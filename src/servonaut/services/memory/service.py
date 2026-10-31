@@ -26,7 +26,7 @@ from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .ssh_mux import DIRECT_OPTIONS, ControlMaster, multiplexing_supported
 from .status import STOPPED_REASON, is_stopped_instance
-from .store import MemoryStore, _validate_finding_id
+from .store import MemoryStore, RecordLockTimeout, _validate_finding_id
 from .team_merge import share_identity
 from .summariser import build_summary_markdown
 from servonaut.services.shared_servers import is_shared_row
@@ -487,8 +487,23 @@ class MemoryService(MemoryServiceInterface):
             # Stamp probed_at if the prober didn't set it.
             if not result.probed_at:
                 result.probed_at = datetime.now(tz=timezone.utc).isoformat()
-            self._persist_result(result, instance_id, provider, instance=instance)
             successes[result.module] = result
+            # The save may wait for a record another process holds: keep that
+            # wait off the event loop, and let one busy module not cost the rest.
+            try:
+                await asyncio.to_thread(self._save_result, result, instance_id, provider)
+            except RecordLockTimeout:
+                result.partial = True
+                failures.append(ModuleBuildFailure(
+                    module=result.module,
+                    reason="record_busy",
+                    message=(
+                        "Another Servonaut process was changing this server's memory, "
+                        "so this result was not saved. Try again."
+                    ),
+                ))
+                continue
+            self._enqueue_result(result, instance_id, provider, instance)
             probed_modules.append(result.module)
 
         if probed_modules:
@@ -733,7 +748,8 @@ class MemoryService(MemoryServiceInterface):
         return self._store.read_annotations(instance_id, provider)
 
     def write_annotations(
-        self, instance_id: str, content: str, provider: str = "custom"
+        self, instance_id: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> Path:
         """Persist *content* as the annotations for *instance_id* and return the path.
 
@@ -743,21 +759,25 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             content: Raw annotation text to write.
             provider: Provider slug.
+            modified_at: Record the notes' hash and this time in the same locked step.
         """
         instance_id = self._resolve_id(instance_id)
-        return self._store.write_annotations(instance_id, content, provider)
+        return self._store.write_annotations(
+            instance_id, content, provider, modified_at=modified_at
+        )
 
     def annotation_lock(self, instance_id: str, *, wait: bool = True):
         """Hold the record lock of *instance_id* (see ``MemoryStore.annotation_lock``)."""
         return self._store.annotation_lock(self._resolve_id(instance_id), wait=wait)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write the notes only if they still hash to *expected_hash* (see the store)."""
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations_if_unchanged(
-            instance_id, expected_hash, content, provider
+            instance_id, expected_hash, content, provider, modified_at=modified_at
         )
 
     def write_annotation_draft(
@@ -892,6 +912,22 @@ class MemoryService(MemoryServiceInterface):
     def remember_finding(
         self,
         instance: Dict[str, Any],
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        """Record a finding and queue it for sync (see :meth:`store_finding`).
+
+        For callers that already run where the sync queue lives. A caller that
+        moves the blocking record transaction to a worker thread calls
+        :meth:`store_finding` there and :meth:`enqueue_findings_for` on its loop.
+        """
+        result = self.store_finding(instance, **fields)
+        if not result.get("refused"):
+            self.enqueue_findings_for(instance)
+        return result
+
+    def store_finding(
+        self,
+        instance: Dict[str, Any],
         *,
         title: str,
         body: str,
@@ -900,7 +936,9 @@ class MemoryService(MemoryServiceInterface):
         source: str = "ai_chat",
         supersede_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record a new agent finding for *instance*.
+        """Record a new agent finding for *instance* in the local store.
+
+        Takes the record lock but does not touch the sync queue.
 
         Args:
             instance: Instance dict (must contain ``id`` or ``name``).
@@ -1004,18 +1042,6 @@ class MemoryService(MemoryServiceInterface):
         except Exception as exc:
             logger.warning("set_findings_meta failed for %s: %s", instance_id, exc)
 
-        # Enqueue for sync (best-effort — never blocks).
-        if self._sync_service is not None:
-            try:
-                all_findings = self._store.list_findings(
-                    instance_id, provider, include_superseded=True
-                )
-                self._sync_service.enqueue_findings(instance, all_findings)
-            except Exception as exc:
-                logger.warning(
-                    "sync enqueue_findings failed for %s: %s", instance_id, exc
-                )
-
         auto_inject = confidence >= getattr(
             self._config, "findings_confidence_threshold", 0.6
         )
@@ -1029,6 +1055,21 @@ class MemoryService(MemoryServiceInterface):
             "secret_warning": warnings,
             "pruned": pruned_ids,
         }
+
+    def enqueue_findings_for(self, instance: Dict[str, Any]) -> None:
+        """Queue *instance*'s findings for sync (best-effort; never raises)."""
+        if self._sync_service is None:
+            return
+        instance = self._resolve_instance(instance)
+        instance_id = instance.get("id") or instance.get("name", "")
+        provider = instance_provider(instance)
+        try:
+            all_findings = self._store.list_findings(
+                instance_id, provider, include_superseded=True
+            )
+            self._sync_service.enqueue_findings(instance, all_findings)
+        except Exception as exc:
+            logger.warning("sync enqueue_findings failed for %s: %s", instance_id, exc)
 
     def recall_findings(
         self,
@@ -1478,6 +1519,11 @@ class MemoryService(MemoryServiceInterface):
                 When provided, passed to sync_service.enqueue_module so
                 the cloud record includes display_name and provider.
         """
+        self._save_result(result, instance_id, provider)
+        self._enqueue_result(result, instance_id, provider, instance)
+
+    def _save_result(self, result: ModuleResult, instance_id: str, provider: str) -> None:
+        """Blocking: write *result* to the store (waits for the record lock)."""
         data: Dict[str, Any] = {
             "module": result.module,
             "instance_id": instance_id,
@@ -1492,20 +1538,28 @@ class MemoryService(MemoryServiceInterface):
         }
         self._store.save_module(instance_id, result.module, data, provider)
 
-        # Enqueue to cloud sync if wired (best-effort — never block a probe)
-        if self._sync_service is not None:
-            instance_dict = instance or {
-                "id": instance_id,
-                "name": instance_id,
-                "provider": provider,
-            }
-            try:
-                self._sync_service.enqueue_module(instance_dict, result.module, result)
-            except Exception as exc:
-                logger.warning(
-                    "sync enqueue_module failed for %s/%s: %s",
-                    instance_id, result.module, exc
-                )
+    def _enqueue_result(
+        self,
+        result: ModuleResult,
+        instance_id: str,
+        provider: str,
+        instance: Optional[Dict[str, Any]],
+    ) -> None:
+        """Enqueue a saved result for cloud sync (best-effort; stays on the owning loop)."""
+        if self._sync_service is None:
+            return
+        instance_dict = instance or {
+            "id": instance_id,
+            "name": instance_id,
+            "provider": provider,
+        }
+        try:
+            self._sync_service.enqueue_module(instance_dict, result.module, result)
+        except Exception as exc:
+            logger.warning(
+                "sync enqueue_module failed for %s/%s: %s",
+                instance_id, result.module, exc
+            )
 
     def make_ssh_runner(
         self, instance: Dict[str, Any], *, timeout: float = 5,

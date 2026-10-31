@@ -20,6 +20,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -905,6 +906,8 @@ class MemoryStore:
         instance_id: str,
         content: str,
         provider: str = "custom",
+        *,
+        modified_at: Optional[str] = None,
     ) -> Path:
         """Write *content* as ``annotations.md`` for *instance_id* atomically.
 
@@ -915,6 +918,9 @@ class MemoryStore:
             instance_id: Instance identifier (validated against path traversal).
             content: Markdown content to persist.
             provider: Provider slug used to select the storage sub-directory.
+            modified_at: When given, the notes' hash and this modified time
+                are recorded in the same record-locked step, so a pull never
+                judges the new text by the old bookkeeping.
 
         Returns:
             The ``Path`` of the written ``annotations.md`` file.
@@ -923,7 +929,21 @@ class MemoryStore:
             ValueError: If *instance_id* fails safety validation.
         """
         with self.annotation_lock(instance_id):
-            return self._write_annotations_locked(instance_id, content, provider)
+            path = self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
+            return path
+
+    def _record_notes_meta(
+        self, instance_id: str, content: str, modified_at: Optional[str]
+    ) -> None:
+        """Record the hash and modified time of notes just written (record lock held)."""
+        if modified_at is None:
+            return
+        self.set_annotations_meta(
+            instance_id,
+            annotations_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            annotations_modified_at=modified_at,
+        )
 
     def _write_annotations_locked(
         self, instance_id: str, content: str, provider: str
@@ -1018,14 +1038,19 @@ class MemoryStore:
         instance_id = self._resolve_id(instance_id)
         with self._locks_guard:
             lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
-        if not lock.acquire(blocking=wait):
-            raise RecordBusy("another thread is changing this server's memory")
+        timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        # One budget for both stages: a thread holding the in-process lock
+        # must not let a waiter outlast the configured bound.
+        deadline = time.monotonic() + timeout
+        if not self._take_thread_lock(lock, wait, timeout):
+            busy = RecordLockTimeout if wait else RecordBusy
+            raise busy("another thread is changing this server's memory")
         try:
             held = self._os_locks.get(instance_id)
             if held is not None:  # nested in this process: already excluded
                 yield
                 return
-            held = self._take_os_lock(instance_id, wait=wait)
+            held = self._take_os_lock(instance_id, wait=wait, deadline=deadline)
             self._os_locks[instance_id] = held
             try:
                 yield
@@ -1035,12 +1060,22 @@ class MemoryStore:
         finally:
             lock.release()
 
-    def _take_os_lock(self, instance_id: str, *, wait: bool = True) -> "_HeldOsLock":
+    @staticmethod
+    def _take_thread_lock(lock: "threading.RLock", wait: bool, timeout: float) -> bool:
+        if not wait:
+            return lock.acquire(blocking=False)
+        return lock.acquire(timeout=timeout)
+
+    def _take_os_lock(
+        self, instance_id: str, *, wait: bool = True, deadline: Optional[float] = None,
+    ) -> "_HeldOsLock":
         digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
         lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock", private_dir=True)
         timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         try:
-            lock.acquire(timeout, poll)
+            lock.acquire_until(deadline, poll)
         except FileLockTimeout as exc:
             busy = RecordLockTimeout if wait else RecordBusy
             raise busy(
@@ -1049,19 +1084,23 @@ class MemoryStore:
         return _HeldOsLock(lock)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write *content* only if the notes still hash to *expected_hash*.
 
         The comparison and the write happen under :meth:`annotation_lock`, so
         a merge that holds the lock cannot be overwritten in between. An
-        absent file hashes as empty text. Returns whether it wrote.
+        absent file hashes as empty text. With *modified_at* the hash and
+        time are recorded in the same step (see :meth:`write_annotations`).
+        Returns whether it wrote.
         """
         with self.annotation_lock(instance_id):
             current = self.read_annotations_strict(instance_id, provider)
             if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
                 return False
             self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
             return True
 
     def write_annotation_draft(

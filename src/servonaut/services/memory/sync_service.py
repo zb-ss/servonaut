@@ -71,7 +71,9 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
-from servonaut.services.memory.store import MemoryCorruptError, RecordBusy, check_finding_record
+from servonaut.services.memory.store import (
+    MemoryCorruptError, RecordBusy, RecordLockTimeout, check_finding_record,
+)
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
@@ -733,6 +735,12 @@ class MemorySyncService:
         local_hash: str = meta.get("annotations_hash", "")
         local_modified: Optional[str] = meta.get("annotations_modified_at") or None
 
+        # Notes that no longer match their recorded hash were edited after the
+        # bookkeeping was written (an editor, a copy): their age is unknown,
+        # so the local text is kept rather than judged by stale metadata.
+        if local_hash and self._notes_hash_on_disk(instance_id, provider) != local_hash:
+            return "local_newer"
+
         # Unchanged short-circuit: same content already on disk.
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if content_hash == local_hash:
@@ -756,6 +764,10 @@ class MemorySyncService:
             annotations_modified_at=server_ts,
         )
         return "updated"
+
+    def _notes_hash_on_disk(self, instance_id: str, provider: str) -> str:
+        text = self._memory_service.read_annotations(instance_id, provider)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # Findings sync methods
@@ -859,6 +871,8 @@ class MemorySyncService:
         - ``"not_found"``  — server has no findings envelope for this instance.
         - ``"unchanged"``  — server returned no findings to merge.
         - ``"updated"``    — at least one finding was created or updated locally.
+        - ``"busy"``       — another process held this server's record; nothing
+          was merged, try again.
         """
         # 1. Opt-out gate (both id and name).
         if self._memory_service.is_memory_disabled(instance_id, instance_name):
@@ -888,20 +902,33 @@ class MemorySyncService:
         if not isinstance(incoming, list):
             return "not_found"
 
-        # 5. Merge into local store.
-        stats = self._memory_service.merge_findings(instance_id, incoming, provider)
-
-        # 6. Update findings bookkeeping in the index.
+        # 5-6. Merge into the local store and update the bookkeeping. The
+        # merge waits for the record lock, so it runs off the event loop; a
+        # record another process holds is reported, not waited out in the UI.
         server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
+        try:
+            stats = await asyncio.to_thread(
+                self._merge_pulled_findings, instance_id, incoming, provider, server_ts
+            )
+        except RecordLockTimeout:
+            return "busy"
+
+        return (
+            "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
+        )
+
+    def _merge_pulled_findings(
+        self, instance_id: str, incoming: List[Dict[str, Any]], provider: str,
+        server_ts: Optional[str],
+    ) -> Dict[str, int]:
+        """Blocking: merge *incoming* findings and record the sync bookkeeping."""
+        stats = self._memory_service.merge_findings(instance_id, incoming, provider)
         self._memory_service.set_findings_meta(
             instance_id,
             findings_synced_at=server_ts,
             findings_count=stats.get("active_after", 0),
         )
-
-        return (
-            "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
-        )
+        return stats
 
     # Modules the CLI must NOT push: server-generated only.
     _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})

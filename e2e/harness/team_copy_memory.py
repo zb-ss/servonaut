@@ -27,15 +27,16 @@ def memory_root(home: Path) -> Path:
     return home / ".servonaut" / "memory"
 
 
-def seed_team_copy(home: Path, note: str = TEAM_NOTE) -> Path:
-    """Write the team's copy of app-1's memory (a note and a probed module) under *home*; returns its folder."""
+def seed_team_copy(home: Path, note: str = TEAM_NOTE, *, with_module: bool = True) -> Path:
+    """Write the team's copy of app-1's memory (a note, and a probed module unless *with_module* is off) under *home*; returns its folder."""
     folder = memory_root(home) / TEAM_FOLDER / SHARE_ID
     folder.mkdir(parents=True)
     module = {
         "module": "os", "instance_id": SHARE_ID, "probed_at": "2026-10-01T00:00:00+00:00",
         "observed": {"distro": TEAM_DISTRO},
     }
-    (folder / "os.json").write_text(json.dumps(module), encoding="utf-8")
+    if with_module:
+        (folder / "os.json").write_text(json.dumps(module), encoding="utf-8")
     (folder / "annotations.md").write_text(note, encoding="utf-8")
     return folder
 

@@ -89,12 +89,19 @@ class FileLock:
             FileLockTimeout: still busy after *timeout*.
             OSError: the lock file cannot be created or opened.
         """
-        deadline = time.monotonic() + max(timeout, 0.0)
-        pause = max(poll_seconds, 0.001)
+        self.acquire_until(time.monotonic() + max(timeout, 0.0), poll_seconds)
+
+    def acquire_until(self, deadline: float, poll_seconds: float) -> None:
+        """Like :meth:`acquire`, with the bound given as a ``time.monotonic()`` deadline.
+
+        Lets a caller that spent part of one budget elsewhere (another lock)
+        hand over only what is left. Never sleeps past the deadline.
+        """
         while not self.try_acquire():
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise FileLockTimeout(f"{self._path.name} is held by another process")
-            time.sleep(pause)
+            time.sleep(min(poll_seconds, remaining))
 
     def release(self) -> None:
         """Let go of the lock; safe to call when not held."""

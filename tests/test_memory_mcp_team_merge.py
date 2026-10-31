@@ -15,7 +15,7 @@ ROWS = [OWN, TWIN]
 
 def _tools(order, *, runner=True):
     memory = _make_memory_service()
-    memory.remember_finding = MagicMock(
+    memory.store_finding = MagicMock(
         side_effect=lambda *a, **k: order.append("remember") or {"finding_id": "f_1", "auto_inject": False}
     )
     memory.recall_findings = MagicMock(side_effect=lambda *a, **k: order.append("recall") or [])

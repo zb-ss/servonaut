@@ -76,7 +76,7 @@ def _make_memory_service(
 ) -> MagicMock:
     """Create a minimal mock MemoryService for findings tools."""
     svc = MagicMock()
-    svc.remember_finding = MagicMock(return_value=remember_return or dict(_CANNED_FINDING))
+    svc.store_finding = MagicMock(return_value=remember_return or dict(_CANNED_FINDING))
     svc.recall_findings = MagicMock(return_value=recall_return if recall_return is not None else list(_CANNED_FINDINGS_LIST))
     return svc
 
@@ -249,7 +249,7 @@ class TestRememberFindingSuccess:
         assert "f_oldfinding1234567890abcdefgh" in result
 
     def test_secret_warning_surfaced(self):
-        """When remember_finding returns a non-empty secret_warning it must appear in the result."""
+        """When store_finding returns a non-empty secret_warning it must appear in the result."""
         finding = dict(_CANNED_FINDING)
         finding["secret_warning"] = "api_key"
         mem_svc = _make_memory_service(remember_return=finding)
@@ -264,7 +264,7 @@ class TestRememberFindingSuccess:
         mem_svc = _make_memory_service()
         tools = _make_tools(memory_service=mem_svc)
         run(tools.remember_server_finding("i-abc123", "title", "body"))
-        _, call_kwargs = mem_svc.remember_finding.call_args
+        _, call_kwargs = mem_svc.store_finding.call_args
         assert call_kwargs.get("source") == "agent"
 
 
@@ -447,7 +447,7 @@ class TestRecordBusyAudit:
         from servonaut.services.memory.store import RecordLockTimeout
 
         svc = _make_memory_service()
-        svc.remember_finding.side_effect = RecordLockTimeout("busy")
+        svc.store_finding.side_effect = RecordLockTimeout("busy")
         tools = _make_tools(memory_service=svc)
         result = run(tools.remember_server_finding("i-abc123", "t", "b"))
         assert "another Servonaut" in result.lower() or "busy" in result.lower()
