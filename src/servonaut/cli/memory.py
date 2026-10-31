@@ -488,9 +488,15 @@ def _cmd_export(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any
 
 
 def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any], sync: Any = None) -> int:
-    """Handle ``memory annotate`` — open annotations file in $VISUAL/$EDITOR/vi."""
+    """Handle ``memory annotate`` — edit the notes in $VISUAL/$EDITOR/vi.
+
+    The editor works on a private copy. On exit the text is written back only
+    if the notes are still what they were when the editor opened (nothing is
+    locked while it runs); otherwise the edit is kept as a draft beside the
+    notes, its name is printed, and the exit status is non-zero.
+    """
     import hashlib
-    from datetime import datetime, timezone
+    import tempfile
 
     iid = inst.get("id") or inst.get("name", "")
     provider = instance_provider(inst)
@@ -501,55 +507,81 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.close(fd)
 
-    # Snapshot the hash before the editor runs so we can detect changes.
     try:
-        old_meta = memory_service.get_annotations_meta(iid)
-        old_hash = old_meta.get("annotations_hash", "")
-    except Exception:  # noqa: BLE001
-        old_hash = ""
-
-    argv = editor_argv(path)
-    try:
-        subprocess.run(argv, check=False)
+        original = memory_service.read_annotations(iid, provider)
     except OSError as exc:
+        print(f"Could not read the notes ({exc.strerror or exc}).", file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
+    expected = hashlib.sha256(original.encode("utf-8")).hexdigest()
+
+    fd, copy_name = tempfile.mkstemp(prefix="servonaut-notes-", suffix=".md")  # 0600
+    copy = Path(copy_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(original)
+        argv = editor_argv(copy)
+        try:
+            subprocess.run(argv, check=False)
+        except OSError as exc:
+            print(
+                f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
+                f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
+                file=sys.stderr,
+            )
+            return _EXIT_GENERIC_ERROR
+        edited = copy.read_bytes().decode("utf-8", errors="replace")
+    finally:
+        copy.unlink(missing_ok=True)
+
+    if edited == original:
+        return _EXIT_SUCCESS
+    return _store_edit(memory_service, sync, inst, iid, provider, expected, edited)
+
+
+def _store_edit(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    expected: str, edited: str,
+) -> int:
+    """Write *edited* if the notes are unchanged since *expected*, else keep it as a draft."""
+    import hashlib
+    from datetime import datetime, timezone
+
+    from servonaut.services.memory.store import RecordLockTimeout
+
+    try:
+        written = memory_service.write_annotations_if_unchanged(iid, expected, edited, provider)
+        reason = "The notes changed while you were editing"
+    except RecordLockTimeout:
+        written, reason = False, "Another Servonaut process is saving these notes"
+    except OSError as exc:
+        written, reason = False, f"The notes could not be saved ({exc.strerror or exc})"
+    if not written:
+        try:
+            draft = memory_service.write_annotation_draft(iid, edited, provider)
+        except OSError as exc:
+            print(f"Could not keep your edit either ({exc.strerror or exc}).", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR
         print(
-            f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
-            f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
+            f"{reason}, so nothing was overwritten. Your edit is kept in "
+            f"{home_relative(str(draft))}.",
             file=sys.stderr,
         )
         return _EXIT_GENERIC_ERROR
 
-    # Recompute annotations_hash and update index via the public API
+    annotations_hash = hashlib.sha256(edited.encode("utf-8")).hexdigest()
+    now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        # Canonicalise to the SAME representation the screen save path and
-        # pull_annotations use (decoded UTF-8 string), so the stored hash
-        # describes exactly the content we enqueue and that pull recomputes
-        # on its "unchanged" short-circuit. Hashing raw bytes here would drift
-        # from those sites for any non-UTF-8 content and trigger spurious
-        # re-pull/overwrite cycles.
-        content_str = path.read_bytes().decode("utf-8", errors="replace")
-        annotations_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
         memory_service.update_index(
-            instance_id=iid,
-            name=inst.get("name", iid),
-            provider=provider,
-            modules=[],
-            annotations_hash=annotations_hash,
+            instance_id=iid, name=inst.get("name", iid), provider=provider,
+            modules=[], annotations_hash=annotations_hash,
         )
-
-        # Persist modified-at and enqueue when content actually changed.
-        if annotations_hash != old_hash:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            memory_service.set_annotations_meta(
-                iid,
-                annotations_hash=annotations_hash,
-                annotations_modified_at=now_iso,
-            )
-            if sync is not None and getattr(sync, "is_configured", False):
-                sync.enqueue_annotations(inst, content_str, probed_at=now_iso)
+        memory_service.set_annotations_meta(
+            iid, annotations_hash=annotations_hash, annotations_modified_at=now_iso,
+        )
     except OSError:
         pass
-
+    if sync is not None and getattr(sync, "is_configured", False):
+        sync.enqueue_annotations(inst, edited, probed_at=now_iso)
     return _EXIT_SUCCESS
 
 
