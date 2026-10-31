@@ -33,7 +33,7 @@ import tempfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from servonaut.services.api_client import (
     APIError,
@@ -201,6 +201,13 @@ class MemorySyncService:
 
         # Status listeners
         self._listeners: List[Callable[[MemorySyncStatus], None]] = []
+
+        # Shares that fold into one of the user's own servers (see
+        # ``team_fold``): their memory lives under the own row, so nothing is
+        # queued or uploaded for them. ``_folded_logged`` keeps the log to one
+        # line per share.
+        self._folded_ids: set[str] = set()
+        self._folded_logged: set[str] = set()
 
         # Persistent queue path
         self._queue_path = Path.home() / ".servonaut" / "memory" / "sync_queue.jsonl"
@@ -426,6 +433,8 @@ class MemorySyncService:
             return
 
         instance_id = instance.get("id") or instance.get("name", "")
+        if self._is_folded(instance_id):
+            return
         env = SyncEnvelope(
             instance_id=instance_id,
             module=module,
@@ -486,6 +495,8 @@ class MemorySyncService:
             return
 
         instance_id = instance.get("id") or instance.get("name", "")
+        if self._is_folded(instance_id):
+            return
         if self._memory_service.is_memory_disabled(
             instance_id, instance.get("name", "")
         ):
@@ -668,6 +679,8 @@ class MemorySyncService:
             return
 
         instance_id = instance.get("id") or instance.get("name", "")
+        if self._is_folded(instance_id):
+            return
         if self._memory_service.is_memory_disabled(
             instance_id, instance.get("name", "")
         ):
@@ -1032,6 +1045,73 @@ class MemorySyncService:
 
         return results
 
+    def set_folded_instance_ids(self, instance_ids: Iterable[str]) -> int:
+        """Name the shares that fold into one of the user's own servers.
+
+        Nothing is queued or uploaded for them again, and what is still
+        queued for them is dropped (it repeats memory the own row holds).
+        Returns how many queued envelopes were dropped.
+        """
+        self._folded_ids = set(instance_ids)
+        return self.drop_pending_for(self._folded_ids)
+
+    def _is_folded(self, instance_id: str) -> bool:
+        """Whether *instance_id* is a folded share; logs the first time it is seen."""
+        if instance_id not in self._folded_ids:
+            return False
+        if instance_id not in self._folded_logged:
+            self._folded_logged.add(instance_id)
+            logger.info(
+                "memory sync: nothing is uploaded for a team copy of one of your servers (%s)",
+                instance_id,
+            )
+        return True
+
+    def drop_pending_for(self, instance_ids: Iterable[str]) -> int:
+        """Drop the queued envelopes of *instance_ids*, in memory and in the queue file.
+
+        Returns how many were dropped. Envelopes of a batch being sent are
+        left to that batch.
+        """
+        ids = set(instance_ids)
+        if not ids:
+            return 0
+        kept = [env for env in self._pending if env.instance_id not in ids]
+        dropped = len(self._pending) - len(kept)
+        if dropped:
+            self._pending.clear()
+            self._pending.extend(kept)
+            for instance_id in ids & self._folded_ids:
+                self._is_folded(instance_id)
+            self._notify_listeners()
+        self._rewrite_queue_without(ids)
+        return dropped
+
+    def _rewrite_queue_without(self, ids: set[str]) -> None:
+        """Rewrite the persisted queue without the lines of *ids* (mode 0o600)."""
+        path = self._queue_path
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept: List[str] = []
+            for line in lines:
+                try:
+                    owner = json.loads(line).get("instance_id")
+                except (ValueError, AttributeError):
+                    owner = None
+                if owner not in ids:
+                    kept.append(line)
+            if len(kept) == len(lines):
+                return
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("".join(f"{line}\n" for line in kept))
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.warning("Could not rewrite the sync queue file: %s", exc)
+
     def pending_count(self, instance_id: Optional[str] = None) -> int:
         """Return pending envelope count, optionally for one instance."""
         if instance_id is None:
@@ -1076,6 +1156,8 @@ class MemorySyncService:
         if self._halted_reason:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
+        if any(env.instance_id in self._folded_ids for env in self._pending):
+            self.drop_pending_for(self._folded_ids)
         if not self._pending:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
