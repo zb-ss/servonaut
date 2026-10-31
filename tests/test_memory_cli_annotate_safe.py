@@ -72,3 +72,64 @@ def test_an_unchanged_edit_writes_nothing_and_succeeds(tmp_path, monkeypatch):
     rc, service, notes = _run(tmp_path, monkeypatch, "true")
     assert rc == 0 and service.read_annotations(IID, "custom") == "original\n"
     assert stat.S_IMODE(notes.stat().st_mode) == 0o600
+
+
+def test_an_absent_notes_file_is_not_created_before_the_editor_runs(tmp_path, monkeypatch):
+    record = tmp_path / "seen"
+    rc, service, notes = _run(
+        tmp_path, monkeypatch, f'[ -e NOTES ] && echo exists > {record} || echo absent > {record}',
+        existing="",
+    )
+    assert record.read_text().strip() == "absent"
+    assert rc == 0 and not notes.exists()   # nothing edited, nothing created
+
+
+def test_the_first_save_creates_the_notes_file_private(tmp_path, monkeypatch):
+    rc, service, notes = _run(tmp_path, monkeypatch, 'printf "first\\n" > "$1"', existing="")
+    assert rc == 0 and service.read_annotations(IID, "custom") == "first\n"
+    assert stat.S_IMODE(notes.stat().st_mode) == 0o600
+
+
+def test_a_failed_draft_keeps_the_private_copy_and_names_it(tmp_path, monkeypatch, capsys):
+    service = _make_memory_service(tmp_path / "mem")
+    service.write_annotations(IID, "original\n", "custom")
+    notes = service._store.get_annotations_path(IID, "custom")
+    _editor(tmp_path, monkeypatch, f'printf "other\\n" > {notes}; printf "valuable edit\\n" > "$1"')
+
+    def no_draft(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(service, "write_annotation_draft", no_draft)
+    rc = _cmd_annotate(_make_args(memory_command="annotate", instance=IID), _fake_config(),
+                       service, _make_inst())
+    err = capsys.readouterr().err
+    assert rc != 0
+    kept = [w for w in err.split() if "servonaut-notes-" in w]
+    assert kept, err
+    recovery = Path(os.path.expanduser(kept[0].rstrip(".")))
+    assert recovery.read_text() == "valuable edit\n"
+    assert stat.S_IMODE(recovery.stat().st_mode) == 0o600
+    recovery.unlink()
+
+
+def test_an_editor_that_fails_leaves_the_notes_and_keeps_the_text_as_a_draft(tmp_path, monkeypatch, capsys):
+    rc, service, notes = _run(tmp_path, monkeypatch, 'printf "half done\\n" > "$1"; exit 17')
+    assert rc != 0
+    assert service.read_annotations(IID, "custom") == "original\n"
+    drafts = list(notes.parent.glob("annotations.unsaved-*.md"))
+    assert [d.read_text() for d in drafts] == ["half done\n"]
+    assert "17" in capsys.readouterr().err
+
+
+def test_an_editor_that_fails_without_changes_leaves_everything_alone(tmp_path, monkeypatch, capsys):
+    rc, service, notes = _run(tmp_path, monkeypatch, "exit 3")
+    assert rc != 0
+    assert service.read_annotations(IID, "custom") == "original\n"
+    assert not list(notes.parent.glob("annotations.unsaved-*.md"))
+
+
+def test_an_editor_that_removes_the_copy_is_a_clear_failure(tmp_path, monkeypatch, capsys):
+    rc, service, notes = _run(tmp_path, monkeypatch, 'rm -f "$1"')
+    assert rc != 0
+    assert service.read_annotations(IID, "custom") == "original\n"
+    assert "Traceback" not in capsys.readouterr().err

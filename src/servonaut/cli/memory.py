@@ -490,10 +490,13 @@ def _cmd_export(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any
 def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any], sync: Any = None) -> int:
     """Handle ``memory annotate`` — edit the notes in $VISUAL/$EDITOR/vi.
 
-    The editor works on a private copy. On exit the text is written back only
-    if the notes are still what they were when the editor opened (nothing is
-    locked while it runs); otherwise the edit is kept as a draft beside the
-    notes, its name is printed, and the exit status is non-zero.
+    The editor works on a private copy; the live notes file is neither created
+    nor touched while it runs. On exit the text is written back only if the
+    notes are still what they were when the editor opened (nothing is locked
+    while it runs); otherwise the edit is kept as a draft beside the notes,
+    its name is printed, and the exit status is non-zero. The private copy is
+    deleted only once the text is safe in the notes or a draft; when neither
+    can be written it is kept and its path printed.
     """
     import hashlib
     import tempfile
@@ -501,11 +504,6 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
     iid = inst.get("id") or inst.get("name", "")
     provider = instance_provider(inst)
     path = memory_service.get_annotations_path(iid, provider)
-
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.close(fd)
 
     try:
         original = memory_service.read_annotations(iid, provider)
@@ -516,26 +514,66 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
 
     fd, copy_name = tempfile.mkstemp(prefix="servonaut-notes-", suffix=".md")  # 0600
     copy = Path(copy_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(original)
-        argv = editor_argv(copy)
-        try:
-            subprocess.run(argv, check=False)
-        except OSError as exc:
-            print(
-                f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
-                f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
-                file=sys.stderr,
-            )
-            return _EXIT_GENERIC_ERROR
-        edited = copy.read_bytes().decode("utf-8", errors="replace")
-    finally:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(original)
+    code, text_is_safe = _edit_copy(
+        memory_service, sync, inst, iid, provider, path, copy, original, expected
+    )
+    if text_is_safe:
         copy.unlink(missing_ok=True)
+    return code
 
+
+def _edit_copy(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    path: Path, copy: Path, original: str, expected: str,
+) -> "tuple[int, bool]":
+    """Run the editor on *copy* and store the result; ``(exit code, copy no longer needed)``."""
+    argv = editor_argv(copy)
+    try:
+        completed = subprocess.run(argv, check=False)
+    except OSError as exc:
+        print(
+            f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
+            f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR, True
+    try:
+        edited = copy.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        print("The editor did not leave your edit behind, so the notes are unchanged.", file=sys.stderr)
+        return _EXIT_GENERIC_ERROR, True
+    returncode = getattr(completed, "returncode", 0)
+    if returncode != 0:
+        return _keep_failed_session(
+            memory_service, iid, provider, copy, original, edited, returncode
+        )
     if edited == original:
-        return _EXIT_SUCCESS
-    return _store_edit(memory_service, sync, inst, iid, provider, expected, edited)
+        return _EXIT_SUCCESS, True
+    code, saved = _save_edit(memory_service, sync, inst, iid, provider, expected, edited, copy)
+    return code, saved
+
+
+def _keep_failed_session(
+    memory_service: Any, iid: str, provider: str, copy: Path, original: str, edited: str,
+    returncode: int,
+) -> "tuple[int, bool]":
+    """The editor failed: leave the notes alone, keep any changed text as a draft."""
+    print(f"The editor exited with status {returncode}, so the notes were not changed.", file=sys.stderr)
+    if edited == original:
+        return _EXIT_GENERIC_ERROR, True
+    try:
+        draft = memory_service.write_annotation_draft(iid, edited, provider)
+    except OSError as exc:
+        print(
+            f"Could not keep your edit either ({exc.strerror or exc}). It is still in "
+            f"{home_relative(str(copy))}.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR, False
+    print(f"Your edit is kept in {home_relative(str(draft))}.", file=sys.stderr)
+    return _EXIT_GENERIC_ERROR, True
 
 
 def _store_edit(
@@ -543,13 +581,26 @@ def _store_edit(
     expected: str, edited: str,
 ) -> int:
     """Write *edited* if the notes are unchanged since *expected*, else keep it as a draft."""
+    return _save_edit(memory_service, sync, inst, iid, provider, expected, edited, None)[0]
+
+
+def _save_edit(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    expected: str, edited: str, copy: Optional[Path],
+) -> "tuple[int, bool]":
+    """Store *edited*; returns ``(exit code, whether the text is now safe elsewhere)``."""
     import hashlib
     from datetime import datetime, timezone
 
     from servonaut.services.memory.store import RecordLockTimeout
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        written = memory_service.write_annotations_if_unchanged(iid, expected, edited, provider)
+        # Text and bookkeeping are one locked step, so a pull never sees
+        # the new text next to the old modified time.
+        written = memory_service.write_annotations_if_unchanged(
+            iid, expected, edited, provider, modified_at=now_iso
+        )
         reason = "The notes changed while you were editing"
     except RecordLockTimeout:
         written, reason = False, "Another Servonaut process is saving these notes"
@@ -559,30 +610,26 @@ def _store_edit(
         try:
             draft = memory_service.write_annotation_draft(iid, edited, provider)
         except OSError as exc:
-            print(f"Could not keep your edit either ({exc.strerror or exc}).", file=sys.stderr)
-            return _EXIT_GENERIC_ERROR
+            kept = f" It is still in {home_relative(str(copy))}." if copy is not None else ""
+            print(f"Could not keep your edit either ({exc.strerror or exc}).{kept}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR, False
         print(
             f"{reason}, so nothing was overwritten. Your edit is kept in "
             f"{home_relative(str(draft))}.",
             file=sys.stderr,
         )
-        return _EXIT_GENERIC_ERROR
+        return _EXIT_GENERIC_ERROR, True
 
-    annotations_hash = hashlib.sha256(edited.encode("utf-8")).hexdigest()
-    now_iso = datetime.now(timezone.utc).isoformat()
     try:
         memory_service.update_index(
             instance_id=iid, name=inst.get("name", iid), provider=provider,
-            modules=[], annotations_hash=annotations_hash,
-        )
-        memory_service.set_annotations_meta(
-            iid, annotations_hash=annotations_hash, annotations_modified_at=now_iso,
+            modules=[], annotations_hash=hashlib.sha256(edited.encode("utf-8")).hexdigest(),
         )
     except OSError:
         pass
     if sync is not None and getattr(sync, "is_configured", False):
         sync.enqueue_annotations(inst, edited, probed_at=now_iso)
-    return _EXIT_SUCCESS
+    return _EXIT_SUCCESS, True
 
 
 def _cmd_pin(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
