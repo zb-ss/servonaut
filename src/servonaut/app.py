@@ -1572,6 +1572,7 @@ class ServonautApp(App):
 
         try:
             from servonaut.services.memory.team_service import TeamMemoryService
+            from servonaut.services.memory.team_wraps import default_pin_store
             self.team_memory_service = TeamMemoryService(
                 api_client=self.api_client,
                 auth_service=self.auth_service,
@@ -1581,6 +1582,7 @@ class ServonautApp(App):
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
                 ),
+                pin_store_provider=default_pin_store,
                 future_skew_provider=lambda: (
                     self.config_manager.get().memory.team_memory_future_skew_seconds
                 ),

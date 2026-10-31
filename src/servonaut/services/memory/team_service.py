@@ -264,6 +264,9 @@ class TeamMemoryService:
         retrieval_service: Duck-typed retrieval service (see module docstring).
         cache_ttl_provider: Returns how long, in seconds, a list of a team's
             shared servers is reused. ``0`` (the default) asks every time.
+        pin_store_provider: Returns the store of fingerprints sealed for so
+            far (:class:`WrapPinStore`); a member whose key differs from the
+            pin is refused like one whose key changed.
         future_skew_provider: Returns how far ahead of now, in seconds, a
             shared copy's ``probed_at`` may be before it is clamped to now.
     """
@@ -287,6 +290,7 @@ class TeamMemoryService:
         retrieval_service: Any,
         cache_ttl_provider: Optional[Callable[[], float]] = None,
         future_skew_provider: Optional[Callable[[], float]] = None,
+        pin_store_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._api = api_client
         self._auth = auth_service
@@ -295,6 +299,7 @@ class TeamMemoryService:
         self._retrieval_service = retrieval_service
         self._cache_ttl_provider = cache_ttl_provider or (lambda: 0.0)
         self._future_skew_provider = future_skew_provider or (lambda: 300.0)
+        self._pin_store_provider = pin_store_provider
         # team slug -> (monotonic time of the answer, the answer)
         self._shared_memo: Dict[str, tuple] = {}
 
@@ -594,7 +599,7 @@ class TeamMemoryService:
         check_segment(team_slug, "team")
         check_segment(instance_id, "server")
         eligible_members = self.eligible_members(member_pubkeys, required_role)
-        self._refuse_changed_keys(eligible_members)
+        self._refuse_changed_keys(team_slug, eligible_members)
 
         # Spec §3.2: GET /memory/{instance_id} returns
         # {"instance": ..., "modules": ["os", "runtimes", ...]}  — strings, not dicts.
@@ -634,14 +639,42 @@ class TeamMemoryService:
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug, instance_id=instance_id) from exc
 
+        self._pin_sealed(team_slug, wraps, eligible_members)
         return _parse_grant(data)
 
-    @staticmethod
-    def _refuse_changed_keys(members: List[TeamMemberKey]) -> None:
-        """Raise before anything is sent if a member's key changed."""
-        changed = [m.name or f"member {m.user_id}" for m in members if m.key_changed]
+    def _pins(self) -> Any:
+        return self._pin_store_provider() if self._pin_store_provider else None
+
+    def _refuse_changed_keys(self, team_slug: str, members: List[TeamMemberKey]) -> None:
+        """Raise before anything is sent if a member's key changed.
+
+        A key changed when the service says so, or when it differs from the
+        fingerprint this client last sealed for that member.
+        """
+        from servonaut.services.memory.team_wraps import pinned_fingerprint
+
+        pins = self._pins()
+        changed = []
+        for member in members:
+            pinned = pinned_fingerprint(pins, team_slug, member.user_id) if pins else None
+            if member.key_changed or (pinned is not None and pinned != member.fingerprint):
+                changed.append(member.name or f"member {member.user_id}")
         if changed:
             raise KeyChangedError(changed)
+
+    def _pin_sealed(
+        self, team_slug: str, wraps: List[Dict[str, Any]], members: List[TeamMemberKey]
+    ) -> None:
+        """Remember the fingerprints a grant was sealed for."""
+        pins = self._pins()
+        sealed = {w["recipient_user_id"] for w in wraps}
+        if pins is None or not sealed:
+            return
+        try:
+            pins.set_many({(team_slug, m.user_id): m.fingerprint
+                           for m in members if m.user_id in sealed})
+        except OSError as exc:
+            logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
     async def reshare_instance(
         self,
@@ -658,7 +691,7 @@ class TeamMemoryService:
         already stored, so deleting them would only recreate them. A failed
         revoke raises before any new grant is requested.
         """
-        self._refuse_changed_keys(self.eligible_members(member_pubkeys, required_role))
+        self._refuse_changed_keys(team_slug, self.eligible_members(member_pubkeys, required_role))
         await self.revoke_grant(team_slug, grant_id)
         return await self.share_instance(
             team_slug, instance_id, required_role, modules, member_pubkeys

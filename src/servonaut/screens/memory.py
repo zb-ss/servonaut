@@ -371,12 +371,28 @@ class MemoryScreen(Screen):
         Binding("H", "build_ai_summary", "Generate Hosted", show=True),
     ]
 
+    # Actions that reach the server itself or change its stored memory.
+    _HOST_ACTIONS = frozenset(
+        {"refresh_all", "refresh_module", "pin_key", "clear_module", "sync_now"}
+    )
+    _HOST_BUTTONS = (
+        "#btn_refresh_all", "#btn_refresh_module", "#btn_pin_key",
+        "#btn_clear_module", "#btn_sync_now", "#btn_empty_probe",
+    )
+
+    @property
+    def _read_only(self) -> bool:
+        """True for a server only a team's memory lists: no host to reach."""
+        return self._instance.get("memory_only") is True
+
     # What a team shares of this server (see ``_request_shared``); class
     # defaults so a screen built without ``__init__`` still renders.
     _shared: Any = None
     _shared_requested = False
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self._read_only and action in self._HOST_ACTIONS:
+            return False
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: dict) -> None:
@@ -531,6 +547,7 @@ class MemoryScreen(Screen):
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
         self._render_table()
+        self._apply_read_only()
         self._request_shared()
         self._refresh_sync_status()
         self._refresh_ai_status()
@@ -727,17 +744,35 @@ class MemoryScreen(Screen):
                 self._render_table()
                 return
 
+    def _apply_read_only(self) -> None:
+        """Turn off what needs a host when the server only has shared memory."""
+        if not self._read_only:
+            return
+        for selector in self._HOST_BUTTONS:
+            try:
+                self.query_one(selector, Button).disabled = True
+            except Exception:  # noqa: BLE001 - not every control is mounted
+                pass
+
     def _show_shared_source(self, shared: Any, in_use: bool) -> None:
         """Say which team the rows that are not local come from."""
         label = self.query_one("#memory-shared-source", Static)
-        if shared is None or not in_use:
+        lines = []
+        if shared is not None and in_use:
+            name = shared.team_name
+            redaction = getattr(self.app, "redaction_service", None)
+            if getattr(self.app, "demo_mode", False) and redaction is not None:
+                name = redaction.redact_name(name)
+            lines.append(escape(shared_source_text(shared, name)))
+        if self._read_only:
+            lines.append(
+                "Read-only: this server has no connection of its own, so it "
+                "cannot be probed, refreshed or cleared."
+            )
+        if not lines:
             label.add_class("hidden")
             return
-        name = shared.team_name
-        redaction = getattr(self.app, "redaction_service", None)
-        if getattr(self.app, "demo_mode", False) and redaction is not None:
-            name = redaction.redact_name(name)
-        label.update(f"[dim]{escape(shared_source_text(shared, name))}[/dim]")
+        label.update("[dim]" + "\n".join(lines) + "[/dim]")
         label.remove_class("hidden")
 
     def _set_empty_state_visible(self, visible: bool) -> None:

@@ -160,3 +160,36 @@ async def test_shared_notes_and_findings_are_shown_read_only(tmp_path):
         assert ["annotations", "note", "Restart workers after deploy."] == rows[0][:3]
     # Nothing was written into the member's own editable record.
     assert app.memory_service.get_all_modules("share-1", "shared") == {}
+
+
+MEMORY_ONLY_ROW: Dict[str, Any] = {
+    "id": "i-owner-1", "name": "owner-web", "provider": "aws", "is_shared": True,
+    "state": "shared", "memory_only": True, "team_slug": "team-a",
+    "team_name": "Team A", "instance_id": "i-owner-1",
+}
+
+
+async def test_a_memory_only_row_cannot_be_probed_refreshed_or_cleared(tmp_path):
+    from textual.widgets import Button
+
+    app = _host(tmp_path, dict(MEMORY_ONLY_ROW), _reader(_shared()))
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        screen = app.screen
+        for button in ("btn_refresh_all", "btn_refresh_module", "btn_pin_key",
+                       "btn_clear_module", "btn_sync_now"):
+            assert screen.query_one(f"#{button}", Button).disabled, button
+        for action in ("refresh_all", "refresh_module", "pin_key", "clear_module", "sync_now"):
+            assert not screen.check_action(action, ()), action
+        label = str(screen.query_one("#memory-shared-source", Static).render())
+        assert "read-only" in label.lower()
+
+
+async def test_a_row_with_a_host_keeps_its_actions(tmp_path):
+    from textual.widgets import Button
+
+    app = _host(tmp_path, dict(SHARED_ROW), _reader(_shared()))
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        assert not app.screen.query_one("#btn_refresh_all", Button).disabled
+        assert app.screen.check_action("refresh_all", ())

@@ -17,12 +17,12 @@ import binascii
 import json
 import logging
 import os
-import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.services.memory.path_segments import check_segment
 from servonaut.services.memory.crypto import (
     X25519_KEY_LEN,
     fingerprint,
@@ -31,8 +31,6 @@ from servonaut.services.memory.crypto import (
 
 logger = logging.getLogger(__name__)
 
-# Slugs and ids end up in a URL path: only plain identifier characters pass.
-_PATH_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 @dataclass(frozen=True)
@@ -96,7 +94,9 @@ def _parse_entry(raw: Any) -> Any:
             return None
     for name in ("team_slug", "grant_id"):
         value = raw.get(name)
-        if not isinstance(value, str) or not _PATH_SAFE.match(value):
+        try:
+            check_segment(value, name)
+        except ValueError:
             return None
     raw_recipients = raw.get("recipients")
     if not isinstance(raw_recipients, list):
@@ -214,6 +214,11 @@ class WrapPinStore:
         except OSError:
             Path(tmp).unlink(missing_ok=True)
             raise
+
+
+def default_pin_store() -> WrapPinStore:
+    """The pin store beside the memory sync queue."""
+    return WrapPinStore(Path.home() / ".servonaut" / "memory" / "team_wrap_pins.json")
 
 
 def pinned_fingerprint(store: WrapPinStore, team_slug: str, user_id: int) -> Optional[str]:
