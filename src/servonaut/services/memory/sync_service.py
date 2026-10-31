@@ -1057,13 +1057,13 @@ class MemorySyncService:
     def set_folded_instance_ids(self, instance_ids: Iterable[str]) -> int:
         """Name the shares that fold into one of the user's own servers.
 
-        Nothing is queued or uploaded for them again, and what is still
-        queued for them is dropped (it repeats memory the own row holds).
-        Returns how many queued envelopes were dropped.
+        Nothing is queued or uploaded for them again. What is already queued
+        for them stays in the queue, unsent, until their memory has been
+        merged into the own row and :meth:`drop_pending_for` is called: a
+        merge that fails must not lose a queued note.
         """
         self._folded_ids = set(instance_ids)
         self._awaiting_folds = False
-        return self.drop_pending_for(self._folded_ids)
 
     def hold_unfolded_shares(self) -> None:
         """Keep share-keyed envelopes queued until the folded shares are known.
@@ -1080,6 +1080,9 @@ class MemorySyncService:
         self._awaiting_folds = False
 
     def _is_held(self, instance_id: str) -> bool:
+        """Whether an envelope of *instance_id* must not be sent now."""
+        if instance_id in self._folded_ids:
+            return True
         return self._awaiting_folds and bool(_SHARE_ID_RE.match(instance_id))
 
     def _is_folded(self, instance_id: str) -> bool:
@@ -1178,8 +1181,6 @@ class MemorySyncService:
         if self._halted_reason:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
-        if any(env.instance_id in self._folded_ids for env in self._pending):
-            self.drop_pending_for(self._folded_ids)
         if not self._pending:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
@@ -1759,6 +1760,16 @@ class MemorySyncService:
         """Encrypt and POST a batch of SyncEnvelopes. Returns SyncBatchResult."""
         import json as json_mod
 
+        await self._rate_limiter.acquire(RateLimitKey.SYNC)
+        # A share may have been folded while this batch waited for the rate
+        # limit: such envelopes go back to the queue instead of the wire.
+        held = [env for env in batch if self._is_held(env.instance_id)]
+        if held:
+            self._pending.extendleft(reversed(held))
+            batch = [env for env in batch if not self._is_held(env.instance_id)]
+            if not batch:
+                return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
+
         envelopes_payload: List[Dict[str, Any]] = []
         for env in batch:
             plaintext_bytes = json_mod.dumps(
@@ -1786,7 +1797,6 @@ class MemorySyncService:
                 wire["safe_metrics"] = env.safe_metrics
             envelopes_payload.append(wire)
 
-        await self._rate_limiter.acquire(RateLimitKey.SYNC)
         response = await self._api.post(
             "/api/v1/memory/sync",
             json={"envelopes": envelopes_payload},

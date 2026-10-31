@@ -18,10 +18,12 @@ def _queue(svc):
     svc.enqueue_module(OWN, "os", _make_module_result())
 
 
-def test_queued_envelopes_of_a_folded_share_are_dropped_from_memory_and_file(tmp_path):
+def test_folding_a_share_keeps_its_queue_until_the_merge_drops_it(tmp_path):
     svc = _make_service(tmp_path=tmp_path)
     _queue(svc)
-    assert svc.set_folded_instance_ids({"share-1"}) == 1
+    svc.set_folded_instance_ids({"share-1"})
+    assert svc.pending_count("share-1") == 1
+    assert svc.drop_pending_for({"share-1"}) == 1
     assert [env.instance_id for env in svc._pending] == [OWN["id"]]
     owners = [json.loads(line)["instance_id"] for line in svc._queue_path.read_text().splitlines()]
     assert owners == [OWN["id"]]
@@ -95,13 +97,39 @@ def test_a_share_shaped_envelope_waits_until_the_folds_are_known(tmp_path):
     assert svc.pending_count(SHARE_SHAPED) == 1  # held, not lost
 
 
-def test_a_held_envelope_is_dropped_when_its_share_turns_out_folded(tmp_path):
+def test_a_held_envelope_is_not_sent_once_its_share_turns_out_folded(tmp_path):
     svc = _make_service(tmp_path=tmp_path)
     svc.enqueue_module({"id": SHARE_SHAPED, "name": "web-1"}, "os", _make_module_result())
     svc.hold_unfolded_shares()
     svc.set_folded_instance_ids({SHARE_SHAPED})
     assert _drain(svc) == []
-    assert svc.pending_count() == 0
+    assert svc.pending_count() == 1  # kept until the merge is verified
+
+
+def test_a_share_folded_while_its_batch_waits_for_the_rate_limit_is_not_posted(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        "servonaut.services.memory.sync_service.encrypt_envelope",
+        lambda *a, **k: SimpleNamespace(to_dict=lambda: {}),
+    )
+    svc = _make_service(tmp_path=tmp_path)
+    svc.enqueue_module({"id": "share-1", "name": "web-1"}, "os", _make_module_result())
+    svc.enqueue_module(OWN, "os", _make_module_result())
+    posted = []
+
+    async def slow_acquire(*args, **kwargs):
+        svc.set_folded_instance_ids({"share-1"})  # reconciliation lands mid-wait
+
+    async def post(path, json):
+        posted.extend(e["instance_id"] for e in json["envelopes"])
+        return {"accepted": [], "rejected": []}
+
+    svc._rate_limiter.acquire = slow_acquire
+    svc._api.post = post
+    asyncio.run(svc.drain_now())
+    assert posted == [OWN["id"]]
+    assert svc.pending_count("share-1") == 1
 
 
 def test_a_held_envelope_of_a_member_goes_out_once_the_hold_is_released(tmp_path):
