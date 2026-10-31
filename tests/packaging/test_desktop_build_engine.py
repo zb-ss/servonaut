@@ -35,15 +35,19 @@ def target() -> DesktopTargetSpec:
     return load_desktop_target_spec(_POLICY_PATH, "linux-x64-ubuntu-22.04")
 
 
-@pytest.fixture
-def wheel(tmp_path: Path) -> Path:
-    path = tmp_path / f"servonaut-{_VERSION}-py3-none-any.whl"
+def _write_wheel(directory: Path, version: str) -> Path:
+    path = directory / f"servonaut-{version}-py3-none-any.whl"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
-            f"servonaut-{_VERSION}.dist-info/METADATA",
-            f"Metadata-Version: 2.1\nName: servonaut\nVersion: {_VERSION}\n",
+            f"servonaut-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: servonaut\nVersion: {version}\n",
         )
     return path
+
+
+@pytest.fixture
+def wheel(tmp_path: Path) -> Path:
+    return _write_wheel(tmp_path, _VERSION)
 
 
 def _request(
@@ -213,6 +217,57 @@ def test_release_build_takes_its_channel_from_the_tag(
 
     assert desktop_build.main(_release_argv(wheel, tmp_path, tag, *identity_args)) == 0
     assert requests[0].release_identity == expected
+
+
+@pytest.mark.parametrize("identity_args", [[], ["--channel", "preview"]])
+def test_a_release_candidate_build_follows_the_preview_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity_args: list[str]
+) -> None:
+    """A candidate's wheel carries the rc number, so its tag matches it whole."""
+    version = f"{_VERSION}rc2"
+    candidate = _write_wheel(tmp_path, version)
+    requests: list[DesktopBuildRequest] = []
+    monkeypatch.setattr(desktop_build, "build_desktop", requests.append)
+
+    argv = _release_argv(
+        candidate, tmp_path, f"v{version}", *identity_args, "--packaging-revision", "1"
+    )
+    assert desktop_build.main(argv) == 0
+    assert requests[0].product_version == version
+    assert requests[0].release_identity == ReleaseIdentity("preview", 1)
+
+
+@pytest.mark.parametrize(
+    ("tag", "identity_args", "reason"),
+    [
+        (f"v{_VERSION}rc1", ["--packaging-revision", "1"], "does not match the product version"),
+        (
+            f"v{_VERSION}rc2",
+            ["--channel", "stable", "--packaging-revision", "1"],
+            "contradicts the preview release tag",
+        ),
+    ],
+)
+def test_a_release_candidate_build_refuses_another_candidate_or_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tag: str,
+    identity_args: list[str],
+    reason: str,
+) -> None:
+    candidate = _write_wheel(tmp_path, f"{_VERSION}rc2")
+    monkeypatch.setattr(
+        desktop_build,
+        "build_desktop",
+        lambda _request: pytest.fail("an inconsistent release build must not start"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        desktop_build.main(_release_argv(candidate, tmp_path, tag, *identity_args))
+
+    assert error.value.code == 2
+    assert reason in capsys.readouterr().err
 
 
 def _pin_host_python(

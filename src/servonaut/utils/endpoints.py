@@ -1,12 +1,13 @@
 """Endpoint overrides and the URL rule every one of them must pass.
 
 Production code talks to fixed services: the Servonaut API and hosted MCP
-server, PyPI for the update check, the Hetzner Cloud API, and ip-api.com /
-AbuseIPDB for IP lookups. Each can be redirected with an environment variable,
-for a staging server, a mirror, a proxy, or a local fake in tests. An unset or
-blank variable keeps the production default unchanged. The relay listener's
-``relay.base_url`` and ``relay.mercure_url`` config values follow the same rule,
-because they carry the session token too.
+server, PyPI for the update check (the signed release manifest for packaged
+builds), the Hetzner Cloud API, and ip-api.com / AbuseIPDB for IP lookups.
+Each can be redirected with an environment variable, for a staging server, a
+mirror, a proxy, or a local fake in tests. An unset or blank variable keeps the
+production default unchanged. The relay listener's ``relay.base_url`` and
+``relay.mercure_url`` config values follow the same rule, because they carry
+the session token too.
 
 An override must be an absolute ``https://`` URL. Plain ``http://`` is accepted
 only for a loopback host (``127.0.0.1``, ``::1`` or ``localhost``): a local fake

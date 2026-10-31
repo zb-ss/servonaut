@@ -13,6 +13,7 @@ from servonaut.distribution.manifest import (
     ReleaseArtifact,
     ReleaseChannel,
     ReleaseManifest,
+    build_version_text,
 )
 from servonaut.distribution import manifest as manifest_module
 from servonaut.distribution import trust as trust_module
@@ -35,6 +36,7 @@ from servonaut.distribution.trust import (
     load_ed25519_public_key,
     normalize_arch,
     normalize_platform,
+    parse_build_version,
     parse_semver,
     release_trust_policy,
     resolve_target_artifact,
@@ -149,6 +151,57 @@ class TestSemVerAndDowngrade:
     def test_non_semver_current_version_raises_schema_error(self) -> None:
         with pytest.raises(ManifestSchemaError):
             check_downgrade(make_test_manifest(product_version="2.28.0"), current_version="2.28.0.dev0")
+
+    def test_a_release_candidate_build_orders_like_its_manifest_spelling(self) -> None:
+        # Candidate builds report the Python package version of their tag.
+        check_downgrade(make_test_manifest(product_version="2.28.0-rc.2"), current_version="2.28.0rc1")
+        check_downgrade(make_test_manifest(product_version="2.28.0-rc.10"), current_version="2.28.0rc9")
+        check_downgrade(make_test_manifest(product_version="2.28.0"), current_version="2.28.0rc9")
+        with pytest.raises(ManifestDowngradeError, match="No update available"):
+            check_downgrade(
+                make_test_manifest(product_version="2.28.0-rc.1", packaging_revision=1),
+                current_version="2.28.0rc1",
+                current_packaging_revision=1,
+            )
+        with pytest.raises(ManifestDowngradeError, match="Refusing downgrade"):
+            check_downgrade(make_test_manifest(product_version="2.28.0-rc.9"), current_version="2.28.0rc10")
+        with pytest.raises(ManifestDowngradeError, match="Refusing downgrade"):
+            check_downgrade(make_test_manifest(product_version="2.27.9"), current_version="2.28.0rc1")
+
+    def test_build_version_parses_both_spellings_of_a_candidate_alike(self) -> None:
+        assert parse_build_version("2.28.0rc3") == parse_semver("2.28.0-rc.3")
+        assert parse_build_version("2.28.0") == parse_semver("2.28.0")
+        assert parse_build_version("2.28.0-rc.3") == parse_semver("2.28.0-rc.3")
+
+    @pytest.mark.parametrize(
+        "version", ["2.28.0rc0", "2.28.0rc01", "2.28.0.rc1", "2.28.0rc", "2.28rc1", "v2.28.0rc1", "2.28.0rc1\n", 7]
+    )
+    def test_build_version_refuses_other_candidate_spellings(self, version: object) -> None:
+        with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
+            parse_build_version(version)
+
+    @pytest.mark.parametrize(
+        ("manifest_version", "text"),
+        [
+            ("2.28.0-rc.3", "2.28.0rc3"),
+            ("2.28.0-rc.10", "2.28.0rc10"),
+            ("2.28.0", "2.28.0"),
+            ("2.28.0-beta.1", "2.28.0-beta.1"),
+            ("2.28.0-rc.1.2", "2.28.0-rc.1.2"),
+            ("2.28.0-rc.3+build.7", "2.28.0-rc.3+build.7"),
+        ],
+    )
+    def test_a_manifest_version_reads_as_its_tag_spells_it(
+        self, manifest_version: str, text: str
+    ) -> None:
+        assert build_version_text(manifest_version) == text
+        if text != manifest_version:
+            assert parse_build_version(text) == parse_semver(manifest_version)
+
+    def test_a_manifest_version_must_be_a_semantic_version(self) -> None:
+        # Only the running build may use the package spelling.
+        with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
+            parse_semver("2.28.0rc1")
 
     def test_parse_semver_invalid(self) -> None:
         with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
@@ -380,6 +433,48 @@ class TestPinnedTrustRoot:
     def test_shipped_pinned_keys_are_loadable(self) -> None:
         for encoded in trust_root.PINNED_RELEASE_KEYS.values():
             load_ed25519_public_key(encoded)
+
+    def test_an_active_and_a_standby_key_are_pinned(self) -> None:
+        # Rotation retires a key only once a standby is already pinned, so a
+        # shipped build always trusts at least two distinct keys.
+        raw_keys = {
+            load_ed25519_public_key(encoded).public_bytes_raw()
+            for encoded in trust_root.PINNED_RELEASE_KEYS.values()
+        }
+        assert len(trust_root.PINNED_RELEASE_KEYS) >= 2
+        assert len(raw_keys) == len(trust_root.PINNED_RELEASE_KEYS)
+
+    def test_pinned_keys_cannot_be_changed_at_runtime(self) -> None:
+        with pytest.raises(TypeError):
+            trust_root.PINNED_RELEASE_KEYS["extra"] = "00" * 32  # type: ignore[index]
+        with pytest.raises(TypeError):
+            trust_root.DEFAULT_MANIFEST_URLS["nightly"] = "https://example.net/m.json"  # type: ignore[index]
+
+    @pytest.mark.parametrize("channel", [ReleaseChannel.STABLE, ReleaseChannel.PREVIEW])
+    def test_shipped_keys_configure_every_packaged_channel(self, channel: ReleaseChannel) -> None:
+        policy = release_trust_policy(channel)
+
+        assert policy is not None
+        assert set(policy.trusted_public_keys) == set(trust_root.PINNED_RELEASE_KEYS)
+        assert policy.minimum_signatures == 1
+
+    def test_every_followable_channel_has_a_pinned_manifest(self) -> None:
+        followable = set()
+        for channel in ReleaseChannel:
+            try:
+                channels_accepted_by(channel)
+            except ValueError:
+                continue
+            followable.add(channel.value)
+
+        assert set(trust_root.DEFAULT_MANIFEST_URLS) == followable
+
+    def test_pinned_manifest_urls(self) -> None:
+        # Pinned on purpose: the release mirror publishes the manifests here.
+        assert dict(trust_root.DEFAULT_MANIFEST_URLS) == {
+            "stable": "https://releases.servonaut.dev/manifest/stable.json",
+            "preview": "https://releases.servonaut.dev/manifest/preview.json",
+        }
 
 
 class TestOriginAndFreshness:

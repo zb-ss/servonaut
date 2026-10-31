@@ -30,6 +30,12 @@ STABLE_TAG: Final = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9
 PREVIEW_TAG: Final = re.compile(
     r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-preview\.[1-9][0-9]*"
 )
+# Release candidates vX.Y.ZrcN, as the Release workflow tags them, follow the
+# preview channel too. Unlike a preview tag, the rc number is part of the
+# product version the candidate carries (X.Y.ZrcN).
+CANDIDATE_TAG: Final = re.compile(
+    r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)rc[1-9][0-9]*"
+)
 
 
 class ReleaseIdentityError(ValueError):
@@ -136,19 +142,24 @@ def resolve_release_identity(
 
 
 def channel_for_release_tag(tag: str) -> str:
-    """Return the release channel a stable or preview release tag belongs to."""
+    """Return the release channel a stable, candidate or preview release tag belongs to."""
     if isinstance(tag, str):
         if STABLE_TAG.fullmatch(tag) is not None:
             return "stable"
-        if PREVIEW_TAG.fullmatch(tag) is not None:
+        if PREVIEW_TAG.fullmatch(tag) is not None or CANDIDATE_TAG.fullmatch(tag) is not None:
             return "preview"
     raise ReleaseIdentityError(
-        "release tag must be a stable vX.Y.Z or preview vX.Y.Z-preview.N tag"
+        "release tag must be a stable vX.Y.Z, release candidate vX.Y.ZrcN "
+        "or preview vX.Y.Z-preview.N tag"
     )
 
 
 def release_tag_product_version(tag: str) -> str:
-    """Return the product version a release tag targets, without a preview suffix."""
+    """Return the product version a release tag targets.
+
+    That is the tag without its "v" and without a preview suffix; a release
+    candidate keeps its rc number.
+    """
     channel_for_release_tag(tag)
     return tag[1:].split("-", 1)[0]
 

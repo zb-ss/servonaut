@@ -27,6 +27,7 @@ from servonaut.distribution.manifest import (
     ReleaseManifest,
     ManifestSignature,
     bounded_repr,
+    parse_build_version,
     parse_semver,
     parse_timestamp,
 )
@@ -364,6 +365,8 @@ def check_downgrade(
     packaging revision. Packaged builds always carry the revision their build
     wrote into the runtime marker; ``None`` (a build without a marker, or a
     manifest without a revision) orders before every revision of its version.
+    A release candidate build may report its version as X.Y.ZrcN, which
+    orders like the manifest spelling X.Y.Z-rc.N.
 
     Raises:
         ManifestDowngradeError: If the manifest version or revision is older or identical.
@@ -372,7 +375,7 @@ def check_downgrade(
     manifest_rev = manifest.packaging_revision or 0
     current_rev = current_packaging_revision or 0
     manifest_order = (parse_semver(manifest.product_version).precedence, manifest_rev)
-    current_order = (parse_semver(current_version).precedence, current_rev)
+    current_order = (parse_build_version(current_version).precedence, current_rev)
 
     if manifest_order < current_order:
         raise ManifestDowngradeError(

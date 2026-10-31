@@ -9,7 +9,9 @@ from servonaut.distribution.manifest import (
     ReleaseChannel,
     ReleaseManifest,
     SemVer,
+    build_version_text,
     canonicalize_json,
+    parse_build_version,
     parse_semver,
 )
 from servonaut.distribution.trust import (
@@ -67,6 +69,7 @@ __all__ = [
     "SemVer",
     "TrustPolicy",
     "VerificationError",
+    "build_version_text",
     "canonicalize_json",
     "channels_accepted_by",
     "check_downgrade",
@@ -75,6 +78,7 @@ __all__ = [
     "load_ed25519_public_key",
     "normalize_arch",
     "normalize_platform",
+    "parse_build_version",
     "parse_semver",
     "release_trust_policy",
     "resolve_target_artifact",
