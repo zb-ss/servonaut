@@ -420,8 +420,8 @@ def test_server_memory_probes_use_the_team_login():
     memory._ssh_service, memory._connection_service = ssh, connections
     memory._vault_runtime = memory._vault_leases = memory._connection_rows = None
     # No team key here (a vault-bound server without a vault refuses to connect).
-    runner = MemoryService._make_ssh_runner(memory, shared_row(_server(credential_binding=None), TEAM))
     with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", new=AsyncMock(return_value=(b"Linux", b""))):
+        runner = MemoryService._make_ssh_runner(memory, shared_row(_server(credential_binding=None), TEAM))
         asyncio.run(runner("uname"))
     command = ssh.build_ssh_command.call_args.kwargs
     assert (command["host"], command["username"], command["key_path"]) == (

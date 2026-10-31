@@ -42,6 +42,28 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.fixture(autouse=True)
+def _no_real_ssh_processes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Fail a unit test that would start a real ssh or scp client.
+
+    A test that forgot to replace one of the subprocess seams used to reach
+    the network (or fail only on machines with an ssh client). A test that
+    starts a stand-in ``ssh`` script on purpose is marked ``real_ssh_process``.
+    """
+    if request.node.get_closest_marker("real_ssh_process"):
+        return
+    import asyncio
+
+    real = asyncio.create_subprocess_exec
+
+    async def guarded(program, *args, **kwargs):
+        if os.path.basename(str(program)) in ("ssh", "scp", "sftp"):
+            raise AssertionError(f"a unit test tried to start {program!r}; replace the subprocess seam")
+        return await real(program, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
+
+
+@pytest.fixture(autouse=True)
 def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Start every test with no team agent rules loaded and only the bundled keys.
 
@@ -161,6 +183,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the env-var-gated markers so strict-markers mode is happy."""
+    config.addinivalue_line(
+        "markers", "real_ssh_process: the test starts a stand-in ssh program on purpose",
+    )
     for marker, env_var in E2E_MARKER_ENV_VARS.items():
         config.addinivalue_line(
             "markers",

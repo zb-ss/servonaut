@@ -75,9 +75,9 @@ def test_memory_probes_use_the_vault_key(tmp_path, lease):
     service.set_vault_runtime(runtime, VaultLeaseCache())
 
     async def run_twice():
-        runner = service._make_ssh_runner(dict(CUSTOM))
-        with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b""))), \
-                patch("servonaut.services.memory.service.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b"")), create=True):
+        # The runner binds the subprocess helper when it is made: patch first.
+        with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b""))):
+            runner = service._make_ssh_runner(dict(CUSTOM))
             await runner("uname -a")
             await runner("uptime")
 
