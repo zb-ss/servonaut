@@ -96,14 +96,18 @@ def _not_found(message: str = "Not found") -> web.Response:
 class MemoryCloud:
     """Thread-safe server-side memory state for the one fake account."""
 
-    def __init__(self, user_id: Callable[[], int]) -> None:
+    def __init__(self, user_id: Callable[[], int], owner_id: Optional[Callable[[], int]] = None) -> None:
+        # ``user_id`` is whoever makes the current request; ``owner_id`` is the
+        # scenario's own account (the one ``enrolled_key`` and the grants of
+        # the single-account journeys belong to).
         self._user_id = user_id
-        self._lock = threading.Lock()
+        self._owner_id = owner_id or user_id
+        self._lock = threading.RLock()
         self.reset()
 
     def reset(self) -> None:
         with self._lock:
-            self._key: Optional[dict[str, Any]] = None
+            self._keys: dict[int, dict[str, Any]] = {}
             self._key_history: list[dict[str, Any]] = []
             self._instances: dict[str, dict[str, Any]] = {}
             self._envelopes: list[dict[str, Any]] = []
@@ -123,10 +127,17 @@ class MemoryCloud:
     # Journey controls and observations
     # ------------------------------------------------------------------
 
-    def enrolled_key(self) -> Optional[dict[str, Any]]:
-        """The keypair the client enrolled (wrapped private key included)."""
+    def enrolled_key(self, user_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+        """The keypair a client enrolled (wrapped private key included).
+
+        The scenario account's by default; pass an added user's id for theirs.
+        """
         with self._lock:
-            return copy.deepcopy(self._key)
+            return copy.deepcopy(self._keys.get(self._owner_id() if user_id is None else user_id))
+
+    def current_key(self) -> Optional[dict[str, Any]]:
+        """The enrolled keypair of whoever makes the current request."""
+        return self.enrolled_key(self._user_id())
 
     def instances(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -221,11 +232,12 @@ class MemoryCloud:
         problem = _key_problem(body)
         if problem:
             return problem
+        uid = self._user_id()
         with self._lock:
-            if self._key is not None:
-                self._key_history.append(self._key)
-            self._key = {k: body[k] for k in KEY_FIELDS}
-            self._key["created_at"] = _now()
+            if uid in self._keys:
+                self._key_history.append(self._keys[uid])
+            self._keys[uid] = {k: body[k] for k in KEY_FIELDS}
+            self._keys[uid]["created_at"] = _now()
         return None
 
     def upsert_instance(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -253,6 +265,7 @@ class MemoryCloud:
                     continue
                 stored = copy.deepcopy(envelope)
                 stored["id"] = str(uuid.uuid4())
+                stored["uploader_id"] = user_id
                 stored["created_at"] = _now()
                 stored["snapshot_version"] = 1 + sum(
                     e["instance_id"] == envelope["instance_id"]
@@ -263,7 +276,8 @@ class MemoryCloud:
                 self._instances[envelope["instance_id"]]["last_probe_at"] = envelope["probed_at"]
                 accepted.append({"index": index, "id": stored["id"]})
             quota = {**QUOTA, "envelopes_used": len(self._envelopes)}
-        return {"accepted": accepted, "rejected": rejected, "quota": quota}
+        return {"accepted": accepted, "rejected": rejected, "quota": quota,
+                "missing_team_wraps": self.missing_team_wraps(accepted)}
 
     def _rejection(self, envelope: Any, user_id: int) -> Optional[str]:
         if not isinstance(envelope, dict) or any(
@@ -325,18 +339,44 @@ class MemoryCloud:
         """Members with an enrolled keypair: the caller (as owner) and teammates."""
         with self._lock:
             members = copy.deepcopy(self._members.get(team_slug, []))
-            key = copy.deepcopy(self._key)
-        if key is not None:
+            key = copy.deepcopy(self._keys.get(self._owner_id()))
+        if key is not None and all(m["user_id"] != self._owner_id() for m in members):
             members.insert(
                 0,
                 {
-                    "user_id": self._user_id(),
+                    "user_id": self._owner_id(),
                     "public_key_b64": key["public_key"],
                     "fingerprint": key["fingerprint"],
                     "role": "owner",
                 },
             )
-        return members
+        return [{**m, "name": m.get("name") or f"member {m['user_id']}", "key_changed": False}
+                for m in members]
+
+    # -- team sharing ------------------------------------------------------
+
+    def _role_of(self, team_slug: str, user_id: int) -> Optional[str]:
+        """A member's role in the team memory sharing, None for a stranger."""
+        return next((m["role"] for m in self.team_keys(team_slug) if m["user_id"] == user_id), None)
+
+    @staticmethod
+    def _covers(grant: dict[str, Any], module: str) -> bool:
+        modules = grant.get("modules")
+        return not isinstance(modules, list) or module in modules
+
+    def _eligible(self, grant: dict[str, Any]) -> list[dict[str, Any]]:
+        """Members with a key whose role reaches the grant's required role."""
+        need = TEAM_ROLES.index(grant["required_role"])
+        return [m for m in self.team_keys(grant["team_slug"]) if TEAM_ROLES.index(m["role"]) >= need]
+
+    def _grant_on(self, team_slug: str, grant_id: str) -> Optional[dict[str, Any]]:
+        return next(
+            (g for g in self._grants if g["id"] == grant_id and g["team_slug"] == team_slug), None
+        )
+
+    def _may_manage(self, team_slug: str, grant: dict[str, Any]) -> bool:
+        uid = self._user_id()
+        return uid == grant["granted_by_user_id"] or self._role_of(team_slug, uid) in ("owner", "admin")
 
     def create_grant(self, team_slug: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         instance_id = str(body.get("instance_id") or "")
@@ -388,22 +428,223 @@ class MemoryCloud:
                 "revoked_at": None,
                 "wraps": copy.deepcopy(wraps),
             }
+            missing = self._missing_wraps(grant)
+            if missing:
+                # An enrolled reader with no wrap for a granted module (in this
+                # request or already stored) is refused, as the service does.
+                return 422, {"error": {
+                    "code": "insufficient_wraps", "message": "missing wraps",
+                    "details": {"missing": [
+                        {"envelope_id": e["id"], "recipient_user_id": m["user_id"]}
+                        for e, m in missing
+                    ]},
+                }}
             self._grants.append(grant)
-        return 201, _public_grant(grant)
+        return 201, {**_public_grant(grant), "pending_recipients": [], "missing_wraps": [],
+                     "skipped_recipients": []}
+
+    def _latest_envelopes(self, grant: dict[str, Any]) -> list[dict[str, Any]]:
+        """The newest stored envelope of each module the grant covers."""
+        latest: dict[str, dict[str, Any]] = {}
+        for e in self._envelopes:
+            if e["instance_id"] == grant["instance_id"] and self._covers(grant, e["module"]):
+                latest[e["module"]] = e
+        return list(latest.values())
+
+    def _has_wrap(self, grant: dict[str, Any], envelope: dict[str, Any], user_id: int) -> bool:
+        if any(w.get("recipient_user_id") == user_id for w in envelope.get("dek_wraps", [])):
+            return True
+        return any(
+            w["envelope_id"] == envelope["id"] and w["recipient_user_id"] == user_id
+            for g in self._grants
+            if g["instance_id"] == grant["instance_id"]
+            for w in g["wraps"]
+        ) or any(
+            w["envelope_id"] == envelope["id"] and w["recipient_user_id"] == user_id
+            for w in grant["wraps"]
+        )
+
+    def _missing_wraps(self, grant: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        return [
+            (e, m)
+            for e in self._latest_envelopes(grant)
+            for m in self._eligible(grant)
+            if not self._has_wrap(grant, e, m["user_id"])
+        ]
+
+    def revoke_grant(self, team_slug: str, grant_id: str) -> tuple[int, dict[str, Any]]:
+        """Revoke: idempotent, wraps kept; 404 only when the grant is not the team's."""
+        with self._lock:
+            grant = self._grant_on(team_slug, grant_id)
+            if grant is None or not self._may_manage(team_slug, grant):
+                return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            if grant["status"] != "revoked":
+                grant["status"] = "revoked"
+                grant["revoked_at"] = _now()
+            return 200, _public_grant(grant)
+
+    def purge_grant(self, team_slug: str, grant_id: str) -> tuple[int, dict[str, Any]]:
+        """Revoke if live, then delete the team members' wraps (not the owner's)."""
+        with self._lock:
+            grant = self._grant_on(team_slug, grant_id)
+            if grant is None or not self._may_manage(team_slug, grant):
+                return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            if grant["status"] != "revoked":
+                grant["status"] = "revoked"
+                grant["revoked_at"] = _now()
+            envelope_module = {e["id"]: e["module"] for e in self._envelopes}
+            still = [
+                g for g in self._grants
+                if g is not grant and g["status"] == "active" and g["instance_id"] == grant["instance_id"]
+            ]
+            keep, deleted = [], 0
+            for w in grant["wraps"]:
+                other = any(self._covers(g, envelope_module.get(w["envelope_id"], "")) for g in still)
+                if w["recipient_user_id"] == grant["granted_by_user_id"] or other:
+                    keep.append(w)
+                else:
+                    deleted += 1
+            grant["wraps"] = keep
+            return 200, {"grant_id": grant_id, "wraps_deleted": deleted, "status": "revoked"}
+
+    def add_wraps(self, team_slug: str, grant_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """The catch-up route: wraps for snapshots uploaded after the share."""
+        with self._lock:
+            grant = self._grant_on(team_slug, grant_id)
+            if grant is None or not self._may_manage(team_slug, grant):
+                return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            if grant["status"] != "active":
+                return 409, {"error": {"code": "grant_not_live", "message": "grant revoked"}}
+            wraps = body.get("wraps")
+            if not isinstance(wraps, list):
+                return 422, {"error": {"code": "validation_failed", "message": "wraps required"}}
+            eligible = {m["user_id"]: m for m in self._eligible(grant)}
+            stored = {e["id"]: e for e in self._envelopes if e["instance_id"] == grant["instance_id"]}
+            kept, unchanged, skipped = 0, 0, []
+            for wrap in wraps:
+                member = eligible.get(wrap.get("recipient_user_id")) if isinstance(wrap, dict) else None
+                envelope = stored.get(wrap.get("envelope_id")) if isinstance(wrap, dict) else None
+                if (
+                    member is None or envelope is None
+                    or not self._covers(grant, envelope["module"])
+                    or not has_size(wrap.get("wrapped_dek"), SEALED_DATA_KEY)
+                ):
+                    return 422, {"error": {"code": "validation_failed", "message": "invalid wrap"}}
+                claimed = wrap.get("recipient_fingerprint")
+                if claimed and claimed != member["fingerprint"]:
+                    skipped.append({"user_id": member["user_id"], "reason": "key_changed"})
+                    continue
+                if any(w["envelope_id"] == wrap["envelope_id"]
+                       and w["recipient_user_id"] == wrap["recipient_user_id"]
+                       for w in grant["wraps"]):
+                    unchanged += 1
+                    continue
+                grant["wraps"].append({k: wrap[k] for k in ("recipient_user_id", "envelope_id", "wrapped_dek")})
+                kept += 1
+            return 200, {"grant_id": grant_id, "wraps_stored": kept, "wraps_unchanged": unchanged,
+                         "missing_count": len(self._missing_wraps(grant)),
+                         "pending_recipients": [], "skipped_recipients": skipped}
+
+    def wrap_coverage(self, team_slug: str, grant_id: str) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            grant = self._grant_on(team_slug, grant_id)
+            if grant is None or not self._may_manage(team_slug, grant):
+                return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            uid = self._user_id()
+            rows = []
+            for e in self._latest_envelopes(grant):
+                own = next((w for w in e.get("dek_wraps", []) if w.get("recipient_user_id") == uid), None)
+                rows.append({
+                    "envelope_id": e["id"], "module": e["module"],
+                    "snapshot_version": e["snapshot_version"],
+                    "wrapped_dek": own["wrapped_dek"] if own else None,
+                    "missing_recipients": [
+                        m["user_id"] for m in self._eligible(grant)
+                        if not self._has_wrap(grant, e, m["user_id"])
+                    ],
+                })
+            return 200, {"grant_id": grant_id, "envelopes": rows, "pending_recipients": []}
+
+    def missing_team_wraps(self, accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """For accepted envelopes: covered members that still lack a wrap."""
+        entries = []
+        with self._lock:
+            by_id = {e["id"]: e for e in self._envelopes}
+            for item in accepted:
+                envelope = by_id[item["id"]]
+                for grant in self._grants:
+                    if (grant["status"] != "active" or grant["instance_id"] != envelope["instance_id"]
+                            or not self._covers(grant, envelope["module"])):
+                        continue
+                    recipients = [
+                        {"user_id": m["user_id"], "name": m["name"], "fingerprint": m["fingerprint"],
+                         "public_key_b64": m["public_key_b64"], "key_changed": False,
+                         "previous_fingerprint": None, "key_rotated_at": None}
+                        for m in self._eligible(grant)
+                        if m["user_id"] != envelope.get("uploader_id")
+                        and not self._has_wrap(grant, envelope, m["user_id"])
+                    ]
+                    if recipients:
+                        entries.append({
+                            "envelope_id": envelope["id"], "instance_id": envelope["instance_id"],
+                            "module": envelope["module"], "team_slug": grant["team_slug"],
+                            "grant_id": grant["id"], "recipients": recipients,
+                        })
+        return entries
 
     def shared_instances(self, team_slug: str) -> list[dict[str, Any]]:
+        """The live grants the caller may read (the granter and team admins see all)."""
+        uid = self._user_id()
+        role = self._role_of(team_slug, uid)
         rows = []
         for grant in self.grants(team_slug):
+            if grant["status"] != "active" or role is None:
+                continue
+            if not (uid == grant["granted_by_user_id"]
+                    or TEAM_ROLES.index(role) >= TEAM_ROLES.index(grant["required_role"])):
+                continue
             with self._lock:
                 instance = copy.deepcopy(self._instances.get(grant["instance_id"], {}))
-                wrapped = {w["envelope_id"] for w in grant["wraps"]}
-                modules = sorted(
-                    {e["module"] for e in self._envelopes if e["id"] in wrapped}
-                )
-            rows.append(
-                {"grant": _public_grant(grant), "instance": instance, "readable_modules": modules}
-            )
+                if uid == grant["granted_by_user_id"]:
+                    wrapped = {w["envelope_id"] for w in grant["wraps"]}
+                else:
+                    wrapped = {w["envelope_id"] for w in grant["wraps"] if w["recipient_user_id"] == uid}
+                modules = sorted({e["module"] for e in self._envelopes if e["id"] in wrapped})
+            rows.append({"grant": _public_grant(grant), "instance": instance,
+                         "readable_modules": modules, "stale_modules": []})
         return rows
+
+    def team_read(self, team_slug: str, instance_id: str, module: str) -> tuple[int, dict[str, Any]]:
+        """The newest envelope of *module* the caller holds a wrap for, else access_revoked."""
+        uid = self._user_id()
+        denied = (404, {"error": {"code": "access_revoked", "message": "no readable copy"}})
+        role = self._role_of(team_slug, uid)
+        with self._lock:
+            grant = next(
+                (g for g in self._grants
+                 if g["team_slug"] == team_slug and g["instance_id"] == instance_id
+                 and g["status"] == "active" and self._covers(g, module)), None)
+            if grant is None or role is None or TEAM_ROLES.index(role) < TEAM_ROLES.index(grant["required_role"]):
+                return denied
+            candidates = [e for e in self._envelopes
+                          if e["instance_id"] == instance_id and e["module"] == module]
+            for envelope in reversed(candidates):
+                wrap = next((w for w in grant["wraps"]
+                             if w["envelope_id"] == envelope["id"] and w["recipient_user_id"] == uid), None)
+                if wrap is None:
+                    continue
+                answer = {k: envelope.get(k) for k in _METADATA}
+                answer.update({
+                    "id": envelope["id"], "snapshot_version": envelope["snapshot_version"],
+                    "created_at": envelope["created_at"], "iv": envelope["iv"], "tag": envelope["tag"],
+                    "salt": envelope.get("salt"), "ciphertext": envelope["ciphertext"],
+                    "encryption": envelope["encryption"], "wrapped_dek": wrap["wrapped_dek"],
+                    "grant_id": grant["id"], "required_role": grant["required_role"],
+                    "is_latest": envelope is candidates[-1],
+                    "latest_snapshot_version": candidates[-1]["snapshot_version"],
+                })
+                return 200, answer
+        return denied
 
     def acknowledge(self, event_id: str) -> Optional[dict[str, Any]]:
         with self._lock:
@@ -484,7 +725,7 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
         return web.json_response(memory.settings())
 
     async def key_me(request: web.Request) -> web.Response:
-        key = memory.enrolled_key()
+        key = memory.current_key()
         if key is None:
             return _not_found("No active keypair")
         return web.json_response(key)
@@ -493,7 +734,7 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
         problem = memory.enrol(await json_body(request))
         if problem:
             return validation_failed(problem)
-        key = memory.enrolled_key() or {}
+        key = memory.current_key() or {}
         return web.json_response({"fingerprint": key.get("fingerprint")}, status=201)
 
     async def team_keys(request: web.Request) -> web.Response:
@@ -559,6 +800,27 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
         )
         return web.json_response(body, status=status)
 
+    def answer(result: tuple[int, dict[str, Any]]) -> web.Response:
+        return web.json_response(result[1], status=result[0])
+
+    async def revoke_grant(request: web.Request) -> web.Response:
+        return answer(memory.revoke_grant(request.match_info["team_slug"], request.match_info["grant_id"]))
+
+    async def purge_grant(request: web.Request) -> web.Response:
+        return answer(memory.purge_grant(request.match_info["team_slug"], request.match_info["grant_id"]))
+
+    async def add_wraps(request: web.Request) -> web.Response:
+        return answer(memory.add_wraps(
+            request.match_info["team_slug"], request.match_info["grant_id"], await json_body(request)))
+
+    async def wrap_coverage(request: web.Request) -> web.Response:
+        return answer(memory.wrap_coverage(request.match_info["team_slug"], request.match_info["grant_id"]))
+
+    async def team_read(request: web.Request) -> web.Response:
+        return answer(memory.team_read(
+            request.match_info["team_slug"], request.match_info["instance_id"],
+            request.match_info["module"]))
+
     async def shared(request: web.Request) -> web.Response:
         return web.json_response(
             {"instances": memory.shared_instances(request.match_info["team_slug"])}
@@ -581,3 +843,9 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
     )
     router.add_post("/api/v1/teams/{team_slug}/memory/grant", guarded(create_grant))
     router.add_get("/api/v1/teams/{team_slug}/memory", guarded(shared))
+    grant = "/api/v1/teams/{team_slug}/memory/grant/{grant_id}"
+    router.add_delete(grant, guarded(revoke_grant))
+    router.add_post(f"{grant}/purge", guarded(purge_grant))
+    router.add_post(f"{grant}/wraps", guarded(add_wraps))
+    router.add_get(f"{grant}/wraps", guarded(wrap_coverage))
+    router.add_get("/api/v1/teams/{team_slug}/memory/{instance_id}/{module}", guarded(team_read))
