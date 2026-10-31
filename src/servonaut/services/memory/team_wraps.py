@@ -386,18 +386,19 @@ def key_change_for(
     )
 
 
-def split_by_trust(store: WrapPinStore, entry: MissingTeamWrap) -> TrustSplit:
+def split_by_trust(store: Optional[WrapPinStore], entry: MissingTeamWrap) -> TrustSplit:
     """Divide *entry*'s recipients into those to seal for and those awaiting confirmation."""
     return split_recipients(store, entry.team_slug, entry.recipients)
 
 
 def split_recipients(
-    store: WrapPinStore, team_slug: str, recipients: Tuple[Recipient, ...]
+    store: Optional[WrapPinStore], team_slug: str, recipients: Tuple[Recipient, ...]
 ) -> TrustSplit:
+    """Like :func:`split_by_trust` for a bare list; no store means nothing is pinned."""
     sealable: List[Recipient] = []
     changed: List[KeyChange] = []
     for recipient in recipients:
-        pinned = pinned_fingerprint(store, team_slug, recipient.user_id)
+        pinned = pinned_fingerprint(store, team_slug, recipient.user_id) if store else None
         trust = classify_key(
             base64.b64encode(recipient.public_key).decode(),
             recipient.fingerprint,

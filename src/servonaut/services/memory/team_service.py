@@ -1009,6 +1009,15 @@ class TeamMemoryService:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return parse_grant_coverage(data)
 
+    def waiting_key_changes(self, team_slug: str, coverage: GrantCoverage) -> List[KeyChange]:
+        """The members of *coverage* whose changed key still needs confirming."""
+        waiting: Dict[int, KeyChange] = {}
+        pins = self._pins()
+        for envelope in coverage.envelopes:
+            split = split_recipients(pins, team_slug, envelope.missing)
+            waiting.update({c.user_id: c for c in split.changed})
+        return list(waiting.values())
+
     async def top_up_grant(self, team_slug: str, grant_id: str) -> "TopUpResult":
         """Seal the newest snapshots for the members still missing a wrap.
 

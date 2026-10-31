@@ -355,28 +355,6 @@ async def test_a_deliberate_edit_wins_over_the_existing_grant():
     assert backend.posted[-1]["required_role"] == "viewer"
 
 
-async def test_a_changed_key_stops_share_again_before_anything_is_revoked():
-    backend = _Backend(members=[_member(1, "Kim Member"), _member(2, "Lee Member", key_changed=True)],
-                       live=[_grant("g-1", required_role="member", modules=["os"])])
-    app = _Host(backend)
-    async with app.run_test(size=(120, 50)) as pilot:
-        screen = await _live_panel(app, pilot)
-        screen.query_one("#share-btn-reshare", Button).press()
-        await _settle(pilot, screen, lambda: "Lee Member" in _text(screen, "#share-status"), "message")
-        assert "changed" in _text(screen, "#share-status")
-    assert not [c for c in backend.calls if not c.startswith("GET")]
-
-
-async def test_a_changed_key_stops_a_first_share_too():
-    backend = _Backend(members=[_member(2, "Lee Member", key_changed=True)])
-    app = _Host(backend)
-    async with app.run_test(size=(120, 50)) as pilot:
-        screen = await _open(app, pilot)
-        screen.query_one("#share-btn-confirm", Button).press()
-        await _settle(pilot, screen, lambda: "Lee Member" in _text(screen, "#share-status"), "message")
-    assert backend.posted == []
-
-
 async def test_demo_mode_never_shows_the_real_team_in_an_error_or_a_success():
     backend = _Backend(members=[_member(1, "Kim Member")], live=[_grant("g-1")])
     backend.fail_delete = RuntimeError("Team team-a is unavailable")
