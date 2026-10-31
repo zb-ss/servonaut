@@ -257,6 +257,23 @@ class TeamCopyMerger:
         ``verified`` says everything is in the target. A *source* equal to
         *target* has no local part: only the remote text and records are merged.
         """
+        # Held for the whole merge so the findings step nests inside it; a busy
+        # record keeps the copy for the next pass instead of holding the caller.
+        with self._store.annotation_lock(target.instance_id, wait=False):
+            return self._merge_locked(
+                source, target, source_label, merged_on, target_name, remote_notes, remote_records
+            )
+
+    def _merge_locked(
+        self,
+        source: MemoryKey,
+        target: MemoryKey,
+        source_label: str,
+        merged_on: str,
+        target_name: str,
+        remote_notes: str,
+        remote_records: Sequence[Dict[str, Any]],
+    ) -> MergeStats:
         store = self._store
         local = source != target
         theirs = store.read_annotations_strict(source.instance_id, source.provider) if local else ""

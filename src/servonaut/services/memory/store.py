@@ -66,6 +66,10 @@ class RecordLockTimeout(FileLockTimeout):
     """
 
 
+class RecordBusy(RecordLockTimeout):
+    """A record is locked right now and the caller chose not to wait for it."""
+
+
 class _HeldOsLock:
     """The OS lock the outermost holder of a record lock owns."""
 
@@ -983,39 +987,46 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def annotation_lock(self, instance_id: str):
+    def annotation_lock(self, instance_id: str, *, wait: bool = True):
         """Hold the lock that serialises changes to one instance's annotations.
 
         Re-entrant. Threads are ordered by an in-process lock; the outermost
         holder also takes an OS lock on ``<root>/.locks/<sha256 of the id>.lock``
         so a second process writing the same record waits (bounded by
         :attr:`record_lock_wait`) and then fails with :class:`RecordLockTimeout`,
-        an ``OSError``, before it has changed anything.
+        an ``OSError``, before it has changed anything. With ``wait=False``
+        (background work that must not hold up an interface) a busy record
+        raises :class:`RecordBusy` at once instead.
         """
         instance_id = self._resolve_id(instance_id)
         with self._locks_guard:
             lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
-        with lock:
+        if not lock.acquire(blocking=wait):
+            raise RecordBusy("another thread is changing this server's memory")
+        try:
             held = self._os_locks.get(instance_id)
             if held is not None:  # nested in this process: already excluded
                 yield
                 return
-            held = self._take_os_lock(instance_id)
+            held = self._take_os_lock(instance_id, wait=wait)
             self._os_locks[instance_id] = held
             try:
                 yield
             finally:
                 del self._os_locks[instance_id]
                 held.lock.release()
+        finally:
+            lock.release()
 
-    def _take_os_lock(self, instance_id: str) -> "_HeldOsLock":
+    def _take_os_lock(self, instance_id: str, *, wait: bool = True) -> "_HeldOsLock":
         digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
         lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock", private_dir=True)
-        timeout, poll = self._record_lock_wait
+        timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
         try:
             lock.acquire(timeout, poll)
         except FileLockTimeout as exc:
-            raise RecordLockTimeout(
+            busy = RecordLockTimeout if wait else RecordBusy
+            raise busy(
                 "another Servonaut process is changing this server's memory"
             ) from exc
         return _HeldOsLock(lock)
