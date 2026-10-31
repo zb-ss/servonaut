@@ -11,6 +11,7 @@ All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -75,6 +76,20 @@ class _HeldOsLock:
 
     def __init__(self, lock: FileLock) -> None:
         self.lock = lock
+
+
+def _record_locked(method):
+    """Run a store method that changes one instance's folder under its record lock.
+
+    Bounded wait, like every user-driven write; callers that already hold the
+    lock (the merge, in its non-waiting mode) nest inside it.
+    """
+    @functools.wraps(method)
+    def locked(self, instance_id, *args, **kwargs):
+        with self.annotation_lock(instance_id):
+            return method(self, instance_id, *args, **kwargs)
+
+    return locked
 
 
 def _draft_stamp() -> str:
@@ -367,6 +382,7 @@ class MemoryStore:
     # Write
     # ------------------------------------------------------------------
 
+    @_record_locked
     def save_module(
         self,
         instance_id: str,
@@ -623,6 +639,7 @@ class MemoryStore:
     # Clear
     # ------------------------------------------------------------------
 
+    @_record_locked
     def clear(
         self,
         instance_id: str,
@@ -1054,7 +1071,9 @@ class MemoryStore:
 
         The name is ``annotations.unsaved-<UTC time>.md`` (a numeric suffix
         when taken); the file is created mode 0600 without following links
-        and appears complete or not at all.
+        and appears complete or not at all. It takes no record lock: a draft
+        is a new file, and it is what keeps the user's text when the record
+        is busy.
         """
         _validate_instance_id(instance_id)
         directory = self._checked_dir(instance_id, provider)
@@ -1241,6 +1260,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         return self._instance_dir(instance_id, provider) / "findings"
 
+    @_record_locked
     def save_finding(
         self,
         instance_id: str,
@@ -1369,6 +1389,7 @@ class MemoryStore:
         results.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return results
 
+    @_record_locked
     def delete_finding(
         self,
         instance_id: str,

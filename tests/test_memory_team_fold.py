@@ -191,7 +191,7 @@ class TestSharedRowKeying:
         row = _shared(instance_id=None, hostname="8.8.8.8")
         store = MemoryStore(root=tmp_path)
         store.save_module(row["id"], "os", {"probed_at": "2026-01-01T00:00:00+00:00"}, instance_provider(row))
-        assert [p.name for p in tmp_path.iterdir()] == ["shared"]
+        assert [p.name for p in tmp_path.iterdir() if p.name != ".locks"] == ["shared"]
 
 
 class TestWritesLandOnTheOwnRow:
