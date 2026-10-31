@@ -53,6 +53,7 @@ from servonaut.services.memory.provider import (
     instance_provider,
 )
 from servonaut.services.shared_servers import is_shared_row, own_twin
+from servonaut.utils.file_lock import UnsafeLockError
 
 logger = logging.getLogger(__name__)
 
@@ -771,6 +772,8 @@ async def merge_team_copies(
     lock = memory_service._store.merge_pass_lock()
     try:
         held = lock.try_acquire()
+    except UnsafeLockError:
+        held = False  # already warned about, once, by the lock
     except OSError as exc:
         logger.warning("Team copy merge skipped: its lock cannot be taken (%s)", type(exc).__name__)
         held = False

@@ -15,8 +15,10 @@ already treat an ``OSError`` as a failed write keep their behaviour.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
+import stat
 import time
 from pathlib import Path
 from typing import Iterator, Optional, Union
@@ -28,21 +30,41 @@ logger = logging.getLogger(__name__)
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 
+#: Paths already warned about; a refused lock is logged once per process, not
+#: on every pass that trips over it.
+_WARNED: set = set()
+
+
+def _owner_uid() -> Optional[int]:
+    """The user a lock folder or file must belong to (``None`` where there are no uids)."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid() if geteuid is not None else None
+
 
 class FileLockTimeout(OSError):
     """The lock stayed busy for the whole wait."""
 
 
+class UnsafeLockError(OSError):
+    """A lock folder or file that is not ours or not a plain folder or file."""
+
+
 class FileLock:
     """One advisory lock on *path*; the file is created 0600 in a 0700 folder.
+
+    With ``private_dir`` the folder must be a real directory (not a link)
+    owned by the current user; a looser mode is tightened to 0700. The lock
+    file is never opened through a link, must belong to the current user and
+    is tightened to 0600. A refusal raises :class:`UnsafeLockError`.
 
     Not re-entrant: a second :meth:`try_acquire` on the same object while held
     is refused like any other holder. Callers that need re-entrancy count
     their own nesting (see ``MemoryStore.annotation_lock``).
     """
 
-    def __init__(self, path: Union[str, Path]) -> None:
+    def __init__(self, path: Union[str, Path], *, private_dir: bool = False) -> None:
         self._path = Path(path)
+        self._private_dir = private_dir
         self._fd: Optional[int] = None
 
     @property
@@ -93,9 +115,56 @@ class FileLock:
 
     def _open(self) -> int:
         directory = self._path.parent
-        if not directory.exists():
+        if self._private_dir:
+            self._check_private_dir(directory)
+        elif not directory.exists():
             directory.mkdir(parents=True, exist_ok=True)
             # mkdir's mode is cut by the umask; the lock folder is private.
             os.chmod(directory, _DIR_MODE)
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-        return os.open(self._path, flags, _FILE_MODE)
+        try:
+            fd = os.open(self._path, flags, _FILE_MODE)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                self._refuse("the lock file is a link")
+            raise
+        try:
+            self._check_file(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _check_private_dir(self, directory: Path) -> None:
+        try:
+            info = os.lstat(directory)
+        except FileNotFoundError:
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(directory, _DIR_MODE)
+            return
+        if not stat.S_ISDIR(info.st_mode):
+            self._refuse("the lock folder is a link or not a folder")
+        uid = _owner_uid()
+        if uid is not None and info.st_uid != uid:
+            self._refuse("the lock folder belongs to another user")
+        if uid is not None and stat.S_IMODE(info.st_mode) != _DIR_MODE:
+            os.chmod(directory, _DIR_MODE)
+
+    def _check_file(self, fd: int) -> None:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            self._refuse("the lock file is not a plain file")
+        uid = _owner_uid()
+        if uid is None:
+            return
+        if info.st_uid != uid:
+            self._refuse("the lock file belongs to another user")
+        if stat.S_IMODE(info.st_mode) != _FILE_MODE:
+            os.fchmod(fd, _FILE_MODE)
+
+    def _refuse(self, reason: str) -> None:
+        key = str(self._path)
+        if key not in _WARNED:
+            _WARNED.add(key)
+            logger.warning("Lock %s refused: %s", self._path.name, reason)
+        raise UnsafeLockError(f"{self._path.name}: {reason}")

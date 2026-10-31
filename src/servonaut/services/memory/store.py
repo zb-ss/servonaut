@@ -1010,7 +1010,7 @@ class MemoryStore:
 
     def _take_os_lock(self, instance_id: str) -> "_HeldOsLock":
         digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
-        lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock")
+        lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock", private_dir=True)
         timeout, poll = self._record_lock_wait
         try:
             lock.acquire(timeout, poll)
