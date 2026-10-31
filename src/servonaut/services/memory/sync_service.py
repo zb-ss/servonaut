@@ -31,6 +31,7 @@ import os
 import random
 import re
 import tempfile
+import threading
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -272,7 +273,9 @@ class MemorySyncService:
         self._wrap_pins: Optional[Any] = None
         # Changed member keys a catch-up skipped this session, keyed
         # (team, user, fingerprint); the listener hears each one once.
-        self._key_changes: Dict[tuple[str, int, str], Any] = {}
+        # (team slug, user id) -> the newest changed key waiting for that member
+        self._key_changes: Dict[tuple[str, int], Any] = {}
+        self._key_changes_lock = threading.Lock()
         self._key_change_listener: Optional[Callable[[Any], None]] = None
 
         # Optional collaborator wired after construction to avoid an import
@@ -2065,27 +2068,43 @@ class MemorySyncService:
         self._key_change_listener = listener
 
     def pending_key_changes(self) -> List[Any]:
-        """The skipped keys this session that still wait for the user's confirmation."""
+        """The skipped keys this session that still wait for the user's confirmation.
+
+        A key that has been pinned since (confirmed, or sealed for) is no longer
+        waiting and is dropped from the registry here.
+        """
         pins = self._pin_store()
-        return [
-            pending for pending in self._key_changes.values()
-            if pins.get(pending.change.team_slug, pending.change.user_id)
-            != pending.change.fingerprint
-        ]
+        with self._key_changes_lock:
+            for key, pending in list(self._key_changes.items()):
+                change = pending.change
+                if pins.get(change.team_slug, change.user_id) == change.fingerprint:
+                    del self._key_changes[key]
+            return list(self._key_changes.values())
 
     def _record_key_changes(self, instance_id: str, changes: Iterable[Any]) -> None:
+        """Remember each changed key once; a newer key for a member replaces the older.
+
+        Only what can still be acted on is kept, so the registry stays one entry
+        per member. The listener runs outside the lock.
+        """
         from servonaut.services.memory.team_wraps import PendingKeyChange  # noqa: PLC0415
 
-        for change in changes:
-            key = (change.team_slug, change.user_id, change.fingerprint)
-            if key in self._key_changes:
-                continue
-            pending = PendingKeyChange(change=change, instance_id=instance_id)
-            self._key_changes[key] = pending
-            if self._key_change_listener is None:
-                continue
+        announce = []
+        with self._key_changes_lock:
+            for change in changes:
+                key = (change.team_slug, change.user_id)
+                known = self._key_changes.get(key)
+                if known is not None and known.change.fingerprint == change.fingerprint:
+                    continue
+                pending = PendingKeyChange(change=change, instance_id=instance_id)
+                self._key_changes[key] = pending
+                announce.append(pending)
+        listener = self._key_change_listener
+        if listener is None:
+            return
+        for pending in announce:
             try:
-                self._key_change_listener(pending)
+                listener(pending)
             except Exception as exc:  # a toast must never cost the upload
                 logger.warning("key change listener failed: %s", type(exc).__name__)
 
