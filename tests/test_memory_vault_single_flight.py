@@ -162,10 +162,59 @@ class TestLeaseSingleFlight:
         assert runtime.calls == 1
 
 
+class TestForgetDuringLookup:
+    def test_a_lookup_after_forget_does_not_join_the_stale_one(self, lease):
+        runtime = _CountingRuntime(lease)
+        cache = VaultLeaseCache()
+
+        async def go():
+            first = asyncio.create_task(vault_lease(dict(CUSTOM), runtime, cache=cache))
+            await asyncio.sleep(0)
+            cache.forget(dict(CUSTOM))
+            second = await vault_lease(dict(CUSTOM), runtime, cache=cache)
+            await first
+            return second
+
+        asyncio.run(go())
+
+        assert runtime.calls == 2
+
+    def test_a_stale_lookup_does_not_publish_its_lease(self, lease):
+        runtime = _CountingRuntime(lease)
+        cache = VaultLeaseCache()
+
+        async def go():
+            first = asyncio.create_task(vault_lease(dict(CUSTOM), runtime, cache=cache))
+            await asyncio.sleep(0)
+            cache.forget(dict(CUSTOM))
+            await first
+
+        asyncio.run(go())
+
+        from servonaut.services.ssh_credentials import lease_key
+
+        assert cache.get(lease_key(dict(CUSTOM))) is None
+
+    def test_clear_also_drops_lookups_in_flight(self, lease):
+        runtime = _CountingRuntime(lease)
+        cache = VaultLeaseCache()
+
+        async def go():
+            first = asyncio.create_task(vault_lease(dict(CUSTOM), runtime, cache=cache))
+            await asyncio.sleep(0)
+            cache.clear()
+            await vault_lease(dict(CUSTOM), runtime, cache=cache)
+            await first
+
+        asyncio.run(go())
+
+        assert runtime.calls == 2
+
+
 class TestRateLimit:
     def test_a_rate_limited_lookup_waits_for_retry_after_once_then_succeeds(self, tmp_path, lease):
         runtime = _CountingRuntime(lease, fail_first=1, error=_rate_limited("2"))
-        service, _ = _service_with(tmp_path, runtime)
+        service, _ = _service_with(tmp_path, runtime, config=MemoryConfig(vault_rate_limit_jitter_seconds=0))
         sleeps = []
 
         async def fake_sleep(seconds):
@@ -294,3 +343,109 @@ class TestRateLimitWait:
         wrapped.__cause__ = RuntimeError("locked")
 
         assert rate_limit_wait(wrapped) == (False, None)
+
+
+class TestRetryJitter:
+    def test_servers_refused_together_wait_for_different_times(self, tmp_path, lease):
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        async def go():
+            services = []
+            for _ in range(3):
+                runtime = _CountingRuntime(lease, fail_first=1, error=_rate_limited("2"))
+                service, _ = _service_with(tmp_path, runtime, config=MemoryConfig(vault_rate_limit_jitter_seconds=1.5))
+                services.append(service)
+            with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b""))):
+                await asyncio.gather(*(s._make_ssh_runner(dict(CUSTOM))("true") for s in services))
+
+        with patch("servonaut.services.memory.service._wait", fake_sleep):
+            asyncio.run(go())
+
+        assert len(sleeps) == 3 and len(set(sleeps)) > 1
+        assert all(2.0 <= value <= 3.5 for value in sleeps)
+
+    def test_the_jitter_does_not_let_a_long_ask_through(self, tmp_path, lease):
+        runtime = _CountingRuntime(lease, fail_first=99, error=_rate_limited("20"))
+        service, _ = _service_with(
+            tmp_path, runtime,
+            config=MemoryConfig(vault_rate_limit_max_wait_seconds=20, vault_rate_limit_jitter_seconds=5),
+        )
+
+        async def go():
+            runner = service._make_ssh_runner(dict(CUSTOM))
+            with pytest.raises(VaultCredentialError):
+                await runner("true")
+
+        async def no_sleep(seconds):
+            return None
+
+        with patch("servonaut.services.memory.service._wait", no_sleep):
+            asyncio.run(go())
+
+        assert runtime.calls == 2
+
+
+class TestResolutionLifecycle:
+    def test_cancelling_the_build_ends_the_resolution(self, tmp_path, lease):
+        gate = asyncio.Event()
+
+        class Held(_CountingRuntime):
+            async def resolve_ssh(self, instance):
+                self.calls += 1
+                await gate.wait()
+                return self._lease
+
+        runtime = Held(lease)
+        service, _ = _service_with(tmp_path, runtime)
+        prober = MagicMock()
+        prober.name = "os"
+
+        async def probe(runner):
+            await runner("uname -a")
+
+        prober.probe = probe
+        service._probers = [prober]
+
+        async def go():
+            before = {t for t in asyncio.all_tasks()}
+            build = asyncio.create_task(service.build_report(dict(CUSTOM), ["os"]))
+            await asyncio.sleep(0.1)
+            assert runtime.calls == 1
+            build.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await build
+            await asyncio.sleep(0)
+            return [t for t in asyncio.all_tasks() if t not in before and not t.done() and "_resolve_credentials" in repr(t)]
+
+        assert asyncio.run(go()) == []
+
+    def test_a_transient_error_is_retried_by_the_next_command(self, tmp_path, lease):
+        runtime = _CountingRuntime(lease)
+        calls = {"n": 0}
+        original = runtime.resolve_ssh
+
+        async def flaky(instance):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("agent socket went away")
+            return await original(instance)
+
+        runtime.resolve_ssh = flaky
+        service, _ = _service_with(tmp_path, runtime)
+
+        async def go():
+            with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b""))), patch(
+                "servonaut.services.ssh_credentials.resolve_with_vault",
+                AsyncMock(side_effect=[OSError("lookup interrupted"), {"host": "h", "username": "u"}]),
+            ):
+                runner = service._make_ssh_runner(dict(CUSTOM))
+                with pytest.raises(OSError):
+                    await runner("first")
+                return await runner("second")
+
+        stdout, _err, code = asyncio.run(go())
+
+        assert (stdout, code) == ("ok", 0)

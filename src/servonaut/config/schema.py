@@ -1203,6 +1203,9 @@ class MemoryConfig:
             server, for the Servonaut service's ``Retry-After`` after the
             service refused a vault key lookup. A longer ask (or a second
             refusal) fails the server as rate limited.
+        vault_rate_limit_jitter_seconds: Random extra pause (up to this long)
+            added to that wait so servers refused together do not all retry
+            at the same moment.
         ssh_max_connections_per_bastion: Most SSH connections open at once
             through one bastion (``host``), shared by every concurrent build.
             With connection sharing it gates opening each server's master.
@@ -1281,6 +1284,7 @@ class MemoryConfig:
     # refused a vault lookup (once per server); a longer ask fails the server
     # at once as rate limited.
     vault_rate_limit_max_wait_seconds: float = 20.0
+    vault_rate_limit_jitter_seconds: float = 2.0
     # Connections a fleet scan may open through one bastion (all builds share
     # the cap), and per server when connections cannot be shared (Windows).
     ssh_max_connections_per_bastion: int = 4

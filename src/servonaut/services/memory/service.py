@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -94,6 +95,11 @@ def _is_multiplex_error(diagnostics: str) -> bool:
     """Whether ssh's messages say it cannot share a connection here (not that the server failed)."""
     text = (diagnostics or "").lower()
     return any(marker in text for marker in _MULTIPLEX_ERROR_MARKERS)
+
+
+def _jitter(limit: float) -> float:
+    """A random extra pause of up to *limit* seconds (a seam for tests)."""
+    return random.uniform(0.0, limit) if limit > 0 else 0.0
 
 
 async def _wait(seconds: float) -> None:
@@ -1709,7 +1715,7 @@ class MemoryService(MemoryServiceInterface):
                     resolved.update(await resolve_with_vault(
                         conn, instance, vault_runtime=vault_runtime,
                         connection_service=connection_service, cache=vault_leases,
-                        team_rows=team_rows, rows=fleet_rows,
+                        team_rows=team_rows, rows=fleet_rows, raise_rate_limited=True,
                     ))
                     break
                 except VaultCredentialError as exc:
@@ -1723,6 +1729,8 @@ class MemoryService(MemoryServiceInterface):
                         _record_problem(VAULT_RATE_LIMITED, message)
                         raise VaultCredentialError(message) from exc
                     waited = True
+                    # Servers that were refused together must not all retry at once.
+                    seconds += _jitter(self._setting("vault_rate_limit_jitter_seconds"))
                     logger.info(
                         "Vault lookup for %s rate limited: waiting %.0f s", instance.get("id", "?"), seconds,
                     )
@@ -1730,13 +1738,29 @@ class MemoryService(MemoryServiceInterface):
             if master is not None:
                 await _open_master()
 
+        def _needs_new_resolution(task: "asyncio.Future[None]") -> bool:
+            """Whether the next command starts its own resolution.
+
+            A cancelled one, or one that failed for a reason other than the
+            vault refusing the credential (a transient error: the old code
+            retried per command), is not replayed to every later command.
+            """
+            if task.cancelled():
+                return True
+            return task.done() and task.exception() is not None and not isinstance(
+                task.exception(), VaultCredentialError,
+            )
+
         async def _ensure_resolved() -> None:
             # `resolved` fills before the shared connection opens: wait for the
             # whole step so no command connects on its own meanwhile.
             if resolution and resolution[0].done() and not resolution[0].cancelled() and resolved:
                 return
-            if not resolution or resolution[0].cancelled():
-                resolution[:] = [asyncio.ensure_future(_resolve_credentials())]
+            if not resolution or _needs_new_resolution(resolution[0]):
+                task = asyncio.ensure_future(_resolve_credentials())
+                # The build owns it (see _close); never leave its error unretrieved.
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())
+                resolution[:] = [task]
             # Shielded: one cancelled prober must not cancel the others' resolution.
             await asyncio.shield(resolution[0])
 

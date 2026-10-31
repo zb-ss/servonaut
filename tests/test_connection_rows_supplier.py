@@ -242,6 +242,60 @@ class _TeamOnlyRuntime:
         return self._lease if instance.get("is_shared") is True else None
 
 
+class _RateLimitedTeamRuntime(_TeamOnlyRuntime):
+    """The service refuses the team's key lookup (a rate limit) until *refusals* are used up."""
+
+    def __init__(self, lease, refusals):
+        super().__init__(lease)
+        self._refusals = refusals
+
+    async def resolve_ssh(self, instance):
+        if instance.get("is_shared") is True and self._refusals > 0:
+            self._refusals -= 1
+            self.asked.append(str(instance.get("id")))
+            from servonaut.services.api_client import APIError
+
+            raise APIError(code="rate_limited", message="slow", status=429, response_headers={"retry-after": "1"})
+        return await super().resolve_ssh(instance)
+
+
+class TestTeamKeyRateLimit:
+    def test_a_refused_team_lookup_waits_and_retries(self, tmp_path, lease):  # noqa: F811
+        service, ssh_service = _memory_service(tmp_path, _connection_service())
+        runtime = _RateLimitedTeamRuntime(lease, refusals=1)
+        service.set_vault_runtime(runtime)
+        service.set_connection_rows(_supplier([_team_row()]))
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        with patch("servonaut.services.memory.service._wait", fake_sleep):
+            _run_first_command(service, dict(OWN))
+
+        assert len(sleeps) == 1 and len(runtime.asked) >= 2
+        assert ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] == lease.identity_agent
+
+    def test_a_second_refusal_fails_as_rate_limited(self, tmp_path, lease):  # noqa: F811
+        from servonaut.services.ssh_credentials import VaultCredentialError
+
+        service, _ = _memory_service(tmp_path, _connection_service())
+        service.set_vault_runtime(_RateLimitedTeamRuntime(lease, refusals=9))
+        service.set_connection_rows(_supplier([_team_row()]))
+
+        async def no_sleep(seconds):
+            return None
+
+        async def go():
+            runner = service._make_ssh_runner(dict(OWN))
+            with pytest.raises(VaultCredentialError):
+                await runner("uname -a")
+            return runner.connection_problem.reason
+
+        with patch("servonaut.services.memory.service._wait", no_sleep):
+            assert asyncio.run(go()) == "vault_rate_limited"
+
+
 class TestCliSupplier:
     @staticmethod
     def _fleet(rows):
