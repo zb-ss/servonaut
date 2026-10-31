@@ -198,7 +198,8 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 }
 
 #share-status {
-    height: 1;
+    height: auto;
+    min-height: 1;
     margin-bottom: 1;
 }
 
@@ -215,6 +216,10 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     height: auto;
     align: right middle;
     margin-top: 1;
+}
+
+#share-btn-keys {
+    min-width: 16;
 }
 
 #share-btn-cancel {

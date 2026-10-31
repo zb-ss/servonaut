@@ -13,12 +13,14 @@ from unittest.mock import AsyncMock, MagicMock
 import nacl.public
 import pytest
 from textual.app import App
+from textual.content import Content
 from textual.widgets import Button, Select, SelectionList, Static
 
 import servonaut.services.memory.crypto as crypto_module
 from servonaut.screens.memory_share import PurgeCopiesModal, ShareInstanceScreen
 from servonaut.services.api_client import APIClient, InsufficientWrapsError
 from servonaut.services.memory.team_service import TeamMemoryService
+from servonaut.utils.markup import literal
 
 pytestmark = pytest.mark.asyncio
 
@@ -355,28 +357,6 @@ async def test_a_deliberate_edit_wins_over_the_existing_grant():
     assert backend.posted[-1]["required_role"] == "viewer"
 
 
-async def test_a_changed_key_stops_share_again_before_anything_is_revoked():
-    backend = _Backend(members=[_member(1, "Kim Member"), _member(2, "Lee Member", key_changed=True)],
-                       live=[_grant("g-1", required_role="member", modules=["os"])])
-    app = _Host(backend)
-    async with app.run_test(size=(120, 50)) as pilot:
-        screen = await _live_panel(app, pilot)
-        screen.query_one("#share-btn-reshare", Button).press()
-        await _settle(pilot, screen, lambda: "Lee Member" in _text(screen, "#share-status"), "message")
-        assert "changed" in _text(screen, "#share-status")
-    assert not [c for c in backend.calls if not c.startswith("GET")]
-
-
-async def test_a_changed_key_stops_a_first_share_too():
-    backend = _Backend(members=[_member(2, "Lee Member", key_changed=True)])
-    app = _Host(backend)
-    async with app.run_test(size=(120, 50)) as pilot:
-        screen = await _open(app, pilot)
-        screen.query_one("#share-btn-confirm", Button).press()
-        await _settle(pilot, screen, lambda: "Lee Member" in _text(screen, "#share-status"), "message")
-    assert backend.posted == []
-
-
 async def test_demo_mode_never_shows_the_real_team_in_an_error_or_a_success():
     backend = _Backend(members=[_member(1, "Kim Member")], live=[_grant("g-1")])
     backend.fail_delete = RuntimeError("Team team-a is unavailable")
@@ -481,3 +461,39 @@ async def test_revoke_and_purge_of_a_vanished_share_say_so_too():
             backend.live = []
             screen.query_one(button, Button).press()
             await _settle(pilot, screen, lambda: "no longer exists" in _text(screen, "#share-status"), "message")
+
+
+ODD_NAMES = ["[link=x", "[/bold]", "[@click=app.quit]", "[bold]Odd[/bold] Name"]
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+async def test_the_shared_markup_escape_makes_every_bracket_literal(name):
+    from rich.text import Text
+
+    from servonaut.utils.markup import escape_markup
+
+    assert Text.from_markup(escape_markup(f"x {name} y")).plain == f"x {name} y"
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+async def test_odd_member_names_are_shown_literally_in_the_readers_line(name):
+    backend = _Backend(members=[_member(1, name)])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        assert name in _text(screen, "#share-readers")
+        assert app.is_running
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+async def test_odd_names_are_shown_literally_in_the_status_and_existing_lines(name):
+    backend = _Backend(members=[_member(1, "Kim Member")])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        screen._show_error(f"{name} went wrong")
+        await pilot.pause()
+        assert f"{name} went wrong" in _text(screen, "#share-status")
+        screen._say_to("#share-existing-text", Content.assemble("Key changed, waiting: ", literal(name)))
+        await pilot.pause()
+        assert name in _text(screen, "#share-existing-text")

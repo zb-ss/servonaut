@@ -392,3 +392,31 @@ def test_two_rejected_saves_keep_both_drafts(tmp_path: Path) -> None:
         assert MemoryScreen._write_unless_changed(service, "custom-web-1", "custom", text, "BASE") is not None
     drafts = sorted((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
     assert sorted(d.read_text() for d in drafts) == ["first draft", "second draft"]
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_cannot_get_the_record_lock_keeps_the_text_in_a_draft(tmp_path: Path) -> None:
+    """Another process holding the record must not lose what the user typed."""
+    import hashlib
+
+    from servonaut.utils.file_lock import FileLock
+
+    service = _memory_service(tmp_path)
+    service._store.set_record_lock_wait(0.1, 0.02)
+    app = _Host(service)
+
+    async with app.run_test(headless=True) as pilot:
+        editor = await _open_editor(app, pilot)
+        digest = hashlib.sha256(b"custom-web-1").hexdigest()
+        other = FileLock(tmp_path / ".locks" / f"{digest}.lock", private_dir=True)
+        assert other.try_acquire()
+        editor.query_one("#text-editor-area", TextArea).load_text("typed while busy\n")
+        await pilot.press("ctrl+s")
+        await _settle(app, pilot)
+        other.release()
+
+    kept = list((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
+    assert [d.read_text() for d in kept] == ["typed while busy\n"]
+    warning = next(message for message, level in app.notes if level == "warning")
+    assert "Another Servonaut window is saving" in warning and kept[0].name in warning
+    assert not any("Could not save" in message for message, _ in app.notes)

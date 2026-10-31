@@ -29,27 +29,27 @@ def _tools(memory, *, found=OWN):
 
 def test_finding_given_a_team_reference_lands_on_the_own_row():
     memory = _make_memory_service()
-    memory.remember_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
+    memory.store_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
     tools = _tools(memory, found=None)
     run(tools.remember_server_finding("team-a/web-1", "t", "b"))
-    assert memory.remember_finding.call_args.args[0]["id"] == OWN["id"]
+    assert memory.store_finding.call_args.args[0]["id"] == OWN["id"]
 
 
 def test_finding_given_a_share_id_lands_on_the_own_row():
     memory = _make_memory_service()
-    memory.remember_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
+    memory.store_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
     tools = _tools(memory, found=None)
     run(tools.remember_server_finding(TWIN["id"], "t", "b"))
-    assert memory.remember_finding.call_args.args[0]["id"] == OWN["id"]
+    assert memory.store_finding.call_args.args[0]["id"] == OWN["id"]
 
 
 def test_a_shared_only_server_keeps_its_own_target():
     memory = _make_memory_service()
-    memory.remember_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
+    memory.store_finding = MagicMock(return_value={"finding_id": "f_1", "auto_inject": False})
     tools = _tools(memory, found=None)
     tools._directory.all_instances = AsyncMock(return_value=[])
     run(tools.remember_server_finding("team-a/web-1", "t", "b"))
-    assert memory.remember_finding.call_args.args[0]["id"] == TWIN["id"]
+    assert memory.store_finding.call_args.args[0]["id"] == TWIN["id"]
 
 
 def test_get_server_memory_by_name_still_returns_the_own_rows_memory():

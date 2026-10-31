@@ -41,6 +41,10 @@ STATUS_OPT_OUT = "opted-out"
 #: provider reports it as stopped or terminated. Nothing is probed.
 STOPPED_REASON = "stopped"
 
+#: Reason code of probed results that were not stored because another process
+#: kept the server's record busy.
+BUSY_BUILD_REASON = "record_busy"
+
 # Provider states that mean "no SSH server is answering". Rows carry the
 # normalised state, so one set covers every provider:
 #   AWS EC2:  stopped, stopping, terminated, shutting-down

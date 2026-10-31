@@ -57,6 +57,7 @@ from e2e.harness.fake_cloud.shapes import (
     has_bytes,
     has_size,
 )
+from e2e.harness.fake_cloud.control import CONTROL_PREFIX
 from e2e.harness.fake_cloud.state import ScenarioStore
 
 MEMORY = "/api/v1/memory"
@@ -113,6 +114,9 @@ class MemoryCloud:
             self._envelopes: list[dict[str, Any]] = []
             self._drift: list[dict[str, Any]] = []
             self._members: dict[str, list[dict[str, Any]]] = {}
+            # (team, user) -> {"previous": fingerprint, "at": time} once that
+            # member replaced a key; the directory flags them from then on.
+            self._rotations: dict[tuple[str, int], dict[str, str]] = {}
             self._grants: list[dict[str, Any]] = []
             self._settings: dict[str, Any] = {
                 "digest_frequency": "off",
@@ -156,7 +160,8 @@ class MemoryCloud:
             ]
 
     def add_team_member(
-        self, team_slug: str, user_id: int, public_key_b64: str, *, role: str = "member"
+        self, team_slug: str, user_id: int, public_key_b64: str, *, role: str = "member",
+        name: str = "",
     ) -> None:
         """A teammate with an enrolled keypair (their private key stays with the test)."""
         if role not in TEAM_ROLES:
@@ -173,8 +178,27 @@ class MemoryCloud:
                     "public_key_b64": public_key_b64,
                     "fingerprint": hashlib.sha256(raw).hexdigest(),
                     "role": role,
+                    **({"name": name} if name else {}),
                 }
             )
+
+    def rotate_member_key(self, team_slug: str, user_id: int, public_key_b64: str) -> None:
+        """The member replaces their key (Memory Sync set up again, a new computer).
+
+        From now on the team key directory flags them for good, as the service
+        does; a server's own flag clears once a wrap is stored for the new key,
+        and a wrap made for the old key stops counting as one.
+        """
+        raw = base64.b64decode(public_key_b64, validate=True)
+        if len(raw) != X25519_KEY:
+            raise ValueError("public_key must be a 32-byte X25519 key")
+        with self._lock:
+            member = next(m for m in self._members[team_slug] if m["user_id"] == user_id)
+            self._rotations[(team_slug, user_id)] = {
+                "previous": member["fingerprint"], "at": _now(),
+            }
+            member["public_key_b64"] = public_key_b64
+            member["fingerprint"] = hashlib.sha256(raw).hexdigest()
 
     def record_drift(self, instance_id: str, module: str, *, severity: str = "medium") -> str:
         """Detect drift between the two newest envelopes of one module."""
@@ -350,8 +374,30 @@ class MemoryCloud:
                     "role": "owner",
                 },
             )
-        return [{**m, "name": m.get("name") or f"member {m['user_id']}", "key_changed": False}
-                for m in members]
+        return [self._directory_entry(team_slug, m) for m in members]
+
+    def _directory_entry(self, team_slug: str, member: dict[str, Any]) -> dict[str, Any]:
+        """A member as the team key directory describes them: flagged once rotated, for good."""
+        rotation = self._rotations.get((team_slug, member["user_id"]))
+        return {
+            **member,
+            "name": member.get("name") or f"member {member['user_id']}",
+            "key_changed": rotation is not None,
+            "previous_fingerprint": rotation["previous"] if rotation else None,
+            "key_rotated_at": rotation["at"] if rotation else None,
+        }
+
+    def _recipient(self, team_slug: str, instance_id: str, member: dict[str, Any]) -> dict[str, Any]:
+        """A member as a server's recipient list describes them: flagged until a wrap is stored for the new key."""
+        entry = self._directory_entry(team_slug, member)
+        entry["key_changed"] = entry["key_changed"] and not any(
+            w["recipient_user_id"] == member["user_id"] and w.get("fingerprint") == member["fingerprint"]
+            for g in self._grants if g["instance_id"] == instance_id
+            for w in g["wraps"]
+        )
+        return {k: entry[k] for k in (
+            "user_id", "name", "fingerprint", "public_key_b64", "key_changed",
+            "previous_fingerprint", "key_rotated_at")}
 
     # -- team sharing ------------------------------------------------------
 
@@ -416,6 +462,14 @@ class MemoryCloud:
                 for g in self._grants
             ):
                 return 409, {"error": {"code": "grant_exists", "message": "already shared"}}
+            # As add_wraps: a wrap sealed for a key the member no longer holds is
+            # not stored, so the member stays missing (insufficient_wraps below).
+            current = {m["user_id"]: m["fingerprint"] for m in self.team_keys(team_slug)}
+            fresh = [
+                w for w in wraps
+                if not w.get("recipient_fingerprint")
+                or w["recipient_fingerprint"] == current.get(w["recipient_user_id"])
+            ]
             grant = {
                 "id": str(uuid.uuid4()),
                 "team_slug": team_slug,
@@ -426,7 +480,10 @@ class MemoryCloud:
                 "granted_by_user_id": self._user_id(),
                 "created_at": _now(),
                 "revoked_at": None,
-                "wraps": copy.deepcopy(wraps),
+                "wraps": self._stamped(team_slug, [
+                    {k: w[k] for k in ("recipient_user_id", "envelope_id", "wrapped_dek")}
+                    for w in fresh
+                ]),
             }
             missing = self._missing_wraps(grant)
             if missing:
@@ -443,6 +500,11 @@ class MemoryCloud:
         return 201, {**_public_grant(grant), "pending_recipients": [], "missing_wraps": [],
                      "skipped_recipients": []}
 
+    def _stamped(self, team_slug: str, wraps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copies of *wraps*, each marked with the key it was sealed for (the member's current one)."""
+        current = {m["user_id"]: m["fingerprint"] for m in self.team_keys(team_slug)}
+        return [{**copy.deepcopy(w), "fingerprint": current.get(w["recipient_user_id"])} for w in wraps]
+
     def _latest_envelopes(self, grant: dict[str, Any]) -> list[dict[str, Any]]:
         """The newest stored envelope of each module the grant covers."""
         latest: dict[str, dict[str, Any]] = {}
@@ -452,16 +514,17 @@ class MemoryCloud:
         return list(latest.values())
 
     def _has_wrap(self, grant: dict[str, Any], envelope: dict[str, Any], user_id: int) -> bool:
+        """Whether the member can open *envelope*: a wrap made for the key they hold now."""
         if any(w.get("recipient_user_id") == user_id for w in envelope.get("dek_wraps", [])):
             return True
+        current = next((m["fingerprint"] for m in self.team_keys(grant["team_slug"])
+                        if m["user_id"] == user_id), None)
         return any(
             w["envelope_id"] == envelope["id"] and w["recipient_user_id"] == user_id
-            for g in self._grants
+            and w.get("fingerprint", current) == current
+            for g in [*self._grants, grant]
             if g["instance_id"] == grant["instance_id"]
             for w in g["wraps"]
-        ) or any(
-            w["envelope_id"] == envelope["id"] and w["recipient_user_id"] == user_id
-            for w in grant["wraps"]
         )
 
     def _missing_wraps(self, grant: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
@@ -536,10 +599,18 @@ class MemoryCloud:
                     continue
                 if any(w["envelope_id"] == wrap["envelope_id"]
                        and w["recipient_user_id"] == wrap["recipient_user_id"]
+                       and w.get("fingerprint") == member["fingerprint"]
                        for w in grant["wraps"]):
                     unchanged += 1
                     continue
-                grant["wraps"].append({k: wrap[k] for k in ("recipient_user_id", "envelope_id", "wrapped_dek")})
+                # A wrap made for a key the member no longer holds is replaced.
+                grant["wraps"] = [
+                    w for w in grant["wraps"]
+                    if not (w["envelope_id"] == wrap["envelope_id"]
+                            and w["recipient_user_id"] == wrap["recipient_user_id"])
+                ]
+                grant["wraps"].extend(self._stamped(team_slug, [
+                    {k: wrap[k] for k in ("recipient_user_id", "envelope_id", "wrapped_dek")}]))
                 kept += 1
             return 200, {"grant_id": grant_id, "wraps_stored": kept, "wraps_unchanged": unchanged,
                          "missing_count": len(self._missing_wraps(grant)),
@@ -550,20 +621,27 @@ class MemoryCloud:
             grant = self._grant_on(team_slug, grant_id)
             if grant is None or not self._may_manage(team_slug, grant):
                 return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            if grant["status"] != "active":
+                return 409, {"error": {"code": "grant_not_live", "message": "grant revoked"}}
             uid = self._user_id()
             rows = []
             for e in self._latest_envelopes(grant):
+                missing = [
+                    self._recipient(team_slug, grant["instance_id"], m)
+                    for m in self._eligible(grant)
+                    if not self._has_wrap(grant, e, m["user_id"])
+                ]
+                if not missing:
+                    continue  # the service lists only snapshots someone cannot read yet
                 own = next((w for w in e.get("dek_wraps", []) if w.get("recipient_user_id") == uid), None)
                 rows.append({
                     "envelope_id": e["id"], "module": e["module"],
                     "snapshot_version": e["snapshot_version"],
                     "wrapped_dek": own["wrapped_dek"] if own else None,
-                    "missing_recipients": [
-                        m["user_id"] for m in self._eligible(grant)
-                        if not self._has_wrap(grant, e, m["user_id"])
-                    ],
+                    "missing_recipients": missing,
                 })
-            return 200, {"grant_id": grant_id, "envelopes": rows, "pending_recipients": []}
+            return 200, {"grant_id": grant_id, "instance_id": grant["instance_id"],
+                         "envelopes": rows, "pending_recipients": []}
 
     def missing_team_wraps(self, accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """For accepted envelopes: covered members that still lack a wrap."""
@@ -577,9 +655,7 @@ class MemoryCloud:
                             or not self._covers(grant, envelope["module"])):
                         continue
                     recipients = [
-                        {"user_id": m["user_id"], "name": m["name"], "fingerprint": m["fingerprint"],
-                         "public_key_b64": m["public_key_b64"], "key_changed": False,
-                         "previous_fingerprint": None, "key_rotated_at": None}
+                        self._recipient(grant["team_slug"], grant["instance_id"], m)
                         for m in self._eligible(grant)
                         if m["user_id"] != envelope.get("uploader_id")
                         and not self._has_wrap(grant, envelope, m["user_id"])
@@ -849,3 +925,31 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
     router.add_post(f"{grant}/wraps", guarded(add_wraps))
     router.add_get(f"{grant}/wraps", guarded(wrap_coverage))
     router.add_get("/api/v1/teams/{team_slug}/memory/{instance_id}/{module}", guarded(team_read))
+
+    async def rotate_member_key(request: web.Request) -> web.Response:
+        # The QA sandbox runs in another process: this lets a walk replace a
+        # teammate's memory key the way the journeys do in process.
+        body = await json_body(request)
+        try:
+            memory.rotate_member_key(
+                str(body["team_slug"]), int(body["user_id"]), str(body["public_key_b64"])
+            )
+        except (KeyError, ValueError, TypeError, StopIteration) as exc:
+            return web.json_response({"error": type(exc).__name__}, status=400)
+        return web.json_response({"ok": True})
+
+    async def add_team_member(request: web.Request) -> web.Response:
+        # A teammate with a memory key, for a walk of team memory sharing in
+        # the QA sandbox (the journeys call the method in process).
+        body = await json_body(request)
+        try:
+            memory.add_team_member(
+                str(body["team_slug"]), int(body["user_id"]), str(body["public_key_b64"]),
+                role=str(body.get("role") or "member"), name=str(body.get("name") or ""),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": type(exc).__name__}, status=400)
+        return web.json_response({"ok": True})
+
+    router.add_post(f"{CONTROL_PREFIX}memory/team-member", add_team_member)
+    router.add_post(f"{CONTROL_PREFIX}memory/rotate-member-key", rotate_member_key)

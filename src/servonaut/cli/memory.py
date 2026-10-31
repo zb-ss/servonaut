@@ -155,6 +155,42 @@ def _init_headless_services() -> Tuple[Any, Any, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Team copies
+# ---------------------------------------------------------------------------
+
+#: Subcommands that read or change one server's record, or probe: they merge a
+#: team's copy into the user's own record first. ``clear`` and ``purge`` do not
+#: (no merge right before deleting).
+_MERGING_COMMANDS = frozenset({"build", "refresh", "show", "export", "annotate", "pin", "pull"})
+
+
+async def _merge_team_copies(memory_service: Any) -> Any:
+    from servonaut.services.memory.headless_merge import HeadlessTeamMerge  # noqa: PLC0415
+
+    _team_rows, fleet_rows = await memory_service.connection_rows()
+    if not fleet_rows:
+        return None
+    return await HeadlessTeamMerge(memory_service).run(fleet_rows)
+
+
+def _merge_team_copies_first(memory_service: Any) -> None:
+    """Fold team copies into the user's own records before the command reads them.
+
+    Reads the rows the run already reads once (signed out, or no vault runtime,
+    means no shared rows and no pass). What was merged goes to stderr so
+    ``--json`` stdout is unchanged; a failed pass is logged and never fails the
+    command.
+    """
+    try:
+        report = _run_async(_merge_team_copies(memory_service))
+    except Exception as exc:  # noqa: BLE001 - the command goes on without the merge
+        logger.warning("Merging team copies of server memory failed (%s)", type(exc).__name__)
+        return
+    if report is not None and report.copies:
+        print(report.message(), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Instance resolution
 # ---------------------------------------------------------------------------
 
@@ -262,6 +298,18 @@ def _report_unreached(inst: Dict[str, Any], message: str, use_json: bool = False
     return _EXIT_GENERIC_ERROR
 
 
+def _report_unsaved(report: Any) -> int:
+    """Say which probed modules were not stored; the exit code reflects it.
+
+    Nothing saved is a generic error, some saved is a partial failure.
+    """
+    message = report.unsaved_message
+    if message is None:
+        return _EXIT_SUCCESS
+    print(message, file=sys.stderr)
+    return _EXIT_PARTIAL_FAILURE if report.has_any_success else _EXIT_GENERIC_ERROR
+
+
 def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory build``."""
     use_json = getattr(args, "json", False)
@@ -273,7 +321,7 @@ def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
         if report.unreached_message:
             return _report_unreached(inst, report.unreached_message, use_json)
         if use_json:
-            out = {
+            out: Dict[str, Any] = {
                 k: {
                     "module": v.module,
                     "probed_at": v.probed_at,
@@ -283,14 +331,16 @@ def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
                 }
                 for k, v in results.items()
             }
+            # Saved modules only: the unsaved ones are named on stderr and in
+            # the exit code, so every value stays a module object.
             print(json.dumps(out, indent=2))
         else:
             iid = inst.get("id") or inst.get("name", "?")
             if results:
                 print(f"Built memory for {iid}: {', '.join(sorted(results))}")
-            else:
+            elif not report.unsaved:
                 print(f"No modules probed for {iid} (check opt-out / disabled modules).")
-        return _EXIT_SUCCESS
+        return _report_unsaved(report)
 
     return _run_async(_do_build())
 
@@ -337,6 +387,8 @@ async def _build_all(
                     skipped.append(iid)
             elif report.unreached_message:
                 failures.append((iid, report.unreached_message))
+            elif report.unsaved_message:
+                failures.append((iid, report.unsaved_message))
 
     await asyncio.gather(*(one(i) for i in instances))
     return failures
@@ -377,8 +429,9 @@ def _cmd_refresh(args: Any, config: Any, memory_service: Any, inst: Dict[str, An
             return _report_unreached(inst, report.unreached_message)
         results = report.successes
         iid = inst.get("id") or inst.get("name", "?")
-        print(f"Refreshed memory for {iid}: {', '.join(sorted(results)) if results else '(none)'}")
-        return _EXIT_SUCCESS
+        if results or not report.unsaved:
+            print(f"Refreshed memory for {iid}: {', '.join(sorted(results)) if results else '(none)'}")
+        return _report_unsaved(report)
 
     return _run_async(_do_refresh())
 
@@ -452,69 +505,148 @@ def _cmd_export(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any
 
 
 def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any], sync: Any = None) -> int:
-    """Handle ``memory annotate`` — open annotations file in $VISUAL/$EDITOR/vi."""
+    """Handle ``memory annotate`` — edit the notes in $VISUAL/$EDITOR/vi.
+
+    The editor works on a private copy; the live notes file is neither created
+    nor touched while it runs. On exit the text is written back only if the
+    notes are still what they were when the editor opened (nothing is locked
+    while it runs); otherwise the edit is kept as a draft beside the notes,
+    its name is printed, and the exit status is non-zero. The private copy is
+    deleted only once the text is safe in the notes or a draft; when neither
+    can be written it is kept and its path printed.
+    """
     import hashlib
-    from datetime import datetime, timezone
+    import tempfile
 
     iid = inst.get("id") or inst.get("name", "")
     provider = instance_provider(inst)
     path = memory_service.get_annotations_path(iid, provider)
 
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.close(fd)
-
-    # Snapshot the hash before the editor runs so we can detect changes.
     try:
-        old_meta = memory_service.get_annotations_meta(iid)
-        old_hash = old_meta.get("annotations_hash", "")
-    except Exception:  # noqa: BLE001
-        old_hash = ""
+        original = memory_service.read_annotations(iid, provider)
+    except OSError as exc:
+        print(f"Could not read the notes ({exc.strerror or exc}).", file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
+    expected = hashlib.sha256(original.encode("utf-8")).hexdigest()
 
-    argv = editor_argv(path)
+    fd, copy_name = tempfile.mkstemp(prefix="servonaut-notes-", suffix=".md")  # 0600
+    copy = Path(copy_name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(original)
+    code, text_is_safe = _edit_copy(
+        memory_service, sync, inst, iid, provider, path, copy, original, expected
+    )
+    if text_is_safe:
+        copy.unlink(missing_ok=True)
+    return code
+
+
+def _edit_copy(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    path: Path, copy: Path, original: str, expected: str,
+) -> "tuple[int, bool]":
+    """Run the editor on *copy* and store the result; ``(exit code, copy no longer needed)``."""
+    argv = editor_argv(copy)
     try:
-        subprocess.run(argv, check=False)
+        completed = subprocess.run(argv, check=False)
     except OSError as exc:
         print(
             f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
             f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
             file=sys.stderr,
         )
-        return _EXIT_GENERIC_ERROR
-
-    # Recompute annotations_hash and update index via the public API
+        return _EXIT_GENERIC_ERROR, True
     try:
-        # Canonicalise to the SAME representation the screen save path and
-        # pull_annotations use (decoded UTF-8 string), so the stored hash
-        # describes exactly the content we enqueue and that pull recomputes
-        # on its "unchanged" short-circuit. Hashing raw bytes here would drift
-        # from those sites for any non-UTF-8 content and trigger spurious
-        # re-pull/overwrite cycles.
-        content_str = path.read_bytes().decode("utf-8", errors="replace")
-        annotations_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
-        memory_service.update_index(
-            instance_id=iid,
-            name=inst.get("name", iid),
-            provider=provider,
-            modules=[],
-            annotations_hash=annotations_hash,
+        edited = copy.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        print("The editor did not leave your edit behind, so the notes are unchanged.", file=sys.stderr)
+        return _EXIT_GENERIC_ERROR, True
+    returncode = getattr(completed, "returncode", 0)
+    if returncode != 0:
+        return _keep_failed_session(
+            memory_service, iid, provider, copy, original, edited, returncode
         )
+    if edited == original:
+        return _EXIT_SUCCESS, True
+    code, saved = _save_edit(memory_service, sync, inst, iid, provider, expected, edited, copy)
+    return code, saved
 
-        # Persist modified-at and enqueue when content actually changed.
-        if annotations_hash != old_hash:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            memory_service.set_annotations_meta(
-                iid,
-                annotations_hash=annotations_hash,
-                annotations_modified_at=now_iso,
-            )
-            if sync is not None and getattr(sync, "is_configured", False):
-                sync.enqueue_annotations(inst, content_str, probed_at=now_iso)
+
+def _keep_failed_session(
+    memory_service: Any, iid: str, provider: str, copy: Path, original: str, edited: str,
+    returncode: int,
+) -> "tuple[int, bool]":
+    """The editor failed: leave the notes alone, keep any changed text as a draft."""
+    print(f"The editor exited with status {returncode}, so the notes were not changed.", file=sys.stderr)
+    if edited == original:
+        return _EXIT_GENERIC_ERROR, True
+    try:
+        draft = memory_service.write_annotation_draft(iid, edited, provider)
+    except OSError as exc:
+        print(
+            f"Could not keep your edit either ({exc.strerror or exc}). It is still in "
+            f"{home_relative(str(copy))}.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR, False
+    print(f"Your edit is kept in {home_relative(str(draft))}.", file=sys.stderr)
+    return _EXIT_GENERIC_ERROR, True
+
+
+def _store_edit(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    expected: str, edited: str,
+) -> int:
+    """Write *edited* if the notes are unchanged since *expected*, else keep it as a draft."""
+    return _save_edit(memory_service, sync, inst, iid, provider, expected, edited, None)[0]
+
+
+def _save_edit(
+    memory_service: Any, sync: Any, inst: Dict[str, Any], iid: str, provider: str,
+    expected: str, edited: str, copy: Optional[Path],
+) -> "tuple[int, bool]":
+    """Store *edited*; returns ``(exit code, whether the text is now safe elsewhere)``."""
+    import hashlib
+    from datetime import datetime, timezone
+
+    from servonaut.services.memory.store import RecordLockTimeout
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        # Text and bookkeeping are one locked step, so a pull never sees
+        # the new text next to the old modified time.
+        written = memory_service.write_annotations_if_unchanged(
+            iid, expected, edited, provider, modified_at=now_iso
+        )
+        reason = "The notes changed while you were editing"
+    except RecordLockTimeout:
+        written, reason = False, "Another Servonaut process is saving these notes"
+    except OSError as exc:
+        written, reason = False, f"The notes could not be saved ({exc.strerror or exc})"
+    if not written:
+        try:
+            draft = memory_service.write_annotation_draft(iid, edited, provider)
+        except OSError as exc:
+            kept = f" It is still in {home_relative(str(copy))}." if copy is not None else ""
+            print(f"Could not keep your edit either ({exc.strerror or exc}).{kept}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR, False
+        print(
+            f"{reason}, so nothing was overwritten. Your edit is kept in "
+            f"{home_relative(str(draft))}.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR, True
+
+    try:
+        memory_service.update_index(
+            instance_id=iid, name=inst.get("name", iid), provider=provider,
+            modules=[], annotations_hash=hashlib.sha256(edited.encode("utf-8")).hexdigest(),
+        )
     except OSError:
         pass
-
-    return _EXIT_SUCCESS
+    if sync is not None and getattr(sync, "is_configured", False):
+        sync.enqueue_annotations(inst, edited, probed_at=now_iso)
+    return _EXIT_SUCCESS, True
 
 
 def _cmd_pin(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
@@ -653,6 +785,7 @@ _PULL_FINDINGS_RESULT_MESSAGES: Dict[str, str] = {
     "opt_out": "Memory is disabled for this instance.",
     "not_found": "No findings found on the server for this instance.",
     "unavailable": "Memory Sync is not configured or not available.",
+    "busy": "Another Servonaut process is changing this server's memory; try again.",
 }
 
 
@@ -838,6 +971,9 @@ def run_memory(args: Any) -> int:
     # entirely, so we route it before _resolve_or_exit.
     if memory_command == "purge":
         return _cmd_purge(args, memory_service)
+
+    if memory_command in _MERGING_COMMANDS:
+        _merge_team_copies_first(memory_service)
 
     # --all path for build
     if memory_command == "build" and getattr(args, "all", False):

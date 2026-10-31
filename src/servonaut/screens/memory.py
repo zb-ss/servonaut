@@ -38,6 +38,7 @@ from servonaut.services.memory.shared_view import (
     shared_source_text,
 )
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -336,6 +337,28 @@ class SimpleConfirmModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 # MemoryScreen
 # ---------------------------------------------------------------------------
+
+
+
+async def _keep_busy_draft(
+    instance_id: str, provider: str, memory_service: Any, text: str
+) -> Tuple[str, str]:
+    """Keep *text* in a draft when another process holds the notes' lock.
+
+    Returns the message to show and its severity.
+    """
+    try:
+        draft = await asyncio.to_thread(
+            memory_service.write_annotation_draft, instance_id, text, provider
+        )
+    except Exception as exc:
+        return f"Could not save annotations: {exc}", "error"
+    return (
+        "Another Servonaut window is saving this server's notes, so nothing was "
+        f"overwritten. Your text is kept in {draft.name} next to the notes: open the "
+        "notes again and copy in what you need from it.",
+        "warning",
+    )
 
 
 class MemoryScreen(Screen):
@@ -955,23 +978,25 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            failure_message = await self._refresh_memory(memory_service)
+            notice = await self._refresh_notice(memory_service)
             self._render_table()
-            if failure_message:
-                self._notify_refresh_failure(failure_message)
+            if notice:
+                self._notify_refresh_problem(*notice)
             else:
                 self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
             self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
-    async def _refresh_memory(
+    async def _refresh_notice(
         self, memory_service: Any, modules: Optional[list] = None,
-    ) -> Optional[str]:
-        """Re-probe, returning the message when the server could not be reached.
+    ) -> Optional[tuple[str, str]]:
+        """Re-probe, returning ``(message, severity)`` when the refresh fell short.
 
-        That is a refused host key or a failed SSH connection: nothing was
-        probed and the stored memory is unchanged.
+        An error when the server could not be reached (a refused host key or a
+        failed SSH connection: nothing was probed and the stored memory is
+        unchanged); a warning when probed modules were not saved because
+        another process was changing the record.
 
         Uses the reporting API when the service provides it; services that
         expose only the dict-returning ``refresh`` report nothing.
@@ -986,11 +1011,15 @@ class MemoryScreen(Screen):
                 await memory_service.refresh(target, modules=modules)
             return None
         report = await refresh_report(target, modules)
-        return report.unreached_message
+        if report.unreached_message:
+            return report.unreached_message, "error"
+        if report.unsaved_message:
+            return report.unsaved_message, "warning"
+        return None
 
-    def _notify_refresh_failure(self, message: str) -> None:
-        """Show why nothing was probed (a host-key refusal names "[host]:port")."""
-        self.app.notify(message, severity="error", markup=False, timeout=20)
+    def _notify_refresh_problem(self, message: str, severity: str) -> None:
+        """Show why a refresh fell short (a host-key refusal names "[host]:port")."""
+        self.app.notify(message, severity=severity, markup=False, timeout=20)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
@@ -1020,12 +1049,12 @@ class MemoryScreen(Screen):
             return
         self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            failure_message = await self._refresh_memory(
+            notice = await self._refresh_notice(
                 memory_service, modules=[module_name],
             )
             self._render_table()
-            if failure_message:
-                self._notify_refresh_failure(failure_message)
+            if notice:
+                self._notify_refresh_problem(*notice)
             else:
                 self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
@@ -1380,6 +1409,7 @@ class MemoryScreen(Screen):
         provider: str,
         text: str,
         expected: Optional[str],
+        modified_at: Optional[str] = None,
     ) -> Optional[Path]:
         """Write *text* unless the notes differ from *expected*.
 
@@ -1390,12 +1420,18 @@ class MemoryScreen(Screen):
         notes as a new private ``annotations.unsaved-<time>.md`` file and
         nothing is overwritten. The comparison and the write are one step
         under the store's annotation lock, so a merge cannot slip in between.
+        With *modified_at* the notes' hash and time are recorded in that same
+        step, so a pull never judges the new text by the old bookkeeping.
         """
         if expected is None:
-            memory_service.write_annotations(instance_id, text, provider)
+            memory_service.write_annotations(
+                instance_id, text, provider, modified_at=modified_at
+            )
             return None
         digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
-        if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
+        if memory_service.write_annotations_if_unchanged(
+            instance_id, digest, text, provider, modified_at=modified_at
+        ):
             return None
         return memory_service.write_annotation_draft(instance_id, text, provider)
 
@@ -1408,10 +1444,16 @@ class MemoryScreen(Screen):
         expected: Optional[str] = None,
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
+        modified_at = datetime.now(timezone.utc).isoformat()
         try:
             draft = await asyncio.to_thread(
-                self._write_unless_changed, memory_service, instance_id, provider, text, expected
+                self._write_unless_changed,
+                memory_service, instance_id, provider, text, expected, modified_at,
             )
+        except RecordLockTimeout:
+            message, severity = await _keep_busy_draft(instance_id, provider, memory_service, text)
+            self.app.notify(message, severity=severity, markup=False)
+            return
         except Exception as exc:
             self.app.notify(
                 f"Could not save annotations: {exc}", severity="error", markup=False
@@ -1428,7 +1470,18 @@ class MemoryScreen(Screen):
             )
             return
         self.app.notify("Annotations saved.", severity="information")
-        await self._record_annotations_edit(instance_id, provider, memory_service)
+        self._enqueue_saved_notes(text, modified_at)
+        self._render_table()
+
+    def _enqueue_saved_notes(self, content: str, modified_at: str) -> None:
+        """Queue just-saved notes for sync; stays on the loop that drains the queue."""
+        sync = getattr(self.app, "memory_sync_service", None)
+        if sync is None:
+            return
+        try:
+            sync.enqueue_annotations(self._target, content, probed_at=modified_at)
+        except Exception as exc:
+            logger.warning("Could not enqueue annotations after edit: %s", exc)
 
     async def _finish_external_edit(
         self, instance_id: str, provider: str, memory_service: Any

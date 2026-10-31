@@ -338,12 +338,9 @@ class TestAnnotate:
         assert len(calls) == 1
         editor_call = calls[0]
         assert editor_call[0] == "true"
-        # Annotations file must exist with mode 0o600
+        # The live notes are not created until something is saved.
         path = memory_service._store.get_annotations_path("i-abc123", "custom")
-        assert path.exists()
-        import stat as _stat
-        mode = path.stat().st_mode & 0o777
-        assert mode == 0o600
+        assert not path.exists()
 
     def test_annotate_fallback_to_vi(self, tmp_path: Path, monkeypatch: Any) -> None:
         """Falls back to 'vi' when neither $VISUAL nor $EDITOR is set."""
@@ -1157,7 +1154,7 @@ class TestAnnotateFileModeAndUpdate:
     def test_annotate_creates_file_with_secure_mode(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        """annotate creates annotations file with mode 0o600."""
+        """The first save creates the annotations file with mode 0o600."""
         import stat as _stat
         import subprocess as _subprocess
         from servonaut.cli.memory import _cmd_annotate
@@ -1171,7 +1168,11 @@ class TestAnnotateFileModeAndUpdate:
         from servonaut.services.memory.store import MemoryStore
         memory_service._store = MemoryStore(root=tmp_path)
 
-        monkeypatch.setattr(_subprocess, "run", lambda cmd, **kw: MagicMock(returncode=0))
+        def _edit(cmd: Any, **kw: Any) -> Any:
+            Path(cmd[-1]).write_text("first note\n")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(_subprocess, "run", _edit)
 
         args = _make_args(memory_command="annotate", instance="i-abc123")
         config = _fake_config()

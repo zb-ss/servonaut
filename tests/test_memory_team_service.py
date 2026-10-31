@@ -160,8 +160,8 @@ class TestListTeamMemberKeys:
     def test_happy_path(self, service, mock_api):
         mock_api.get.return_value = {
             "members": [
-                {"user_id": 42, "fingerprint": "abc123", "public_key_b64": "AAAA", "role": "admin"},
-                {"user_id": 99, "fingerprint": "def456", "public_key_b64": "BBBB", "role": "viewer"},
+                {"user_id": 42, "fingerprint": "a" * 64, "public_key_b64": "AAAA", "role": "admin"},
+                {"user_id": 99, "fingerprint": "b" * 64, "public_key_b64": "BBBB", "role": "viewer"},
             ]
         }
         result = run(service.list_team_member_keys("myteam"))
@@ -200,7 +200,7 @@ class TestListTeamMemberKeys:
         raw_key = nacl.public.PrivateKey.generate().public_key
         b64 = base64.b64encode(bytes(raw_key)).decode()
         mock_api.get.return_value = {
-            "members": [{"user_id": 1, "fingerprint": "f", "public_key_b64": b64, "role": "member"}]
+            "members": [{"user_id": 1, "fingerprint": "f" * 64, "public_key_b64": b64, "role": "member"}]
         }
         result = run(service.list_team_member_keys("myteam"))
         assert result[0].public_key_bytes == bytes(raw_key)

@@ -275,8 +275,9 @@ class MemorySyncSetupScreen(Screen):
         if material is not None and getattr(material, "public_key", None):
             try:
                 from servonaut.services.memory.crypto import fingerprint as fp_func
+                from servonaut.services.memory.crypto import short_fingerprint
 
-                fingerprint = fp_func(material.public_key)[:24] + "…"
+                fingerprint = short_fingerprint(fp_func(material.public_key))
             except Exception:
                 fingerprint = "loaded"
 

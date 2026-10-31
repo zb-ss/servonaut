@@ -478,17 +478,12 @@ class TestPullPrecedenceLocalNewerVsServer:
         → pull_annotations returns 'updated', local file is overwritten."""
         store = MemoryStore(root=tmp_path / "store")
         store.write_annotations("web-1", "old local content", provider="custom")
+        # The recorded hash matches the local text, which differs from the
+        # server's, so the pull reaches the timestamp comparison.
         store.set_annotations_meta(
             "web-1",
-            annotations_hash=hashlib.sha256(b"server-newer content").hexdigest(),
-            # Deliberately empty hash in meta so it does NOT match server content —
-            # we want to reach the timestamp comparison branch.
+            annotations_hash=hashlib.sha256(b"old local content").hexdigest(),
             annotations_modified_at="2026-05-01T00:00:00+00:00",
-        )
-        # Override hash to something that won't short-circuit on unchanged check
-        store.set_annotations_meta(
-            "web-1",
-            annotations_hash="0" * 64,  # deliberately wrong → won't match
         )
 
         mem = MemoryService(store=store, config=None)

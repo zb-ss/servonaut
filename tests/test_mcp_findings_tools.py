@@ -76,7 +76,7 @@ def _make_memory_service(
 ) -> MagicMock:
     """Create a minimal mock MemoryService for findings tools."""
     svc = MagicMock()
-    svc.remember_finding = MagicMock(return_value=remember_return or dict(_CANNED_FINDING))
+    svc.store_finding = MagicMock(return_value=remember_return or dict(_CANNED_FINDING))
     svc.recall_findings = MagicMock(return_value=recall_return if recall_return is not None else list(_CANNED_FINDINGS_LIST))
     return svc
 
@@ -249,7 +249,7 @@ class TestRememberFindingSuccess:
         assert "f_oldfinding1234567890abcdefgh" in result
 
     def test_secret_warning_surfaced(self):
-        """When remember_finding returns a non-empty secret_warning it must appear in the result."""
+        """When store_finding returns a non-empty secret_warning it must appear in the result."""
         finding = dict(_CANNED_FINDING)
         finding["secret_warning"] = "api_key"
         mem_svc = _make_memory_service(remember_return=finding)
@@ -264,7 +264,7 @@ class TestRememberFindingSuccess:
         mem_svc = _make_memory_service()
         tools = _make_tools(memory_service=mem_svc)
         run(tools.remember_server_finding("i-abc123", "title", "body"))
-        _, call_kwargs = mem_svc.remember_finding.call_args
+        _, call_kwargs = mem_svc.store_finding.call_args
         assert call_kwargs.get("source") == "agent"
 
 
@@ -440,3 +440,53 @@ class TestToolSchemaGating:
         from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
         assert TOOL_SCHEMAS["remember_server_finding"]["chat_exposed"] is True
         assert TOOL_SCHEMAS["recall_server_findings"]["chat_exposed"] is True
+
+
+class TestRecordBusyAudit:
+    def test_a_busy_record_gets_its_own_audit_reason(self):
+        from servonaut.services.memory.store import RecordLockTimeout
+
+        svc = _make_memory_service()
+        svc.store_finding.side_effect = RecordLockTimeout("busy")
+        tools = _make_tools(memory_service=svc)
+        result = run(tools.remember_server_finding("i-abc123", "t", "b"))
+        assert "another Servonaut" in result.lower() or "busy" in result.lower()
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is False and audit_call.args[4] == "record_busy"
+
+
+class TestRecordLockDoesNotStallTheLoop:
+    def test_a_held_record_lock_does_not_block_other_coroutines(self, tmp_path):
+        import hashlib
+        import time
+
+        from servonaut.config.schema import MemoryConfig as _MC
+        from servonaut.services.memory.service import MemoryService
+        from servonaut.services.memory.store import LOCKS_DIR, MemoryStore
+        from servonaut.utils.file_lock import FileLock
+
+        store = MemoryStore(root=tmp_path)
+        store.set_record_lock_wait(0.6, 0.02)
+        service = MemoryService(store=store, config=_MC(enabled=True), probers=[])
+        tools = _make_tools(memory_service=service)
+        digest = hashlib.sha256(b"i-abc123").hexdigest()
+        other = FileLock(tmp_path / LOCKS_DIR / f"{digest}.lock", private_dir=True)
+        assert other.try_acquire()
+
+        async def scenario():
+            ticks = []
+
+            async def ticker():
+                while True:
+                    ticks.append(time.monotonic())
+                    await asyncio.sleep(0.02)
+
+            task = asyncio.create_task(ticker())
+            result = await tools.remember_server_finding("i-abc123", "t", "b")
+            task.cancel()
+            return result, len(ticks)
+
+        result, ticks = run(scenario())
+        other.release()
+        assert result.startswith("busy:")
+        assert ticks >= 10  # the loop kept running during the 0.6 s wait

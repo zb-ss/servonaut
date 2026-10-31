@@ -25,8 +25,8 @@ from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, Module
 from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .ssh_mux import DIRECT_OPTIONS, ControlMaster, multiplexing_supported
-from .status import STOPPED_REASON, is_stopped_instance
-from .store import MemoryStore, _validate_finding_id
+from .status import BUSY_BUILD_REASON, STOPPED_REASON, is_stopped_instance
+from .store import MemoryStore, RecordLockTimeout, _validate_finding_id
 from .team_merge import share_identity
 from .summariser import build_summary_markdown
 from servonaut.services.shared_servers import is_shared_row
@@ -153,18 +153,24 @@ class BuildReport:
     """Outcome of a single ``build_report()`` invocation.
 
     Attributes:
-        successes: ``module_name → ModuleResult`` for probers that returned.
-        failures: Per-module probe failures (timeouts, exceptions).
+        successes: ``module_name → ModuleResult`` for modules that were
+            probed AND stored.
+        failures: Per-module probe failures (timeouts, exceptions, a record
+            another process kept busy).
+        unsaved: ``module_name → ModuleResult`` for modules that were probed
+            but not stored because their record stayed busy; nothing probed
+            is lost to a caller that wants to show or retry them.
         overall_reason: Machine-readable code when ``successes`` is empty
             (``"opt_out"`` | ``"disabled"`` | ``"stopped"`` |
             ``"no_modules_matched"`` | ``"all_probers_failed"`` |
-            ``HOST_KEY_BUILD_REASON`` | ``SSH_FAILED_BUILD_REASON``);
-            ``None`` on partial / full success.
+            ``"record_busy"`` | ``HOST_KEY_BUILD_REASON`` |
+            ``SSH_FAILED_BUILD_REASON``); ``None`` on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
     failures: List[ModuleBuildFailure] = field(default_factory=list)
     overall_reason: Optional[str] = None
+    unsaved: Dict[str, ModuleResult] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -173,6 +179,18 @@ class BuildReport:
     @property
     def has_any_success(self) -> bool:
         return bool(self.successes)
+
+    @property
+    def unsaved_message(self) -> Optional[str]:
+        """Which probed modules were not stored, and what to do, or None."""
+        if not self.unsaved:
+            return None
+        n = len(self.unsaved)
+        noun = "module was" if n == 1 else "modules were"
+        return (
+            f"{n} {noun} probed but not saved: another Servonaut process was "
+            "changing this server's memory. Run it again."
+        )
 
     @property
     def unreached_message(self) -> Optional[str]:
@@ -297,6 +315,9 @@ class MemoryService(MemoryServiceInterface):
             else MemoryStore(redactor=_select_redactor(config))
         )
         self._config = config
+        wait = getattr(config, "record_lock_wait", None)
+        if callable(wait):
+            self._store.set_record_lock_wait(*wait())
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service
         self._connection_service = connection_service
@@ -472,6 +493,7 @@ class MemoryService(MemoryServiceInterface):
             )
 
         successes: Dict[str, ModuleResult] = {}
+        unsaved: Dict[str, ModuleResult] = {}
         failures: List[ModuleBuildFailure] = []
         probed_modules: List[str] = []
 
@@ -484,28 +506,66 @@ class MemoryService(MemoryServiceInterface):
             # Stamp probed_at if the prober didn't set it.
             if not result.probed_at:
                 result.probed_at = datetime.now(tz=timezone.utc).isoformat()
-            self._persist_result(result, instance_id, provider, instance=instance)
+            # The save may wait for a record another process holds: keep that
+            # wait off the event loop, and let one busy module not cost the rest.
+            try:
+                await asyncio.to_thread(self._save_result, result, instance_id, provider)
+            except RecordLockTimeout:
+                result.partial = True
+                unsaved[result.module] = result
+                failures.append(ModuleBuildFailure(
+                    module=result.module,
+                    reason=BUSY_BUILD_REASON,
+                    message=(
+                        "Another Servonaut process was changing this server's memory, "
+                        "so this result was not saved. Try again."
+                    ),
+                ))
+                continue
             successes[result.module] = result
+            self._enqueue_result(result, instance_id, provider, instance)
             probed_modules.append(result.module)
 
         if probed_modules:
-            if is_shared_row(instance):
-                # So a re-share can be matched to this entry, from any surface.
-                self._store.set_share_identity(instance_id, share_identity(instance))
-            self._store.update_index(
-                instance_id=instance_id,
-                name=name,
-                provider=provider,
-                modules=probed_modules,
-            )
+            # The index has its own lock another process may hold: wait for it
+            # off the event loop. The modules are stored already, so a busy
+            # index only leaves the listing behind until the next write.
+            try:
+                await asyncio.to_thread(
+                    self._index_build, instance, instance_id, name, provider, probed_modules
+                )
+            except RecordLockTimeout:
+                logger.warning("Memory index not updated after a build: it was busy")
 
         overall_reason: Optional[str] = None
-        if not successes and failures:
+        if not successes and unsaved:
+            overall_reason = BUSY_BUILD_REASON
+        elif not successes and failures:
             overall_reason = "all_probers_failed"
         return BuildReport(
             successes=successes,
             failures=failures,
             overall_reason=overall_reason,
+            unsaved=unsaved,
+        )
+
+    def _index_build(
+        self,
+        instance: Dict[str, Any],
+        instance_id: str,
+        name: str,
+        provider: str,
+        modules: List[str],
+    ) -> None:
+        """List *modules* of a build in the memory index (blocking: run off the loop)."""
+        if is_shared_row(instance):
+            # So a re-share can be matched to this entry, from any surface.
+            self._store.set_share_identity(instance_id, share_identity(instance))
+        self._store.update_index(
+            instance_id=instance_id,
+            name=name,
+            provider=provider,
+            modules=modules,
         )
 
     async def refresh(
@@ -729,8 +789,22 @@ class MemoryService(MemoryServiceInterface):
         instance_id = self._resolve_id(instance_id)
         return self._store.read_annotations(instance_id, provider)
 
+    def read_annotations_strict(self, instance_id: str, provider: str = "custom") -> str:
+        """Like :meth:`read_annotations`, but an unreadable file raises (see the store)."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.read_annotations_strict(instance_id, provider)
+
+    def annotations_fingerprint(self, instance_id: str, provider: str = "custom"):
+        """Exact-bytes digest, size and modified time of the notes file, or ``None``.
+
+        Public proxy so the sync layer never reaches into ``_store``.
+        """
+        instance_id = self._resolve_id(instance_id)
+        return self._store.annotations_fingerprint(instance_id, provider)
+
     def write_annotations(
-        self, instance_id: str, content: str, provider: str = "custom"
+        self, instance_id: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> Path:
         """Persist *content* as the annotations for *instance_id* and return the path.
 
@@ -740,17 +814,25 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             content: Raw annotation text to write.
             provider: Provider slug.
+            modified_at: Record the notes' hash and this time in the same locked step.
         """
         instance_id = self._resolve_id(instance_id)
-        return self._store.write_annotations(instance_id, content, provider)
+        return self._store.write_annotations(
+            instance_id, content, provider, modified_at=modified_at
+        )
+
+    def annotation_lock(self, instance_id: str, *, wait: bool = True):
+        """Hold the record lock of *instance_id* (see ``MemoryStore.annotation_lock``)."""
+        return self._store.annotation_lock(self._resolve_id(instance_id), wait=wait)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write the notes only if they still hash to *expected_hash* (see the store)."""
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations_if_unchanged(
-            instance_id, expected_hash, content, provider
+            instance_id, expected_hash, content, provider, modified_at=modified_at
         )
 
     def write_annotation_draft(
@@ -885,6 +967,22 @@ class MemoryService(MemoryServiceInterface):
     def remember_finding(
         self,
         instance: Dict[str, Any],
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        """Record a finding and queue it for sync (see :meth:`store_finding`).
+
+        For callers that already run where the sync queue lives. A caller that
+        moves the blocking record transaction to a worker thread calls
+        :meth:`store_finding` there and :meth:`enqueue_findings_for` on its loop.
+        """
+        result = self.store_finding(instance, **fields)
+        if not result.get("refused"):
+            self.enqueue_findings_for(instance)
+        return result
+
+    def store_finding(
+        self,
+        instance: Dict[str, Any],
         *,
         title: str,
         body: str,
@@ -893,7 +991,9 @@ class MemoryService(MemoryServiceInterface):
         source: str = "ai_chat",
         supersede_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record a new agent finding for *instance*.
+        """Record a new agent finding for *instance* in the local store.
+
+        Takes the record lock but does not touch the sync queue.
 
         Args:
             instance: Instance dict (must contain ``id`` or ``name``).
@@ -951,40 +1051,42 @@ class MemoryService(MemoryServiceInterface):
         fid = "f_" + uuid.uuid4().hex[:26]
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Handle supersede: if the referenced finding exists, mark it.
-        effective_supersede: Optional[str] = None
-        if supersede_id:
-            try:
-                _validate_finding_id(supersede_id)
-                old_record = self._store.get_finding(instance_id, supersede_id, provider)
-                if old_record is not None:
-                    old_record["superseded_by"] = fid
-                    old_record["updated_at"] = now_iso
-                    self._store.save_finding(instance_id, old_record, provider)
-                    effective_supersede = supersede_id
-            except ValueError:
-                pass  # invalid supersede_id — ignore silently
+        # One locked step: another process may supersede or prune the same record.
+        with self._store.annotation_lock(instance_id):
+            # Handle supersede: if the referenced finding exists, mark it.
+            effective_supersede: Optional[str] = None
+            if supersede_id:
+                try:
+                    _validate_finding_id(supersede_id)
+                    old_record = self._store.get_finding(instance_id, supersede_id, provider)
+                    if old_record is not None:
+                        old_record["superseded_by"] = fid
+                        old_record["updated_at"] = now_iso
+                        self._store.save_finding(instance_id, old_record, provider)
+                        effective_supersede = supersede_id
+                except ValueError:
+                    pass  # invalid supersede_id — ignore silently
 
-        # Secret scan (warn, never block — findings convention mirrors annotations).
-        warnings = scan_for_secrets(body)
+            # Secret scan (warn, never block — findings convention mirrors annotations).
+            warnings = scan_for_secrets(body)
 
-        # Build and persist record.
-        record: Dict[str, Any] = {
-            "id": fid,
-            "instance_id": instance_id,
-            "title": title,
-            "body": body,
-            "tags": tags,
-            "confidence": confidence,
-            "source": source,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-            "superseded_by": None,
-        }
-        self._store.save_finding(instance_id, record, provider)
+            # Build and persist record.
+            record: Dict[str, Any] = {
+                "id": fid,
+                "instance_id": instance_id,
+                "title": title,
+                "body": body,
+                "tags": tags,
+                "confidence": confidence,
+                "source": source,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "superseded_by": None,
+            }
+            self._store.save_finding(instance_id, record, provider)
 
-        # Prune over-cap findings (never prunes the record just saved).
-        pruned_ids = self._prune_findings(instance_id, provider, fid)
+            # Prune over-cap findings (never prunes the record just saved).
+            pruned_ids = self._prune_findings(instance_id, provider, fid)
 
         # Update meta with fresh active count.
         active_count = len(
@@ -994,18 +1096,6 @@ class MemoryService(MemoryServiceInterface):
             self._store.set_findings_meta(instance_id, findings_count=active_count)
         except Exception as exc:
             logger.warning("set_findings_meta failed for %s: %s", instance_id, exc)
-
-        # Enqueue for sync (best-effort — never blocks).
-        if self._sync_service is not None:
-            try:
-                all_findings = self._store.list_findings(
-                    instance_id, provider, include_superseded=True
-                )
-                self._sync_service.enqueue_findings(instance, all_findings)
-            except Exception as exc:
-                logger.warning(
-                    "sync enqueue_findings failed for %s: %s", instance_id, exc
-                )
 
         auto_inject = confidence >= getattr(
             self._config, "findings_confidence_threshold", 0.6
@@ -1020,6 +1110,21 @@ class MemoryService(MemoryServiceInterface):
             "secret_warning": warnings,
             "pruned": pruned_ids,
         }
+
+    def enqueue_findings_for(self, instance: Dict[str, Any]) -> None:
+        """Queue *instance*'s findings for sync (best-effort; never raises)."""
+        if self._sync_service is None:
+            return
+        instance = self._resolve_instance(instance)
+        instance_id = instance.get("id") or instance.get("name", "")
+        provider = instance_provider(instance)
+        try:
+            all_findings = self._store.list_findings(
+                instance_id, provider, include_superseded=True
+            )
+            self._sync_service.enqueue_findings(instance, all_findings)
+        except Exception as exc:
+            logger.warning("sync enqueue_findings failed for %s: %s", instance_id, exc)
 
     def recall_findings(
         self,
@@ -1143,66 +1248,68 @@ class MemoryService(MemoryServiceInterface):
         updated = 0
         skipped = 0
 
-        for record in incoming:
-            fid = record.get("id", "")
-            try:
-                _validate_finding_id(fid)
-            except (ValueError, TypeError):
-                skipped += 1
-                continue
-
-            local = self._store.get_finding(instance_id, fid, provider)
-            if local is None:
+        # Read-compare-write per record, excluding other processes too.
+        with self._store.annotation_lock(instance_id):
+            for record in incoming:
+                fid = record.get("id", "")
                 try:
-                    self._store.save_finding(instance_id, dict(record), provider)
-                    created += 1
-                except Exception as exc:
-                    logger.warning(
-                        "merge_findings: could not save %s for %s: %s",
-                        fid, instance_id, exc,
-                    )
+                    _validate_finding_id(fid)
+                except (ValueError, TypeError):
                     skipped += 1
-                continue
+                    continue
 
-            # Effective timestamp: max(created_at, updated_at).
-            def _eff_ts(r: Dict[str, Any]) -> str:
-                return max(
-                    r.get("created_at") or "",
-                    r.get("updated_at") or "",
-                )
-
-            local_ts = _eff_ts(local)
-            incoming_ts = _eff_ts(record)
-
-            if incoming_ts > local_ts:
-                # Incoming wins — but apply monotonic superseded_by from local.
-                merged = dict(record)
-                local_sup = local.get("superseded_by")
-                inc_sup = merged.get("superseded_by")
-                if local_sup and not inc_sup:
-                    merged["superseded_by"] = local_sup
-                try:
-                    self._store.save_finding(instance_id, merged, provider)
-                    updated += 1
-                except Exception as exc:
-                    logger.warning(
-                        "merge_findings: could not save %s for %s: %s",
-                        fid, instance_id, exc,
-                    )
-                    skipped += 1
-            else:
-                # Local wins — still apply monotonic superseded_by from incoming.
-                inc_sup = record.get("superseded_by")
-                if inc_sup and not local.get("superseded_by"):
-                    local["superseded_by"] = inc_sup
+                local = self._store.get_finding(instance_id, fid, provider)
+                if local is None:
                     try:
-                        self._store.save_finding(instance_id, local, provider)
+                        self._store.save_finding(instance_id, dict(record), provider)
+                        created += 1
                     except Exception as exc:
                         logger.warning(
-                            "merge_findings: could not update superseded_by for %s: %s",
-                            fid, exc,
+                            "merge_findings: could not save %s for %s: %s",
+                            fid, instance_id, exc,
                         )
-                skipped += 1
+                        skipped += 1
+                    continue
+
+                # Effective timestamp: max(created_at, updated_at).
+                def _eff_ts(r: Dict[str, Any]) -> str:
+                    return max(
+                        r.get("created_at") or "",
+                        r.get("updated_at") or "",
+                    )
+
+                local_ts = _eff_ts(local)
+                incoming_ts = _eff_ts(record)
+
+                if incoming_ts > local_ts:
+                    # Incoming wins — but apply monotonic superseded_by from local.
+                    merged = dict(record)
+                    local_sup = local.get("superseded_by")
+                    inc_sup = merged.get("superseded_by")
+                    if local_sup and not inc_sup:
+                        merged["superseded_by"] = local_sup
+                    try:
+                        self._store.save_finding(instance_id, merged, provider)
+                        updated += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "merge_findings: could not save %s for %s: %s",
+                            fid, instance_id, exc,
+                        )
+                        skipped += 1
+                else:
+                    # Local wins — still apply monotonic superseded_by from incoming.
+                    inc_sup = record.get("superseded_by")
+                    if inc_sup and not local.get("superseded_by"):
+                        local["superseded_by"] = inc_sup
+                        try:
+                            self._store.save_finding(instance_id, local, provider)
+                        except Exception as exc:
+                            logger.warning(
+                                "merge_findings: could not update superseded_by for %s: %s",
+                                fid, exc,
+                            )
+                    skipped += 1
 
         active_after = len(
             self._store.list_findings(instance_id, provider, include_superseded=False)
@@ -1349,6 +1456,10 @@ class MemoryService(MemoryServiceInterface):
         """
         self._connection_rows = supplier
 
+    async def connection_rows(self) -> tuple[list, Optional[list]]:
+        """``(team_rows, fleet_rows)`` from the supplier; no rows when none is set."""
+        return await self._load_connection_rows()
+
     async def _load_connection_rows(self) -> tuple[list, Optional[list]]:
         from servonaut.services.ssh_credentials import load_connection_rows  # noqa: PLC0415
 
@@ -1463,6 +1574,11 @@ class MemoryService(MemoryServiceInterface):
                 When provided, passed to sync_service.enqueue_module so
                 the cloud record includes display_name and provider.
         """
+        self._save_result(result, instance_id, provider)
+        self._enqueue_result(result, instance_id, provider, instance)
+
+    def _save_result(self, result: ModuleResult, instance_id: str, provider: str) -> None:
+        """Blocking: write *result* to the store (waits for the record lock)."""
         data: Dict[str, Any] = {
             "module": result.module,
             "instance_id": instance_id,
@@ -1477,20 +1593,28 @@ class MemoryService(MemoryServiceInterface):
         }
         self._store.save_module(instance_id, result.module, data, provider)
 
-        # Enqueue to cloud sync if wired (best-effort — never block a probe)
-        if self._sync_service is not None:
-            instance_dict = instance or {
-                "id": instance_id,
-                "name": instance_id,
-                "provider": provider,
-            }
-            try:
-                self._sync_service.enqueue_module(instance_dict, result.module, result)
-            except Exception as exc:
-                logger.warning(
-                    "sync enqueue_module failed for %s/%s: %s",
-                    instance_id, result.module, exc
-                )
+    def _enqueue_result(
+        self,
+        result: ModuleResult,
+        instance_id: str,
+        provider: str,
+        instance: Optional[Dict[str, Any]],
+    ) -> None:
+        """Enqueue a saved result for cloud sync (best-effort; stays on the owning loop)."""
+        if self._sync_service is None:
+            return
+        instance_dict = instance or {
+            "id": instance_id,
+            "name": instance_id,
+            "provider": provider,
+        }
+        try:
+            self._sync_service.enqueue_module(instance_dict, result.module, result)
+        except Exception as exc:
+            logger.warning(
+                "sync enqueue_module failed for %s/%s: %s",
+                instance_id, result.module, exc
+            )
 
     def make_ssh_runner(
         self, instance: Dict[str, Any], *, timeout: float = 5,

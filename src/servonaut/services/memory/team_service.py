@@ -37,8 +37,10 @@ Stream 2) so this service compiles independently.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -55,6 +57,22 @@ from servonaut.services.memory.interfaces import (
 )
 from servonaut.services.memory.path_segments import check_segment
 from servonaut.services.memory.retrieval_service import _validate_instance_id
+from servonaut.services.memory.team_wraps import (
+    GrantCoverage,
+    KeyChange,
+    KeyTrust,
+    UNCONFIRMED,
+    acknowledge_wraps,
+    classify_key,
+    derive_fingerprint,
+    merge_seen,
+    optional_fingerprint,
+    pins_of,
+    previous_pin,
+    read_skips,
+    parse_grant_coverage,
+    split_recipients,
+)
 
 if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
@@ -86,21 +104,62 @@ class GrantAlreadyExistsError(MemoryBackendError):
         )
 
 
-class KeyChangedError(MemoryBackendError):
-    """Raised when a share would seal for a member whose key changed.
+def display_name(name: str, user_id: int) -> str:
+    """The member as people are told about them."""
+    return name or f"member {user_id}"
 
-    A changed key needs the owner's confirmation, which no screen offers yet,
-    so nothing is revoked, sealed or sent.
+
+class KeyChangedError(MemoryBackendError):
+    """Raised when a share would seal for a member whose key needs confirming.
+
+    Nothing is revoked, sealed or sent. :meth:`TeamMemoryService.confirm_member_keys`
+    records the user's confirmation, after which the same call goes through.
 
     Attributes:
-        names: Display names of the members whose key changed.
+        changes: One :class:`KeyChange` per member to confirm.
+        names: Display names of those members.
+    """
+
+    def __init__(self, changes: List[KeyChange]) -> None:
+        self.changes = list(changes)
+        self.names = [display_name(c.name, c.user_id) for c in self.changes]
+        super().__init__(
+            "The memory key of " + ", ".join(self.names or ["a member"]) + " has changed."
+        )
+
+
+class UnusableMemberKeyError(MemoryBackendError):
+    """Raised when the service sends a member key that is not the key it names.
+
+    Not confirmable: nothing is sealed for it and nothing was changed.
+
+    Attributes:
+        names: Display names of the members concerned.
     """
 
     def __init__(self, names: List[str]) -> None:
         self.names = names
         super().__init__(
-            "The memory key of " + ", ".join(names or ["a member"]) + " has changed."
+            "The service sent a memory key for " + ", ".join(names or ["a member"])
+            + " that does not match its fingerprint. Nothing was changed."
         )
+
+
+class ShareGoneError(MemoryBackendError):
+    """Raised when a share is no longer live (HTTP 404 or 409 from the service)."""
+
+    def __init__(self) -> None:
+        super().__init__("That share no longer exists.")
+
+
+class ServiceBusyError(MemoryBackendError):
+    """Raised when the service answered ``conflict_retry`` (HTTP 409).
+
+    The share is still live; another change to it was in progress.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("The service was busy changing this share. Try again.")
 
 
 class InsufficientWrapsRequired(MemoryBackendError):
@@ -144,6 +203,8 @@ class TeamMemberKey:
         name: Display name of the member ("" when the service sends none).
         key_changed: ``True`` when the member's key changed since it was
             last trusted.
+        previous_fingerprint: The replaced key's fingerprint, when reported.
+        key_rotated_at: When the key was replaced, as the service wrote it.
     """
 
     user_id: int
@@ -152,6 +213,8 @@ class TeamMemberKey:
     role: str
     name: str = ""
     key_changed: bool = False
+    previous_fingerprint: Optional[str] = None
+    key_rotated_at: Optional[str] = None
 
     def derived_fingerprint(self) -> Optional[str]:
         """The fingerprint of the key actually held, or None if it is not a key.
@@ -160,15 +223,7 @@ class TeamMemberKey:
         pin or a check against it says nothing about the key a wrap is sealed
         for.
         """
-        try:
-            raw = base64.b64decode(self.public_key_b64, validate=True)
-        except ValueError:
-            return None
-        if len(raw) != 32:
-            return None
-        import hashlib
-
-        return hashlib.sha256(raw).hexdigest()
+        return derive_fingerprint(self.public_key_b64)
 
     @property
     def public_key_bytes(self) -> bytes:
@@ -238,6 +293,18 @@ class WrapEntry:
     recipient_user_id: int
     envelope_id: str
     wrapped_dek: str
+
+
+@dataclass(frozen=True)
+class TopUpResult:
+    """What a top-up did: whom it shared with, who could not be added, and whose key waits."""
+
+    sealed_names: tuple
+    waiting: tuple
+    skipped_names: tuple = ()  # sealed for, but the service did not store the wrap
+    # Why each of ``skipped_names`` was not stored: a skip reason of the
+    # service, or ``"unconfirmed"``.
+    skipped_reasons: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -357,16 +424,11 @@ class TeamMemoryService:
 
         members = []
         for item in data.get("members", []):
-            members.append(
-                TeamMemberKey(
-                    user_id=int(item["user_id"]),
-                    fingerprint=item["fingerprint"],
-                    public_key_b64=item["public_key_b64"],
-                    role=item["role"],
-                    name=str(item.get("name") or ""),
-                    key_changed=bool(item.get("key_changed", False)),
-                )
-            )
+            member = _parse_member_key(item)
+            if member is None:
+                logger.debug("member key ignored: malformed (%s)", type(item).__name__)
+                continue
+            members.append(member)
         return members
 
     def eligible_members(
@@ -620,7 +682,7 @@ class TeamMemoryService:
         check_segment(team_slug, "team")
         check_segment(instance_id, "server")
         eligible_members = self.eligible_members(member_pubkeys, required_role)
-        self._refuse_changed_keys(team_slug, eligible_members)
+        seen = self._refuse_changed_keys(team_slug, eligible_members)
 
         # Spec §3.2: GET /memory/{instance_id} returns
         # {"instance": ..., "modules": ["os", "runtimes", ...]}  — strings, not dicts.
@@ -660,46 +722,117 @@ class TeamMemoryService:
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug, instance_id=instance_id) from exc
 
-        self._pin_sealed(team_slug, wraps, eligible_members)
+        await self._pin_after_grant(team_slug, wraps, eligible_members, seen, data)
         return _parse_grant(data)
 
     def _pins(self) -> Any:
         return self._pin_store_provider() if self._pin_store_provider else None
 
-    def _refuse_changed_keys(self, team_slug: str, members: List[TeamMemberKey]) -> None:
-        """Raise before anything is sent if a member's key changed.
+    def _refuse_changed_keys(
+        self, team_slug: str, members: List[TeamMemberKey]
+    ) -> Dict[tuple, Optional[str]]:
+        """Raise before anything is sent if a member's key may not be sealed for.
 
-        A key changed when the service says so, or when it differs from the
-        fingerprint this client last sealed for that member.
+        An unusable key is refused outright; a changed one (flagged by the
+        service, or different from what was sealed for before) can be confirmed
+        with :meth:`confirm_member_keys`. A confirmed key passes whatever the
+        service's flag says.
+
+        Returns:
+            The pin each member was judged against, for the compare-and-set
+            that records what was sealed.
         """
-        from servonaut.services.memory.team_wraps import pinned_fingerprint
-
         pins = self._pins()
-        changed = []
+        unusable: List[str] = []
+        changes: List[KeyChange] = []
+        seen: Dict[tuple, Optional[str]] = {}
         for member in members:
-            derived = member.derived_fingerprint()
-            pinned = pinned_fingerprint(pins, team_slug, member.user_id) if pins else None
-            if (
-                member.key_changed
-                or derived is None
-                or derived != member.fingerprint
-                or (pinned is not None and pinned != derived)
-            ):
-                changed.append(member.name or f"member {member.user_id}")
-        if changed:
-            raise KeyChangedError(changed)
+            pinned = pins.get(team_slug, member.user_id) if pins else None
+            seen[(team_slug, member.user_id, member.fingerprint)] = pinned
+            trust = classify_key(
+                member.public_key_b64, member.fingerprint,
+                flagged=member.key_changed, pinned=pinned,
+            )
+            if trust is KeyTrust.UNUSABLE:
+                unusable.append(display_name(member.name, member.user_id))
+            elif trust is KeyTrust.CHANGED:
+                previous = previous_pin(pinned, member.fingerprint)
+                changes.append(KeyChange(
+                    team_slug=team_slug,
+                    user_id=member.user_id,
+                    name=member.name,
+                    fingerprint=member.fingerprint,
+                    previous_fingerprint=previous or member.previous_fingerprint,
+                    rotated_at=member.key_rotated_at,
+                ))
+        if unusable:
+            raise UnusableMemberKeyError(unusable)
+        if changes:
+            raise KeyChangedError(changes)
+        return seen
 
-    def _pin_sealed(
-        self, team_slug: str, wraps: List[Dict[str, Any]], members: List[TeamMemberKey]
-    ) -> None:
-        """Remember the fingerprints a grant was sealed for."""
+    def confirm_member_keys(self, team_slug: str, changes: List[KeyChange]) -> None:
+        """Record that the user checked and trusts these members' current keys.
+
+        All or nothing: the pins are validated first and written in one atomic
+        write. Afterwards the key counts as sealed-for, so Share, Share again
+        and the top-up accept it.
+
+        Raises:
+            ValueError: A slug or fingerprint is not well formed.
+            MemoryBackendError: Pins cannot be kept here.
+            OSError: The pins could not be written.
+        """
+        check_segment(team_slug, "team")
         pins = self._pins()
-        sealed = {w["recipient_user_id"] for w in wraps}
-        if pins is None or not sealed:
+        if pins is None:
+            raise MemoryBackendError("Confirmed keys cannot be saved here.")
+        batch: Dict[tuple, str] = {}
+        for change in changes:
+            check_segment(change.team_slug, "team")
+            if change.team_slug != team_slug:
+                raise ValueError("a confirmation belongs to another team")
+            if (not isinstance(change.user_id, int) or isinstance(change.user_id, bool)
+                    or change.user_id <= 0):
+                raise ValueError("user id is not a valid member id")
+            if not _FINGERPRINT.fullmatch(change.fingerprint or ""):
+                raise ValueError("fingerprint is not a valid key fingerprint")
+            batch[(change.team_slug, change.user_id)] = change.fingerprint
+        pins.set_many(batch)
+
+    async def _pin_after_grant(
+        self,
+        team_slug: str,
+        wraps: List[Dict[str, Any]],
+        members: List[TeamMemberKey],
+        seen: Dict[tuple, Optional[str]],
+        response: Any,
+    ) -> None:
+        """Remember the keys a created grant was sealed for.
+
+        A recipient the service skipped was not sealed for, so it is not
+        remembered; a skip list that is missing or cannot be read means nobody is. A pin that
+        changed since the trust decision (*seen*) is left alone.
+        """
+        skips = read_skips(response.get("skipped_recipients") if isinstance(response, dict) else None)
+        pins = self._pins()
+        if skips is None or pins is None:
+            return
+        by_user = {m.user_id: m.derived_fingerprint() or m.fingerprint for m in members}
+        sealed = {
+            (team_slug, w["recipient_user_id"]): by_user[w["recipient_user_id"]]
+            for w in wraps
+            if w["recipient_user_id"] not in skips and w["recipient_user_id"] in by_user
+        }
+        await self._set_if_seen(pins, sealed, seen)
+
+    @staticmethod
+    async def _set_if_seen(pins: Any, sealed: Dict[tuple, str], seen: Dict[tuple, Optional[str]]) -> None:
+        """Write automatic pins off the event loop: the file lock may be busy."""
+        if not sealed:
             return
         try:
-            pins.set_many({(team_slug, m.user_id): m.derived_fingerprint() or m.fingerprint
-                           for m in members if m.user_id in sealed})
+            await asyncio.to_thread(pins.set_if_seen, sealed, seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
@@ -793,6 +926,9 @@ class TeamMemoryService:
                         "recipient_user_id": member.user_id,
                         "envelope_id": actual_env_id,
                         "wrapped_dek": base64.b64encode(sealed).decode(),
+                        # Lets the service skip a member who rotated since the
+                        # key was read, instead of storing a wrap nobody can open.
+                        "recipient_fingerprint": member.derived_fingerprint(),
                     })
                 except Exception as exc:
                     logger.warning(
@@ -819,7 +955,21 @@ class TeamMemoryService:
             KeyError: If no self-wrap is found.
             nacl.exceptions.CryptoError: On decryption failure.
         """
-        import base64 as _b64
+        wrapped_b64 = self._self_wrap(raw_env, key_material)
+        wrapped_bytes = base64.b64decode(wrapped_b64)
+        priv_key = nacl.public.PrivateKey(key_material.private_key)
+        box = nacl.public.SealedBox(priv_key)
+        dek = box.decrypt(wrapped_bytes)
+        return dek
+
+    @staticmethod
+    def _self_wrap(raw_env: Dict[str, Any], key_material: Any) -> str:
+        """The base64 wrap of the data key addressed to the caller.
+
+        Raises:
+            KeyError: If the envelope holds no wrap for the caller.
+            ValueError: If the wrap is not text.
+        """
         user_id = key_material.user_id
 
         # §3.7 shape: single wrapped_dek pre-addressed to caller
@@ -835,12 +985,9 @@ class TeamMemoryService:
                 raise KeyError(f"No self-wrap found for user_id={user_id}")
         else:
             raise KeyError("Envelope has neither 'wrapped_dek' nor 'dek_wraps'")
-
-        wrapped_bytes = _b64.b64decode(wrapped_b64)
-        priv_key = nacl.public.PrivateKey(key_material.private_key)
-        box = nacl.public.SealedBox(priv_key)
-        dek = box.decrypt(wrapped_bytes)
-        return dek
+        if not isinstance(wrapped_b64, str) or not wrapped_b64:
+            raise ValueError("self-wrap is not text")
+        return wrapped_b64
 
     async def revoke_grant(self, team_slug: str, grant_id: str) -> Grant:
         """Soft-revoke a team memory grant.
@@ -900,6 +1047,158 @@ class TeamMemoryService:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return int(data.get("wraps_deleted", 0))
 
+    async def grant_coverage(self, team_slug: str, grant_id: str) -> GrantCoverage:
+        """Who cannot read the newest snapshots of a live share yet.
+
+        Raises:
+            ShareGoneError: The share is gone or no longer live.
+            UpsellRequired: If ``memory_team_share`` is not in the plan.
+        """
+        from servonaut.services.api_client import APIError
+
+        self._require_feature()
+        check_segment(team_slug, "team")
+        check_segment(grant_id, "grant")
+        try:
+            data = await self._api.get(f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}/wraps")
+        except APIError as exc:
+            self._raise_share_error(exc, team_slug)
+            raise _translate_api_error(exc, team_slug=team_slug) from exc
+        return parse_grant_coverage(data)
+
+    def waiting_key_changes(self, team_slug: str, coverage: GrantCoverage) -> List[KeyChange]:
+        """The members of *coverage* whose changed key still needs confirming."""
+        waiting: Dict[int, KeyChange] = {}
+        pins = self._pins()
+        for envelope in coverage.envelopes:
+            split = split_recipients(pins, team_slug, envelope.missing)
+            waiting.update({c.user_id: c for c in split.changed})
+        return list(waiting.values())
+
+    async def top_up_grant(
+        self,
+        team_slug: str,
+        grant_id: str,
+        instance_id: str,
+        modules: Optional[List[str]],
+    ) -> "TopUpResult":
+        """Seal the newest snapshots for the members still missing a wrap.
+
+        Only members whose key is trusted (sealed for or confirmed before) or
+        new are sealed for; a member whose key is waiting for confirmation is
+        returned in ``waiting`` and left alone. The data key always comes from
+        the caller's own envelope of that snapshot, never from the reply.
+
+        Args:
+            team_slug: Team slug identifier.
+            grant_id: The live share.
+            instance_id: The server the share is for.
+            modules: The modules the share covers (None means all).
+
+        Raises:
+            ShareGoneError: The share is gone or no longer live.
+            ServiceBusyError: The service was busy changing the share.
+            MemoryBackendError: Memory Sync is locked, or the service answered
+                for a different share.
+        """
+        from servonaut.services.api_client import APIError
+
+        check_segment(instance_id, "server")
+        coverage = await self.grant_coverage(team_slug, grant_id)
+        if coverage.grant_id != grant_id or coverage.instance_id != instance_id:
+            logger.warning("top-up: the coverage reply is not for the requested share")
+            raise MemoryBackendError(
+                "The service answered for a different share. Nothing was shared."
+            )
+        pins = self._pins()
+        material = self._key_store_provider()
+        if material is None:
+            raise MemoryBackendError("Unlock Memory Sync first.")
+        wraps: List[Dict[str, Any]] = []
+        names: Dict[int, str] = {}
+        waiting: Dict[int, KeyChange] = {}
+        seen: Dict[tuple, Optional[str]] = {}
+        for envelope in coverage.envelopes:
+            split = split_recipients(pins, team_slug, envelope.missing)
+            merge_seen(seen, split.seen)
+            waiting.update({c.user_id: c for c in split.changed})
+            if not split.sealable or (modules is not None and envelope.module not in modules):
+                continue
+            own_wrap = await self._own_wrap_of(instance_id, envelope, material)
+            if own_wrap is None:
+                continue
+            try:
+                sealed = self._crypto.reseal_dek(
+                    own_wrap,
+                    private_key=material.private_key,
+                    recipient_public_keys=[r.public_key for r in split.sealable],
+                )
+            except (self._crypto.CryptoError, ValueError, TypeError) as exc:
+                logger.debug("top-up: could not seal a snapshot (%s)", type(exc).__name__)
+                continue
+            for recipient, wrapped in zip(split.sealable, sealed):
+                if wrapped is None:
+                    continue
+                names[recipient.user_id] = display_name(recipient.name, recipient.user_id)
+                wraps.append({
+                    "recipient_user_id": recipient.user_id,
+                    "envelope_id": envelope.envelope_id,
+                    "wrapped_dek": wrapped,
+                    "recipient_fingerprint": recipient.fingerprint,
+                })
+        stored: List[Dict[str, Any]] = []
+        skipped: Dict[int, str] = {}
+        if wraps:
+            try:
+                response = await post_grant_wraps(self._api, team_slug, grant_id, wraps)
+            except APIError as exc:
+                self._raise_share_error(exc, team_slug)
+                raise
+            ack = acknowledge_wraps(wraps, response)
+            stored, skipped = list(ack.stored), ack.skipped
+            pins = self._pins()
+            if pins is not None:
+                await self._set_if_seen(pins, pins_of(team_slug, stored), seen)
+        stored_ids = {w["recipient_user_id"] for w in stored}
+        not_stored = [uid for uid in names if uid not in stored_ids]
+        return TopUpResult(
+            sealed_names=tuple(n for uid, n in names.items() if uid in stored_ids),
+            waiting=tuple(waiting.values()),
+            skipped_names=tuple(names[uid] for uid in not_stored),
+            skipped_reasons=tuple(skipped.get(uid, UNCONFIRMED) for uid in not_stored),
+        )
+
+    async def _own_wrap_of(self, instance_id: str, envelope: Any, material: Any) -> Optional[str]:
+        """The caller's own wrap of *envelope*'s data key, or None to skip it.
+
+        Fetched from the caller's own latest envelope of that module and only
+        used when it is the very snapshot the coverage names: what the
+        coverage reply carries is not trusted as a source of data keys.
+        """
+        try:
+            raw = await self._retrieval_service.get_module_envelope_raw(
+                instance_id, envelope.module
+            )
+        except Exception as exc:  # noqa: BLE001 — one snapshot never stops the others
+            logger.debug("top-up: own envelope not fetched (%s)", type(exc).__name__)
+            return None
+        if not isinstance(raw, dict) or raw.get("id") != envelope.envelope_id:
+            logger.debug("top-up: a snapshot is not the caller's latest; skipped")
+            return None
+        try:
+            return self._self_wrap(raw, material)
+        except (KeyError, TypeError, ValueError):
+            logger.debug("top-up: no own wrap for a snapshot; skipped")
+            return None
+
+    @staticmethod
+    def _raise_share_error(exc: Any, team_slug: str) -> None:
+        """Raise the typed error for a 404 or 409 answer; return for anything else."""
+        if exc.status == 404 or (exc.status == 409 and exc.code == "grant_not_live"):
+            raise ShareGoneError() from exc
+        if exc.status == 409 and exc.code == "conflict_retry":
+            raise ServiceBusyError() from exc
+
     async def post_grant_wraps(
         self,
         team_slug: str,
@@ -922,6 +1221,42 @@ class TeamMemoryService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value else None
+
+
+def _parse_member_key(item: Any) -> Optional[TeamMemberKey]:
+    """One directory row, or None when it cannot describe a member's key.
+
+    A row that lacks a key or a well-formed fingerprint is dropped on its own,
+    so one bad row never costs the others; a fingerprint that is well formed
+    but not the key's own is kept and refused later as an unusable key.
+    """
+    if not isinstance(item, dict):
+        return None
+    user_id, key_b64, claimed = item.get("user_id"), item.get("public_key_b64"), item.get("fingerprint")
+    if not isinstance(user_id, int) or isinstance(user_id, bool):
+        return None
+    if not isinstance(key_b64, str) or not key_b64 or optional_fingerprint(claimed) is None:
+        return None
+    role = item.get("role")
+    if not isinstance(role, str):
+        return None
+    return TeamMemberKey(
+        user_id=user_id,
+        fingerprint=claimed,
+        public_key_b64=key_b64,
+        role=role,
+        name=str(item.get("name") or ""),
+        key_changed=bool(item.get("key_changed", False)),
+        previous_fingerprint=optional_fingerprint(item.get("previous_fingerprint")),
+        key_rotated_at=_optional_str(item.get("key_rotated_at")),
+    )
+
 
 def _parse_grant(data: Dict[str, Any]) -> Grant:
     """Parse a raw server grant dict into a ``Grant`` dataclass."""

@@ -37,6 +37,7 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.team_fold import absorbed_share_ids
 from servonaut.services.memory.shared_view import (
     merge_shared,
@@ -277,8 +278,12 @@ class ServonautTools:
                  vault_runtime=None,
                  apply_team_rules: bool = True,
                  team_policy=None,
-                 shared_memory_reader=None) -> None:
+                 shared_memory_reader=None,
+                 team_merge=None) -> None:
         self._config_manager = config_manager
+        # Runs the team-copy merge before a memory tool reads or changes a
+        # record (a HeadlessTeamMerge). None in the app, which runs its own.
+        self._team_merge = team_merge
         self._shared_memory_reader = shared_memory_reader
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -2532,7 +2537,7 @@ class ServonautTools:
                     result, True,
                 )
                 return result
-        if not stored_modules:
+        if not stored_modules and not self._has_notes_or_findings(iid, provider):
             hint = (
                 f"Call build_server_memory(instance_id='{iid}') to "
                 "probe the host and populate memory, then retry."
@@ -2578,6 +2583,7 @@ class ServonautTools:
                         "_trust_notice": MEMORY_TRUST_NOTICE,
                         "instance_id": iid,
                         "modules": sanitized,
+                        "annotations": self._notes_text(iid, provider),
                     },
                     indent=2,
                 )
@@ -2600,6 +2606,12 @@ class ServonautTools:
                 )
                 summary["_trust_notice"] = MEMORY_TRUST_NOTICE
                 result = json.dumps(summary)
+            elif format == "context_block" and not stored_modules:
+                # The context builder works from probed modules; notes and
+                # findings alone are rendered through the summary instead.
+                result = frame_as_untrusted(
+                    await self._memory_service.get_summary(meta, max_tokens=1500)
+                )
             elif format == "context_block":
                 from servonaut.services.ai_memory_injector import (
                     InstanceScope, build_memory_context,
@@ -2632,6 +2644,23 @@ class ServonautTools:
             result, True,
         )
         return result
+
+    def _notes_text(self, iid: str, provider: str) -> str:
+        """The record's notes as text (empty when there are none)."""
+        notes = self._memory_service.read_annotations(iid, provider)
+        return notes if isinstance(notes, str) else ""
+
+    def _has_notes_or_findings(self, iid: str, provider: str) -> bool:
+        """Whether the record holds notes or findings (it may have no probed module yet)."""
+        memory = self._memory_service
+        try:
+            notes = memory.read_annotations(iid, provider)
+            if isinstance(notes, str) and notes.strip():
+                return True
+            findings = memory.list_findings(iid, provider)
+            return isinstance(findings, list) and bool(findings)
+        except (OSError, ValueError):
+            return False
 
     async def _shared_memory(self, requested: Dict, target: Dict) -> Any:
         """What a team shares of this server, or None (nothing, or not wired).
@@ -2774,6 +2803,8 @@ class ServonautTools:
             if hasattr(self._memory_service, "build_report"):
                 report = await self._memory_service.build_report(instance, modules)
                 successes = list(report.successes.keys())
+                unsaved = sorted(report.unsaved)
+                unsaved_message = report.unsaved_message
                 failures = [
                     {"module": f.module, "reason": f.reason, "message": f.message}
                     for f in report.failures
@@ -2782,6 +2813,7 @@ class ServonautTools:
             else:
                 results = await self._memory_service.refresh(instance, modules)
                 successes = list(results.keys())
+                unsaved, unsaved_message = [], None
                 failures = []
                 overall_reason = None if successes else "all_probers_failed"
         except Exception as exc:
@@ -2800,6 +2832,10 @@ class ServonautTools:
             SSH_FAILED_BUILD_REASON,
         )
         from servonaut.services.memory.status import STOPPED_REASON
+        if unsaved:
+            # Probed but not stored: the stored snapshot is unchanged for these.
+            response["unsaved"] = unsaved
+            response["message"] = unsaved_message
         if overall_reason:
             response["reason"] = overall_reason
             if overall_reason == "all_probers_failed":
@@ -2828,7 +2864,7 @@ class ServonautTools:
         self._audit.log(
             tool_name, audit_args, payload,
             len(successes) > 0,
-            overall_reason or "",
+            overall_reason or ("unsaved_modules" if unsaved else ""),
         )
         return payload
 
@@ -2879,6 +2915,7 @@ class ServonautTools:
             return "Error: memory subsystem not wired."
 
         config = self._config_manager.get()
+        await self._merge_team_copies()
         all_entries = await self._without_folded_team_copies(
             self._memory_service.list_all(),
         )
@@ -2953,7 +2990,10 @@ class ServonautTools:
         instance = await self._memory_target(instance)
 
         try:
-            result = self._memory_service.remember_finding(
+            # Only the record transaction runs off the event loop (the lock may
+            # be held by another process); the sync queue is touched back here.
+            result = await asyncio.to_thread(
+                self._memory_service.store_finding,
                 instance,
                 title=title,
                 body=body,
@@ -2965,6 +3005,9 @@ class ServonautTools:
         except ValueError as exc:
             self._audit.log('remember_server_finding', args, str(exc), False, 'validation')
             return f"validation: {exc}"
+        except RecordLockTimeout as exc:
+            self._audit.log('remember_server_finding', args, str(exc), False, 'record_busy')
+            return f"busy: {exc}; nothing was saved, try again"
         except Exception as exc:
             self._audit.log('remember_server_finding', args, str(exc), False, 'api_error')
             return f"api_error: {exc}"
@@ -2973,6 +3016,7 @@ class ServonautTools:
             msg = f"Memory is disabled for instance {instance_id}; finding not saved."
             self._audit.log('remember_server_finding', args, msg, False, 'memory_disabled')
             return msg
+        self._memory_service.enqueue_findings_for(instance)
 
         finding_id = result.get("finding_id", "")
         auto_inject = result.get("auto_inject", False)
@@ -5033,6 +5077,21 @@ class ServonautTools:
         folded = absorbed_share_ids(rows)
         return [entry for entry in entries if entry.get('instance_id', '') not in folded]
 
+    async def _merge_team_copies(self) -> None:
+        """Fold team copies into the user's own records before a memory tool reads them.
+
+        Once per distinct set of shared servers (the runner remembers). Rows
+        that cannot be read or a failed pass are logged, never failures of
+        the tool.
+        """
+        if self._team_merge is None:
+            return
+        try:
+            _team_rows, rows = await self.connection_rows()
+            await self._team_merge.run(rows)
+        except Exception as exc:  # noqa: BLE001 - the tool answers from what is stored
+            logger.warning("Merging team copies skipped (%s)", type(exc).__name__)
+
     async def _memory_target(self, instance: Dict) -> Dict:
         """The row whose memory *instance* has: the user's own row for a team's
         copy of a server they own, else *instance* itself.
@@ -5041,6 +5100,7 @@ class ServonautTools:
         to the server, so it lands on the user's own record rather than on
         the team's copy.
         """
+        await self._merge_team_copies()
         if instance.get('is_shared') is not True:
             return instance
         try:

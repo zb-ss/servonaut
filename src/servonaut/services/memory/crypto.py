@@ -248,6 +248,15 @@ def fingerprint(public_key_bytes: bytes) -> str:
     return hashlib.sha256(public_key_bytes).hexdigest()
 
 
+#: How much of a fingerprint a person reads out and compares.
+_SHORT_FINGERPRINT_CHARS = 24
+
+
+def short_fingerprint(full_fingerprint: str) -> str:
+    """The form of a key fingerprint people read aloud to each other."""
+    return full_fingerprint[:_SHORT_FINGERPRINT_CHARS] + "…"
+
+
 def estimate_pw_score(passphrase: str) -> int:
     """Estimate the strength of a passphrase on a 0–4 scale.
 
