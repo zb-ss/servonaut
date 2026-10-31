@@ -27,7 +27,8 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
+from servonaut.services.shared_servers import own_twin
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -382,12 +383,21 @@ class MemoryScreen(Screen):
 
     @property
     def _target(self) -> dict:
-        """The real record behind the displayed row (itself outside demo mode)."""
+        """The real record behind the displayed row (itself outside demo mode).
+
+        A team's copy of a server the user owns stands for the user's own
+        row: its notes, findings and probes are the own row's, so nothing
+        new lands on the copy.
+        """
         try:
             app = self.app
         except RuntimeError:  # no running app: nothing was redacted either
             return self._instance
-        return connection_instance(app, self._instance)
+        real = connection_instance(app, self._instance)
+        if not isinstance(real, dict) or real.get("is_shared") is not True:
+            return real
+        twin = own_twin(real, real_fleet_rows(app) or [])
+        return dict(twin) if twin is not None else real
 
     # ------------------------------------------------------------------
     # Compose

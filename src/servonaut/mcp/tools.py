@@ -38,7 +38,7 @@ from servonaut.services.accounts.headless import (
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.shared_servers import (
-    as_shared_row, fold_shared_rows, lacks_own_key, team_key_fallback, team_key_target,
+    as_shared_row, fold_shared_rows, lacks_own_key, own_twin, team_key_fallback, team_key_target,
     with_team_key,
 )
 from servonaut.services.team_rules import (
@@ -2454,6 +2454,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        instance = await self._memory_target(instance)
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
@@ -2809,6 +2810,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        instance = await self._memory_target(instance)
 
         try:
             result = self._memory_service.remember_finding(
@@ -2892,6 +2894,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        instance = await self._memory_target(instance)
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
         provider = instance_provider(instance)
@@ -4873,6 +4876,24 @@ class ServonautTools:
         if self._team_policy is None:
             return []
         return await self._team_policy.refresh(teams)
+
+    async def _memory_target(self, instance: Dict) -> Dict:
+        """The row whose memory *instance* has: the user's own row for a team's
+        copy of a server they own, else *instance* itself.
+
+        A note or finding given as ``<team>/<name>`` or a share id belongs
+        to the server, so it lands on the user's own record rather than on
+        the team's copy.
+        """
+        if instance.get('is_shared') is not True:
+            return instance
+        try:
+            own = await self._directory.all_instances()
+        except Exception as exc:  # noqa: BLE001 - a degraded provider must not block memory
+            logger.warning("Could not list servers to find the own row (%s)", type(exc).__name__)
+            return instance
+        twin = own_twin(instance, own)
+        return dict(twin) if twin is not None else instance
 
     async def _find_shared(self, reference: str) -> Optional[Dict]:
         """The team shared server *reference* names (id, name or ``<team>/<name>``).

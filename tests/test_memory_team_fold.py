@@ -180,3 +180,23 @@ class TestSharedRowKeying:
         store = MemoryStore(root=tmp_path)
         store.save_module(row["id"], "os", {"probed_at": "2026-01-01T00:00:00+00:00"}, instance_provider(row))
         assert [p.name for p in tmp_path.iterdir()] == ["shared"]
+
+
+class TestWritesLandOnTheOwnRow:
+    def test_the_memory_screen_of_a_team_copy_works_on_the_own_row(self):
+        from servonaut.screens.memory import MemoryScreen
+
+        own, twin = _own(), _shared()
+        app = _app([own, twin])
+        screen = MemoryScreen(twin)
+        type(screen).app = property(lambda self: app)
+        assert screen._target["id"] == own["id"]
+
+    def test_a_shared_only_row_keeps_its_own_target(self):
+        from servonaut.screens.memory import MemoryScreen
+
+        twin = _shared(instance_id=None, hostname="8.8.8.8")
+        app = _app([_own(), twin])
+        screen = MemoryScreen(twin)
+        type(screen).app = property(lambda self: app)
+        assert screen._target["id"] == twin["id"]
