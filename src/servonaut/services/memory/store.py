@@ -6,6 +6,13 @@ Per-module JSON files live at::
 
 A global ``index.json`` tracks which instances have been scanned and when.
 All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
+
+Locks. A record lock (:meth:`MemoryStore.annotation_lock`) serialises changes
+to one server's folder. Every read-modify-write of ``index.json`` runs under
+the single index lock (an in-process lock plus ``<root>/.locks/index.lock``
+for other processes), which the record lock may enclose. The order is always
+record lock first, index lock second, never the reverse: nothing takes a
+record lock while holding the index lock.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 from servonaut.config.schema import (
     DEFAULT_RECORD_LOCK_POLL_SECONDS,
@@ -52,6 +59,9 @@ TEAM_MERGED_MARKER = "team_merged.marker"
 #: Folder under the memory root that holds the cross-process lock files.
 LOCKS_DIR = ".locks"
 
+#: Lock file, inside :data:`LOCKS_DIR`, held while ``index.json`` is rewritten.
+INDEX_LOCK = "index.lock"
+
 #: File under the memory root held by the one running team-copy merge pass.
 TEAM_MERGE_LOCK = "team_merge.lock"
 
@@ -72,6 +82,18 @@ class RecordBusy(RecordLockTimeout):
     """A record is locked right now and the caller chose not to wait for it."""
 
 
+class NotesFingerprint(NamedTuple):
+    """What the notes file holds right now: exact-bytes digest, size, mtime (ISO UTC)."""
+
+    digest: str
+    size: int
+    modified_at: str
+
+
+#: SHA-256 of no text at all: the recorded hash of notes cleared on purpose.
+EMPTY_NOTES_DIGEST = hashlib.sha256(b"").hexdigest()
+
+
 class _HeldOsLock:
     """The OS lock the outermost holder of a record lock owns."""
 
@@ -89,6 +111,20 @@ def _record_locked(method):
     def locked(self, instance_id, *args, **kwargs):
         with self.annotation_lock(instance_id):
             return method(self, instance_id, *args, **kwargs)
+
+    return locked
+
+
+def _index_locked(method):
+    """Run a store method that rewrites ``index.json`` under the index lock.
+
+    The read that feeds the write happens inside the lock, so two writers
+    never start from the same copy of the index.
+    """
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._index_lock():
+            return method(self, *args, **kwargs)
 
     return locked
 
@@ -113,7 +149,9 @@ def _read_plain_text(path: Path) -> str:
         if path.is_symlink():
             raise MemoryCorruptError(f"{path.name} is a symlink") from exc
         raise
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+    # newline="": the text is exactly the bytes on disk, so what is hashed
+    # and compared is what was written, whatever the line endings.
+    with os.fdopen(fd, "r", encoding="utf-8", newline="") as fh:
         return fh.read()
 
 
@@ -238,7 +276,8 @@ def _write_private_atomic(path: Path, text: str, *, as_json: bool = False) -> No
         0o600,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # newline="": no translation, so the file holds exactly the encoded text.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             if as_json:
                 json.dump(text, fh, indent=2)
             else:
@@ -329,6 +368,10 @@ class MemoryStore:
         self._annotation_locks: Dict[str, threading.RLock] = {}
         self._os_locks: Dict[str, _HeldOsLock] = {}
         self._locks_guard = threading.Lock()
+        # Serialises every read-modify-write of index.json: this lock between
+        # threads, an OS lock between processes (see the module docstring).
+        self._index_thread_lock = threading.RLock()
+        self._index_depth = 0
         self._record_lock_wait = (
             DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS, DEFAULT_RECORD_LOCK_POLL_SECONDS,
         )
@@ -703,10 +746,42 @@ class MemoryStore:
             logger.error("Index migration failed: %s", exc)
             return {"version": INDEX_VERSION, "instances": {}}
 
+    @contextlib.contextmanager
+    def _index_lock(self):
+        """Hold the lock that serialises changes to ``index.json``. Re-entrant.
+
+        Waits at most :attr:`record_lock_wait` for both stages, then fails with
+        :class:`RecordLockTimeout` (an ``OSError``) before anything is changed.
+        """
+        timeout, poll = self._record_lock_wait
+        deadline = time.monotonic() + timeout
+        if not self._index_thread_lock.acquire(timeout=timeout):
+            raise RecordLockTimeout("another thread is changing the memory index")
+        try:
+            if self._index_depth:
+                yield
+                return
+            lock = FileLock(self._root / LOCKS_DIR / INDEX_LOCK, private_dir=True)
+            try:
+                lock.acquire_until(deadline, poll)
+            except FileLockTimeout as exc:
+                raise RecordLockTimeout(
+                    "another Servonaut process is changing the memory index"
+                ) from exc
+            self._index_depth = 1
+            try:
+                yield
+            finally:
+                self._index_depth = 0
+                lock.release()
+        finally:
+            self._index_thread_lock.release()
+
     def _save_index(self, index: Dict[str, Any]) -> None:
         """Persist *index* to disk atomically."""
         _atomic_write_json(self._index_path, index)
 
+    @_index_locked
     def update_index(
         self,
         instance_id: str,
@@ -756,6 +831,7 @@ class MemoryStore:
         if identity is not None:
             entry["share_identity"] = dict(identity)
 
+    @_index_locked
     def ensure_index_entry(
         self, instance_id: str, name: str, provider: str, modules: List[str]
     ) -> None:
@@ -782,6 +858,7 @@ class MemoryStore:
         self._apply_share_identity(instance_id, stored)
         self._save_index(index)
 
+    @_index_locked
     def _remove_from_index(self, instance_id: str) -> None:
         """Remove *instance_id* from the index (called by ``clear``)."""
         instance_id = self._resolve_id(instance_id)
@@ -878,10 +955,41 @@ class MemoryStore:
         path = self.get_annotations_path(instance_id, provider)
         try:
             if path.exists():
-                return path.read_text(encoding="utf-8")
+                with open(path, "r", encoding="utf-8", newline="") as fh:
+                    return fh.read()
         except OSError:
             pass
         return ""
+
+    def annotations_fingerprint(
+        self, instance_id: str, provider: str = "custom"
+    ) -> Optional[NotesFingerprint]:
+        """The exact bytes' SHA-256, size and modified time of the notes file.
+
+        ``None`` when there is no notes file. Unlike :meth:`read_annotations`
+        this never decodes the text, so a file that is not valid UTF-8 still
+        has a fingerprint. A symlink in place of the file raises
+        ``MemoryCorruptError``; other read errors raise ``OSError``.
+        """
+        _validate_instance_id(instance_id)
+        path = self.get_annotations_path(instance_id, provider)
+        if not path.is_symlink() and not path.exists():
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            if path.is_symlink():
+                raise MemoryCorruptError(f"{path.name} is a symlink") from exc
+            raise
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read()
+            modified = os.fstat(fh.fileno()).st_mtime
+        return NotesFingerprint(
+            digest=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            modified_at=datetime.fromtimestamp(modified, tz=timezone.utc).isoformat(),
+        )
 
     def read_annotations_strict(
         self,
@@ -982,6 +1090,7 @@ class MemoryStore:
             "annotations_modified_at": entry.get("annotations_modified_at", ""),
         }
 
+    @_index_locked
     def set_annotations_meta(
         self,
         instance_id: str,
@@ -1120,7 +1229,7 @@ class MemoryStore:
         tmp = directory / f".draft-{secrets.token_hex(8)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(content)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -1236,6 +1345,7 @@ class MemoryStore:
         state = (entry.get("cloud_imports") or {}).get(share_id)
         return dict(state) if isinstance(state, dict) else None
 
+    @_index_locked
     def set_cloud_import(
         self, instance_id: str, share_id: str, state: str, upload_pending: bool
     ) -> None:
@@ -1259,6 +1369,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         self._remove_from_index(instance_id)
 
+    @_index_locked
     def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
         """Record which server a share is, on its index entry.
 
@@ -1488,6 +1599,7 @@ class MemoryStore:
             "findings_synced_at": entry.get("findings_synced_at", ""),
         }
 
+    @_index_locked
     def set_findings_meta(
         self,
         instance_id: str,

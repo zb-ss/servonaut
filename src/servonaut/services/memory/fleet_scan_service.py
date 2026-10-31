@@ -24,6 +24,7 @@ from servonaut.services.memory.status import (
     STATUS_STALE as _STATUS_STALE,
     STATUS_NONE as _STATUS_NONE,
     STATUS_OPT_OUT as _STATUS_OPT_OUT,
+    BUSY_BUILD_REASON,
     STOPPED_REASON,
     is_stopped_instance,
     compute_memory_status as _compute_status,
@@ -49,6 +50,7 @@ _ROW_REASON_TEXT: Dict[str, str] = {
     "vault_credential_unavailable": "no usable vault key",
     "vault_rate_limited": "rate limited",
     STOPPED_REASON: "stopped (skipped)",
+    BUSY_BUILD_REASON: "memory busy, try again",
 }
 _HOST_KEY_REASON_PREFIX = "ssh_host_key_"
 _ROW_REASON_FALLBACK = "failed"
@@ -63,8 +65,16 @@ def row_reason_text(code: str) -> str:
     return _ROW_REASON_TEXT.get(code, _ROW_REASON_FALLBACK)
 
 
+def _has_unsaved(report: Any) -> bool:
+    """Whether probed modules were left unstored (reports from stubs have none)."""
+    unsaved = getattr(report, "unsaved", None)
+    return isinstance(unsaved, dict) and bool(unsaved)
+
+
 def _failure_code(report: Any) -> str:
-    """The most specific reason code of a build that produced nothing."""
+    """The most specific reason code of a build that stored nothing or not all."""
+    if _has_unsaved(report):
+        return BUSY_BUILD_REASON
     failures = getattr(report, "failures", None) or []
     if failures and getattr(failures[0], "reason", ""):
         return str(failures[0].reason)
@@ -285,14 +295,15 @@ class FleetScanService:
                     ms = self._memory_service
                     if hasattr(ms, "build_report"):
                         report = await ms.build_report(inst)
-                        if report.has_any_success:
+                        if report.has_any_success and not _has_unsaved(report):
                             result.succeeded.append(name)
                             ok = True
                         else:
                             self.last_reasons[row_id] = _failure_code(report)
                             result.failed.append({
                                 "instance": name,
-                                "reason": report.overall_reason or "unknown",
+                                "reason": report.overall_reason
+                                or (BUSY_BUILD_REASON if _has_unsaved(report) else "unknown"),
                                 "failures": [
                                     {
                                         "module": f.module,

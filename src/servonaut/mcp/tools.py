@@ -2803,6 +2803,8 @@ class ServonautTools:
             if hasattr(self._memory_service, "build_report"):
                 report = await self._memory_service.build_report(instance, modules)
                 successes = list(report.successes.keys())
+                unsaved = sorted(report.unsaved)
+                unsaved_message = report.unsaved_message
                 failures = [
                     {"module": f.module, "reason": f.reason, "message": f.message}
                     for f in report.failures
@@ -2811,6 +2813,7 @@ class ServonautTools:
             else:
                 results = await self._memory_service.refresh(instance, modules)
                 successes = list(results.keys())
+                unsaved, unsaved_message = [], None
                 failures = []
                 overall_reason = None if successes else "all_probers_failed"
         except Exception as exc:
@@ -2829,6 +2832,10 @@ class ServonautTools:
             SSH_FAILED_BUILD_REASON,
         )
         from servonaut.services.memory.status import STOPPED_REASON
+        if unsaved:
+            # Probed but not stored: the stored snapshot is unchanged for these.
+            response["unsaved"] = unsaved
+            response["message"] = unsaved_message
         if overall_reason:
             response["reason"] = overall_reason
             if overall_reason == "all_probers_failed":
@@ -2857,7 +2864,7 @@ class ServonautTools:
         self._audit.log(
             tool_name, audit_args, payload,
             len(successes) > 0,
-            overall_reason or "",
+            overall_reason or ("unsaved_modules" if unsaved else ""),
         )
         return payload
 

@@ -76,9 +76,26 @@ def test_a_busy_record_marks_the_module_partial_with_a_reason_and_keeps_the_rest
     assert set(calls) == {"os", "runtimes"}
     assert service._store.get_module(OWN_ID, "runtimes", "aws") is not None
     assert service._store.get_module(OWN_ID, "os", "aws") is None
-    assert report.successes["os"].partial is True
-    assert report.successes["runtimes"].partial is False
+    assert set(report.successes) == {"runtimes"}
+    assert report.count == 1 and report.has_any_success
+    assert report.unsaved["os"].partial is True
     assert [(f.module, f.reason) for f in report.failures] == [("os", "record_busy")]
+    assert report.overall_reason is None
+    assert "1 module was probed but not saved" in report.unsaved_message
+
+
+def test_nothing_saved_because_every_record_was_busy_is_reported_as_busy(tmp_path):
+    service = _build_service(tmp_path, names=("os", "runtimes"))
+
+    def busy(instance_id, module, data, provider="custom"):
+        raise RecordLockTimeout("busy")
+
+    service._store.save_module = busy
+    report = asyncio.run(service.build_report(_own(), ["os", "runtimes"]))
+    assert report.successes == {} and not report.has_any_success
+    assert set(report.unsaved) == {"os", "runtimes"}
+    assert report.overall_reason == "record_busy"
+    assert "2 modules were probed but not saved" in report.unsaved_message
 
 
 def test_pulling_findings_does_not_stall_the_loop_and_reports_busy(tmp_path):

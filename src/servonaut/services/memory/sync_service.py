@@ -72,7 +72,8 @@ from servonaut.services.memory.interfaces import (
     ValidationFailed,
 )
 from servonaut.services.memory.store import (
-    MemoryCorruptError, RecordBusy, RecordLockTimeout, check_finding_record,
+    EMPTY_NOTES_DIGEST, MemoryCorruptError, NotesFingerprint, RecordBusy,
+    RecordLockTimeout, check_finding_record,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
@@ -734,12 +735,27 @@ class MemorySyncService:
         meta = self._memory_service.get_annotations_meta(instance_id)
         local_hash: str = meta.get("annotations_hash", "")
         local_modified: Optional[str] = meta.get("annotations_modified_at") or None
+        adopted = False
 
-        # Notes that no longer match their recorded hash were edited after the
-        # bookkeeping was written (an editor, a copy): their age is unknown,
-        # so the local text is kept rather than judged by stale metadata.
-        if local_hash and self._notes_hash_on_disk(instance_id, provider) != local_hash:
+        try:
+            on_disk = self._memory_service.annotations_fingerprint(instance_id, provider)
+        except (OSError, MemoryCorruptError):
+            # Unreadable notes (a link, a permission): keep them untouched.
             return "local_newer"
+        if self._nothing_to_protect(on_disk, local_hash):
+            # No notes, or notes emptied by hand: whatever the bookkeeping says,
+            # there is no local text to lose, so the service's notes win.
+            local_hash, local_modified = "", None
+        elif on_disk.digest != local_hash:
+            # Edited after the bookkeeping was written (an editor, a copy), or
+            # written by a release that kept no hash: adopt the file as a local
+            # edit, dated by its modified time, and let the timestamps decide.
+            local_hash, local_modified, adopted = on_disk.digest, on_disk.modified_at, True
+            self._memory_service.set_annotations_meta(
+                instance_id,
+                annotations_hash=local_hash,
+                annotations_modified_at=local_modified,
+            )
 
         # Unchanged short-circuit: same content already on disk.
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -755,7 +771,10 @@ class MemorySyncService:
             # Undatable server copy — keep known-good local.
             return "local_newer"
 
-        # Server wins: write back to local store.
+        # Server wins. An adopted edit is the user's text: keep it as a draft
+        # first, and keep it in place when that cannot be done.
+        if adopted and not self._keep_displaced_notes(instance_id, provider):
+            return "local_newer"
         self._memory_service.write_annotations(instance_id, content, provider)
         self._memory_service.set_annotations_meta(
             instance_id,
@@ -765,9 +784,26 @@ class MemorySyncService:
         )
         return "updated"
 
-    def _notes_hash_on_disk(self, instance_id: str, provider: str) -> str:
-        text = self._memory_service.read_annotations(instance_id, provider)
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    @staticmethod
+    def _nothing_to_protect(on_disk: Optional[NotesFingerprint], recorded_hash: str) -> bool:
+        """Whether the local notes hold no text worth keeping over the service's.
+
+        Missing, or empty; except notes cleared on purpose in the app (their
+        recorded hash is the empty one), which are judged by their age.
+        """
+        if on_disk is None:
+            return True
+        return on_disk.size == 0 and recorded_hash != EMPTY_NOTES_DIGEST
+
+    def _keep_displaced_notes(self, instance_id: str, provider: str) -> bool:
+        """Save the local notes as a draft before they are replaced; whether it worked."""
+        try:
+            text = self._memory_service.read_annotations_strict(instance_id, provider)
+            self._memory_service.write_annotation_draft(instance_id, text, provider)
+        except (OSError, ValueError):
+            logger.warning("pull_annotations: could not keep the local notes as a draft")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Findings sync methods

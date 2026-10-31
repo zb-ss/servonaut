@@ -978,23 +978,25 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            failure_message = await self._refresh_memory(memory_service)
+            notice = await self._refresh_notice(memory_service)
             self._render_table()
-            if failure_message:
-                self._notify_refresh_failure(failure_message)
+            if notice:
+                self._notify_refresh_problem(*notice)
             else:
                 self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
             self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
-    async def _refresh_memory(
+    async def _refresh_notice(
         self, memory_service: Any, modules: Optional[list] = None,
-    ) -> Optional[str]:
-        """Re-probe, returning the message when the server could not be reached.
+    ) -> Optional[tuple[str, str]]:
+        """Re-probe, returning ``(message, severity)`` when the refresh fell short.
 
-        That is a refused host key or a failed SSH connection: nothing was
-        probed and the stored memory is unchanged.
+        An error when the server could not be reached (a refused host key or a
+        failed SSH connection: nothing was probed and the stored memory is
+        unchanged); a warning when probed modules were not saved because
+        another process was changing the record.
 
         Uses the reporting API when the service provides it; services that
         expose only the dict-returning ``refresh`` report nothing.
@@ -1009,11 +1011,15 @@ class MemoryScreen(Screen):
                 await memory_service.refresh(target, modules=modules)
             return None
         report = await refresh_report(target, modules)
-        return report.unreached_message
+        if report.unreached_message:
+            return report.unreached_message, "error"
+        if report.unsaved_message:
+            return report.unsaved_message, "warning"
+        return None
 
-    def _notify_refresh_failure(self, message: str) -> None:
-        """Show why nothing was probed (a host-key refusal names "[host]:port")."""
-        self.app.notify(message, severity="error", markup=False, timeout=20)
+    def _notify_refresh_problem(self, message: str, severity: str) -> None:
+        """Show why a refresh fell short (a host-key refusal names "[host]:port")."""
+        self.app.notify(message, severity=severity, markup=False, timeout=20)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
@@ -1043,12 +1049,12 @@ class MemoryScreen(Screen):
             return
         self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            failure_message = await self._refresh_memory(
+            notice = await self._refresh_notice(
                 memory_service, modules=[module_name],
             )
             self._render_table()
-            if failure_message:
-                self._notify_refresh_failure(failure_message)
+            if notice:
+                self._notify_refresh_problem(*notice)
             else:
                 self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
