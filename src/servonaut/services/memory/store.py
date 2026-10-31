@@ -10,10 +10,14 @@ All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import secrets
+import stat
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -36,6 +40,56 @@ INDEX_VERSION = 1
 # Where a team copy's directory is kept after it was merged into the user's own
 # record. Never deleted by Servonaut; the user may remove it by hand.
 TEAM_COPY_BACKUP_DIR = "team-copy-backups"
+
+# Marker written into a team copy's folder once its memory is merged elsewhere.
+# Not ``*.json``: module globbing must never read it as a module.
+TEAM_MERGED_MARKER = "team_merged.marker"
+
+
+class MemoryCorruptError(ValueError):
+    """Stored memory that cannot be trusted: a wrong shape, or a symlink where a plain file belongs."""
+
+
+def _draft_stamp() -> str:
+    """UTC timestamp, to the microsecond, for a conflict draft's name."""
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _is_plain(path: Path, want_dir: bool) -> bool:
+    """Whether *path* exists as a plain file (or directory), not a symlink."""
+    mode = path.lstat().st_mode
+    return stat.S_ISDIR(mode) if want_dir else stat.S_ISREG(mode)
+
+
+def _read_plain_text(path: Path) -> str:
+    """Read a UTF-8 file that is not a symlink; raises ``MemoryCorruptError`` for a link."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if path.is_symlink():
+            raise MemoryCorruptError(f"{path.name} is a symlink") from exc
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _load_object(path: Path) -> Dict[str, Any]:
+    """Parse a JSON object from a plain file; anything else is ``MemoryCorruptError``."""
+    data = json.loads(_read_plain_text(path))
+    if not isinstance(data, dict):
+        raise MemoryCorruptError(f"{path.name} does not hold a JSON object")
+    return data
+
+
+def _check_finding_shape(record: Dict[str, Any], path: Path) -> None:
+    if not isinstance(record.get("id"), str):
+        raise MemoryCorruptError(f"{path.name}: finding id is not text")
+    for key in ("created_at", "updated_at", "superseded_by"):
+        value = record.get(key)
+        if value is not None and not isinstance(value, str):
+            raise MemoryCorruptError(f"{path.name}: {key} is not text")
+
 
 # Regex that detects forbidden characters/sequences in instance IDs.
 _UNSAFE_ID_RE = re.compile(r"[/\\]|\.\.")
@@ -211,6 +265,9 @@ class MemoryStore:
         # Which server each share is (see :meth:`set_share_identity`), kept so
         # an index entry created later still records it.
         self._share_identities: Dict[str, Dict[str, Any]] = {}
+        # One lock per instance guards compare-and-write of its annotations.
+        self._annotation_locks: Dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
 
     def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
         """Map every incoming instance id through *resolver* (fake → real)."""
@@ -343,11 +400,16 @@ class MemoryStore:
         for instance_dir in dirs_to_search:
             if not instance_dir.exists():
                 continue
+            if strict and instance_dir.is_symlink():
+                raise MemoryCorruptError("memory folder is a symlink")
             for json_file in instance_dir.glob("*.json"):
                 module_name = json_file.stem
                 try:
-                    with open(json_file, "r") as fh:
-                        result[module_name] = json.load(fh)
+                    if strict:
+                        result[module_name] = _load_object(json_file)
+                    else:
+                        with open(json_file, "r") as fh:
+                            result[module_name] = json.load(fh)
                 except (json.JSONDecodeError, OSError) as exc:
                     if strict:
                         raise
@@ -751,12 +813,13 @@ class MemoryStore:
         ``""`` means there is no annotations file (or it is empty). A file
         that exists and cannot be read or decoded raises ``OSError`` or
         ``ValueError`` (``UnicodeDecodeError``), so a caller that rewrites
-        the notes never treats unreadable text as empty.
+        the notes never treats unreadable text as empty. A symlink in place of
+        the file raises ``MemoryCorruptError``.
         """
         path = self.get_annotations_path(instance_id, provider)
-        if not path.exists():
+        if not path.is_symlink() and not path.exists():
             return ""
-        return path.read_text(encoding="utf-8")
+        return _read_plain_text(path)
 
     def write_annotations(
         self,
@@ -780,6 +843,12 @@ class MemoryStore:
         Raises:
             ValueError: If *instance_id* fails safety validation.
         """
+        with self.annotation_lock(instance_id):
+            return self._write_annotations_locked(instance_id, content, provider)
+
+    def _write_annotations_locked(
+        self, instance_id: str, content: str, provider: str
+    ) -> Path:
         _validate_instance_id(instance_id)
         final_path = self.get_annotations_path(instance_id, provider)
         final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -866,8 +935,119 @@ class MemoryStore:
         self._save_index(index)
 
     # ------------------------------------------------------------------
+    # Annotation writers that must not lose each other's text
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def annotation_lock(self, instance_id: str):
+        """Hold the lock that serialises changes to one instance's annotations.
+
+        Re-entrant. In-process only: another process writing the same file is
+        not excluded.
+        """
+        instance_id = self._resolve_id(instance_id)
+        with self._locks_guard:
+            lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
+        with lock:
+            yield
+
+    def write_annotations_if_unchanged(
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+    ) -> bool:
+        """Write *content* only if the notes still hash to *expected_hash*.
+
+        The comparison and the write happen under :meth:`annotation_lock`, so
+        a merge that holds the lock cannot be overwritten in between. An
+        absent file hashes as empty text. Returns whether it wrote.
+        """
+        import hashlib
+
+        with self.annotation_lock(instance_id):
+            current = self.read_annotations_strict(instance_id, provider)
+            if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
+                return False
+            self._write_annotations_locked(instance_id, content, provider)
+            return True
+
+    def write_annotation_draft(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> Path:
+        """Keep *content* beside the notes as a new private file, never replacing another.
+
+        The name is ``annotations.unsaved-<UTC time>.md`` (a numeric suffix
+        when taken); the file is created mode 0600 without following links
+        and appears complete or not at all.
+        """
+        _validate_instance_id(instance_id)
+        directory = self._checked_dir(instance_id, provider)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / f".draft-{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            stamp = _draft_stamp()
+            for attempt in range(1000):
+                suffix = "" if attempt == 0 else f"-{attempt}"
+                final = directory / f"annotations.unsaved-{stamp}{suffix}.md"
+                try:
+                    os.link(tmp, final)  # fails if the name exists, even as a link
+                except FileExistsError:
+                    continue
+                return final
+            raise OSError("no free draft name")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
     # Team copies
     # ------------------------------------------------------------------
+
+    def find_instance_dirs(self, instance_id: str) -> List[str]:
+        """Provider folders under the root that hold a folder for *instance_id*.
+
+        Found by scanning the root, not the index, so a copy filed under a
+        renamed team's label is found on every retry. Only plain
+        directories count: a symlink at either level, a file, the backup
+        folder and unsafe names are skipped.
+        """
+        try:
+            _validate_instance_id(instance_id)
+            root = self._root.resolve()
+            children = sorted(self._root.iterdir())
+        except (ValueError, OSError):
+            return []
+        found: List[str] = []
+        for child in children:
+            candidate = child / instance_id
+            try:
+                if child.name == TEAM_COPY_BACKUP_DIR or _UNSAFE_ID_RE.search(child.name):
+                    continue
+                if not _is_plain(child, True) or not _is_plain(candidate, True):
+                    continue
+                candidate.resolve().relative_to(root)
+            except (OSError, ValueError):
+                continue
+            found.append(child.name)
+        return found
+
+    def read_merge_marker(self, instance_id: str, provider: str) -> Optional[Dict[str, Any]]:
+        """The marker saying this folder was merged elsewhere, or ``None``.
+
+        Raises ``MemoryCorruptError`` for a marker that is a link or not an object.
+        """
+        path = self._checked_dir(instance_id, provider) / TEAM_MERGED_MARKER
+        if not path.is_symlink() and not path.exists():
+            return None
+        return _load_object(path)
+
+    def write_merge_marker(self, instance_id: str, provider: str, data: Dict[str, Any]) -> None:
+        """Record atomically (mode 0600) that this folder is merged; the folder is kept."""
+        directory = self._checked_dir(instance_id, provider)
+        directory.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(directory / TEAM_MERGED_MARKER, data)
 
     def is_addressable(self, instance_id: str, provider: str) -> bool:
         """Whether *instance_id* under *provider* names a directory inside the memory root.
@@ -1077,14 +1257,20 @@ class MemoryStore:
         """
         _validate_instance_id(instance_id)
         findings_dir = self._findings_dir(instance_id, provider)
+        if strict and findings_dir.is_symlink():
+            raise MemoryCorruptError("findings folder is a symlink")
         if not findings_dir.exists():
             return []
 
         results: List[Dict[str, Any]] = []
         for json_file in findings_dir.glob("*.json"):
             try:
-                with open(json_file, "r") as fh:
-                    record: Dict[str, Any] = json.load(fh)
+                if strict:
+                    record = _load_object(json_file)
+                    _check_finding_shape(record, json_file)
+                else:
+                    with open(json_file, "r") as fh:
+                        record = json.load(fh)
             except (json.JSONDecodeError, OSError) as exc:
                 if strict:
                     raise
