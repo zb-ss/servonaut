@@ -141,7 +141,7 @@ def test_only_the_built_in_token_reaches_the_publish_steps(workflow: str) -> Non
     assert "github.token" not in _job(workflow, "resolve")
     assert "github.token" not in _job(workflow, "qualify")
     publish = _job(workflow, "publish")
-    assert publish.count("GH_TOKEN: ${{ github.token }}") == 2
+    assert publish.count("GH_TOKEN: ${{ github.token }}") == 3
     assert "GH_TOKEN" not in publish.split("\n    steps:", 1)[0]
 
 
@@ -343,6 +343,7 @@ def test_the_package_is_attested_before_it_is_uploaded(workflow: str) -> None:
         [
             "- name: Verify the package and write its checksums",
             "- name: Confirm the release and its tag",
+            "- name: Keep the preview the release already carries",
             "- name: Attest the package's build provenance",
             "- name: Upload the preview to the release",
         ],
@@ -1072,6 +1073,99 @@ gh() {
   esac
 }
 """
+
+
+def _keep(
+    workflow: str, tmp_path: Path, attached: dict[str, bytes]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """The check of what the release carries, against a release holding attached."""
+    preview = preview_for_tag("v2.28.0rc1")
+    workspace = tmp_path / "workspace"
+    (workspace / "preview").mkdir(parents=True)
+    for name, data in _this_run().items():
+        (workspace / "preview" / name).write_bytes(data)
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "notes.txt").write_text("published earlier\n", encoding="utf-8")
+    for name, data in attached.items():
+        (release / name).write_bytes(data)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / "assets-before").write_text(
+        "".join(f"{path.name}\n" for path in sorted(release.iterdir())), encoding="utf-8"
+    )
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-c", _GH_STUB + _script(workflow, "Keep the preview the release already carries")],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "TAG": preview.tag,
+            "DEB_ASSET": preview.deb_asset,
+            "SUMS_ASSET": preview.sums_asset,
+            "TEST_RELEASE": str(release),
+            "TEST_GH_LOG": str(log),
+        },
+    )
+    return result, log.read_text(encoding="utf-8").splitlines()
+
+
+def _this_run() -> dict[str, bytes]:
+    """The two assets as this run would attach them."""
+    preview = preview_for_tag("v2.28.0rc1")
+    return {preview.deb_asset: b"qualified package", preview.sums_asset: b"sums of this run\n"}
+
+
+def test_a_release_without_a_preview_gets_this_runs(workflow: str, tmp_path: Path) -> None:
+    result, calls = _keep(workflow, tmp_path, {})
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls == []
+
+
+def test_a_re_run_of_the_publish_job_may_attach_its_own_package_again(
+    workflow: str, tmp_path: Path
+) -> None:
+    result, calls = _keep(workflow, tmp_path, _this_run())
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    preview = preview_for_tag("v2.28.0rc1")
+    assert calls == [
+        f"release download v2.28.0rc1 --dir {tmp_path}/runner-temp/attached --pattern {name}"
+        for name in (preview.deb_asset, preview.sums_asset)
+    ]
+
+
+@pytest.mark.parametrize("asset", ["deb", "sums"])
+def test_a_package_built_by_another_run_never_replaces_the_attached_one(
+    workflow: str, tmp_path: Path, asset: str
+) -> None:
+    """A rebuilt package may differ, and the mirror keeps the first one."""
+    preview = preview_for_tag("v2.28.0rc1")
+    attached = _this_run()
+    name = preview.deb_asset if asset == "deb" else preview.sums_asset
+    attached[name] = b"built by another run"
+
+    result, _ = _keep(workflow, tmp_path, attached)
+
+    assert result.returncode == 1
+    assert f"::error::v2.28.0rc1 already carries {name} from another run." in result.stdout
+    assert "a release's desktop preview .deb is attached once" in result.stdout
+
+
+def test_the_attached_preview_is_checked_without_replacing_anything(workflow: str) -> None:
+    keep = _step(_job(workflow, "publish"), "Keep the preview the release already carries")
+
+    assert "if: env.DRY_RUN != 'true'" in keep
+    assert '"${RUNNER_TEMP}/assets-before"' in keep
+    assert "--clobber" not in keep
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "A release's `.deb` is attached once" in guide
 
 
 def _upload(workflow: str, tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:

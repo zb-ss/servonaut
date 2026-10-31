@@ -62,8 +62,12 @@ Every published `vX.Y.Z` release and `vX.Y.ZrcN` candidate also gets a Linux
 desktop preview `.deb`, built from the release's tag commit and qualified by
 the Desktop preview .deb workflow before it is attached, with its
 `SHA256SUMS` and a build-provenance attestation. That workflow is separate
-from the PyPI publish and never holds it back. Re-running it replaces only its
-own two assets; run it on the tag itself
+from the PyPI publish and never holds it back, and it never touches another
+asset of the release. A release's `.deb` is attached once: the release mirror
+never replaces a file it has copied, so `publish` refuses a package another run
+built when the release already carries one with other bytes; a re-run of the
+same run's `publish` job may attach its own package again. To attach a preview
+to a release that has none, run it on the tag itself
 (`gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z`), or add
 `-f dry_run=true` to build and qualify without attaching anything.
 

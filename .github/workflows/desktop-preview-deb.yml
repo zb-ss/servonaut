@@ -631,14 +631,36 @@ jobs:
           echo "Assets of ${TAG} now:"
           sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
 
+      # A package built by another run has other bytes, and the release mirror
+      # never replaces a file it has copied: the update manifest would then
+      # list a package GitHub no longer serves. So the first package stays.
+      - name: Keep the preview the release already carries
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          attached="${RUNNER_TEMP}/attached"
+          mkdir "${attached}"
+          for name in "${DEB_ASSET}" "${SUMS_ASSET}"; do
+            grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-before" || continue
+            gh release download "${TAG}" --dir "${attached}" --pattern "${name}"
+            if ! cmp -s "${attached}/${name}" "preview/${name}"; then
+              echo "::error::${TAG} already carries ${name} from another run. The release mirror never replaces a file it has copied, so a release's desktop preview .deb is attached once. Ship the fix with the next release; CONTRIBUTING.md describes how to take a broken preview off a release."
+              exit 1
+            fi
+            echo "${name} is already attached with these bytes."
+          done
+
       - name: Attest the package's build provenance
         if: env.DRY_RUN != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: preview/${{ needs.qualify.outputs.deb-asset }}
 
-      # --clobber replaces this workflow's own two assets, so a re-run is
-      # idempotent; every other asset of the release is left alone.
+      # --clobber lets a re-run of this publish job attach its own package
+      # again; a package another run built was refused above. Every other
+      # asset of the release is left alone.
       - name: Upload the preview to the release
         if: env.DRY_RUN != 'true'
         env:
