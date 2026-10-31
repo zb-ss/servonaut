@@ -162,3 +162,21 @@ class TestMergedFleet:
         service.get_remote_fleet = no_remote
         rows = asyncio.run(service.get_merged_fleet(hidden_ids={"share-1"}))
         assert [row["id"] for row in rows] == ["i-0abc0abc0abc0abc0"]
+
+
+class TestSharedRowKeying:
+    def test_memory_of_a_shared_row_is_never_filed_under_the_team_label(self):
+        from servonaut.services.memory.provider import instance_provider
+
+        row = _shared(instance_id=None, hostname="8.8.8.8")
+        assert row["provider"] == "Team Team A"
+        assert instance_provider(row) == "shared"
+
+    def test_a_team_label_with_spaces_never_reaches_the_path(self, tmp_path):
+        from servonaut.services.memory.provider import instance_provider
+        from servonaut.services.memory.store import MemoryStore
+
+        row = _shared(instance_id=None, hostname="8.8.8.8")
+        store = MemoryStore(root=tmp_path)
+        store.save_module(row["id"], "os", {"probed_at": "2026-01-01T00:00:00+00:00"}, instance_provider(row))
+        assert [p.name for p in tmp_path.iterdir()] == ["shared"]
