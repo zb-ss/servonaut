@@ -11,6 +11,7 @@ All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+from servonaut.config.schema import (
+    DEFAULT_RECORD_LOCK_POLL_SECONDS,
+    DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS,
+)
 from servonaut.services.memory.provider import provider_slug
+from servonaut.utils.file_lock import FileLock, FileLockTimeout
 
 if TYPE_CHECKING:
     from servonaut.config.schema import MemoryConfig
@@ -41,9 +47,27 @@ INDEX_VERSION = 1
 # Not ``*.json``: module globbing must never read it as a module.
 TEAM_MERGED_MARKER = "team_merged.marker"
 
+#: Folder under the memory root that holds the cross-process lock files.
+LOCKS_DIR = ".locks"
+
 
 class MemoryCorruptError(ValueError):
     """Stored memory that cannot be trusted: a wrong shape, or a symlink where a plain file belongs."""
+
+
+class RecordLockTimeout(FileLockTimeout):
+    """Another process kept a server's record locked for the whole wait.
+
+    An ``OSError``, so callers that treat an unwritable record as a failed
+    write (the merge keeps the copy, a save keeps the draft) need no change.
+    """
+
+
+class _HeldOsLock:
+    """The OS lock the outermost holder of a record lock owns."""
+
+    def __init__(self, lock: FileLock) -> None:
+        self.lock = lock
 
 
 def _draft_stamp() -> str:
@@ -276,9 +300,24 @@ class MemoryStore:
         # Which server each share is (see :meth:`set_share_identity`), kept so
         # an index entry created later still records it.
         self._share_identities: Dict[str, Dict[str, Any]] = {}
-        # One lock per instance guards compare-and-write of its annotations.
+        # One lock per instance guards compare-and-write of its record; the
+        # outermost holder in this process also takes an OS lock, so another
+        # process (app, CLI, MCP server) is excluded too.
         self._annotation_locks: Dict[str, threading.RLock] = {}
+        self._os_locks: Dict[str, _HeldOsLock] = {}
         self._locks_guard = threading.Lock()
+        self._record_lock_wait = (
+            DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS, DEFAULT_RECORD_LOCK_POLL_SECONDS,
+        )
+
+    @property
+    def record_lock_wait(self) -> tuple[float, float]:
+        """``(timeout, poll)`` seconds a change waits for another process's lock."""
+        return self._record_lock_wait
+
+    def set_record_lock_wait(self, timeout: float, poll: float) -> None:
+        """Set how long a change waits for another process holding the same record."""
+        self._record_lock_wait = (timeout, poll)
 
     def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
         """Map every incoming instance id through *resolver* (fake → real)."""
@@ -939,14 +978,39 @@ class MemoryStore:
     def annotation_lock(self, instance_id: str):
         """Hold the lock that serialises changes to one instance's annotations.
 
-        Re-entrant. In-process only: another process writing the same file is
-        not excluded.
+        Re-entrant. Threads are ordered by an in-process lock; the outermost
+        holder also takes an OS lock on ``<root>/.locks/<sha256 of the id>.lock``
+        so a second process writing the same record waits (bounded by
+        :attr:`record_lock_wait`) and then fails with :class:`RecordLockTimeout`,
+        an ``OSError``, before it has changed anything.
         """
         instance_id = self._resolve_id(instance_id)
         with self._locks_guard:
             lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
         with lock:
-            yield
+            held = self._os_locks.get(instance_id)
+            if held is not None:  # nested in this process: already excluded
+                yield
+                return
+            held = self._take_os_lock(instance_id)
+            self._os_locks[instance_id] = held
+            try:
+                yield
+            finally:
+                del self._os_locks[instance_id]
+                held.lock.release()
+
+    def _take_os_lock(self, instance_id: str) -> "_HeldOsLock":
+        digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+        lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock")
+        timeout, poll = self._record_lock_wait
+        try:
+            lock.acquire(timeout, poll)
+        except FileLockTimeout as exc:
+            raise RecordLockTimeout(
+                "another Servonaut process is changing this server's memory"
+            ) from exc
+        return _HeldOsLock(lock)
 
     def write_annotations_if_unchanged(
         self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
@@ -957,8 +1021,6 @@ class MemoryStore:
         a merge that holds the lock cannot be overwritten in between. An
         absent file hashes as empty text. Returns whether it wrote.
         """
-        import hashlib
-
         with self.annotation_lock(instance_id):
             current = self.read_annotations_strict(instance_id, provider)
             if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
