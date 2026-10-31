@@ -461,6 +461,14 @@ class MemoryCloud:
                 for g in self._grants
             ):
                 return 409, {"error": {"code": "grant_exists", "message": "already shared"}}
+            # As add_wraps: a wrap sealed for a key the member no longer holds is
+            # not stored, so the member stays missing (insufficient_wraps below).
+            current = {m["user_id"]: m["fingerprint"] for m in self.team_keys(team_slug)}
+            fresh = [
+                w for w in wraps
+                if not w.get("recipient_fingerprint")
+                or w["recipient_fingerprint"] == current.get(w["recipient_user_id"])
+            ]
             grant = {
                 "id": str(uuid.uuid4()),
                 "team_slug": team_slug,
@@ -471,7 +479,10 @@ class MemoryCloud:
                 "granted_by_user_id": self._user_id(),
                 "created_at": _now(),
                 "revoked_at": None,
-                "wraps": self._stamped(team_slug, wraps),
+                "wraps": self._stamped(team_slug, [
+                    {k: w[k] for k in ("recipient_user_id", "envelope_id", "wrapped_dek")}
+                    for w in fresh
+                ]),
             }
             missing = self._missing_wraps(grant)
             if missing:
@@ -609,21 +620,27 @@ class MemoryCloud:
             grant = self._grant_on(team_slug, grant_id)
             if grant is None or not self._may_manage(team_slug, grant):
                 return 404, {"error": {"code": "not_found", "message": "no such grant"}}
+            if grant["status"] != "active":
+                return 409, {"error": {"code": "grant_not_live", "message": "grant revoked"}}
             uid = self._user_id()
             rows = []
             for e in self._latest_envelopes(grant):
+                missing = [
+                    self._recipient(team_slug, grant["instance_id"], m)
+                    for m in self._eligible(grant)
+                    if not self._has_wrap(grant, e, m["user_id"])
+                ]
+                if not missing:
+                    continue  # the service lists only snapshots someone cannot read yet
                 own = next((w for w in e.get("dek_wraps", []) if w.get("recipient_user_id") == uid), None)
                 rows.append({
                     "envelope_id": e["id"], "module": e["module"],
                     "snapshot_version": e["snapshot_version"],
                     "wrapped_dek": own["wrapped_dek"] if own else None,
-                    "missing_recipients": [
-                        self._recipient(team_slug, grant["instance_id"], m)
-                        for m in self._eligible(grant)
-                        if not self._has_wrap(grant, e, m["user_id"])
-                    ],
+                    "missing_recipients": missing,
                 })
-            return 200, {"grant_id": grant_id, "envelopes": rows, "pending_recipients": []}
+            return 200, {"grant_id": grant_id, "instance_id": grant["instance_id"],
+                         "envelopes": rows, "pending_recipients": []}
 
     def missing_team_wraps(self, accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """For accepted envelopes: covered members that still lack a wrap."""
