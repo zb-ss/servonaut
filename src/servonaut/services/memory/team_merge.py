@@ -70,6 +70,10 @@ class MemoryKey:
     instance_id: str
 
 
+class CopyChanged(OSError):
+    """A team copy changed after it was checked; it is merged again next pass."""
+
+
 @dataclass
 class MergeStats:
     """What one merge changed in the target."""
@@ -422,8 +426,14 @@ class TeamCopyMerger:
     def mark_merged(
         self, source: MemoryKey, target: MemoryKey, *, upload_pending: bool,
         notes_pending: bool = False, findings_pending: bool = False,
+        verify_source: bool = False,
     ) -> Dict[str, Any]:
         """Write the marker and return what it holds.
+
+        With ``verify_source`` the copy is checked once more, under its own
+        record lock, and :class:`CopyChanged` is raised (nothing written) when
+        it holds something the target does not: a note saved between the merge
+        and the marker must not be marked as merged.
 
         ``notes_pending`` and ``findings_pending`` say the service's notes or
         findings for the share are still owed to the target (Memory Sync was
@@ -440,7 +450,13 @@ class TeamCopyMerger:
             "remote_notes_pending": notes_pending,
             "remote_findings_pending": findings_pending,
         }
-        self._store.write_merge_marker(source.instance_id, source.provider, data)
+        if not verify_source or source == target:
+            self._store.write_merge_marker(source.instance_id, source.provider, data)
+            return data
+        with self._store.annotation_lock(source.instance_id, wait=False):
+            if not self.is_contained(source, target):
+                raise CopyChanged("the team copy changed while it was merged")
+            self._store.write_merge_marker(source.instance_id, source.provider, data)
         return data
 
 
@@ -683,7 +699,7 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
     owes = plan.uploads and run.state != SYNC_OFF and (stats.held_notes or stats.held_findings)
     data = merger.mark_merged(
         plan.source, plan.target, upload_pending=owes,
-        notes_pending=notes_pending, findings_pending=findings_pending,
+        notes_pending=notes_pending, findings_pending=findings_pending, verify_source=True,
     )
     report.copies += 1
     if not (notes_pending or findings_pending):

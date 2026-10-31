@@ -123,3 +123,26 @@ class TestOneTarget:
         assert _marker(tmp_path) == before
         assert SHARE_ID in report.kept
         assert sync.pending_count(new_id) == 0 and sync.pending_count(OWN_ID) == 0
+
+
+class TestCopyEditedBeforeItIsMarked:
+    def test_a_copy_changed_after_the_check_is_not_marked_and_is_merged_next_pass(self, tmp_path):
+        from unittest.mock import patch
+
+        from servonaut.services.memory.team_merge import TeamCopyMerger
+
+        service = _service(tmp_path)
+        _put_copy(service, notes="first note")
+        original = TeamCopyMerger.mark_merged
+
+        def change_then_mark(merger, *args, **kwargs):
+            service.write_annotations(SHARE_ID, "newer source note", LEGACY)
+            return original(merger, *args, **kwargs)
+
+        with patch.object(TeamCopyMerger, "mark_merged", change_then_mark):
+            first = _run(service, ROWS, _locked(tmp_path, service))
+        assert _marker(tmp_path) is None and first.copies == 0 and SHARE_ID in first.kept
+        _run(service, ROWS, _locked(tmp_path, service))
+        merged = service.read_annotations(OWN_ID, "aws")
+        assert "first note" in merged and "newer source note" in merged
+        assert _marker(tmp_path) is not None
