@@ -14,8 +14,10 @@ name: Release mirror
 #            candidates included) at the release when it is the newest, and
 #            signs the update manifests the packaged desktop app reads,
 #            manifest/stable.json and manifest/preview.json, to match;
-#   notes    links the mirrored desktop packages from the release notes, and
-#            removes those links once the packages are gone from the release;
+#   notes    once the channel files point at the release, links the mirrored
+#            desktop packages from the release notes, and removes those links
+#            once the packages are gone from the release; a failure to sign
+#            the update manifests does not hold it back;
 #   refresh  every day, re-signs the update manifests with a fresh expiry
 #            before they expire;
 #   audit    every day, re-checks the channel files, every file they list and
@@ -160,6 +162,8 @@ jobs:
       attestations: read
     outputs:
       desktop-deb: ${{ steps.verify.outputs.desktop-deb }}
+      # Set once the plan was handed on, even when a later step fails.
+      plan-artifact: ${{ steps.plan-handoff.outputs.artifact-id }}
     env:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.resolve.outputs.tag }}
@@ -292,6 +296,20 @@ jobs:
             --github-latest-tag "${latest}" \
             "${dry_run_flag[@]}"
 
+      # The notes job needs the plan, not the files. It is handed on before
+      # the update manifests are signed, so the notes still link files that
+      # are mirrored when signing fails; the run fails all the same.
+      - name: Hand the plan to the notes job
+        id: plan-handoff
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-mirror-plan
+          path: ${{ runner.temp }}/mirror/plan.json
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+          include-hidden-files: false
+
       # They follow the channel files and must pass the app's own trust
       # policy before they are uploaded. Only this step and the refresh
       # receive the signing key; a dry run signs and checks, but writes nothing.
@@ -319,23 +337,16 @@ jobs:
             --refresh-days "${MANIFEST_REFRESH_DAYS}" \
             "${dry_run_flag[@]}"
 
-      # The notes job needs the plan, not the files.
-      - name: Hand the plan to the notes job
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-mirror-plan
-          path: ${{ runner.temp }}/mirror/plan.json
-          retention-days: 1
-          if-no-files-found: error
-          overwrite: true
-          include-hidden-files: false
-
-  # Runs after every real mirror run: it adds the link once the package is
-  # mirrored and removes it again if the package was taken off the release.
+  # Runs after every real mirror run that got as far as the channel files: it
+  # adds the link once the package is mirrored and removes it again if the
+  # package was taken off the release. A failure to sign the update
+  # manifests, which comes later, does not hold it back.
   notes:
     name: notes
     needs: [resolve, mirror]
-    if: needs.mirror.result == 'success' && needs.resolve.outputs.dry-run != 'true'
+    if: >-
+      !cancelled() && needs.mirror.outputs.plan-artifact != '' &&
+      needs.resolve.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The only job that can write to the repository: it edits the release notes.

@@ -1836,8 +1836,8 @@ def test_files_are_verified_before_anything_is_uploaded(workflow: str) -> None:
         "- name: Upload the files",
         "- name: Download the files again through the mirror",
         "- name: Point the channel files at the release",
-        "- name: Sign the update manifests",
         "- name: Hand the plan to the notes job",
+        "- name: Sign the update manifests",
     ]
     positions = [mirror_job.index(marker) for marker in order]
     assert positions == sorted(positions)
@@ -1898,9 +1898,28 @@ def test_the_provenance_loop_checks_every_disk_image(workflow: str, tmp_path: Pa
 
 def test_the_notes_job_edits_only_after_a_real_mirror_run(workflow: str) -> None:
     notes = _job(workflow, "notes")
-    # Every real run, so a withdrawn package's link is removed again.
-    assert "    if: needs.mirror.result == 'success' && needs.resolve.outputs.dry-run != 'true'\n" in notes
+    # Every real run that handed the plan on, so a withdrawn package's link
+    # is removed again.
+    assert (
+        "    if: >-\n      !cancelled() && needs.mirror.outputs.plan-artifact != '' &&\n"
+        "      needs.resolve.outputs.dry-run != 'true'\n"
+    ) in notes
     assert 'gh api -X PATCH "repos/${GH_REPO}/releases/${release_id}"' in notes
+
+
+def test_a_failure_to_sign_the_manifests_does_not_hold_back_the_notes(workflow: str) -> None:
+    mirror_job = _job(workflow, "mirror")
+    handoff = _step(workflow, "Hand the plan to the notes job")
+    assert "        id: plan-handoff\n" in handoff
+    # The plan is handed on only once the channel files point at the release.
+    assert "        if:" not in handoff
+    assert "      plan-artifact: ${{ steps.plan-handoff.outputs.artifact-id }}\n" in mirror_job
+    assert mirror_job.index("- name: Hand the plan to the notes job") < mirror_job.index(
+        "- name: Sign the update manifests"
+    )
+    # Nothing after the handoff decides whether the notes run.
+    notes = _job(workflow, "notes")
+    assert "needs.mirror.result" not in notes
 
 
 def test_the_audit_runs_daily_only_while_the_mirror_is_on(workflow: str) -> None:
