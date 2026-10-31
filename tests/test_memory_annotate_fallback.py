@@ -323,3 +323,27 @@ async def test_modal_escape_without_changes_closes_at_once() -> None:
         await pilot.press("escape")
         await pilot.pause()
     assert app.result is None
+
+
+@pytest.mark.asyncio
+async def test_notes_changed_while_the_editor_was_open_are_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    service = _memory_service(tmp_path)
+    app = _Host(service)
+
+    async with app.run_test(headless=True) as pilot:
+        editor = await _open_editor(app, pilot)
+        # A team-copy merge appends its block while the editor is open.
+        merged = "my note\n\n## Notes from a team's copy of this server\n\nteam note\n"
+        service.write_annotations("custom-web-1", merged, "custom")
+        editor.query_one("#text-editor-area", TextArea).load_text("my edited note\n")
+        await pilot.press("ctrl+s")
+        await _settle(app, pilot)
+
+    assert _annotations(service) == merged
+    assert any("changed" in message and level == "warning" for message, level in app.notes)
+    assert "Annotations saved." not in [message for message, _ in app.notes]
+    kept = tmp_path / "custom" / "custom-web-1" / "annotations.unsaved.md"
+    assert kept.read_text() == "my edited note\n"
+    app.memory_sync_service.enqueue_annotations.assert_not_called()

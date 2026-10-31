@@ -1231,7 +1231,9 @@ class MemoryScreen(Screen):
             if result is None or result == content:
                 return
             self.run_worker(
-                self._save_annotations(instance_id, provider, memory_service, result),
+                self._save_annotations(
+                    instance_id, provider, memory_service, result, expected=content
+                ),
                 exclusive=False,
                 group="memory_mutation",
                 name="memory_annotations_save",
@@ -1248,17 +1250,53 @@ class MemoryScreen(Screen):
             _on_close,
         )
 
+    @staticmethod
+    def _write_unless_changed(
+        memory_service: Any,
+        instance_id: str,
+        provider: str,
+        text: str,
+        expected: Optional[str],
+    ) -> bool:
+        """Write *text* unless the notes differ from *expected*; return whether it wrote.
+
+        The editor holds the notes as they were when it opened. A merge or
+        another editor may have changed the file since, and writing the
+        editor's text would drop that. The text is then kept beside the notes
+        as ``annotations.unsaved.md`` and nothing is overwritten.
+        """
+        if expected is not None and memory_service.read_annotations(instance_id, provider) != expected:
+            path = memory_service.get_annotations_path(instance_id, provider)
+            path.with_name("annotations.unsaved.md").write_text(text, encoding="utf-8")
+            return False
+        memory_service.write_annotations(instance_id, text, provider)
+        return True
+
     async def _save_annotations(
-        self, instance_id: str, provider: str, memory_service: Any, text: str
+        self,
+        instance_id: str,
+        provider: str,
+        memory_service: Any,
+        text: str,
+        expected: Optional[str] = None,
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
         try:
-            await asyncio.to_thread(
-                memory_service.write_annotations, instance_id, text, provider
+            written = await asyncio.to_thread(
+                self._write_unless_changed, memory_service, instance_id, provider, text, expected
             )
         except Exception as exc:
             self.app.notify(
                 f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        if not written:
+            self.app.notify(
+                "The notes changed while you were editing (a team merge or another "
+                "edit), so nothing was overwritten. Your text is saved as "
+                "annotations.unsaved.md next to the notes; reopen the editor to merge it.",
+                severity="warning",
+                markup=False,
             )
             return
         self.app.notify("Annotations saved.", severity="information")
