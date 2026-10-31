@@ -647,7 +647,7 @@ class MemoryScreen(Screen):
             if all_modules.get(name) is module
         }
         in_use = bool(shared_names)
-        self._show_shared_source(self._shared, in_use)
+        self._show_shared_source(self._shared, shared_names)
 
         if not all_modules:
             # Empty: show the CTA so users know how to populate memory.
@@ -773,18 +773,18 @@ class MemoryScreen(Screen):
             except Exception:  # noqa: BLE001 - not every control is mounted
                 pass
 
-    def _show_shared_source(self, shared: Any, in_use: bool) -> None:
+    def _show_shared_source(self, shared: Any, shown: Any) -> None:
         """Say which team the rows that are not local come from."""
         label = self.query_one("#memory-shared-source", Static)
         lines = []
-        if shared is not None and in_use:
+        if shared is not None and shown:
             redaction = getattr(self.app, "redaction_service", None)
             redact = (
                 redaction.redact_name
                 if getattr(self.app, "demo_mode", False) and redaction is not None
                 else (lambda n: n)
             )
-            lines.append(escape(shared_source_text(shared, redact(shared.team_name), redact)))
+            lines.append(escape(shared_source_text(shared, shared.team_name, redact, shown)))
         if self._read_only:
             lines.append(
                 "Read-only: this server has no connection of its own, so it "

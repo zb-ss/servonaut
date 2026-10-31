@@ -2668,7 +2668,8 @@ class ServonautTools:
             MEMORY_TRUST_NOTICE, frame_as_untrusted,
         )
 
-        source = shared_source_text(shared, shared.team_name)
+        shown = {n for n, m in shared.modules.items() if modules.get(n) is m}
+        source = shared_source_text(shared, shared.team_name, shown=shown)
         if fmt == "stack_summary":
             from servonaut.services.memory.stack_summary import build_stack_summary
 

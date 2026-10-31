@@ -122,3 +122,16 @@ def _app_with_services():
         side_effect=lambda work, **_kw: work.close() if hasattr(work, "close") else None)
     app.init_paid_services()
     return app
+
+
+def test_full_output_names_the_team_that_supplied_the_shown_module():
+    from servonaut.services.memory.shared_view import combine_shared
+
+    a = SharedMemory("team-a", "Team A", {"os": {"observed": {"distro": "old"}, "declared": {},
+                                                "probed_at": "2026-10-20T08:00:00+00:00"}})
+    b = SharedMemory("team-b", "Team B", {"os": {"observed": {"distro": "new"}, "declared": {},
+                                                "probed_at": "2026-10-22T08:00:00+00:00"}})
+    reader = MagicMock()
+    reader.read = AsyncMock(return_value=combine_shared([a, b]))
+    out = json.loads(asyncio.run(_tools(reader).get_server_memory("web-1", format="full")))
+    assert out["source"].startswith("Shared by Team B") and "Team A" not in out["source"]

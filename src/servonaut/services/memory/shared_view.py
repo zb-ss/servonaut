@@ -301,25 +301,35 @@ def combine_shared(found: Any) -> Optional[SharedMemory]:
             mine = modules.get(name)
             if mine is None or (module.get("probed_at") or "") > (mine.get("probed_at") or ""):
                 modules[name] = module
-                sources[name] = part.team_name
+                sources[name] = part.sources.get(name, part.team_name)
     return SharedMemory(parts[0].team_slug, parts[0].team_name, modules, sources)
 
 
 def shared_source_text(
-    shared: SharedMemory, team_name: str, redact: Callable[[str], str] = lambda n: n
+    shared: SharedMemory,
+    team_name: str,
+    redact: Callable[[str], str] = lambda n: n,
+    shown: Optional[Any] = None,
 ) -> str:
     """The plain label of where shared memory comes from.
 
-    One team: "Shared by <team>, probed <date>". Several: each team with
-    the modules it supplied. *redact* maps a team name to what may be shown.
+    Built from the modules actually *shown* from the team copies (default:
+    all of them), never from the first team read: one team gives "Shared by
+    <team>, probed <date>", several give each team with the modules it
+    supplied. *team_name* is only used when the modules carry no source.
+    *redact* maps a team name to what may be shown. Empty when no module
+    is shown from the teams.
     """
-    probed = shared.probed_at[:16].replace("T", " ")
+    names = sorted(shared.modules if shown is None else (n for n in shown if n in shared.modules))
+    if not names:
+        return ""
+    probed = max((shared.modules[n].get("probed_at") or "" for n in names), default="")
+    probed = probed[:16].replace("T", " ")
     when = f", probed {probed}" if probed else ""
-    teams = sorted(set(shared.sources.values()))
-    if len(teams) <= 1:
-        return f"Shared by {team_name}{when}"
-    parts = [
-        f"{redact(team)} ({', '.join(sorted(m for m, t in shared.sources.items() if t == team))})"
-        for team in teams
-    ]
+    by_team: Dict[str, list] = {}
+    for name in names:
+        by_team.setdefault(shared.sources.get(name) or team_name, []).append(name)
+    if len(by_team) == 1:
+        return f"Shared by {redact(next(iter(by_team)))}{when}"
+    parts = [f"{redact(team)} ({', '.join(mods)})" for team, mods in sorted(by_team.items())]
     return f"Shared by {'; '.join(parts)}{when}"

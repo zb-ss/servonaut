@@ -292,3 +292,60 @@ async def test_disjoint_grants_from_two_teams_both_show_with_their_own_label(tmp
         assert names == ["os", "services"]
         label = str(app.screen.query_one("#memory-shared-source", Static).render())
         assert "Team A (os)" in label and "Team B (services)" in label
+
+
+def _team_copy(slug, name, module, probed_at):
+    return SharedMemory(slug, name, {module: {"observed": {"k": "v"}, "declared": {},
+                                              "probed_at": probed_at}})
+
+
+async def test_overlapping_grants_label_the_team_whose_copy_won(tmp_path):
+    from servonaut.services.memory.shared_view import ShareCandidate, combine_shared
+
+    row = dict(MEMORY_ONLY_ROW)
+    row["grant_candidates"] = [ShareCandidate("team-a", "Team A", "i-owner-1"),
+                               ShareCandidate("team-b", "Team B", "i-owner-1")]
+    reader = MagicMock()
+    reader.read = AsyncMock(side_effect=[
+        _team_copy("team-a", "Team A", "os", "2026-10-20T08:00:00+00:00"),
+        _team_copy("team-b", "Team B", "os", "2026-10-22T08:00:00+00:00"),
+    ])
+    app = _host(tmp_path, row, reader)
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        for _ in range(20):
+            await pilot.pause(0.05)
+        label = str(app.screen.query_one("#memory-shared-source", Static).render())
+        assert "Team B" in label and "Team A" not in label
+    # The combined map says the same for a sole source.
+    combined = combine_shared([_team_copy("team-a", "Team A", "os", "2026-10-20T08:00:00+00:00"),
+                               _team_copy("team-b", "Team B", "os", "2026-10-22T08:00:00+00:00")])
+    from servonaut.services.memory.shared_view import shared_source_text
+    assert shared_source_text(combined, combined.team_name).startswith("Shared by Team B")
+
+
+async def test_a_module_replaced_by_local_data_makes_no_shared_claim(tmp_path):
+    from datetime import datetime, timezone
+    from servonaut.services.memory.shared_view import ShareCandidate
+
+    row = dict(SHARED_ROW)
+    row["grant_candidates"] = [ShareCandidate("team-a", "Team A", "i-owner-1"),
+                               ShareCandidate("team-b", "Team B", "i-owner-1")]
+    reader = MagicMock()
+    reader.read = AsyncMock(side_effect=[
+        _team_copy("team-a", "Team A", "os", "2020-01-01T00:00:00+00:00"),
+        _team_copy("team-b", "Team B", "services", "2026-10-22T08:00:00+00:00"),
+    ])
+    app = _host(tmp_path, row, reader)
+    app.memory_service._store.save_module("share-1", "os", {
+        "module": "os", "instance_id": "share-1", "observed": {"distro": "Local 13"},
+        "declared": {}, "probed_at": datetime.now(tz=timezone.utc).isoformat(),
+        "ttl_seconds": 86400, "sudo_used": False, "truncated": False, "partial": False,
+        "raw_output": ""}, provider="shared")
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        for _ in range(30):
+            await pilot.pause(0.05)
+        label = str(app.screen.query_one("#memory-shared-source", Static).render())
+        assert "Team B (services)" in label or label.startswith("Shared by Team B")
+        assert "Team A" not in label
