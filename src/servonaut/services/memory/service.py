@@ -733,7 +733,8 @@ class MemoryService(MemoryServiceInterface):
         return self._store.read_annotations(instance_id, provider)
 
     def write_annotations(
-        self, instance_id: str, content: str, provider: str = "custom"
+        self, instance_id: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> Path:
         """Persist *content* as the annotations for *instance_id* and return the path.
 
@@ -743,21 +744,25 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             content: Raw annotation text to write.
             provider: Provider slug.
+            modified_at: Record the notes' hash and this time in the same locked step.
         """
         instance_id = self._resolve_id(instance_id)
-        return self._store.write_annotations(instance_id, content, provider)
+        return self._store.write_annotations(
+            instance_id, content, provider, modified_at=modified_at
+        )
 
     def annotation_lock(self, instance_id: str, *, wait: bool = True):
         """Hold the record lock of *instance_id* (see ``MemoryStore.annotation_lock``)."""
         return self._store.annotation_lock(self._resolve_id(instance_id), wait=wait)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write the notes only if they still hash to *expected_hash* (see the store)."""
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations_if_unchanged(
-            instance_id, expected_hash, content, provider
+            instance_id, expected_hash, content, provider, modified_at=modified_at
         )
 
     def write_annotation_draft(

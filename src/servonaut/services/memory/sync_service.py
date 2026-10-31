@@ -733,6 +733,12 @@ class MemorySyncService:
         local_hash: str = meta.get("annotations_hash", "")
         local_modified: Optional[str] = meta.get("annotations_modified_at") or None
 
+        # Notes that no longer match their recorded hash were edited after the
+        # bookkeeping was written (an editor, a copy): their age is unknown,
+        # so the local text is kept rather than judged by stale metadata.
+        if local_hash and self._notes_hash_on_disk(instance_id, provider) != local_hash:
+            return "local_newer"
+
         # Unchanged short-circuit: same content already on disk.
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if content_hash == local_hash:
@@ -756,6 +762,10 @@ class MemorySyncService:
             annotations_modified_at=server_ts,
         )
         return "updated"
+
+    def _notes_hash_on_disk(self, instance_id: str, provider: str) -> str:
+        text = self._memory_service.read_annotations(instance_id, provider)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # Findings sync methods

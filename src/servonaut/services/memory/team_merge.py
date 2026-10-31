@@ -400,12 +400,10 @@ class TeamCopyMerger:
             text, changed = merge_annotation_text(mine, theirs, source=label, merged_on=merged_on)
             if not changed:
                 return 0
-            store.write_annotations(target.instance_id, text, target.provider)
-        store.set_annotations_meta(
-            target.instance_id,
-            annotations_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            annotations_modified_at=datetime.now(tz=timezone.utc).isoformat(),
-        )
+            store.write_annotations(
+                target.instance_id, text, target.provider,
+                modified_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
         return 1
 
     def _merge_findings(self, target: MemoryKey, records: List[Dict[str, Any]]) -> None:

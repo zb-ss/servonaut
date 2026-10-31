@@ -906,6 +906,8 @@ class MemoryStore:
         instance_id: str,
         content: str,
         provider: str = "custom",
+        *,
+        modified_at: Optional[str] = None,
     ) -> Path:
         """Write *content* as ``annotations.md`` for *instance_id* atomically.
 
@@ -916,6 +918,9 @@ class MemoryStore:
             instance_id: Instance identifier (validated against path traversal).
             content: Markdown content to persist.
             provider: Provider slug used to select the storage sub-directory.
+            modified_at: When given, the notes' hash and this modified time
+                are recorded in the same record-locked step, so a pull never
+                judges the new text by the old bookkeeping.
 
         Returns:
             The ``Path`` of the written ``annotations.md`` file.
@@ -924,7 +929,21 @@ class MemoryStore:
             ValueError: If *instance_id* fails safety validation.
         """
         with self.annotation_lock(instance_id):
-            return self._write_annotations_locked(instance_id, content, provider)
+            path = self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
+            return path
+
+    def _record_notes_meta(
+        self, instance_id: str, content: str, modified_at: Optional[str]
+    ) -> None:
+        """Record the hash and modified time of notes just written (record lock held)."""
+        if modified_at is None:
+            return
+        self.set_annotations_meta(
+            instance_id,
+            annotations_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            annotations_modified_at=modified_at,
+        )
 
     def _write_annotations_locked(
         self, instance_id: str, content: str, provider: str
@@ -1065,19 +1084,23 @@ class MemoryStore:
         return _HeldOsLock(lock)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write *content* only if the notes still hash to *expected_hash*.
 
         The comparison and the write happen under :meth:`annotation_lock`, so
         a merge that holds the lock cannot be overwritten in between. An
-        absent file hashes as empty text. Returns whether it wrote.
+        absent file hashes as empty text. With *modified_at* the hash and
+        time are recorded in the same step (see :meth:`write_annotations`).
+        Returns whether it wrote.
         """
         with self.annotation_lock(instance_id):
             current = self.read_annotations_strict(instance_id, provider)
             if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
                 return False
             self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
             return True
 
     def write_annotation_draft(

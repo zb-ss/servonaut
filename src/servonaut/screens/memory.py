@@ -1403,6 +1403,7 @@ class MemoryScreen(Screen):
         provider: str,
         text: str,
         expected: Optional[str],
+        modified_at: Optional[str] = None,
     ) -> Optional[Path]:
         """Write *text* unless the notes differ from *expected*.
 
@@ -1413,12 +1414,18 @@ class MemoryScreen(Screen):
         notes as a new private ``annotations.unsaved-<time>.md`` file and
         nothing is overwritten. The comparison and the write are one step
         under the store's annotation lock, so a merge cannot slip in between.
+        With *modified_at* the notes' hash and time are recorded in that same
+        step, so a pull never judges the new text by the old bookkeeping.
         """
         if expected is None:
-            memory_service.write_annotations(instance_id, text, provider)
+            memory_service.write_annotations(
+                instance_id, text, provider, modified_at=modified_at
+            )
             return None
         digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
-        if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
+        if memory_service.write_annotations_if_unchanged(
+            instance_id, digest, text, provider, modified_at=modified_at
+        ):
             return None
         return memory_service.write_annotation_draft(instance_id, text, provider)
 
@@ -1431,9 +1438,11 @@ class MemoryScreen(Screen):
         expected: Optional[str] = None,
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
+        modified_at = datetime.now(timezone.utc).isoformat()
         try:
             draft = await asyncio.to_thread(
-                self._write_unless_changed, memory_service, instance_id, provider, text, expected
+                self._write_unless_changed,
+                memory_service, instance_id, provider, text, expected, modified_at,
             )
         except RecordLockTimeout:
             message, severity = await _keep_busy_draft(instance_id, provider, memory_service, text)
@@ -1455,7 +1464,18 @@ class MemoryScreen(Screen):
             )
             return
         self.app.notify("Annotations saved.", severity="information")
-        await self._record_annotations_edit(instance_id, provider, memory_service)
+        self._enqueue_saved_notes(text, modified_at)
+        self._render_table()
+
+    def _enqueue_saved_notes(self, content: str, modified_at: str) -> None:
+        """Queue just-saved notes for sync; stays on the loop that drains the queue."""
+        sync = getattr(self.app, "memory_sync_service", None)
+        if sync is None:
+            return
+        try:
+            sync.enqueue_annotations(self._target, content, probed_at=modified_at)
+        except Exception as exc:
+            logger.warning("Could not enqueue annotations after edit: %s", exc)
 
     async def _finish_external_edit(
         self, instance_id: str, provider: str, memory_service: Any
