@@ -779,11 +779,11 @@ class MemoryScreen(Screen):
         lines = []
         if shared is not None and shown:
             redaction = getattr(self.app, "redaction_service", None)
-            redact = (
-                redaction.redact_name
-                if getattr(self.app, "demo_mode", False) and redaction is not None
-                else (lambda n: n)
-            )
+            demo = getattr(self.app, "demo_mode", False) and redaction is not None
+
+            def redact(team: str) -> str:
+                return redaction.redact_name(team) if demo else team
+
             lines.append(escape(shared_source_text(shared, shared.team_name, redact, shown)))
         if self._read_only:
             lines.append(
