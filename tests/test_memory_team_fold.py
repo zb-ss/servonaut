@@ -73,7 +73,7 @@ class TestMemoryFleetRows:
     def test_demo_mode_folds_real_records_and_shows_redacted_ones(self):
         own, twin = _own(), _shared()
         fake_own = {**own, "id": "i-fake0001", "public_ip": "1.2.3.4"}
-        fake_twin = {**twin, "id": "fake-share", "public_ip": "1.2.3.5"}
+        fake_twin = {**twin, "id": "fake-share", "public_ip": "2.3.4.5"}
         redaction = MagicMock()
         redaction.real_instance_id.side_effect = {
             "i-fake0001": own["id"], "fake-share": twin["id"],

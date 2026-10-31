@@ -456,7 +456,7 @@ class TestConnectionCaps:
     def test_servers_behind_different_bastions_do_not_share_a_cap(self, tmp_path, monkeypatch):
         _use(monkeypatch, "windows")
         service = _memory_service(tmp_path, profile=BASTION, ssh_max_connections_per_bastion=1)
-        other = ConnectionProfile(name="other", bastion_host="9.9.9.8")
+        other = ConnectionProfile(name="other", bastion_host="5.6.7.8")
         profiles = {"i-0001": BASTION, "i-0002": other}
         service._connection_service.resolve_profile.side_effect = lambda inst: profiles[inst["id"]]
         service._probers = [_Prober(["a"])]
