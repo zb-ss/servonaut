@@ -811,10 +811,10 @@ class TeamMemoryService:
         """Remember the keys a created grant was sealed for.
 
         A recipient the service skipped was not sealed for, so it is not
-        remembered; a skip list that cannot be read means nobody is. A pin that
+        remembered; a skip list that is missing or cannot be read means nobody is. A pin that
         changed since the trust decision (*seen*) is left alone.
         """
-        skips = read_skips(response.get("skipped_recipients", []) if isinstance(response, dict) else None)
+        skips = read_skips(response.get("skipped_recipients") if isinstance(response, dict) else None)
         pins = self._pins()
         if skips is None or pins is None:
             return

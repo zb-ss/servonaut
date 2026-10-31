@@ -22,7 +22,7 @@ from servonaut.services.memory.team_wraps import WrapPinStore, pinned_fingerprin
 SLUG = "team-a"
 OWNER = "i-owner-1"
 GRANT = {"id": "g", "instance_id": OWNER, "required_role": "member", "modules": ["os"],
-         "created_at": "2026-10-01T10:00:00Z"}
+         "created_at": "2026-10-01T10:00:00Z", "skipped_recipients": []}
 
 
 def run(coro):

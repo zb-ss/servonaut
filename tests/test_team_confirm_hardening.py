@@ -45,7 +45,7 @@ FP_A, FP_B = "a" * 64, "b" * 64
 STORED_ONE = {"wraps_stored": 1, "wraps_unchanged": 0, "skipped_recipients": []}
 
 
-# --- K2-1: the whole pin file is validated -------------------------------
+# --- the whole pin file is validated -------------------------------
 
 @pytest.mark.parametrize("entry", [
     {"team-a:2": None},
@@ -85,7 +85,7 @@ def test_a_well_formed_store_is_read_as_before(tmp_path):
     assert (store.get("team-a", 2), store.get("team_b-1", 10)) == (FP_A, FP_B)
 
 
-# --- K2-2: an automatic pin keeps the expectation of its own decision -----
+# --- an automatic pin keeps the expectation of its own decision -----
 
 def test_a_later_envelope_does_not_change_what_an_earlier_seal_expected(tmp_path):
     svc, api, pins = _service(tmp_path)
@@ -131,7 +131,7 @@ def test_a_catch_up_batch_keeps_the_expectation_of_its_first_decision(tmp_path):
     assert original("team-a", 8) == FP_B
 
 
-# --- K2-3: Share never pins a recipient the grant create skipped ----------
+# --- Share never pins a recipient the grant create skipped ----------
 
 def _share(svc, members):
     return run(svc.share_instance(SLUG, OWNER, "member", ["os"], members))
@@ -162,6 +162,17 @@ def test_a_malformed_skip_list_pins_nobody_but_the_share_stands(tmp_path, skippe
     assert pinned_fingerprint(pins, SLUG, 2) is None
 
 
+def test_a_grant_response_without_a_skip_list_pins_nobody_but_the_share_stands(tmp_path):
+    svc, api, pins = _service(tmp_path)
+    lee, _p = _member(2, "Lee")
+    response = dict(api.post.return_value)
+    response.pop("skipped_recipients", None)
+    api.post.return_value = response
+    grant = _share(svc, [lee])
+    assert grant.id == "g"
+    assert pinned_fingerprint(pins, SLUG, 2) is None
+
+
 def test_share_again_does_not_pin_a_skipped_recipient(tmp_path):
     svc, api, pins = _service(tmp_path)
     lee, _p = _member(2, "Lee")
@@ -171,7 +182,7 @@ def test_share_again_does_not_pin_a_skipped_recipient(tmp_path):
     assert pinned_fingerprint(pins, SLUG, 2) is None
 
 
-# --- K2-4: the wraps acknowledgement has to add up ------------------------
+# --- the wraps acknowledgement has to add up ------------------------
 
 def _wraps(*users, envelopes=("e1",)):
     return [{"recipient_user_id": u, "envelope_id": e} for u in users for e in envelopes]
@@ -223,7 +234,7 @@ def test_top_up_reports_an_inconsistent_acknowledgement_as_unconfirmed(tmp_path)
     assert pinned_fingerprint(pins, SLUG, 3) is None
 
 
-# --- K2-6: a skipped recipient keeps its validated reason -----------------
+# --- a skipped recipient keeps its validated reason -----------------
 
 @pytest.mark.parametrize("sent,expected", [
     ("key_changed", "key_changed"), ("no_memory_key", "no_memory_key"),
@@ -239,7 +250,7 @@ def test_top_up_keeps_the_skip_reason_of_each_recipient(tmp_path, sent, expected
     assert result.skipped_names == ("Lee",) and result.skipped_reasons == (expected,)
 
 
-# --- K2-5: pin writes never block the event loop --------------------------
+# --- pin writes never block the event loop --------------------------
 
 def _hold(tmp_path):
     holder = FileLock(tmp_path / "pins.json.lock")

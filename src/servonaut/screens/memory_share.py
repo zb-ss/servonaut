@@ -33,7 +33,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
 from servonaut.services.memory.interfaces import MemoryBackendError
-from servonaut.utils.markup import escape_markup, literal, scrub
+from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -65,11 +65,6 @@ def _shown_names(app: Any, names: List[str]) -> str:
     redaction = getattr(app, "redaction_service", None)
     demo = bool(getattr(app, "demo_mode", False)) and redaction is not None
     return ", ".join(redaction.redact_name(n) if demo else n for n in names)
-
-
-def _names(app: Any, names: List[str]) -> str:
-    """Markup-safe, comma-separated names; stand-ins in demo mode."""
-    return escape_markup(_shown_names(app, names))
 
 
 # What the form says about a member the service did not add, by skip reason.
@@ -249,20 +244,24 @@ class ShareInstanceScreen(Screen):
         self._waiting: List[Any] = []
         # True while an error line is on show: a refresh must not wipe it.
         self._status_locked = False
+        # The confirmation write in flight; the next one waits for it.
+        self._pin_write: Optional["asyncio.Future[None]"] = None
 
     # ------------------------------------------------------------------
     # Compose
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        name = escape_markup(str(self._instance.get("name") or self._instance.get("id", "?")))
+        name = str(self._instance.get("name") or self._instance.get("id", "?"))
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
                 Container(
                     Static(
-                        f"[bold $text-accent]Share Memory: {name}[/bold $text-accent]",
+                        Content.from_markup(
+                            "[bold $text-accent]Share Memory: $name[/bold $text-accent]", name=name
+                        ),
                         id="share-title",
                     ),
                     Static("", id="share-status"),
@@ -529,20 +528,24 @@ class ShareInstanceScreen(Screen):
         else:
             service = getattr(self.app, "team_memory_service", None)
             eligible = service.eligible_members(keys, role) if service else keys
-            who = _names(self.app, [m.name or f"member {m.user_id}" for m in eligible])
+            who = _shown_names(self.app, [m.name or f"member {m.user_id}" for m in eligible])
             line = (
-                f"Will be able to read it ({len(eligible)}): {who}"
+                Content.assemble(f"Will be able to read it ({len(eligible)}): ", literal(who))
                 if eligible
-                else "No member with a memory key has this role yet."
+                else Content("No member with a memory key has this role yet.")
             )
-            line += (
+            line = Content.assemble(
+                line,
                 "\nMembers who set up Memory Sync later are added "
-                "automatically on the next sync."
+                "automatically on the next sync.",
             )
             if pending:
-                waiting = _names(self.app, [str(p.get("name") or f"member {p.get('user_id')}") for p in pending])
-                line += (
-                    f"\nNo memory key yet: {waiting}. Ask them to set up Memory Sync."
+                waiting = _shown_names(
+                    self.app, [str(p.get("name") or f"member {p.get('user_id')}") for p in pending]
+                )
+                line = Content.assemble(
+                    line, "\nNo memory key yet: ", literal(waiting),
+                    ". Ask them to set up Memory Sync.",
                 )
             self._say(readers, line)
         self._render_existing()
@@ -557,13 +560,14 @@ class ShareInstanceScreen(Screen):
         if grant is None:
             return
         modules = ", ".join(grant.modules) if grant.modules else "all modules"
-        text = (
-            f"Already shared with this team: role {escape_markup(grant.required_role)}, "
-            f"modules {escape_markup(modules)}."
+        text = Content(
+            f"Already shared with this team: role {grant.required_role}, modules {modules}."
         )
         if waiting:
-            who = _names(self.app, [self._member_label(c) for c in self._waiting])
-            text += f"\nKey changed, waiting for your confirmation: {who}"
+            who = _shown_names(self.app, [self._member_label(c) for c in self._waiting])
+            text = Content.assemble(
+                text, "\nKey changed, waiting for your confirmation: ", literal(who)
+            )
         self._say_to("#share-existing-text", text)
 
     @staticmethod
@@ -824,7 +828,7 @@ class ShareInstanceScreen(Screen):
         if service is None:
             return
         try:
-            await asyncio.to_thread(service.confirm_member_keys, action.team_slug, confirmed)
+            await self._save_confirmed(service, action.team_slug, confirmed)
         except (OSError, ValueError, MemoryBackendError) as exc:
             logger.error("Could not save the confirmed keys: %s", type(exc).__name__)
             self._show_error("Could not save the confirmed keys. Nothing was changed.")
@@ -835,6 +839,24 @@ class ShareInstanceScreen(Screen):
             await self._do_reshare(action)
         else:
             await self._do_share(action)
+
+    async def _save_confirmed(self, service: Any, team_slug: str, confirmed: List[Any]) -> None:
+        """Write confirmed keys, one write at a time.
+
+        Cancelling a worker does not stop the thread it is waiting on, so an
+        older write could finish after a newer one and bring its pin back. A
+        write is therefore kept running (shielded) when its worker is
+        cancelled, and the next one starts only once it is done.
+        """
+        while self._pin_write is not None and not self._pin_write.done():
+            await asyncio.wait([self._pin_write])
+        write = asyncio.ensure_future(
+            asyncio.to_thread(service.confirm_member_keys, team_slug, confirmed)
+        )
+        # Read the outcome even if the worker that started it was cancelled.
+        write.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._pin_write = write
+        await asyncio.shield(write)
 
     async def _top_up(self, action: _ShareAction) -> None:
         """Seal the latest snapshots for the members whose key was just confirmed."""

@@ -151,6 +151,14 @@ class MissingTeamWrap:
     recipients: Tuple[Recipient, ...]
 
 
+def is_user_id(value: Any) -> bool:
+    """Whether *value* is a service user id: a positive 64-bit integer."""
+    return (
+        isinstance(value, int) and not isinstance(value, bool)
+        and 0 < value < 2**63
+    )
+
+
 def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
@@ -168,7 +176,7 @@ def _parse_recipient(raw: Any) -> Optional[Recipient]:
     if not isinstance(raw, dict):
         return None
     user_id = raw.get("user_id")
-    if not isinstance(user_id, int) or isinstance(user_id, bool):
+    if not is_user_id(user_id):
         return None
     flagged = raw.get("key_changed")
     if not isinstance(flagged, bool):
@@ -269,6 +277,8 @@ def seal_for_recipients(
 # user is asked, instead of the store silently starting over (trust on first use).
 UNREADABLE_PIN = "unreadable"
 
+_MAX_USER_ID_DIGITS = 19  # a signed 64-bit integer
+
 PinKey = Tuple[str, int]
 # A trust decision: the member and the key it was about.
 SeenKey = Tuple[str, int, str]
@@ -280,8 +290,11 @@ def _valid_pin_entry(key: Any, value: Any) -> bool:
         check_segment(team_slug, "team")
     except ValueError:
         return False
+    # Checked on the text: a huge digit string must not reach int(). Ids the
+    # service issues fit a signed 64-bit integer (at most 19 digits).
     return (
-        user_id.isascii() and user_id.isdigit() and int(user_id) > 0
+        user_id.isascii() and user_id.isdigit() and user_id[0] != "0"
+        and len(user_id) <= _MAX_USER_ID_DIGITS
         and optional_fingerprint(value) is not None
     )
 
@@ -381,6 +394,7 @@ class WrapPinStore:
         Raises:
             OSError: the lock stayed busy or the file could not be written.
         """
+        pins = {key: fp for key, fp in pins.items() if is_user_id(key[1])}
         if not pins:
             return
         with self._locked():
@@ -406,6 +420,7 @@ class WrapPinStore:
         Raises:
             OSError: the lock stayed busy or the file could not be written.
         """
+        pins = {key: fp for key, fp in pins.items() if is_user_id(key[1])}
         if not pins:
             return set()
         with self._locked():
@@ -556,7 +571,7 @@ def read_skips(skipped: Any) -> Optional[Dict[int, str]]:
     for item in skipped:
         user_id = item.get("user_id") if isinstance(item, dict) else None
         reason = item.get("reason") if isinstance(item, dict) else None
-        if not isinstance(user_id, int) or isinstance(user_id, bool) or not _text(reason):
+        if not is_user_id(user_id) or not _text(reason):
             return None
         reasons[user_id] = reason if reason in SKIP_REASONS else UNCONFIRMED
     return reasons
@@ -579,7 +594,10 @@ def acknowledge_wraps(wraps: List[Dict[str, Any]], response: Any) -> WrapAck:
     if not all(_is_count(n) for n in (stored, unchanged)) or skips is None:
         logger.debug("wraps response ignored: unexpected shape")
         return unconfirmed
-    kept = [w for w in wraps if w["recipient_user_id"] not in skips]
+    kept = [
+        w for w in wraps
+        if w["recipient_user_id"] not in skips and is_user_id(w["recipient_user_id"])
+    ]
     pairs = {(w["recipient_user_id"], w["envelope_id"]) for w in kept}
     if stored + unchanged != len(pairs):
         logger.debug("wraps response ignored: counts do not match the wraps posted")

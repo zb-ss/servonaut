@@ -13,12 +13,14 @@ from unittest.mock import AsyncMock, MagicMock
 import nacl.public
 import pytest
 from textual.app import App
+from textual.content import Content
 from textual.widgets import Button, Select, SelectionList, Static
 
 import servonaut.services.memory.crypto as crypto_module
 from servonaut.screens.memory_share import PurgeCopiesModal, ShareInstanceScreen
 from servonaut.services.api_client import APIClient, InsufficientWrapsError
 from servonaut.services.memory.team_service import TeamMemoryService
+from servonaut.utils.markup import literal
 
 pytestmark = pytest.mark.asyncio
 
@@ -492,12 +494,6 @@ async def test_odd_names_are_shown_literally_in_the_status_and_existing_lines(na
         screen._show_error(f"{name} went wrong")
         await pilot.pause()
         assert f"{name} went wrong" in _text(screen, "#share-status")
-        screen._say_to("#share-existing-text", "Key changed, waiting: " + _names_for(app, name))
+        screen._say_to("#share-existing-text", Content.assemble("Key changed, waiting: ", literal(name)))
         await pilot.pause()
         assert name in _text(screen, "#share-existing-text")
-
-
-def _names_for(app, name):
-    from servonaut.screens.memory_share import _names
-
-    return _names(app, [name])
