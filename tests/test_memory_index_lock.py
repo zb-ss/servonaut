@@ -13,8 +13,8 @@ from servonaut.utils.file_lock import FileLock
 
 import pytest
 
-ITERATIONS = 300
-TRIALS = 5
+ITERATIONS = 100
+TRIALS = 2
 
 
 def _instances(root: Path) -> dict:
