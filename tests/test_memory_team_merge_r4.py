@@ -178,3 +178,72 @@ class TestEditorAgainstTheRealMerger:
         assert outcome == [True]
         final = service.read_annotations(OWN_ID, "aws")
         assert "USER EDIT" in final and "TEAM NOTE" in final
+
+
+class TestCloudImportState:
+    """A cloud-only import is recorded on the target before anything is written."""
+
+    def _sync_with_cloud(self, tmp_path, service, **answers):
+        retrieval = Retrieval(
+            notes=answers.get("notes", {"content": "OLD CLOUD NOTE"}), findings=answers.get("findings"),
+        )
+        return _sync(tmp_path, service, retrieval), retrieval
+
+    def test_a_refused_upload_then_a_user_edit_then_a_retry_keeps_the_edit(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        sync, retrieval = self._sync_with_cloud(tmp_path, service)
+        from tests.test_memory_sync_service import _make_module_result
+        sync.enqueue_module(_own(), "os", _make_module_result())
+        monkeypatch.setattr("servonaut.services.memory.sync_service._QUEUE_CAP", 1)       # full
+        rows = [_own(), _shared()]
+        _run(service, rows, sync)
+        assert service.read_annotations(OWN_ID, "aws") == "OLD CLOUD NOTE"
+        assert service._store.get_cloud_import(OWN_ID, SHARE_ID) == {"state": "imported", "upload_pending": True}
+        service.write_annotations(OWN_ID, "CURRENT USER NOTE", "aws")
+        monkeypatch.setattr("servonaut.services.memory.sync_service._QUEUE_CAP", 100)
+        calls = len(retrieval.calls)
+        _run(service, rows, sync)
+        assert service.read_annotations(OWN_ID, "aws") == "CURRENT USER NOTE"
+        assert len(retrieval.calls) == calls                              # the cloud payload is not read again
+        assert service._store.get_cloud_import(OWN_ID, SHARE_ID)["upload_pending"] is False
+        assert any("CURRENT USER NOTE" in line for line in sync._queue_path.read_text().splitlines())
+
+    def test_a_partial_member_import_is_finished_by_the_next_pass(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        finding = {"findings": [{"id": FIRST, "title": "HAND WRITTEN FINDING", "created_at": NEW}]}
+        sync, retrieval = self._sync_with_cloud(tmp_path, service, notes={"content": "CLOUD NOTE"}, findings=finding)
+        real = MemoryStore.save_finding
+        monkeypatch.setattr(MemoryStore, "save_finding",
+                            lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied")))
+        first = _run(service, [_member_row()], sync)
+        assert first.copies == 0 and service.read_annotations(SHARE_ID, "shared") == "CLOUD NOTE"
+        assert service._store.get_cloud_import(SHARE_ID, SHARE_ID)["state"] == "importing"
+        monkeypatch.setattr(MemoryStore, "save_finding", real)
+        second = _run(service, [_member_row()], sync)           # the canonical folder exists now
+        assert second.copies == 1
+        assert service._store.get_finding(SHARE_ID, FIRST, "shared")["title"] == "HAND WRITTEN FINDING"
+        assert service._store.get_cloud_import(SHARE_ID, SHARE_ID)["state"] == "imported"
+        calls = len(retrieval.calls)
+        _run(service, [_member_row()], sync)
+        assert len(retrieval.calls) == calls
+
+    def test_an_existing_canonical_folder_without_a_pending_import_still_gets_no_plan(self, tmp_path):
+        service = _service(tmp_path)
+        service._store.write_annotations(SHARE_ID, "canonical", "shared")
+        sync, retrieval = self._sync_with_cloud(tmp_path, service)
+        _run(service, [_member_row()], sync)
+        assert retrieval.calls == []
+
+
+class TestSymlinkLoop:
+    def test_a_looping_target_folder_is_skipped_and_the_pass_goes_on(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "aws").mkdir(parents=True)
+        os.symlink(root / "aws" / OWN_ID, root / "aws" / OWN_ID)       # points at itself
+        service = _service(root)
+        assert service._store.is_addressable(OWN_ID, "aws") is False
+        _put_copy(service, notes="x")
+        _second_copy(service)
+        report = _run(service, [_own(), _shared()] + _second_pair(), _sync(tmp_path, service))
+        assert SHARE_ID in report.kept and report.copies == 1
+        assert service.read_annotations(OTHER_OWN, "aws") == "second copy note"

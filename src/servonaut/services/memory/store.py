@@ -1025,7 +1025,7 @@ class MemoryStore:
                 if not _is_plain(child, True) or not _is_plain(candidate, True):
                     continue
                 candidate.resolve().relative_to(root)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 continue
             found.append(child.name)
         return found
@@ -1057,7 +1057,8 @@ class MemoryStore:
             _validate_instance_id(_provider_slug(provider))
             resolved = self._instance_dir(instance_id, provider).resolve()
             resolved.relative_to(self._root.resolve())
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):
+            # RuntimeError: a symlink loop (Path.resolve on Python 3.12).
             return False
         return True
 
@@ -1076,22 +1077,32 @@ class MemoryStore:
         """
         return self._checked_dir(instance_id, provider).is_dir()
 
-    def share_merged(self, instance_id: str, share_id: str) -> bool:
-        """Whether *share_id*'s service-only memory was already merged into *instance_id*."""
-        entry = self.get_index_entry(instance_id) or {}
-        return share_id in entry.get("merged_share_ids", [])
+    def get_cloud_import(self, instance_id: str, share_id: str) -> Optional[Dict[str, Any]]:
+        """The state of importing *share_id*'s service-only memory into *instance_id*, or ``None``.
 
-    def record_share_merged(self, instance_id: str, share_id: str) -> None:
-        """Record on *instance_id*'s index entry that *share_id* was merged into it."""
+        ``{"state": "importing" | "imported", "upload_pending": bool}``.
+        """
+        entry = self.get_index_entry(instance_id) or {}
+        state = (entry.get("cloud_imports") or {}).get(share_id)
+        return dict(state) if isinstance(state, dict) else None
+
+    def set_cloud_import(
+        self, instance_id: str, share_id: str, state: str, upload_pending: bool
+    ) -> None:
+        """Record on *instance_id*'s index entry how far importing *share_id* has come.
+
+        Written before anything is imported (``importing``), so an interrupted
+        import is found and repeated, and flipped to ``imported`` once the
+        target is verified. Creates a minimal entry when none exists yet.
+        """
         _validate_instance_id(instance_id)
+        _validate_instance_id(share_id)
         index = self._load_index()
-        entry = index.get("instances", {}).get(self._resolve_id(instance_id))
-        if entry is None:
-            return
-        done = entry.setdefault("merged_share_ids", [])
-        if share_id not in done:
-            done.append(share_id)
-            self._save_index(index)
+        entry = index.setdefault("instances", {}).setdefault(self._resolve_id(instance_id), {})
+        entry.setdefault("cloud_imports", {})[share_id] = {
+            "state": state, "upload_pending": bool(upload_pending),
+        }
+        self._save_index(index)
 
     def remove_index_entry(self, instance_id: str) -> None:
         """Drop *instance_id*'s index entry; its folder and files are untouched."""

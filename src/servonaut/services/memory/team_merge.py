@@ -405,7 +405,12 @@ def _label(row: Mapping[str, Any]) -> str:
 Discover = Callable[[str], Sequence[str]]
 
 
-def plan_merges(rows: Sequence[Mapping[str, Any]], discover: Discover) -> List[MergePlan]:
+CloudImport = Callable[[str, str], Optional[Dict[str, Any]]]
+
+
+def plan_merges(
+    rows: Sequence[Mapping[str, Any]], discover: Discover, cloud_import: CloudImport
+) -> List[MergePlan]:
     """What to fold, from the real *rows* and the folders on disk.
 
     *discover* names the provider folders that hold a folder for a share id
@@ -414,7 +419,10 @@ def plan_merges(rows: Sequence[Mapping[str, Any]], discover: Discover) -> List[M
     into that key: the user's own row when :func:`own_twin` confirms one, else
     the shared row itself (a member's view; uploads stay as they were). A
     member's canonical folder is not a copy of itself and gets no plan. A row
-    with no folder at all gets one cloud-only plan. Memory filed under an
+    with no folder at all gets one cloud-only plan, and so does a row whose
+    import from the service is unfinished (``importing``) or still owes an
+    upload, whatever folders exist; *cloud_import* gives that state for a
+    (target id, share id). Memory filed under an
     earlier share id (a share removed and added again) is not touched.
     """
     plans: List[MergePlan] = []
@@ -430,7 +438,9 @@ def plan_merges(rows: Sequence[Mapping[str, Any]], discover: Discover) -> List[M
         label = _label(row)
         if sources:
             plans.extend(MergePlan(key, target, label, target_row, twin is not None) for key in sources)
-        elif not keys:
+        state = cloud_import(target.instance_id, share_id) or {}
+        unfinished = state.get("state") == "importing" or bool(state.get("upload_pending"))
+        if (not keys and not sources) or unfinished:
             plans.append(MergePlan(
                 MemoryKey(SHARED_MEMORY_PROVIDER, share_id), target, label, target_row,
                 twin is not None, cloud_only=True,
@@ -603,14 +613,26 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
 async def _fold_cloud_only(plan: MergePlan, run: _Pass, name: str) -> None:
     """Merge what the service holds for a share that has no folder here.
 
-    Needs a usable Memory Sync. Completion is recorded on the target's index
-    entry (never in a folder of its own); a verified absence is only
+    Needs a usable Memory Sync. The import is recorded on the target's index
+    entry before anything is written (``importing``; an interrupted import is
+    repeated, which the whole-line rules make idempotent) and flips to
+    ``imported`` once the target is verified. From then on the service's
+    payload is never imported again: a refused upload is retried from the
+    CURRENT target, through the strict readers. A verified absence is only
     remembered for this run.
     """
     share_id, store, report = plan.source.instance_id, run.memory_service._store, run.report
-    if run.state != SYNC_READY or share_id in run.absent:
+    target_id = plan.target.instance_id
+    if run.state != SYNC_READY:
         return
-    if store.share_merged(plan.target.instance_id, share_id):
+    state = store.get_cloud_import(target_id, share_id) or {}
+    if state.get("state") == "imported":
+        if state.get("upload_pending") and plan.uploads and _queue_upload(
+            run.sync_service, run.memory_service, plan
+        ):
+            store.set_cloud_import(target_id, share_id, "imported", False)
+        return
+    if share_id in run.absent and state.get("state") != "importing":
         return
     notes, findings = await run.read_remote(share_id, name)
     if notes.status == "unavailable" or findings.status == "unavailable":
@@ -618,6 +640,7 @@ async def _fold_cloud_only(plan: MergePlan, run: _Pass, name: str) -> None:
     if notes.status == "absent" and findings.status == "absent":
         run.absent.add(share_id)
         return
+    store.set_cloud_import(target_id, share_id, "importing", plan.uploads)
     stats = run.merger.merge(
         plan.source, plan.target, source_label=plan.label, merged_on=run.merged_on,
         target_name=name, remote_notes=notes.text, remote_records=findings.records,
@@ -627,10 +650,10 @@ async def _fold_cloud_only(plan: MergePlan, run: _Pass, name: str) -> None:
     if not stats.verified:
         report.kept.append(share_id)
         return
-    if plan.uploads and not _queue_upload(run.sync_service, run.memory_service, plan):
-        return  # not recorded: the next pass repeats the merge and tries again
-    store.record_share_merged(plan.target.instance_id, share_id)
+    store.set_cloud_import(target_id, share_id, "imported", plan.uploads)
     report.copies += 1
+    if plan.uploads and _queue_upload(run.sync_service, run.memory_service, plan):
+        store.set_cloud_import(target_id, share_id, "imported", False)
 
 
 async def merge_team_copies(
@@ -660,7 +683,7 @@ async def merge_team_copies(
     store = memory_service._store
     merged_on = today or datetime.now(tz=timezone.utc).date().isoformat()
     _record_identities(memory_service, rows)
-    plans = plan_merges(rows, store.find_instance_dirs)
+    plans = plan_merges(rows, store.find_instance_dirs, store.get_cloud_import)
     plans = [p for p in plans if p.cloud_only or store.is_addressable(p.source.instance_id, p.source.provider)]
     run = _Pass(
         merger, memory_service, sync_service, sync_state(sync_service), merged_on, report,

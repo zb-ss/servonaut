@@ -291,7 +291,7 @@ class TestCloudOnly:
         assert _run(service, rows, sync).copies == 1
         assert service.read_annotations(OWN_ID, "aws") == "only in the cloud"
         assert not (tmp_path / "shared").exists()                    # no folder made for the share
-        assert service._store.share_merged(OWN_ID, SHARE_ID)
+        assert service._store.get_cloud_import(OWN_ID, SHARE_ID)["state"] == "imported"
         calls = len(retrieval.calls)
         _run(service, rows, sync)
         assert len(retrieval.calls) == calls                         # recorded: not read again
@@ -302,7 +302,7 @@ class TestCloudOnly:
         sync = _sync(tmp_path, service, retrieval)
         absent = set()
         asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
-        assert absent == {SHARE_ID} and not service._store.share_merged(OWN_ID, SHARE_ID)
+        assert absent == {SHARE_ID} and service._store.get_cloud_import(OWN_ID, SHARE_ID) is None
         calls = len(retrieval.calls)
         asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
         assert len(retrieval.calls) == calls
@@ -313,7 +313,7 @@ class TestCloudOnly:
         sync = _sync(tmp_path, service, retrieval)
         absent = set()
         asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
-        assert absent == set() and not service._store.share_merged(OWN_ID, SHARE_ID)
+        assert absent == set() and service._store.get_cloud_import(OWN_ID, SHARE_ID) is None
 
     def test_locked_or_unset_sync_reads_nothing_for_a_share_with_no_folder(self, tmp_path):
         service = _service(tmp_path)
