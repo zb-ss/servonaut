@@ -57,6 +57,8 @@ class MergeStats:
     notes: int = 0
     findings: int = 0
     verified: bool = True
+    held_notes: bool = False
+    held_findings: bool = False
 
     @property
     def changed(self) -> bool:
@@ -73,6 +75,9 @@ class TeamMergeReport:
     modules: int = 0
     kept: List[str] = field(default_factory=list)
     undecided: int = 0
+    #: Whether the service was asked which share ids it holds and every pull
+    #: it named worked: the cloud side of every copy is then settled.
+    cloud_checked: bool = False
 
     def message(self) -> str:
         copies = f"{self.copies} team {'copy' if self.copies == 1 else 'copies'}"
@@ -124,6 +129,24 @@ def is_contained_text(own: str, wanted: str) -> bool:
     haystack = [line.rstrip() for line in own.splitlines()]
     size = len(needle)
     return any(haystack[i:i + size] == needle for i in range(len(haystack) - size + 1))
+
+
+def _effective_time(record: Mapping[str, Any]) -> str:
+    return max(record.get("created_at") or "", record.get("updated_at") or "")
+
+
+def finding_contained(source: Mapping[str, Any], target: Optional[Mapping[str, Any]]) -> bool:
+    """Whether *target* holds everything the finding *source* says.
+
+    Last-writer-wins on the effective time (``max(created_at, updated_at)``):
+    the target must be at least as recent, and a ``superseded_by`` on the
+    source must also be set on the target (it is never unset by a merge).
+    """
+    if target is None:
+        return False
+    if _effective_time(target) < _effective_time(source):
+        return False
+    return bool(target.get("superseded_by")) or not source.get("superseded_by")
 
 
 def merge_annotation_text(
@@ -251,20 +274,32 @@ class TeamCopyMerger:
             source.instance_id, source.provider, include_superseded=True, strict=True
         )
         store.get_all_modules(source.instance_id, source.provider, strict=True)
-        stats = MergeStats()
+        stats = MergeStats(
+            held_notes=bool((theirs + earlier_notes).strip()), held_findings=bool(records)
+        )
+        before = self._finding_snapshot(target)
         stats.modules = self._merge_modules(source, target)
         stats.notes = self._merge_notes(target, theirs, source_label, merged_on)
         if earlier_notes.strip() and earlier_notes != theirs:
             stats.notes += self._merge_notes(target, earlier_notes, source_label, merged_on)
-        stats.findings = self._merge_findings(target, records)
-        if stats.modules or (
-            source.instance_id == target.instance_id and (stats.notes or stats.findings)
-        ):
-            self._list_target(target, target_name)
+        self._merge_findings(target, records)
+        stats.findings = self._changed_findings(target, before)
+        self._list_target(target, target_name)
         stats.verified = self.is_contained(source, target) and (
             not earlier_notes.strip() or self._notes_contain(target, earlier_notes)
         )
         return stats
+
+    def _finding_snapshot(self, target: MemoryKey) -> Dict[str, Any]:
+        records = self._store.list_findings(
+            target.instance_id, target.provider, include_superseded=True, strict=True
+        )
+        return {record["id"]: dict(record) for record in records}
+
+    def _changed_findings(self, target: MemoryKey, before: Dict[str, Any]) -> int:
+        """How many of the target's findings are new or differ from *before*."""
+        after = self._finding_snapshot(target)
+        return sum(1 for fid, record in after.items() if before.get(fid) != record)
 
     def _notes_contain(self, target: MemoryKey, text: str) -> bool:
         kept = self._store.read_annotations_strict(target.instance_id, target.provider)
@@ -284,7 +319,8 @@ class TeamCopyMerger:
         for record in store.list_findings(
             source.instance_id, source.provider, include_superseded=True, strict=True
         ):
-            if store.get_finding(target.instance_id, record["id"], target.provider) is None:
+            kept = store.get_finding(target.instance_id, record["id"], target.provider)
+            if not finding_contained(record, kept):
                 return False
         return True
 
@@ -313,9 +349,9 @@ class TeamCopyMerger:
         return changed
 
     def _list_target(self, target: MemoryKey, name: str) -> None:
-        """Make sure the memory index lists the target with its modules."""
+        """Make sure the memory index lists the target with a name, provider and modules."""
         modules = sorted(self._store.get_all_modules(target.instance_id, target.provider))
-        self._service.update_index(
+        self._store.ensure_index_entry(
             target.instance_id, name or target.instance_id, target.provider, modules
         )
 
@@ -333,14 +369,13 @@ class TeamCopyMerger:
         )
         return 1
 
-    def _merge_findings(self, target: MemoryKey, records: List[Dict[str, Any]]) -> int:
+    def _merge_findings(self, target: MemoryKey, records: List[Dict[str, Any]]) -> None:
         if not records:
-            return 0
+            return
         stats = self._service.merge_findings(target.instance_id, records, target.provider)
         self._store.set_findings_meta(
             target.instance_id, findings_count=stats.get("active_after", 0)
         )
-        return stats.get("created", 0) + stats.get("updated", 0)
 
     def back_up(self, source: MemoryKey) -> Optional[Any]:
         """Move the merged copy's directory aside; nothing is deleted."""
@@ -432,6 +467,20 @@ RemoteIdLister = Callable[[], Awaitable[Collection[str]]]
 #: plan that raises one is kept as it was; the pass goes on.
 _PLAN_ERRORS = (OSError, ValueError, KeyError)
 
+#: How Memory Sync stands on this computer: not set up (no remote copy can be
+#: pulled here), set up but locked, or usable.
+SYNC_OFF, SYNC_LOCKED, SYNC_READY = "off", "locked", "ready"
+
+
+def sync_state(sync_service: Any) -> str:
+    """Whether Memory Sync is not set up, set up but locked, or usable here."""
+    if sync_service is None:
+        return SYNC_OFF
+    if bool(getattr(sync_service, "is_configured", False)):
+        return SYNC_READY
+    enrolled = getattr(sync_service, "is_enrolled_locally", None)
+    return SYNC_LOCKED if callable(enrolled) and bool(enrolled()) else SYNC_OFF
+
 
 async def _pull_copy(sync_service: Any, source: MemoryKey, name: str) -> bool:
     """Pull what the service holds for the copy, before it is merged.
@@ -465,25 +514,33 @@ async def _remote_ids(lister: Optional[RemoteIdLister]) -> Optional[Set[str]]:
 
 
 def _record_identities(memory_service: Any, rows: Sequence[Mapping[str, Any]]) -> None:
-    """Note on each shared-only row's entry which server it is (see :func:`same_share`)."""
+    """Note which server each shared-only row is (see :func:`same_share`).
+
+    The store keeps it for entries not created yet.
+    """
     store = memory_service._store
     for row in rows:
         if is_shared_row(row) and row.get("id") and own_twin(row, rows) is None:
             store.set_share_identity(str(row["id"]), share_identity(row))
 
 
-def _upload_merged(
+def _queue_upload(
     sync_service: Any, memory_service: Any, plan: MergePlan, stats: MergeStats
 ) -> None:
-    """Queue the user's merged annotations and findings for upload."""
+    """Queue the own row's annotations and findings for upload.
+
+    Decided by what the copy held, not by what this pass changed, so a retry
+    after an earlier pass merged everything still queues them (a duplicate
+    upload is harmless).
+    """
     if sync_service is None or not plan.uploads:
         return
     target = plan.target
     instance = {"id": target.instance_id, "name": str(plan.target_row.get("name") or "")}
-    if stats.notes:
+    if stats.held_notes:
         text = memory_service.read_annotations(target.instance_id, target.provider)
         sync_service.enqueue_annotations(instance, text)
-    if stats.findings:
+    if stats.held_findings:
         records = memory_service.list_findings(
             target.instance_id, target.provider, include_superseded=True
         )
@@ -498,48 +555,70 @@ def _has_copy(merger: TeamCopyMerger, key: MemoryKey) -> bool:
         return False
 
 
-async def _fold(
-    plan: MergePlan,
-    *,
-    merger: TeamCopyMerger,
-    memory_service: Any,
-    sync_service: Any,
-    remote_ids: Optional[Set[str]],
-    syncing: bool,
-    merged_on: str,
-    report: TeamMergeReport,
-) -> None:
-    """Merge one copy into its target and, when nothing is missing, back it up."""
-    source_id = plan.source.instance_id
+@dataclass
+class _Pass:
+    """What one pass shares between its plans."""
+
+    merger: TeamCopyMerger
+    memory_service: Any
+    sync_service: Any
+    state: str
+    remote_ids: Optional[Set[str]]
+    merged_on: str
+    report: TeamMergeReport
+    pulled: Dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def settled_remotely(self) -> bool:
+        """Whether no remote copy can still hold something this pass did not see."""
+        if self.state == SYNC_OFF:
+            return True
+        return self.state == SYNC_READY and self.remote_ids is not None
+
+    async def pull_once(self, source: MemoryKey, name: str) -> bool:
+        """Pull a listed share id once per pass; returns whether that worked."""
+        share_id = source.instance_id
+        if share_id not in self.pulled:
+            self.pulled[share_id] = await _pull_copy(self.sync_service, source, name)
+        return self.pulled[share_id]
+
+
+async def _fold(plan: MergePlan, run: _Pass) -> None:
+    """Merge one copy into its target; back it up last, once everything is settled."""
+    source_id, report, merger = plan.source.instance_id, run.report, run.merger
     name = str(plan.target_row.get("name") or "")
-    if memory_service.is_memory_disabled(plan.target.instance_id, name):
+    if run.memory_service.is_memory_disabled(plan.target.instance_id, name):
         report.kept.append(source_id)
         return
-    pulled, earlier = True, ""
-    if syncing:
+    earlier = ""
+    listed = run.remote_ids is not None and source_id in run.remote_ids
+    if run.state == SYNC_READY and listed:
         # Pulling may replace the copy's own notes; keep what they said.
         earlier = merger.earlier_notes(plan.source)
-        if remote_ids is None:
-            pulled = False
-        elif source_id in remote_ids:
-            pulled = await _pull_copy(sync_service, plan.source, name)
+        await run.pull_once(plan.source, name)
+    if not _has_copy(merger, plan.source):
+        return  # nothing here, and nothing came down from the service
     stats = merger.merge(
         plan.source, plan.target, source_label=plan.label,
-        merged_on=merged_on, target_name=name, earlier_notes=earlier,
+        merged_on=run.merged_on, target_name=name, earlier_notes=earlier,
     )
     report.notes += stats.notes
     report.findings += stats.findings
     report.modules += stats.modules
-    if not stats.verified or not pulled:
+    pulled = run.pulled.get(source_id, True)
+    if not stats.verified or not pulled or not run.settled_remotely:
         logger.warning("Team copy %s kept: not everything it held can be confirmed in the target", source_id)
         report.kept.append(source_id)
+        if not stats.verified:
+            return
+    # Verified: queue the own row's upload, then drop the copy's queued
+    # envelopes. A member's queue for the same id is theirs and stays.
+    _queue_upload(run.sync_service, run.memory_service, plan, stats)
+    if run.sync_service is not None and plan.uploads:
+        run.sync_service.drop_pending_for({source_id})
+    if source_id in report.kept:
         return
-    merger.back_up(plan.source)
-    if sync_service is not None and plan.uploads:
-        # An own-row fold repeats memory the own row holds; a member's queue
-        # for the same id is theirs and stays as it was.
-        sync_service.drop_pending_for({source_id})
-    _upload_merged(sync_service, memory_service, plan, stats)
+    merger.back_up(plan.source)  # last: any earlier failure leaves the copy for the next pass
     report.copies += 1
 
 
@@ -550,36 +629,49 @@ async def merge_team_copies(
     *,
     today: Optional[str] = None,
     list_remote_ids: Optional[RemoteIdLister] = None,
+    check_cloud: bool = True,
 ) -> TeamMergeReport:
     """Fold every team copy of a server's memory into the user's own record.
 
-    *rows* are the real records (never demo-redacted). A copy is moved to a
-    backup only after everything it held was read back from the target;
-    until then, and whenever the read-back or a pull fails, it stays where it
-    is and a later pass retries. One copy that fails never stops the others.
-
-    When sync is configured, *list_remote_ids* (one request) names the share
-    ids the service holds memory for; only those are pulled. If the listing
-    is missing or fails, local data is still merged but no copy is backed up.
-    Without sync nothing is listed or pulled.
+    *rows* are the real records (never demo-redacted). Every step is safe to
+    repeat; the copy's directory is moved to a backup last, and only when
+    everything it held was read back from the target and its remote side is
+    settled: Memory Sync is not set up here, or it is usable and the one
+    listing *list_remote_ids* succeeded and every pull it named worked. With
+    Memory Sync set up but locked, or a failed listing, local data is merged
+    and nothing is backed up. A share id the listing names that has no local
+    directory is pulled and merged too. *check_cloud* False skips the listing
+    when no copy is on disk (the cloud was already checked in this process).
+    One copy that fails never stops the others.
     """
     report = TeamMergeReport()
     merger = TeamCopyMerger(memory_service)
+    store = memory_service._store
     merged_on = today or datetime.now(tz=timezone.utc).date().isoformat()
     _record_identities(memory_service, rows)
     plans, report.undecided = plan_merges(rows, memory_service.list_all())
-    work = [p for p in plans if p.source != p.target and _has_copy(merger, p.source)]
-    syncing = sync_service is not None and bool(getattr(sync_service, "is_configured", False))
-    remote_ids = await _remote_ids(list_remote_ids) if syncing and work else None
-    for plan in work:
+    plans = [
+        p for p in plans
+        if p.source != p.target and store.is_addressable(p.source.instance_id, p.source.provider)
+    ]
+    state = sync_state(sync_service)
+    on_disk = any(_has_copy(merger, p.source) for p in plans)
+    remote_ids: Optional[Set[str]] = None
+    if state == SYNC_READY and plans and (on_disk or check_cloud):
+        remote_ids = await _remote_ids(list_remote_ids)
+    run = _Pass(merger, memory_service, sync_service, state, remote_ids, merged_on, report)
+    for plan in plans:
+        listed = remote_ids is not None and plan.source.instance_id in remote_ids
+        if not listed and not _has_copy(merger, plan.source):
+            continue
         try:
-            await _fold(
-                plan, merger=merger, memory_service=memory_service, sync_service=sync_service,
-                remote_ids=remote_ids, syncing=syncing, merged_on=merged_on, report=report,
-            )
+            await _fold(plan, run)
         except _PLAN_ERRORS as exc:
             logger.warning(
                 "Team copy %s kept: %s", plan.source.instance_id, type(exc).__name__
             )
             report.kept.append(plan.source.instance_id)
+    report.cloud_checked = (
+        state == SYNC_READY and remote_ids is not None and all(run.pulled.values())
+    )
     return report

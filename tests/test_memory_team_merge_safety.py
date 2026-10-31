@@ -221,7 +221,7 @@ class TestListingFirst:
     def test_without_sync_nothing_is_listed_or_pulled(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="note")
-        sync = _sync(is_configured=False)
+        sync = _sync(is_configured=False, is_enrolled_locally=lambda: False)
         listing = AsyncMock(return_value=[])
         report = _run(service, [_own(), _shared()], sync, listing)
         listing.assert_not_awaited()

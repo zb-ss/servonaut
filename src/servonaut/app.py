@@ -157,6 +157,7 @@ class ServonautApp(App):
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
     memory_sync_service = None
+    _team_memory_cloud_checked = False
     memory_retrieval_service = None
     memory_settings_service = None
     fleet_service = None
@@ -2191,8 +2192,13 @@ class ServonautApp(App):
             if sync is not None:
                 sync.set_folded_instance_ids(absorbed_share_ids(rows))
             report = await merge_team_copies(
-                self.memory_service, sync, rows, list_remote_ids=self._remote_memory_ids,
+                self.memory_service, sync, rows,
+                list_remote_ids=self._remote_memory_ids,
+                check_cloud=not self._team_memory_cloud_checked,
             )
+            # Once the service was asked about every copy and nothing is
+            # left to retry, later passes need no listing while no copy is on disk.
+            self._team_memory_cloud_checked = report.cloud_checked and not report.kept
         except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
             logger.exception("Merging team copies of server memory failed")
             return

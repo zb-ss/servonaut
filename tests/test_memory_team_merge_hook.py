@@ -134,3 +134,35 @@ def test_the_app_holds_share_keyed_uploads_from_the_start(tmp_path):
     app.api_client, app.auth_service = MagicMock(), MagicMock()
     app._init_memory_cloud_services()
     assert app.memory_sync_service._awaiting_folds is True
+
+
+def test_a_failed_merge_leaves_the_shares_queued_notes_in_the_queue(tmp_path):
+    from servonaut.config.schema import MemoryConfig
+    from tests.test_memory_sync_service import _make_module_result, _make_service
+    from tests.test_memory_team_merge import OWN_ID, SHARE_ID, _put_copy, _service
+
+    service = _service(tmp_path / "mem")
+    service._config = MemoryConfig(per_server_overrides={OWN_ID: {"memory_disabled": True}})
+    _put_copy(service, notes="team note")
+    sync = _make_service(tmp_path=tmp_path)
+    sync.enqueue_module({"id": SHARE_ID, "name": "web-1"}, "os", _make_module_result())
+    app = _app([_own(), _shared()])
+    app.memory_service, app.memory_sync_service = service, sync
+    app.fleet_service = None
+    asyncio.run(app._do_reconcile_team_memory(app.instances))
+    assert sync.pending_count(SHARE_ID) == 1
+    assert (tmp_path / "mem" / "team team a" / SHARE_ID / "annotations.md").is_file()
+
+
+def test_the_cloud_is_listed_again_only_while_something_is_unsettled(monkeypatch):
+    app = _app([_own(), _shared()])
+    seen = []
+
+    async def merged(*args, **kwargs):
+        seen.append(kwargs["check_cloud"])
+        return TeamMergeReport(cloud_checked=True)
+
+    monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", merged)
+    asyncio.run(app._do_reconcile_team_memory(app.instances))
+    asyncio.run(app._do_reconcile_team_memory(app.instances))
+    assert seen == [True, False]
