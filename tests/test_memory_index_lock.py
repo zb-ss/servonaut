@@ -25,6 +25,8 @@ def test_index_writers_on_two_threads_lose_no_entry(tmp_path):
     for trial in range(TRIALS):
         root = tmp_path / f"trial-{trial}"
         store = MemoryStore(root)
+        # The race is the subject, not the wait: a loaded machine must not time out.
+        store.set_record_lock_wait(120.0, 0.005)
 
         def bookkeeping():
             for i in range(ITERATIONS):
@@ -48,6 +50,7 @@ def test_index_writers_in_two_processes_lose_no_entry(tmp_path):
         from pathlib import Path
         from servonaut.services.memory.store import MemoryStore
         store = MemoryStore(Path(sys.argv[1]))
+        store.set_record_lock_wait(120.0, 0.005)
         for i in range(int(sys.argv[3])):
             store.update_index(f"{sys.argv[2]}-{i}", "web", "AWS", ["os"])
         """
