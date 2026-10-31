@@ -17,14 +17,20 @@ written into the copy), the copy's folder is never moved or deleted, and its
 queued uploads are dropped only after everything is stored. Once the copy's
 own data is verified to be in the target, a small marker is written into the
 copy's folder; a later pass never merges that data again, so a note the user
-deleted since is never brought back. The marker also says whether the
+deleted since is never brought back. The merge, that verification and the
+marker are one transaction under the target's record lock and then the
+copy's, neither waited for (see :meth:`TeamCopyMerger.transaction`): no edit
+lands between a verified target and the marker, and a busy record keeps the
+copy for the next pass. The marker also says whether the
 service's notes and findings for the share are still owed
 (``remote_notes_pending`` / ``remote_findings_pending``: Memory Sync was
 locked here, or that read was unavailable; each part settles on its own).
 A later pass with Memory Sync usable reads the service for the share and
-merges only what it holds beyond the copy's own data (the service's copy is
-usually what this computer uploaded from it, so a note deleted since is not
-brought back), into the marker's target, and only while that is still the
+merges only what it holds beyond the data of every local folder of that
+share that folds into the same target (the service's copy is usually what
+this computer uploaded from them, so a note deleted since is not brought
+back, whichever folder held it; the part is merged once per share and
+target), into the marker's target, and only while that is still the
 server's own record; uploads the target owes continue after that. With Memory Sync not set up nothing is owed. A
 marker from an earlier release has the single ``remote_pending`` flag, which
 owes both parts. Anything short
@@ -44,6 +50,7 @@ nothing is written over it. One copy that fails never stops the others.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from dataclasses import dataclass, field
@@ -267,6 +274,24 @@ class TeamCopyMerger:
     def __init__(self, memory_service: Any) -> None:
         self._service = memory_service
         self._store = memory_service._store
+
+    @contextlib.contextmanager
+    def transaction(self, source: MemoryKey, target: MemoryKey):
+        """Hold the target's record lock, then the source's, without waiting for either.
+
+        The merge, its verification and the marker are written inside one such
+        block, so no edit can land between a verified target and the marker
+        (an edit after the marker is the user's and is never undone). The
+        locks are re-entrant, so the steps inside nest; a record busy in
+        another process raises :class:`RecordBusy` and the copy is kept for
+        the next pass. Non-waiting on both sides, so the order cannot deadlock.
+        """
+        with self._store.annotation_lock(target.instance_id, wait=False):
+            if source.instance_id == target.instance_id:
+                yield
+                return
+            with self._store.annotation_lock(source.instance_id, wait=False):
+                yield
 
     def merge(
         self,
@@ -686,25 +711,27 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
             remote_records = findings.records
         notes_pending = notes.status == "unavailable"
         findings_pending = findings.status == "unavailable"
-    stats = merger.merge(
-        plan.source, plan.target, source_label=plan.label, merged_on=run.merged_on,
-        target_name=name, remote_notes=remote_notes, remote_records=remote_records,
-    )
-    report.notes += stats.notes
-    report.findings += stats.findings
-    report.modules += stats.modules
-    if not stats.verified:
-        logger.warning("Team copy %s not marked: not everything it held can be confirmed in the target", source_id)
-        report.kept.append(source_id)
-        return
-    # The local part is stored: mark it now, whatever the service part, so a
-    # note the user deletes later is never merged back. The service part is
-    # owed (``remote_pending``) until a pass can read and settle it.
-    owes = plan.uploads and run.state != SYNC_OFF and (stats.held_notes or stats.held_findings)
-    data = merger.mark_merged(
-        plan.source, plan.target, upload_pending=owes,
-        notes_pending=notes_pending, findings_pending=findings_pending, verify_source=True,
-    )
+    # Merge, verification and marker are one non-waiting transaction.
+    with merger.transaction(plan.source, plan.target):
+        stats = merger.merge(
+            plan.source, plan.target, source_label=plan.label, merged_on=run.merged_on,
+            target_name=name, remote_notes=remote_notes, remote_records=remote_records,
+        )
+        report.notes += stats.notes
+        report.findings += stats.findings
+        report.modules += stats.modules
+        if not stats.verified:
+            logger.warning("Team copy %s not marked: not everything it held can be confirmed in the target", source_id)
+            report.kept.append(source_id)
+            return
+        # The local part is stored: mark it now, whatever the service part, so a
+        # note the user deletes later is never merged back. The service part is
+        # owed (``remote_pending``) until a pass can read and settle it.
+        owes = plan.uploads and run.state != SYNC_OFF and (stats.held_notes or stats.held_findings)
+        data = merger.mark_merged(
+            plan.source, plan.target, upload_pending=owes,
+            notes_pending=notes_pending, findings_pending=findings_pending, verify_source=True,
+        )
     report.copies += 1
     if not (notes_pending or findings_pending):
         await _settle_uploads(plan, run, data)
