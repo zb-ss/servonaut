@@ -59,6 +59,7 @@ def _fake_ssh(stdout: bytes = b"", returncode: int = 0, diagnostics: str = "") -
         opens_only = "-N" in args
         process.communicate = AsyncMock(return_value=(b"" if opens_only else stdout, b""))
         process.returncode = 0 if opens_only and not diagnostics else returncode
+        process.wait = AsyncMock(return_value=process.returncode)
         process._transport = None
         return process
 

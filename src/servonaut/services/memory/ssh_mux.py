@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from servonaut.utils.platform_utils import get_os
-from servonaut.utils.ssh_utils import run_ssh_subprocess
+from servonaut.utils.ssh_utils import run_ssh_daemonizing, run_ssh_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ _BIND_SUFFIX_LENGTH = 17
 # The directory belongs to one build and one server, so the socket needs no
 # per-host ``%C`` hash (40 characters): a short name keeps long bases usable.
 _SOCKET_NAME = "m"
+_STDERR_NAME = "err"
 # Short on purpose: macOS' per-user temp directory alone nearly fills the limit.
 _SHORT_BASE_DIRS = ("/tmp",)
 
@@ -121,7 +122,10 @@ class ControlMaster:
         argv = build_argv(self._master_options())
         # -N: no command; -f: go to the background once authenticated.
         argv[1:1] = ["-N", "-f"]
-        await run_ssh_subprocess(argv, timeout=self._connect_timeout, check=True)
+        # Only the parent's exit is awaited: the master it forks may keep the
+        # output descriptors, which a pipe-reading wait would block on.
+        assert self._dir is not None
+        await run_ssh_daemonizing(argv, self._dir / _STDERR_NAME, timeout=self._connect_timeout)
         self._opened = True
         return True
 
@@ -133,7 +137,7 @@ class ControlMaster:
         try:
             # A socket may exist even when open() was interrupted after ssh
             # forked its master: ask whatever is there to exit.
-            if build_argv is not None and any(directory.iterdir()):
+            if build_argv is not None and any(p.name != _STDERR_NAME for p in directory.iterdir()):
                 exit_argv = build_argv(self.command_options())
                 exit_argv[1:1] = ["-O", "exit"]
                 await run_ssh_subprocess(exit_argv, timeout=5)

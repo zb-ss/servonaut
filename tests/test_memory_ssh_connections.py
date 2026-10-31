@@ -65,6 +65,9 @@ class FakeSsh:
     def of_kind(self, kind: str) -> List[List[str]]:
         return [argv for argv in self.calls if self.kind(argv) == kind]
 
+    async def daemonizing(self, argv, stderr_path, timeout: float = 30):
+        return await self(argv, timeout, check=True)
+
     async def __call__(self, argv, timeout: float = 30, *, check: bool = False):
         argv = list(argv)
         kind = self.kind(argv)
@@ -129,6 +132,7 @@ def _patched(fake: FakeSsh, wait: Optional[Callable] = None):
     stack = [
         patch("servonaut.utils.ssh_utils.run_ssh_subprocess", fake),
         patch("servonaut.services.memory.ssh_mux.run_ssh_subprocess", fake),
+        patch("servonaut.services.memory.ssh_mux.run_ssh_daemonizing", fake.daemonizing),
     ]
     if wait is not None:
         stack.append(patch("servonaut.services.memory.service._wait", wait))
@@ -597,3 +601,46 @@ class TestVerdict:
 
         assert (stdout, code) == ("partial", 1) and len(fake.calls) == 1
         assert runner.commands_answered == 1 and runner.connection_problem is None
+
+
+class TestMasterOpenIgnoresInheritedPipes:
+    """``ssh -f`` can leave its master holding ssh's output descriptors."""
+
+    @staticmethod
+    def _fake_ssh(tmp_path: Path) -> tuple[Path, Path]:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pid_file = tmp_path / "sleeper.pid"
+        script = bin_dir / "ssh"
+        # The parent exits 0 once "authenticated"; the forked child keeps stderr.
+        script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nexit 0\n")
+        script.chmod(0o755)
+        return bin_dir, pid_file
+
+    def test_open_returns_when_the_parent_exits_not_when_the_pipes_close(self, tmp_path, monkeypatch):
+        import signal
+        import time
+
+        from servonaut.services.memory.ssh_mux import ControlMaster
+
+        bin_dir, pid_file = self._fake_ssh(tmp_path)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr("servonaut.services.memory.ssh_mux.get_os", lambda: "linux")
+        master = ControlMaster(persist_seconds=5, connect_timeout=3, socket_dir=str(tmp_path))
+
+        async def go():
+            started = time.monotonic()
+            opened = await master.open(lambda options: ["ssh", *[x for o in options for x in ("-o", o)], "--", "u@h"])
+            return opened, time.monotonic() - started
+
+        try:
+            opened, took = asyncio.run(go())
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except (ProcessLookupError, ValueError):
+                    pass
+            asyncio.run(master.close(None))
+
+        assert opened is True and took < 2
