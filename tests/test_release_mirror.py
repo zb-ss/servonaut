@@ -799,7 +799,7 @@ def test_an_update_manifest_is_written_short_lived(tmp_path: Path) -> None:
     body = mirror.published_manifest(manifest, "preview", SIGNED_AT, POLICY_FOR)
     bucket = FakeBucket()
 
-    assert mirror.write_manifest(bucket, "b", PREVIEW_JSON, body, (mirror.parse_tag("v1.2.3"), 1)) == "written"
+    assert mirror.write_manifest(bucket, "b", PREVIEW_JSON, body, (mirror.parse_tag("v1.2.3"), 1), "preview", POLICY_FOR) == "written"
 
     stored = bucket.objects[PREVIEW_JSON]
     assert (stored["type"], stored["cache"], stored["data"]) == ("application/json", "public, max-age=300", body)
@@ -822,36 +822,95 @@ def test_an_update_manifest_is_written_short_lived(tmp_path: Path) -> None:
 def test_an_update_manifest_never_moves_to_an_older_release(tmp_path: Path, current: str, new: str, outcome: str) -> None:
     bodies = {tag: _body(_update_manifest(tmp_path, tag)[2]) for tag in (current, new)}
     bucket = FakeBucket()
-    mirror.write_manifest(bucket, "b", PREVIEW_JSON, bodies[current], (mirror.parse_tag(current), 1))
+    mirror.write_manifest(bucket, "b", PREVIEW_JSON, bodies[current], (mirror.parse_tag(current), 1), "preview", POLICY_FOR)
     etag_before = bucket.objects[PREVIEW_JSON]["etag"]
 
-    assert mirror.write_manifest(bucket, "b", PREVIEW_JSON, bodies[new], (mirror.parse_tag(new), 1)) == outcome
+    assert mirror.write_manifest(bucket, "b", PREVIEW_JSON, bodies[new], (mirror.parse_tag(new), 1), "preview", POLICY_FOR) == outcome
     if outcome == "written":
         assert bucket.puts[-1]["IfMatch"] == etag_before
     stored = ReleaseManifest.from_json(bucket.objects[PREVIEW_JSON]["data"])
     assert stored.product_version == mirror.manifest_version(max(current, new, key=mirror.parse_tag))
 
 
+def _repackaged(tmp_path: Path, revision: int) -> bytes:
+    """v1.2.3's update manifest for another packaging revision, signed."""
+    _, _, manifest = _update_manifest(tmp_path)
+    return _body(mirror.signed_manifest(
+        manifest.product_version, channel=manifest.channel, packaging_revision=revision,
+        artifacts=manifest.artifacts, signer=SIGNER, now=SIGNED_AT, validity_days=14,
+    ))
+
+
 def test_a_newer_packaging_of_the_same_release_is_kept(tmp_path: Path) -> None:
     bucket = FakeBucket()
-    newer = json.dumps({"product_version": "1.2.3", "packaging_revision": 2}).encode()
-    bucket.objects[STABLE_JSON] = {"data": newer, "etag": '"e"', "type": "t", "cache": "c", "meta": {}}
+    bucket.objects[STABLE_JSON] = {"data": _repackaged(tmp_path, 2), "etag": '"e"', "type": "t", "cache": "c", "meta": {}}
 
-    assert mirror.write_manifest(bucket, "b", STABLE_JSON, b"{}", (mirror.parse_tag("v1.2.3"), 1)) == "kept, it names the newer v1.2.3"
+    assert mirror.write_manifest(bucket, "b", STABLE_JSON, b"{}", (mirror.parse_tag("v1.2.3"), 1), "stable", POLICY_FOR) == "kept, it names the newer v1.2.3"
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        # Claims a far newer release, but no key signed it.
+        {"product_version": "99.0.0", "packaging_revision": 1},
+        {"product_version": "1.2.3", "packaging_revision": 99},
+    ],
+)
+def test_an_unsigned_manifest_naming_a_newer_release_is_replaced(tmp_path: Path, stored: dict[str, Any]) -> None:
+    """The bucket is never trusted: only a pinned key's signature holds a newer release in place."""
+    _, _, manifest = _update_manifest(tmp_path)
+    body = mirror.published_manifest(manifest, "stable", SIGNED_AT, POLICY_FOR)
+    bucket = FakeBucket()
+    bucket.objects[STABLE_JSON] = {"data": json.dumps(stored).encode(), "etag": '"e"', "type": "t", "cache": "c", "meta": {}}
+
+    assert mirror.write_manifest(bucket, "b", STABLE_JSON, body, (mirror.parse_tag("v1.2.3"), 1), "stable", POLICY_FOR) == "written"
+    assert bucket.puts[-1]["IfMatch"] == '"e"'
+    assert bucket.objects[STABLE_JSON]["data"] == body
+
+
+def test_a_newer_manifest_a_key_the_app_does_not_pin_signed_is_replaced(tmp_path: Path) -> None:
+    _, _, manifest = _update_manifest(tmp_path)
+    body = mirror.published_manifest(manifest, "stable", SIGNED_AT, POLICY_FOR)
+    foreign = _body(_update_manifest(tmp_path, "v9.0.0", signer=(Ed25519PrivateKey.generate(), KEY_ID))[2])
+    bucket = FakeBucket()
+    bucket.objects[STABLE_JSON] = {"data": foreign, "etag": '"e"', "type": "t", "cache": "c", "meta": {}}
+
+    assert mirror.write_manifest(bucket, "b", STABLE_JSON, body, (mirror.parse_tag("v1.2.3"), 1), "stable", POLICY_FOR) == "written"
+    assert bucket.objects[STABLE_JSON]["data"] == body
+
+
+def test_mirroring_a_release_again_replaces_a_junk_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The recovery the refresh names for a manifest it cannot renew works."""
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    junk = json.dumps({"product_version": "99.0.0"}).encode()
+    for key in (STABLE_JSON, PREVIEW_JSON):
+        bucket.objects[key] = {"data": junk, "etag": f'"{key}"', "type": "t", "cache": "c", "meta": {}}
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    _, plan = _plan(tmp_path, macos=True)
+
+    assert mirror.main(_manifests_args(tmp_path, plan)) == 0
+
+    out = capsys.readouterr().out
+    assert f"- `{STABLE_JSON}`: written" in out and f"- `{PREVIEW_JSON}`: written" in out
+    for key, channel in ((STABLE_JSON, "stable"), (PREVIEW_JSON, "preview")):
+        verify_manifest(ReleaseManifest.from_json(bucket.objects[key]["data"]), POLICY_FOR(channel))
 
 
 def test_an_unreadable_update_manifest_is_repaired() -> None:
     bucket = FakeBucket()
     bucket.objects[STABLE_JSON] = {"data": b"not json", "etag": '"e"', "type": "t", "cache": "c", "meta": {}}
 
-    assert mirror.write_manifest(bucket, "b", STABLE_JSON, b"{}", (mirror.parse_tag("v1.2.3"), 1)) == "written"
+    assert mirror.write_manifest(bucket, "b", STABLE_JSON, b"{}", (mirror.parse_tag("v1.2.3"), 1), "stable", POLICY_FOR) == "written"
     assert bucket.puts[-1]["IfMatch"] == '"e"'
 
 
 def test_a_manifest_write_that_loses_a_race_re_reads_and_decides_again(tmp_path: Path) -> None:
     bodies = {tag: _body(_update_manifest(tmp_path, tag)[2]) for tag in ("v1.2.3", "v1.2.4", "v1.2.5")}
     bucket = FakeBucket()
-    mirror.write_manifest(bucket, "b", STABLE_JSON, bodies["v1.2.3"], (mirror.parse_tag("v1.2.3"), 1))
+    mirror.write_manifest(bucket, "b", STABLE_JSON, bodies["v1.2.3"], (mirror.parse_tag("v1.2.3"), 1), "stable", POLICY_FOR)
     real_put = bucket.put_object
 
     def racing_put(**kwargs: Any) -> dict[str, str]:
@@ -862,7 +921,7 @@ def test_a_manifest_write_that_loses_a_race_re_reads_and_decides_again(tmp_path:
 
     bucket.put_object = racing_put  # type: ignore[method-assign]
 
-    outcome = mirror.write_manifest(bucket, "b", STABLE_JSON, bodies["v1.2.4"], (mirror.parse_tag("v1.2.4"), 1))
+    outcome = mirror.write_manifest(bucket, "b", STABLE_JSON, bodies["v1.2.4"], (mirror.parse_tag("v1.2.4"), 1), "stable", POLICY_FOR)
 
     assert outcome == "kept, it names the newer v1.2.5"
 

@@ -19,8 +19,8 @@ Subcommands, in the order the workflow runs them:
   manifests     sign the update manifests the packaged desktop app reads,
                 manifest/stable.json and manifest/preview.json, for the
                 release's desktop files; each must pass the app's own trust
-                policy before it is uploaded, and neither moves to an older
-                release
+                policy before it is uploaded, and neither moves back from a
+                newer release a pinned key signed
   notes         add or refresh the mirror links in the release notes
   refresh       re-sign the update manifests with a fresh expiry before they
                 expire, while GitHub still lists every file they name
@@ -724,15 +724,40 @@ def manifest_keys(plan: dict[str, Any], github_latest_tag: str, prefix: str) -> 
     ]
 
 
-def write_manifest(client: Any, bucket: str, key: str, body: bytes, order: tuple[Version, int]) -> str:
-    """Upload an update manifest unless the stored one names a newer release.
+def stored_order(data: Any, build_channel: str, policy_for: PolicyFor | None) -> tuple[Version, int] | None:
+    """Where a stored update manifest's release sorts, once a pinned key is found to have signed it.
 
-    The same release is replaced, which renews its expiry; the write is
+    Anything else, unsigned, signed by a key the app does not pin, or
+    unreadable, names no release at all: the bucket is never trusted, so what
+    it holds is believed only when it carries a pinned key's signature.
+    """
+    if not isinstance(data, dict):
+        return None
+    try:
+        authentic_manifest(data, build_channel, policy_for)
+    except MirrorError:
+        return None
+    return manifest_order(data)
+
+
+def write_manifest(
+    client: Any,
+    bucket: str,
+    key: str,
+    body: bytes,
+    order: tuple[Version, int],
+    build_channel: str,
+    policy_for: PolicyFor | None = None,
+) -> str:
+    """Upload an update manifest unless the stored one is ours and names a newer release.
+
+    The same release is replaced, which renews its expiry, and a stored file
+    no pinned key signed is replaced like an unreadable one; the write is
     conditional on what was read, like a channel file's.
     """
     for _ in range(5):
         current, etag = read_channel(client, bucket, key)
-        current_order = manifest_order(current)
+        current_order = stored_order(current, build_channel, policy_for)
         if current_order is not None and current_order > order:
             return f"kept, it names the newer {manifest_tag(current['product_version'])}"
         if put_short_lived(client, bucket, key, body, etag):
@@ -1236,18 +1261,21 @@ def command_manifests(args: argparse.Namespace) -> None:
         return
     # Each is checked before anything is written, so a refusal changes nothing.
     bodies = [
-        (key, published_manifest(manifest, build_channel, now))
+        (key, build_channel, published_manifest(manifest, build_channel, now))
         for key, build_channel in manifest_keys(plan, args.github_latest_tag, prefix)
     ]
     if args.dry_run:
         write_summary(
             [title, ""]
-            + [f"- `{key}` would name {plan['tag']}, valid until {manifest.expires_at}" for key, _ in bodies]
+            + [f"- `{key}` would name {plan['tag']}, valid until {manifest.expires_at}" for key, _, _ in bodies]
         )
         return
     order = (parse_tag(plan["tag"]), PACKAGING_REVISION)
     client, bucket = bucket_client()
-    outcomes = [(key, write_manifest(client, bucket, key, body, order)) for key, body in bodies]
+    outcomes = [
+        (key, write_manifest(client, bucket, key, body, order, build_channel))
+        for key, build_channel, body in bodies
+    ]
     write_summary([title, ""] + [f"- `{key}`: {outcome}" for key, outcome in outcomes])
 
 
