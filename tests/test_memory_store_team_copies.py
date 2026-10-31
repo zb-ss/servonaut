@@ -101,7 +101,7 @@ class TestSourceDiscovery:
         store.write_annotations("other-id", "x", "team a")
         assert sorted(store.find_instance_dirs(ID)) == ["former team", "shared", "team a"]
 
-    def test_symlinks_files_and_the_backup_folder_are_not_sources(self, tmp_path):
+    def test_symlinks_and_files_are_not_sources(self, tmp_path):
         store = _store(tmp_path)
         root = tmp_path / "root"
         store.write_annotations(ID, "x", "real")
@@ -109,8 +109,6 @@ class TestSourceDiscovery:
         (tmp_path / "outside").mkdir()
         os.symlink(tmp_path / "outside", root / "linked" / ID)
         (root / "a-file").write_text("x")
-        (root / "team-copy-backups" / ID).mkdir(parents=True)
-        (root / "..").resolve()
         assert store.find_instance_dirs(ID) == ["real"]
 
     def test_an_unsafe_id_finds_nothing(self, tmp_path):

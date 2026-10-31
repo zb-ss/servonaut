@@ -157,7 +157,6 @@ class ServonautApp(App):
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
     memory_sync_service = None
-    _team_memory_cloud_checked = False
     memory_retrieval_service = None
     memory_settings_service = None
     fleet_service = None
@@ -2214,11 +2213,7 @@ class ServonautApp(App):
             report = await merge_team_copies(
                 self.memory_service, sync, rows,
                 list_remote_ids=self._remote_memory_ids,
-                check_cloud=not self._team_memory_cloud_checked,
             )
-            # Once the service was asked about every copy and nothing is
-            # left to retry, later passes need no listing while no copy is on disk.
-            self._team_memory_cloud_checked = report.cloud_checked and not report.kept
         except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
             logger.exception("Merging team copies of server memory failed")
             return
@@ -2230,9 +2225,13 @@ class ServonautApp(App):
     async def _remote_memory_ids(self) -> set:
         """Ids the sync service holds memory for (one fleet listing request).
 
-        Raises when the listing is unavailable or incomplete, so the caller
-        keeps the team copies it could not check.
+        A complete answer is kept for the rest of the run, so the several
+        passes of one start ask the service once. Raises when the listing is
+        unavailable or incomplete: no copy is then marked as merged.
         """
+        cached = self.__dict__.get("_remote_memory_ids_cache")
+        if cached is not None:
+            return cached
         fleet_service = getattr(self, "fleet_service", None)
         if fleet_service is None:
             raise RuntimeError("fleet listing not available")
@@ -2242,8 +2241,9 @@ class ServonautApp(App):
         ids = {
             str(item.instance.get("instance_id") or item.instance.get("id") or "")
             for item in fleet.items
-        }
-        return ids - {""}
+        } - {""}
+        self._remote_memory_ids_cache = ids
+        return ids
 
     def start_fleet_manual_scan(
         self,

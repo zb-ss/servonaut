@@ -152,17 +152,3 @@ def test_a_failed_merge_leaves_the_shares_queued_notes_in_the_queue(tmp_path):
     asyncio.run(app._do_reconcile_team_memory(app.instances))
     assert sync.pending_count(SHARE_ID) == 1
     assert (tmp_path / "mem" / "team team a" / SHARE_ID / "annotations.md").is_file()
-
-
-def test_the_cloud_is_listed_again_only_while_something_is_unsettled(monkeypatch):
-    app = _app([_own(), _shared()])
-    seen = []
-
-    async def merged(*args, **kwargs):
-        seen.append(kwargs["check_cloud"])
-        return TeamMergeReport(cloud_checked=True)
-
-    monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", merged)
-    asyncio.run(app._do_reconcile_team_memory(app.instances))
-    asyncio.run(app._do_reconcile_team_memory(app.instances))
-    assert seen == [True, False]

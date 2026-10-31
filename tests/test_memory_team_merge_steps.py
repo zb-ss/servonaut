@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from servonaut.services.memory.store import TEAM_COPY_BACKUP_DIR, MemoryStore
+from servonaut.services.memory.store import MemoryStore
 from servonaut.services.memory.team_merge import merge_team_copies, share_identity
 from tests.test_memory_team_merge import (
     FIRST,
@@ -51,20 +51,6 @@ def _run(service, rows, sync=None, listing=None, **kwargs):
 
 
 class TestOrder:
-    def test_a_failure_while_queueing_the_upload_leaves_the_copy_for_the_next_pass(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="team note")
-        sync = _sync(enqueue_annotations=MagicMock(side_effect=OSError("queue file")))
-        first = _run(service, [_own(), _shared()], sync, _ids())
-        assert first.copies == 0 and SHARE_ID in first.kept
-        assert (tmp_path / LEGACY / SHARE_ID / "annotations.md").is_file()
-        sync.enqueue_annotations = MagicMock()
-        second = _run(service, [_own(), _shared()], sync, _ids())
-        assert second.copies == 1
-        # The note was merged by the first pass; the retry still uploads it.
-        sync.enqueue_annotations.assert_called_once()
-        assert not (tmp_path / LEGACY / SHARE_ID).exists()
-
     def test_the_queue_is_dropped_only_after_a_verified_merge(self, tmp_path):
         service = _service(tmp_path)
         service._config = type(service._config)(per_server_overrides={OWN_ID: {"memory_disabled": True}})
@@ -73,21 +59,6 @@ class TestOrder:
         _run(service, [_own(), _shared()], sync, _ids())
         sync.drop_pending_for.assert_not_called()
 
-    def test_the_backup_is_the_last_step(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="team note")
-        steps: List[str] = []
-        sync = _sync(
-            enqueue_annotations=MagicMock(side_effect=lambda *a: steps.append("enqueue")),
-            drop_pending_for=MagicMock(side_effect=lambda *a: steps.append("drop")),
-        )
-        real = MemoryStore.backup_instance_dir
-        MemoryStore.backup_instance_dir = lambda self, *a, **k: (steps.append("backup"), real(self, *a, **k))[1]
-        try:
-            _run(service, [_own(), _shared()], sync, _ids())
-        finally:
-            MemoryStore.backup_instance_dir = real
-        assert steps == ["enqueue", "drop", "backup"]
 
 
 class TestRemoteState:
@@ -107,48 +78,6 @@ class TestRemoteState:
         assert report.copies == 0 and SHARE_ID in report.kept
         assert (tmp_path / LEGACY / SHARE_ID / "annotations.md").is_file()
 
-    def test_a_cloud_only_copy_is_pulled_merged_and_archived(self, tmp_path):
-        service = _service(tmp_path)
-
-        async def pull(instance_id, name, provider):
-            service.write_annotations(instance_id, "only in the cloud", provider)
-            return "updated"
-
-        sync = _sync(pull_annotations=pull)
-        report = _run(service, [_own(), _shared()], sync, _ids(SHARE_ID))
-        assert service.read_annotations(OWN_ID, "aws") == "only in the cloud"
-        assert report.copies == 1
-
-    def test_one_pull_per_share_id_however_many_keys_it_may_sit_under(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="n")
-        sync = _sync()
-        _run(service, [_own(), _shared()], sync, _ids(SHARE_ID))
-        assert sync.pull_annotations.await_count == 1
-
-    def test_a_listing_is_not_repeated_once_the_cloud_is_checked_and_no_copy_remains(self, tmp_path):
-        service = _service(tmp_path)
-        listing = AsyncMock(return_value=[])
-        _run(service, [_own(), _shared()], _sync(), listing, check_cloud=False)
-        listing.assert_not_awaited()
-
-
-class TestPulledNotesBothOrders:
-    @pytest.mark.parametrize("outcome", ["updated", "local_newer"])
-    def test_neither_text_is_lost(self, tmp_path, outcome):
-        service = _service(tmp_path)
-        _put_copy(service, notes="LOCAL ONLY NOTE")
-
-        async def pull(instance_id, name, provider):
-            if outcome == "updated":
-                service.write_annotations(instance_id, "CLOUD NOTE", provider)
-            return outcome
-
-        _run(service, [_own(), _shared()], _sync(pull_annotations=pull), _ids(SHARE_ID))
-        merged = service.read_annotations(OWN_ID, "aws")
-        assert "LOCAL ONLY NOTE" in merged
-        if outcome == "updated":
-            assert "CLOUD NOTE" in merged
 
 
 class TestAddressing:

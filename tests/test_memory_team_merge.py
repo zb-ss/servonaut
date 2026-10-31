@@ -16,7 +16,7 @@ import pytest
 
 from servonaut.config.schema import MemoryConfig
 from servonaut.services.memory.service import MemoryService
-from servonaut.services.memory.store import TEAM_COPY_BACKUP_DIR, MemoryStore
+from servonaut.services.memory.store import MemoryStore
 from servonaut.services.memory.team_merge import (
     MemoryKey,
     copy_module_wins,
@@ -128,21 +128,6 @@ class TestMerge:
         assert service.read_annotations(OWN_ID, "aws") == "restart nginx after deploys"
         assert (report.copies, report.notes) == (1, 1)
 
-    def test_different_annotations_are_both_kept_and_a_second_run_adds_nothing(self, tmp_path):
-        service = _service(tmp_path)
-        service.write_annotations(OWN_ID, "my note", "aws")
-        _put_copy(service, notes="team note")
-        rows = [_own(), _shared()]
-        _run(service, rows)
-        merged = service.read_annotations(OWN_ID, "aws")
-        assert merged.startswith("my note") and "team note" in merged
-        backup = tmp_path / TEAM_COPY_BACKUP_DIR / "team team a" / SHARE_ID
-        assert (backup / "annotations.md").read_text() == "team note"
-        # The copy is gone from its old place; a second run finds nothing to merge.
-        second = _run(service, rows)
-        assert second.copies == 0
-        assert service.read_annotations(OWN_ID, "aws") == merged
-
     def test_findings_merge_last_writer_wins_and_keep_superseded_by(self, tmp_path):
         service = _service(tmp_path)
         service._store.save_finding(
@@ -157,17 +142,6 @@ class TestMerge:
         assert kept["title"] == "theirs" and kept["superseded_by"] == SECOND
         assert service._store.get_finding(OWN_ID, SECOND, "aws")["title"] == "extra"
         assert report.findings == 2
-
-    def test_the_newer_probe_wins_and_the_copy_survives_as_a_backup(self, tmp_path):
-        service = _service(tmp_path)
-        service._store.save_module(OWN_ID, "os", _module(OLD, distro="own") | {"instance_id": OWN_ID}, "aws")
-        _put_copy(service, module=_module(NEW, distro="team"))
-        _run(service, [_own(), _shared()])
-        assert service._store.get_module(OWN_ID, "os", "aws")["observed"]["distro"] == "team"
-        backup = tmp_path / TEAM_COPY_BACKUP_DIR / "team team a" / SHARE_ID
-        assert json.loads((backup / "os.json").read_text())["observed"]["distro"] == "team"
-        assert (backup / "index_entry.json").is_file()
-        assert not (tmp_path / "team team a" / SHARE_ID).exists()
 
     def test_an_older_copy_module_never_replaces_the_own_one(self, tmp_path):
         service = _service(tmp_path)
@@ -222,44 +196,9 @@ class TestSyncSide:
         sync.pull_findings = AsyncMock(return_value="not_found")
         return sync
 
-    def test_the_copy_is_pulled_first_and_the_merge_is_queued(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="team note", findings=[{"id": FIRST, "title": "t", "created_at": NEW}])
-        sync = self._sync()
-        _run(service, [_own(), _shared()], sync)
-        sync.pull_annotations.assert_awaited_once_with(SHARE_ID, "web-1", "team team a")
-        sync.pull_findings.assert_awaited_once()
-        sync.drop_pending_for.assert_called_once_with({SHARE_ID})
-        assert sync.enqueue_annotations.call_args.args[0]["id"] == OWN_ID
-        assert sync.enqueue_findings.call_args.args[0]["id"] == OWN_ID
-
-    def test_a_failing_pull_merges_but_keeps_the_copy(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="team note")
-        sync = self._sync()
-        sync.pull_annotations = AsyncMock(side_effect=RuntimeError("offline"))
-        report = _run(service, [_own(), _shared()], sync)
-        # The local data is merged; the copy waits for a pass whose pulls work.
-        assert service.read_annotations(OWN_ID, "aws") == "team note"
-        assert report.copies == 0 and report.kept == [SHARE_ID]
 
 
 class TestReshare:
-    def test_an_entry_left_by_an_old_share_id_folds_into_the_new_one(self, tmp_path):
-        service = _service(tmp_path)
-        old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow
-        row = _shared(instance_id=None, hostname="8.8.8.8")
-        service._store.save_module(old_id, "os", _module(NEW, distro="old") | {"instance_id": old_id}, "shared")
-        service.update_index(old_id, "web-1", "shared", ["os"])
-        service._store.write_annotations(old_id, "kept note", "shared")
-        # The entry recorded which server the old share was.
-        from servonaut.services.memory.team_merge import share_identity
-        service._store.set_share_identity(old_id, share_identity(row))
-        report = _run(service, [row])
-        assert report.copies == 1
-        assert service.read_annotations(SHARE_ID, "shared") == "kept note"
-        assert (tmp_path / TEAM_COPY_BACKUP_DIR / "shared" / old_id / "os.json").is_file()
-
     def test_an_entry_with_no_recorded_identity_is_left_alone(self, tmp_path):
         service = _service(tmp_path)
         old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow

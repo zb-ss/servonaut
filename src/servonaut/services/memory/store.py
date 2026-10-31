@@ -37,10 +37,6 @@ MEMORY_ROOT = Path.home() / ".servonaut" / "memory"
 INDEX_PATH = MEMORY_ROOT / "index.json"
 INDEX_VERSION = 1
 
-# Where a team copy's directory is kept after it was merged into the user's own
-# record. Never deleted by Servonaut; the user may remove it by hand.
-TEAM_COPY_BACKUP_DIR = "team-copy-backups"
-
 # Marker written into a team copy's folder once its memory is merged elsewhere.
 # Not ``*.json``: module globbing must never read it as a module.
 TEAM_MERGED_MARKER = "team_merged.marker"
@@ -1010,8 +1006,8 @@ class MemoryStore:
 
         Found by scanning the root, not the index, so a copy filed under a
         renamed team's label is found on every retry. Only plain
-        directories count: a symlink at either level, a file, the backup
-        folder and unsafe names are skipped.
+        directories count: a symlink at either level, a file and unsafe
+        names are skipped.
         """
         try:
             _validate_instance_id(instance_id)
@@ -1023,7 +1019,7 @@ class MemoryStore:
         for child in children:
             candidate = child / instance_id
             try:
-                if child.name == TEAM_COPY_BACKUP_DIR or _UNSAFE_ID_RE.search(child.name):
+                if _UNSAFE_ID_RE.search(child.name):
                     continue
                 if not _is_plain(child, True) or not _is_plain(candidate, True):
                     continue
@@ -1079,42 +1075,10 @@ class MemoryStore:
         """
         return self._checked_dir(instance_id, provider).is_dir()
 
-    def backup_instance_dir(
-        self, instance_id: str, provider: str = "custom"
-    ) -> Optional[Path]:
-        """Move an instance's directory under :data:`TEAM_COPY_BACKUP_DIR`.
-
-        Nothing is deleted: the directory keeps every file it held, with the
-        instance's index entry beside them as ``index_entry.json``, and the
-        index no longer lists the instance, unless the entry now belongs to
-        another provider's record of the same id (a merge target). A name already taken in the
-        backup directory gets a numeric suffix, so an earlier backup is
-        never replaced.
-
-        Returns the backup path, or ``None`` when there was no directory.
-
-        Raises:
-            ValueError: If *instance_id* or the provider slug is unsafe.
-        """
-        slug = _provider_slug(provider)
-        source = self._checked_dir(instance_id, provider)
-        if not source.is_dir():
-            return None
-        entry = self._load_index().get("instances", {}).get(instance_id)
-        if entry is not None and _provider_slug(str(entry.get("provider") or "")) != slug:
-            entry = None
-        target = self._root / TEAM_COPY_BACKUP_DIR / slug / instance_id
-        suffix = 1
-        while target.exists():
-            suffix += 1
-            target = self._root / TEAM_COPY_BACKUP_DIR / slug / f"{instance_id}-{suffix}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
-        if entry is not None:
-            _atomic_write_json(target / "index_entry.json", entry)
-            self._remove_from_index(instance_id)
-        logger.info("Moved team copy %s/%s to %s", slug, instance_id, target)
-        return target
+    def remove_index_entry(self, instance_id: str) -> None:
+        """Drop *instance_id*'s index entry; its folder and files are untouched."""
+        _validate_instance_id(instance_id)
+        self._remove_from_index(instance_id)
 
     def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
         """Record which server a share is, on its index entry.

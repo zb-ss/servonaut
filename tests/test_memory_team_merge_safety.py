@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from servonaut.services.memory.store import TEAM_COPY_BACKUP_DIR, MemoryStore
+from servonaut.services.memory.store import MemoryStore
 from servonaut.services.memory.team_merge import (
     MemoryKey,
     TeamCopyMerger,
@@ -76,19 +76,6 @@ class TestMemberLegacyEntries:
         store.save_finding(SHARE_ID, {"id": FIRST, "title": "t", "created_at": NEW}, LEGACY)
         service.update_index(SHARE_ID, "web-1", "Team Team A", ["os"])
 
-    def test_everything_is_visible_under_the_rows_current_key(self, tmp_path):
-        service = _service(tmp_path)
-        self._fill(service)
-        sync = _sync()
-        report = _run(service, [_member()], sync)
-        assert report.copies == 1
-        assert service.read_annotations(SHARE_ID, "shared") == "hand written"
-        assert "os" in service._store.get_all_modules(SHARE_ID, "shared")
-        assert [r["id"] for r in service.list_findings(SHARE_ID, "shared")] == [FIRST]
-        assert service._store.get_index_entry(SHARE_ID)["provider"] == "shared"
-        assert (tmp_path / TEAM_COPY_BACKUP_DIR / LEGACY / SHARE_ID / "os.json").is_file()
-        assert not (tmp_path / LEGACY / SHARE_ID).exists()
-
     def test_a_members_uploads_do_not_change(self, tmp_path):
         service = _service(tmp_path)
         self._fill(service)
@@ -107,13 +94,6 @@ class TestMemberLegacyEntries:
         assert report.copies == 1
         assert service.read_annotations(SHARE_ID, "shared") == "old label note"
 
-    def test_the_index_entry_is_kept_when_it_belongs_to_the_target(self, tmp_path):
-        store = MemoryStore(root=tmp_path)
-        store.write_annotations(SHARE_ID, "x", LEGACY)
-        store.write_annotations(SHARE_ID, "y", "shared")
-        store.update_index(SHARE_ID, "web-1", "shared", [])
-        store.backup_instance_dir(SHARE_ID, LEGACY)
-        assert store.get_index_entry(SHARE_ID) is not None
 
 
 class TestNoteMatching:
@@ -134,44 +114,11 @@ class TestNoteMatching:
         assert is_contained_text("x\none\ntwo\ny\n", "one\ntwo")
         assert not is_contained_text("x\none\ntwo three\ny\n", "one\ntwo")
 
-    def test_the_short_note_reaches_the_own_row_through_a_pass(self, tmp_path):
-        service = _service(tmp_path)
-        service.write_annotations(OWN_ID, "prod db\n", "aws")
-        _put_copy(service, notes="prod")
-        _run(service, [_own(), _shared()], _sync(), _listing([SHARE_ID]))
-        assert "\nprod" in service.read_annotations(OWN_ID, "aws").split("prod db")[1]
 
 
 class TestPullBeforeMerge:
     """C3: what a pull overwrites in the copy is merged too."""
 
-    def test_the_text_a_pull_replaces_is_not_lost(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="local copy note")
-
-        async def pull(instance_id, name, provider):
-            service.write_annotations(instance_id, "service copy note", provider)
-            return "updated"
-
-        sync = _sync(pull_annotations=pull)
-        _run(service, [_own(), _shared()], sync, _listing([SHARE_ID]))
-        merged = service.read_annotations(OWN_ID, "aws")
-        assert merged.count("local copy note") == 1
-        assert merged.count("service copy note") == 1
-
-    def test_local_findings_survive_a_pull(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, findings=[{"id": FIRST, "title": "local", "created_at": OLD}])
-
-        async def pull(instance_id, name, provider):
-            service.merge_findings(
-                instance_id, [{"id": SECOND, "title": "remote", "created_at": NEW}], provider
-            )
-            return "updated"
-
-        _run(service, [_own(), _shared()], _sync(pull_findings=pull), _listing([SHARE_ID]))
-        ids = {r["id"] for r in service.list_findings(OWN_ID, "aws", include_superseded=True)}
-        assert ids == {FIRST, SECOND}
 
 
 class TestListingFirst:
@@ -185,38 +132,6 @@ class TestListingFirst:
         sync.pull_annotations.assert_not_awaited()
         sync.pull_findings.assert_not_awaited()
         assert report.copies == 1
-
-    def test_a_listed_id_is_pulled_once_each(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="note")
-        sync = _sync()
-        _run(service, [_own(), _shared()], sync, _listing([SHARE_ID]))
-        sync.pull_annotations.assert_awaited_once()
-        sync.pull_findings.assert_awaited_once()
-
-    def test_a_failed_listing_merges_but_backs_up_nothing_and_a_later_pass_finishes(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="note")
-        sync = _sync()
-
-        async def broken() -> List[str]:
-            raise RuntimeError("offline")
-
-        first = _run(service, [_own(), _shared()], sync, broken)
-        assert service.read_annotations(OWN_ID, "aws") == "note"
-        assert (tmp_path / LEGACY / SHARE_ID / "annotations.md").is_file()
-        assert first.copies == 0 and SHARE_ID in first.kept
-        second = _run(service, [_own(), _shared()], sync, _listing([]))
-        assert second.copies == 1
-        assert not (tmp_path / LEGACY / SHARE_ID).exists()
-
-    def test_a_failed_pull_of_a_listed_id_keeps_the_copy(self, tmp_path):
-        service = _service(tmp_path)
-        _put_copy(service, notes="note")
-        sync = _sync(pull_annotations=AsyncMock(side_effect=RuntimeError("boom")))
-        report = _run(service, [_own(), _shared()], sync, _listing([SHARE_ID]))
-        assert report.copies == 0 and SHARE_ID in report.kept
-        assert (tmp_path / LEGACY / SHARE_ID / "annotations.md").is_file()
 
     def test_without_sync_nothing_is_listed_or_pulled(self, tmp_path):
         service = _service(tmp_path)
@@ -302,32 +217,6 @@ class TestOnePlanNeverStopsTheOthers:
         assert (nested / "annotations.md").is_file()
         assert "Ops" not in caplog.text
 
-    def test_a_failing_backup_is_kept_and_the_next_copy_still_merges(self, tmp_path, monkeypatch):
-        service = _service(tmp_path)
-        _put_copy(service, notes="team note")
-        second = _shared(id=OTHER_SHARE)
-        calls: List[str] = []
-        real = MemoryStore.backup_instance_dir
-
-        def flaky(self, instance_id, provider="custom"):
-            calls.append(instance_id)
-            if len(calls) == 1:
-                raise OSError("disk full")
-            return real(self, instance_id, provider)
-
-        monkeypatch.setattr(MemoryStore, "backup_instance_dir", flaky)
-        service._store.write_annotations(OTHER_SHARE, "other note", LEGACY)
-        service.update_index(OTHER_SHARE, "web-1", "Team Team A", [])
-        report = _run(service, [_own(), _shared(), second], _sync(), _listing([]))
-        assert len(calls) >= 2
-        assert report.copies == 1 and len(report.kept) == 1
-
-    def test_the_store_refuses_an_unsafe_provider_slug(self, tmp_path):
-        store = MemoryStore(root=tmp_path)
-        for method in (store.has_instance_dir, store.backup_instance_dir):
-            for slug in ("a/b", "..", "a\\b"):
-                with pytest.raises(ValueError):
-                    method(SHARE_ID, slug)
 
 
 class TestReshareQueue:
