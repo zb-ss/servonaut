@@ -527,15 +527,15 @@ class MemoryService(MemoryServiceInterface):
             probed_modules.append(result.module)
 
         if probed_modules:
-            if is_shared_row(instance):
-                # So a re-share can be matched to this entry, from any surface.
-                self._store.set_share_identity(instance_id, share_identity(instance))
-            self._store.update_index(
-                instance_id=instance_id,
-                name=name,
-                provider=provider,
-                modules=probed_modules,
-            )
+            # The index has its own lock another process may hold: wait for it
+            # off the event loop. The modules are stored already, so a busy
+            # index only leaves the listing behind until the next write.
+            try:
+                await asyncio.to_thread(
+                    self._index_build, instance, instance_id, name, provider, probed_modules
+                )
+            except RecordLockTimeout:
+                logger.warning("Memory index not updated after a build: it was busy")
 
         overall_reason: Optional[str] = None
         if not successes and unsaved:
@@ -547,6 +547,25 @@ class MemoryService(MemoryServiceInterface):
             failures=failures,
             overall_reason=overall_reason,
             unsaved=unsaved,
+        )
+
+    def _index_build(
+        self,
+        instance: Dict[str, Any],
+        instance_id: str,
+        name: str,
+        provider: str,
+        modules: List[str],
+    ) -> None:
+        """List *modules* of a build in the memory index (blocking: run off the loop)."""
+        if is_shared_row(instance):
+            # So a re-share can be matched to this entry, from any surface.
+            self._store.set_share_identity(instance_id, share_identity(instance))
+        self._store.update_index(
+            instance_id=instance_id,
+            name=name,
+            provider=provider,
+            modules=modules,
         )
 
     async def refresh(

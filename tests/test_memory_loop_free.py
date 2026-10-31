@@ -138,3 +138,18 @@ def test_remembering_a_finding_saves_in_a_worker_and_queues_on_the_loop(tmp_path
     assert result.startswith("finding_id:")
     assert save_threads and all(t != loop_thread for t in save_threads)
     assert queue_threads == [loop_thread]
+
+
+def test_a_busy_index_does_not_stall_the_loop_or_cost_the_saved_modules(tmp_path):
+    from servonaut.services.memory.store import INDEX_LOCK
+
+    service = _build_service(tmp_path)
+    index = FileLock(tmp_path / LOCKS_DIR / INDEX_LOCK, private_dir=True)
+    assert index.try_acquire()
+    try:
+        report, ticks = asyncio.run(_ticks_while(service.build_report(_own(), ["os"])))
+    finally:
+        index.release()
+    assert ticks >= 8  # the 0.3 s index wait did not freeze the timer
+    assert set(report.successes) == {"os"}
+    assert service._store.get_module(OWN_ID, "os", "aws") is not None
