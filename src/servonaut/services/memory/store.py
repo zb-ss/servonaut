@@ -208,6 +208,9 @@ class MemoryStore:
         # Demo mode hands screens redacted rows; their fake ids must never
         # become directory names or index keys. Identity until wired.
         self._resolve_id: Callable[[str], str] = lambda instance_id: instance_id
+        # Which server each share is (see :meth:`set_share_identity`), kept so
+        # an index entry created later still records it.
+        self._share_identities: Dict[str, Dict[str, Any]] = {}
 
     def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
         """Map every incoming instance id through *resolver* (fake → real)."""
@@ -601,7 +604,40 @@ class MemoryStore:
                 "annotations_hash": annotations_hash,
             }
         )
+        self._apply_share_identity(instance_id, entry)
         instances[instance_id] = entry
+        self._save_index(index)
+
+    def _apply_share_identity(self, instance_id: str, entry: Dict[str, Any]) -> None:
+        """Record on *entry* which server a share is, when that is known."""
+        identity = self._share_identities.get(instance_id)
+        if identity is not None:
+            entry["share_identity"] = dict(identity)
+
+    def ensure_index_entry(
+        self, instance_id: str, name: str, provider: str, modules: List[str]
+    ) -> None:
+        """Make sure the index lists *instance_id* with a name, provider and modules.
+
+        A missing entry is created like :meth:`update_index` does. An existing
+        entry keeps its scan times and counters; only a missing name, a
+        provider that differs, and modules not yet listed are filled in. A
+        skeletal entry (one created for bookkeeping keys alone) is completed.
+        """
+        instance_id = self._resolve_id(instance_id)
+        entry = self._load_index().get("instances", {}).get(instance_id)
+        if entry is None or "last_scan" not in entry:
+            self.update_index(instance_id, name, provider, modules)
+            return
+        wanted = {"name": entry.get("name") or name, "provider": provider}
+        merged = sorted(set(entry.get("modules", [])) | set(modules))
+        if all(entry.get(k) == v for k, v in wanted.items()) and merged == entry.get("modules"):
+            return
+        index = self._load_index()
+        stored = index["instances"][instance_id]
+        stored.update(wanted)
+        stored["modules"] = merged
+        self._apply_share_identity(instance_id, stored)
         self._save_index(index)
 
     def _remove_from_index(self, instance_id: str) -> None:
@@ -820,6 +856,7 @@ class MemoryStore:
         index = self._load_index()
         instances = index.setdefault("instances", {})
         entry = instances.setdefault(instance_id, {})
+        self._apply_share_identity(instance_id, entry)
         if annotations_hash is not None:
             entry["annotations_hash"] = annotations_hash
         if annotations_synced_at is not None:
@@ -832,11 +869,35 @@ class MemoryStore:
     # Team copies
     # ------------------------------------------------------------------
 
+    def is_addressable(self, instance_id: str, provider: str) -> bool:
+        """Whether *instance_id* under *provider* names a directory inside the memory root.
+
+        Both parts must be safe path components, and the resolved directory
+        (symlinks followed) must lie within the root.
+        """
+        try:
+            _validate_instance_id(instance_id)
+            _validate_instance_id(_provider_slug(provider))
+            resolved = self._instance_dir(instance_id, provider).resolve()
+            resolved.relative_to(self._root.resolve())
+        except (ValueError, OSError):
+            return False
+        return True
+
+    def _checked_dir(self, instance_id: str, provider: str) -> Path:
+        """The instance directory, refused with ``ValueError`` unless addressable."""
+        if not self.is_addressable(instance_id, provider):
+            raise ValueError(f"memory directory for {instance_id!r} is outside the memory root")
+        return self._instance_dir(instance_id, provider)
+
     def has_instance_dir(self, instance_id: str, provider: str = "custom") -> bool:
-        """Whether any memory is filed on disk for *instance_id* under *provider*."""
-        _validate_instance_id(instance_id)
-        _validate_instance_id(_provider_slug(provider))
-        return self._instance_dir(instance_id, provider).is_dir()
+        """Whether any memory is filed on disk for *instance_id* under *provider*.
+
+        Raises:
+            ValueError: If the id or provider slug is unsafe, or the directory
+                would lie outside the memory root.
+        """
+        return self._checked_dir(instance_id, provider).is_dir()
 
     def backup_instance_dir(
         self, instance_id: str, provider: str = "custom"
@@ -855,10 +916,8 @@ class MemoryStore:
         Raises:
             ValueError: If *instance_id* or the provider slug is unsafe.
         """
-        _validate_instance_id(instance_id)
         slug = _provider_slug(provider)
-        _validate_instance_id(slug)
-        source = self._instance_dir(instance_id, provider)
+        source = self._checked_dir(instance_id, provider)
         if not source.is_dir():
             return None
         entry = self._load_index().get("instances", {}).get(instance_id)
@@ -886,6 +945,7 @@ class MemoryStore:
         existing entry is updated. Returns whether the entry changed.
         """
         _validate_instance_id(instance_id)
+        self._share_identities[instance_id] = dict(identity)
         index = self._load_index()
         entry = index.get("instances", {}).get(instance_id)
         if entry is None or entry.get("share_identity") == identity:
@@ -1124,6 +1184,7 @@ class MemoryStore:
         index = self._load_index()
         instances = index.setdefault("instances", {})
         entry = instances.setdefault(instance_id, {})
+        self._apply_share_identity(instance_id, entry)
         if findings_count is not None:
             entry["findings_count"] = findings_count
         if findings_synced_at is not None:
