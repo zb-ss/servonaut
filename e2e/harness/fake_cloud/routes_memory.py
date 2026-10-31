@@ -57,6 +57,7 @@ from e2e.harness.fake_cloud.shapes import (
     has_bytes,
     has_size,
 )
+from e2e.harness.fake_cloud.control import CONTROL_PREFIX
 from e2e.harness.fake_cloud.state import ScenarioStore
 
 MEMORY = "/api/v1/memory"
@@ -924,3 +925,17 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
     router.add_post(f"{grant}/wraps", guarded(add_wraps))
     router.add_get(f"{grant}/wraps", guarded(wrap_coverage))
     router.add_get("/api/v1/teams/{team_slug}/memory/{instance_id}/{module}", guarded(team_read))
+
+    async def rotate_member_key(request: web.Request) -> web.Response:
+        # The QA sandbox runs in another process: this lets a walk replace a
+        # teammate's memory key the way the journeys do in process.
+        body = await json_body(request)
+        try:
+            memory.rotate_member_key(
+                str(body["team_slug"]), int(body["user_id"]), str(body["public_key_b64"])
+            )
+        except (KeyError, ValueError, TypeError, StopIteration) as exc:
+            return web.json_response({"error": type(exc).__name__}, status=400)
+        return web.json_response({"ok": True})
+
+    router.add_post(f"{CONTROL_PREFIX}memory/rotate-member-key", rotate_member_key)
