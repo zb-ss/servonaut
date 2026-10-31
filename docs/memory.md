@@ -328,6 +328,26 @@ Earlier releases could keep a separate record for the team's copy. The first tim
 
 A team's server you do not own yourself keeps its own record, filed under `~/.servonaut/memory/shared/<share id>/` rather than under the team's name.
 
+### Sharing memory with a team
+
+In Fleet Memory, select a server and press `S`. Pick the team, the lowest role that may read it, and the modules. The form lists the members who will be able to read it. After you share, it names any member who has no memory key yet. Ask them to set up Memory Sync: the snapshots you upload after that reach them too; for older ones, use **Share again**.
+
+When the server is already shared with that team, the form shows that share instead:
+- **Share again** replaces it with the role and modules shown, which start from the current share's settings;
+- **Revoke** stops members reading it;
+- **Revoke and delete members' copies** also removes their access to the snapshots already shared, after a confirmation. Your own memory is kept.
+
+Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need. A member's key is used only while it matches the one Servonaut first shared with. A member whose key changed is skipped until that is confirmed, and Share or Share again refuses, before changing anything, rather than seal for a changed key.
+
+**As a member**, a server shared with you appears in Fleet Memory with its module count and age, even when you have no other row for it. Its Memory screen and MCP `get_server_memory` show the team's copy, labelled "Shared by <team>, probed <date>". If you have a snapshot of your own that is newer, yours is shown instead. When several teams share the same server, each module comes from the newest copy, and the label names the team behind each one. Shared memory is read-only: it is never merged into your own notes or uploaded from your computer. The standalone `servonaut --mcp` server cannot open shared memory; use it from the app with Memory Sync unlocked.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `team_memory_cache_seconds` | `60` | How long a team's list of shared servers is reused before it is read again. |
+| `team_memory_future_skew_seconds` | `300` | How far in the future a shared snapshot's date may be before it counts as now, so a wrong clock cannot outrank your own newer snapshot. |
+| `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads without saying for how long. |
+| `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload; past it, the next sync tries again. |
+
 ---
 
 ## Secret redaction

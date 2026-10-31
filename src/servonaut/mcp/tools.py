@@ -38,6 +38,11 @@ from servonaut.services.accounts.headless import (
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import absorbed_share_ids
+from servonaut.services.memory.shared_view import (
+    merge_shared,
+    share_candidates,
+    shared_source_text,
+)
 from servonaut.services.shared_servers import (
     as_shared_row, fold_shared_rows, lacks_own_key, own_twin, team_key_fallback, team_key_target,
     with_team_key,
@@ -229,6 +234,24 @@ def _ovh_cloud_project_id(instance: Dict) -> str:
     return project_id if sep and project_id and instance_part else ''
 
 
+class _MergedMemory:
+    """The memory service, with one server's modules replaced by a merged set.
+
+    Lets the existing context builder render local and team-shared modules
+    together without writing the shared ones anywhere.
+    """
+
+    def __init__(self, service: Any, modules: Dict) -> None:
+        self._service = service
+        self._modules = modules
+
+    def get_all_modules(self, *_args: Any, **_kwargs: Any) -> Dict:
+        return self._modules
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service, name)
+
+
 class ServonautTools:
     """Implements all MCP tools using Servonaut services."""
 
@@ -253,8 +276,10 @@ class ServonautTools:
                  account_registry=None,
                  vault_runtime=None,
                  apply_team_rules: bool = True,
-                 team_policy=None) -> None:
+                 team_policy=None,
+                 shared_memory_reader=None) -> None:
         self._config_manager = config_manager
+        self._shared_memory_reader = shared_memory_reader
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
         self._cache_service = cache_service
@@ -411,6 +436,14 @@ class ServonautTools:
     @property
     def has_memory(self) -> bool:
         return self._memory_service is not None
+
+    def set_shared_memory_reader(self, reader) -> None:
+        """Bind the reader of team-shared memory (the app holds the unlocked key).
+
+        Pushed in after construction, like the secret provider: the reader
+        exists only once the memory cloud services are up.
+        """
+        self._shared_memory_reader = reader
 
     def set_secret_provider(self, provider) -> None:
         """Bind/rebind the active secret store used by the DB tools.
@@ -2455,6 +2488,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        requested = instance
         instance = await self._memory_target(instance)
 
         iid = instance.get('id') or instance.get('name', instance_id)
@@ -2486,15 +2520,34 @@ class ServonautTools:
         # agent a machine-readable `missing` code and a clear hint so it can
         # self-heal by calling build_server_memory.
         stored_modules = self._memory_service.get_all_modules(iid, provider)
+        shared = await self._shared_memory(requested, instance)
+        if shared is not None:
+            merged = merge_shared(stored_modules, shared)
+            if any(merged.get(n) is m for n, m in shared.modules.items()):
+                result = self._shared_memory_text(
+                    iid, merged, shared, format, provider=provider, name=iname,
+                )
+                self._audit.log(
+                    'get_server_memory', {'instance_id': instance_id, 'format': format},
+                    result, True,
+                )
+                return result
         if not stored_modules:
+            hint = (
+                f"Call build_server_memory(instance_id='{iid}') to "
+                "probe the host and populate memory, then retry."
+            )
+            if requested.get('is_shared') is True and self._shared_memory_reader is None:
+                hint = (
+                    "This server is shared through a team. Memory a team "
+                    "shares can only be read from the Servonaut app with "
+                    "Memory Sync unlocked; this server cannot open it."
+                )
             payload = json.dumps({
                 "error": {
                     "code": "missing",
                     "message": f"No memory stored for {iid}.",
-                    "hint": (
-                        f"Call build_server_memory(instance_id='{iid}') to "
-                        "probe the host and populate memory, then retry."
-                    ),
+                    "hint": hint,
                 }
             })
             self._audit.log(
@@ -2579,6 +2632,81 @@ class ServonautTools:
             result, True,
         )
         return result
+
+    async def _shared_memory(self, requested: Dict, target: Dict) -> Any:
+        """What a team shares of this server, or None (nothing, or not wired).
+
+        Read-only and best effort: any failure reads as nothing shared.
+        """
+        reader = self._shared_memory_reader
+        if reader is None:
+            return None
+        try:
+            rows = await self._shared_server_rows()
+            candidates = share_candidates(target, rows) or share_candidates(requested, rows)
+            from servonaut.services.memory.shared_view import combine_shared
+
+            return combine_shared([
+                await reader.read(c.team_slug, c.team_name, c.instance_id)
+                for c in candidates
+            ])
+        except Exception as exc:  # noqa: BLE001 — a fallback must never fail the tool
+            logger.debug("Shared memory not read (%s)", type(exc).__name__)
+        return None
+
+    def _shared_memory_text(
+        self, iid: str, modules: Dict, shared: Any, fmt: str,
+        *, provider: str, name: str,
+    ) -> str:
+        """Memory in which at least one module is a team's shared copy.
+
+        The local store cannot summarise it, so the modules are rendered
+        directly, through each format's own contract, and the output says
+        where the shared part comes from.
+        """
+        from servonaut.services.ai_memory_injector import (
+            MEMORY_TRUST_NOTICE, frame_as_untrusted,
+        )
+
+        shown = {n for n, m in shared.modules.items() if modules.get(n) is m}
+        source = shared_source_text(shared, shared.team_name, shown=shown)
+        if fmt == "stack_summary":
+            from servonaut.services.memory.stack_summary import build_stack_summary
+
+            summary = build_stack_summary(modules, provider=provider)
+            summary["_trust_notice"] = MEMORY_TRUST_NOTICE
+            summary["source"] = source
+            return json.dumps(summary)
+        if fmt == "context_block":
+            from servonaut.services.ai_memory_injector import (
+                InstanceScope, build_memory_context,
+            )
+
+            config = self._config_manager.get()
+            body, _telemetry = build_memory_context(
+                instances=[InstanceScope(id=iid, name=name or iid, provider=provider)],
+                prompt="",
+                memory_service=_MergedMemory(self._memory_service, modules),
+                config_memory=config.memory,
+                redaction_enabled=getattr(config.memory, "redaction_enabled", True),
+            )
+            return body or "<!-- empty memory context -->"
+        if fmt == "full":
+            return json.dumps({
+                "_trust_notice": MEMORY_TRUST_NOTICE,
+                "instance_id": iid,
+                "source": source,
+                "modules": {
+                    name: {k: v for k, v in mod.items() if k != "raw_output"}
+                    for name, mod in modules.items()
+                },
+            }, indent=2)
+        lines = [f"# Server memory: {iid}", f"_{source}_", ""]
+        for name in sorted(modules):
+            lines.append(f"## {name}")
+            for key, value in (modules[name].get("observed") or {}).items():
+                lines.append(f"- {key}: {value}")
+        return frame_as_untrusted("\n".join(lines)[:6000])
 
     async def _run_memory_build(
         self,

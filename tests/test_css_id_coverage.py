@@ -718,6 +718,15 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "settings_msync_status", # Reason: Static status; inherits global Static
         "severity_message",     # Reason: Static; inherits global Static
         # ---- Share screen ----
+        # Share form / purge confirmation: laid out by the screens' DEFAULT_CSS.
+        "memory-shared-source",     # Reason: Static; inherits global Static styling
+        "purge-btn-cancel",
+        "purge-btn-confirm",
+        "purge-text",
+        "purge-title",
+        "share-btn-purge",
+        "share-btn-reshare",
+        "share-btn-revoke",
         "share-btn-confirm",
         "share-modules-list",   # Reason: ListView; inherits layout
         "share_outer",          # Reason: Container; layout-only

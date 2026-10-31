@@ -166,6 +166,7 @@ class ServonautApp(App):
     ai_summary_service = None
     export_service = None
     team_memory_service = None
+    shared_memory_reader = None
     memory_crypto = None
     _memory_key_material = None
 
@@ -1571,13 +1572,29 @@ class ServonautApp(App):
 
         try:
             from servonaut.services.memory.team_service import TeamMemoryService
+            from servonaut.services.memory.team_wraps import default_pin_store
             self.team_memory_service = TeamMemoryService(
                 api_client=self.api_client,
                 auth_service=self.auth_service,
                 crypto=self.memory_crypto,
                 key_store_provider=lambda: self._memory_key_material,
                 retrieval_service=self.memory_retrieval_service,
+                cache_ttl_provider=lambda: (
+                    self.config_manager.get().memory.team_memory_cache_seconds
+                ),
+                pin_store_provider=default_pin_store,
+                future_skew_provider=lambda: (
+                    self.config_manager.get().memory.team_memory_future_skew_seconds
+                ),
             )
+            from servonaut.services.memory.shared_view import SharedMemoryReader
+            self.shared_memory_reader = SharedMemoryReader(
+                self.team_memory_service,
+                lambda: self.config_manager.get().memory.team_memory_cache_seconds,
+                teams_provider=self.auth_service.list_teams,
+            )
+            if getattr(self, "servonaut_tools", None) is not None:
+                self.servonaut_tools.set_shared_memory_reader(self.shared_memory_reader)
         except Exception as exc:
             logger.debug("TeamMemoryService init failed: %s", exc)
 
