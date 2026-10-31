@@ -20,6 +20,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -1018,14 +1019,19 @@ class MemoryStore:
         instance_id = self._resolve_id(instance_id)
         with self._locks_guard:
             lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
-        if not lock.acquire(blocking=wait):
-            raise RecordBusy("another thread is changing this server's memory")
+        timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        # One budget for both stages: a thread holding the in-process lock
+        # must not let a waiter outlast the configured bound.
+        deadline = time.monotonic() + timeout
+        if not self._take_thread_lock(lock, wait, timeout):
+            busy = RecordLockTimeout if wait else RecordBusy
+            raise busy("another thread is changing this server's memory")
         try:
             held = self._os_locks.get(instance_id)
             if held is not None:  # nested in this process: already excluded
                 yield
                 return
-            held = self._take_os_lock(instance_id, wait=wait)
+            held = self._take_os_lock(instance_id, wait=wait, deadline=deadline)
             self._os_locks[instance_id] = held
             try:
                 yield
@@ -1035,12 +1041,22 @@ class MemoryStore:
         finally:
             lock.release()
 
-    def _take_os_lock(self, instance_id: str, *, wait: bool = True) -> "_HeldOsLock":
+    @staticmethod
+    def _take_thread_lock(lock: "threading.RLock", wait: bool, timeout: float) -> bool:
+        if not wait:
+            return lock.acquire(blocking=False)
+        return lock.acquire(timeout=timeout)
+
+    def _take_os_lock(
+        self, instance_id: str, *, wait: bool = True, deadline: Optional[float] = None,
+    ) -> "_HeldOsLock":
         digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
         lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock", private_dir=True)
         timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         try:
-            lock.acquire(timeout, poll)
+            lock.acquire_until(deadline, poll)
         except FileLockTimeout as exc:
             busy = RecordLockTimeout if wait else RecordBusy
             raise busy(

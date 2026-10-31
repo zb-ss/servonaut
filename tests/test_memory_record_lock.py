@@ -152,3 +152,57 @@ def test_an_unusable_wait_falls_back_to_the_default(bad):
 
 def test_defaults_are_documented_values():
     assert MemoryConfig().record_lock_wait() == (5.0, 0.05)
+
+
+def test_a_thread_holding_the_record_times_out_a_waiting_thread_in_bound(tmp_path):
+    import threading
+    import time
+
+    store = _store(tmp_path, timeout=0.1)
+    ready, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.annotation_lock(ID):
+            ready.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert ready.wait(2)
+    started = time.monotonic()
+    try:
+        with pytest.raises(RecordLockTimeout):
+            with store.annotation_lock(ID):
+                pass
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
+        holder.join(2)
+
+
+def test_threads_taking_two_records_in_opposite_order_both_time_out(tmp_path):
+    import threading
+
+    store = _store(tmp_path, timeout=0.2)
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def run(first, second):
+        try:
+            with store.annotation_lock(first):
+                barrier.wait(2)
+                with store.annotation_lock(second):
+                    outcomes.append("both")
+        except RecordLockTimeout:
+            outcomes.append("timeout")
+
+    threads = [
+        threading.Thread(target=run, args=("web-1", "web-2"), daemon=True),
+        threading.Thread(target=run, args=("web-2", "web-1"), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(3)
+    assert not any(t.is_alive() for t in threads)
+    assert "timeout" in outcomes

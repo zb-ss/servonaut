@@ -95,3 +95,27 @@ def test_second_process_is_excluded_until_release(lock_path):
         child.join(5)
         if child.is_alive():
             child.kill()
+
+
+def test_acquire_never_sleeps_past_the_deadline(lock_path):
+    holder = FileLock(lock_path)
+    assert holder.try_acquire()
+    started = time.monotonic()
+    with pytest.raises(FileLockTimeout):
+        FileLock(lock_path).acquire(timeout=0.05, poll_seconds=2.0)
+    assert time.monotonic() - started < 0.5
+    holder.release()
+
+
+def test_acquire_uses_a_small_configured_poll_unchanged(lock_path, monkeypatch):
+    holder = FileLock(lock_path)
+    assert holder.try_acquire()
+    slept = []
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        "servonaut.utils.file_lock.time.sleep", lambda s: (slept.append(s), real_sleep(s))
+    )
+    with pytest.raises(FileLockTimeout):
+        FileLock(lock_path).acquire(timeout=0.02, poll_seconds=0.0001)
+    holder.release()
+    assert slept and max(slept) <= 0.0001 + 1e-9
