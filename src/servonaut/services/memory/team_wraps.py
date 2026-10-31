@@ -270,6 +270,44 @@ def seal_for_recipients(
 UNREADABLE_PIN = "unreadable"
 
 PinKey = Tuple[str, int]
+# A trust decision: the member and the key it was about.
+SeenKey = Tuple[str, int, str]
+
+
+def _valid_pin_entry(key: Any, value: Any) -> bool:
+    team_slug, _, user_id = key.rpartition(":") if isinstance(key, str) else ("", "", "")
+    try:
+        check_segment(team_slug, "team")
+    except ValueError:
+        return False
+    return (
+        user_id.isascii() and user_id.isdigit() and int(user_id) > 0
+        and optional_fingerprint(value) is not None
+    )
+
+
+def merge_seen(into: Dict[SeenKey, Optional[str]], new: Dict[SeenKey, Optional[str]]) -> None:
+    """Add *new* decisions to *into*; the first decision about a key stays.
+
+    A later envelope may be judged against a pin the user changed meanwhile,
+    and that must not become the expectation of a seal made before.
+    """
+    for key, pinned in new.items():
+        into.setdefault(key, pinned)
+
+
+def pins_of(team_slug: str, wraps: List[Dict[str, Any]]) -> Dict[PinKey, str]:
+    """The fingerprint each wrap's recipient was sealed for, one per member.
+
+    A member sealed for two different keys in one batch is left out: which one
+    to remember is not known.
+    """
+    found: Dict[PinKey, Set[str]] = {}
+    for wrap in wraps:
+        found.setdefault((team_slug, wrap["recipient_user_id"]), set()).add(
+            wrap["recipient_fingerprint"]
+        )
+    return {key: next(iter(fps)) for key, fps in found.items() if len(fps) == 1}
 
 
 class WrapPinStore:
@@ -294,19 +332,26 @@ class WrapPinStore:
         self._warned = False
 
     def _read(self) -> Optional[Dict[str, str]]:
-        """The stored pins; ``{}`` when there is no file, None when it is unreadable."""
+        """The stored pins; ``{}`` when there is no file, None when it is unreadable.
+
+        The whole file is checked: one entry that is not ``<team>:<user id>`` ->
+        fingerprint makes the store unreadable, because dropping it would turn
+        a member whose key was confirmed into a first sighting.
+        """
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
         except (OSError, ValueError):
             data = None
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or not all(
+            _valid_pin_entry(k, v) for k, v in data.items()
+        ):
             if not self._warned:
                 self._warned = True
                 logger.warning("team wrap pins unreadable; every member needs confirming")
             return None
-        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+        return dict(data)
 
     @staticmethod
     def _key(team_slug: str, user_id: int) -> str:
@@ -346,11 +391,12 @@ class WrapPinStore:
             self._write({**data, **{self._key(*key): fp for key, fp in pins.items()}})
 
     def set_if_seen(
-        self, pins: Dict[PinKey, str], seen: Dict[PinKey, Optional[str]]
+        self, pins: Dict[PinKey, str], seen: Dict[SeenKey, Optional[str]]
     ) -> Set[PinKey]:
         """Record pins an automatic seal produced, unless the pin changed since it was seen.
 
-        *seen* is the pin each trust decision looked at (None for no pin). A
+        *seen* is the pin each trust decision looked at (None for no pin), per
+        member and key. A
         pin that is different now, say because the user confirmed another key
         meanwhile, is left as it is. An unreadable file is never written.
 
@@ -367,8 +413,8 @@ class WrapPinStore:
             if data is None:
                 return set()
             written = {
-                key for key in pins
-                if data.get(self._key(*key)) == seen.get(key) and key in seen
+                key for key, fp in pins.items()
+                if (*key, fp) in seen and data.get(self._key(*key)) == seen[(*key, fp)]
             }
             if written:
                 self._write({**data, **{self._key(*key): pins[key] for key in written}})
@@ -482,33 +528,69 @@ def parse_grant_coverage(payload: Any) -> GrantCoverage:
     )
 
 
-def stored_wraps(wraps: List[Dict[str, Any]], response: Any) -> List[Dict[str, Any]]:
-    """The posted *wraps* the service says it stored.
+SKIP_REASONS = ("key_changed", "no_memory_key", "not_eligible")
+UNCONFIRMED = "unconfirmed"  # the service did not say, or what it said did not add up
 
-    Read strictly from ``wraps_stored``, ``wraps_unchanged`` and
-    ``skipped_recipients`` (``[{user_id, reason}]``): a response that does not
-    fit, or that stored nothing, means no wrap counts as stored. A recipient
-    named in ``skipped_recipients`` never counts, whatever else it says.
+
+@dataclass(frozen=True)
+class WrapAck:
+    """What the service confirmed of a batch of posted wraps.
+
+    ``skipped`` maps each posted recipient that was not stored to the reason:
+    one of :data:`SKIP_REASONS`, or :data:`UNCONFIRMED`.
     """
-    if not isinstance(response, dict):
-        return []
-    stored, unchanged, skipped = (
-        response.get("wraps_stored"), response.get("wraps_unchanged"),
-        response.get("skipped_recipients"),
-    )
-    if not all(_is_count(n) for n in (stored, unchanged)) or not isinstance(skipped, list):
-        logger.debug("wraps response ignored: unexpected shape")
-        return []
-    skipped_ids = set()
+
+    stored: Tuple[Dict[str, Any], ...]
+    skipped: Dict[int, str]
+
+
+def read_skips(skipped: Any) -> Optional[Dict[int, str]]:
+    """``{user_id: reason}`` from a ``skipped_recipients`` list, None if it is malformed.
+
+    Every entry needs an integer ``user_id`` and a non-empty text ``reason``;
+    a reason this client does not know is kept as :data:`UNCONFIRMED`.
+    """
+    if not isinstance(skipped, list):
+        return None
+    reasons: Dict[int, str] = {}
     for item in skipped:
         user_id = item.get("user_id") if isinstance(item, dict) else None
-        if not isinstance(user_id, int) or isinstance(user_id, bool):
-            logger.debug("wraps response ignored: malformed skipped_recipients")
-            return []
-        skipped_ids.add(user_id)
-    if stored + unchanged == 0:
-        return []
-    return [w for w in wraps if w["recipient_user_id"] not in skipped_ids]
+        reason = item.get("reason") if isinstance(item, dict) else None
+        if not isinstance(user_id, int) or isinstance(user_id, bool) or not _text(reason):
+            return None
+        reasons[user_id] = reason if reason in SKIP_REASONS else UNCONFIRMED
+    return reasons
+
+
+def acknowledge_wraps(wraps: List[Dict[str, Any]], response: Any) -> WrapAck:
+    """The posted *wraps* the service confirms it stored, and why the rest were not.
+
+    Read strictly from ``wraps_stored``, ``wraps_unchanged`` and
+    ``skipped_recipients`` (``[{user_id, reason}]``). The counts have to equal
+    the number of distinct (recipient, envelope) pairs posted for recipients
+    that were not skipped; a response that does not fit means nothing counts as
+    stored and every recipient is :data:`UNCONFIRMED`.
+    """
+    unconfirmed = WrapAck((), {w["recipient_user_id"]: UNCONFIRMED for w in wraps})
+    if not isinstance(response, dict):
+        return unconfirmed
+    stored, unchanged = response.get("wraps_stored"), response.get("wraps_unchanged")
+    skips = read_skips(response.get("skipped_recipients"))
+    if not all(_is_count(n) for n in (stored, unchanged)) or skips is None:
+        logger.debug("wraps response ignored: unexpected shape")
+        return unconfirmed
+    kept = [w for w in wraps if w["recipient_user_id"] not in skips]
+    pairs = {(w["recipient_user_id"], w["envelope_id"]) for w in kept}
+    if stored + unchanged != len(pairs):
+        logger.debug("wraps response ignored: counts do not match the wraps posted")
+        return unconfirmed
+    posted = {w["recipient_user_id"] for w in wraps}
+    return WrapAck(tuple(kept), {u: r for u, r in skips.items() if u in posted})
+
+
+def stored_wraps(wraps: List[Dict[str, Any]], response: Any) -> List[Dict[str, Any]]:
+    """The posted *wraps* the service says it stored (see :func:`acknowledge_wraps`)."""
+    return list(acknowledge_wraps(wraps, response).stored)
 
 
 def _is_count(value: Any) -> bool:
@@ -522,7 +604,7 @@ class TrustSplit:
     sealable: Tuple[Recipient, ...]
     changed: Tuple[KeyChange, ...]
     # The pin each recipient was judged against, for ``WrapPinStore.set_if_seen``.
-    seen: Dict[PinKey, Optional[str]] = field(default_factory=dict)
+    seen: Dict[SeenKey, Optional[str]] = field(default_factory=dict)
 
 
 def previous_pin(pinned: Optional[str], current: str) -> Optional[str]:
@@ -561,7 +643,7 @@ def split_recipients(
     seen: Dict[PinKey, Optional[str]] = {}
     for recipient in recipients:
         pinned = pinned_fingerprint(store, team_slug, recipient.user_id) if store else None
-        seen[(team_slug, recipient.user_id)] = pinned
+        seen[(team_slug, recipient.user_id, recipient.fingerprint)] = pinned
         trust = classify_key(
             base64.b64encode(recipient.public_key).decode(),
             recipient.fingerprint,

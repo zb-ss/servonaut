@@ -2027,6 +2027,7 @@ class MemorySyncService:
         from servonaut.services.memory.team_wraps import (  # noqa: PLC0415
             parse_missing_team_wraps,
             seal_for_recipients,
+            merge_seen,
             split_by_trust,
             stored_wraps,
         )
@@ -2039,7 +2040,7 @@ class MemorySyncService:
         for entry in entries:
             grant = (entry.team_slug, entry.grant_id)
             split = split_by_trust(pins, entry)
-            seen_by_grant.setdefault(grant, {}).update(split.seen)
+            merge_seen(seen_by_grant.setdefault(grant, {}), split.seen)
             entry = replace(entry, recipients=split.sealable)
             if split.changed:
                 changed_by_grant[grant] = changed_by_grant.get(grant, 0) + len(split.changed)
@@ -2072,7 +2073,9 @@ class MemorySyncService:
             response = await self._post_team_wraps(team_slug, grant_id, wraps)
             stored = stored_wraps(wraps, response) if response is not None else []
             if stored:
-                self._pin_sealed(pins, team_slug, stored, seen_by_grant[(team_slug, grant_id)])
+                await self._pin_sealed(
+                    pins, team_slug, stored, seen_by_grant[(team_slug, grant_id)]
+                )
 
     def set_key_change_listener(self, listener: Optional[Callable[[Any], None]]) -> None:
         """Call *listener* once for each changed key a catch-up newly skips."""
@@ -2139,7 +2142,7 @@ class MemorySyncService:
         return MemoryConfig().record_lock_wait()
 
     @staticmethod
-    def _pin_sealed(
+    async def _pin_sealed(
         pins: Any,
         team_slug: str,
         wraps: List[Dict[str, Any]],
@@ -2148,13 +2151,13 @@ class MemorySyncService:
         """Remember the keys a delivered batch of wraps was sealed for.
 
         A pin the user confirmed (or anything else changed) while the batch
-        was on its way is left as it is.
+        was on its way is left as it is. The write runs in a thread: another
+        process may hold the pin file's lock.
         """
-        sealed = {
-            (team_slug, w["recipient_user_id"]): w["recipient_fingerprint"] for w in wraps
-        }
+        from servonaut.services.memory.team_wraps import pins_of  # noqa: PLC0415
+
         try:
-            pins.set_if_seen(sealed, seen)
+            await asyncio.to_thread(pins.set_if_seen, pins_of(team_slug, wraps), seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
