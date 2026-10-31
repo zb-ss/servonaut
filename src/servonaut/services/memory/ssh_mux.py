@@ -33,8 +33,8 @@ _BIND_SUFFIX_LENGTH = 17
 # per-host ``%C`` hash (40 characters): a short name keeps long bases usable.
 _SOCKET_NAME = "m"
 _STDERR_NAME = "err"
-# Short on purpose: macOS' per-user temp directory alone nearly fills the limit.
-_SHORT_BASE_DIRS = ("/tmp",)
+# Used only when the user's temp directory is too long for a socket path.
+_FALLBACK_BASE_DIR = "/tmp"
 
 #: ``argv`` builder: the ssh command for these extra ``-o`` options, no remote command.
 ArgvBuilder = Callable[[List[str]], List[str]]
@@ -45,13 +45,39 @@ def multiplexing_supported() -> bool:
     return get_os() != "windows"
 
 
-def _socket_dir_base(configured: str = "") -> str:
+def _fits(base: str) -> bool:
+    """Whether a socket under a private directory in *base* stays within the path limit (in bytes)."""
+    # mkdtemp adds an 8-character random suffix after the prefix.
+    length = len(os.fsencode(base)) + len("/sv-") + 8 + 1 + len(_SOCKET_NAME) + _BIND_SUFFIX_LENGTH
+    return length <= _SOCKET_PATH_LIMIT
+
+
+def _usable(base: str) -> bool:
+    # ssh splits an option value at spaces and expands "%" tokens in it.
+    return " " not in base and "%" not in base and os.path.isdir(base) and os.access(base, os.W_OK)
+
+
+def _socket_dir_base(configured: str = "") -> Optional[str]:
+    """Where to make the build's socket directory, or None when connection sharing must stay off.
+
+    The configured directory, else the user's temp directory when a socket
+    path fits there, else ``/tmp`` when the temp directory's path is too long.
+    """
     if configured:
+        if " " in configured or "%" in configured:
+            logger.warning("SSH multiplexing off: the socket directory contains a space or '%'")
+            return None
+        if not _usable(configured) or not _fits(configured):
+            logger.warning("SSH multiplexing off: the configured socket directory is missing, read-only or too long")
+            return None
         return configured
-    for base in _SHORT_BASE_DIRS:
-        if os.path.isdir(base) and os.access(base, os.W_OK):
-            return base
-    return tempfile.gettempdir()
+    temp = tempfile.gettempdir()
+    if _usable(temp) and _fits(temp):
+        return temp
+    if _usable(_FALLBACK_BASE_DIR) and _fits(_FALLBACK_BASE_DIR):
+        return _FALLBACK_BASE_DIR
+    logger.debug("SSH multiplexing off: no temp directory with a short enough path")
+    return None
 
 
 class ControlMaster:
@@ -105,14 +131,7 @@ class ControlMaster:
         if self._dir is not None:  # a retry reuses the build's directory
             return True
         base = _socket_dir_base(self._socket_dir)
-        # ssh splits an option value at spaces and expands "%" tokens in it.
-        if " " in base or "%" in base:
-            logger.warning("SSH multiplexing off: the socket directory contains a space or '%'")
-            return False
-        # Unix socket limits are in bytes. mkdtemp adds an 8-character random
-        # suffix after the prefix.
-        if len(os.fsencode(base)) + len("/sv-") + 8 + 1 + len(_SOCKET_NAME) + _BIND_SUFFIX_LENGTH > _SOCKET_PATH_LIMIT:
-            logger.debug("SSH multiplexing off: the control socket path would be too long")
+        if base is None:
             return False
         try:
             self._dir = Path(tempfile.mkdtemp(prefix="sv-", dir=base))

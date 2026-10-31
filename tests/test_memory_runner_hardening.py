@@ -268,3 +268,48 @@ class TestSurvivingMutations:
         upper = ConnectionProfile(name="u", bastion_host="Bastion.Example")
         lower = ConnectionProfile(name="l", bastion_host="bastion.example")
         assert service._bastion_gate(upper) is service._bastion_gate(lower)
+
+
+class TestSocketBaseChoice:
+    """The socket directory goes where the user's temp directory is, unless that path is too long."""
+
+    def _choose(self, monkeypatch, tmp_path, *, temp, configured="", fallback=None):
+        from servonaut.services.memory import ssh_mux
+
+        monkeypatch.setattr(ssh_mux.tempfile, "gettempdir", lambda: str(temp))
+        monkeypatch.setattr(ssh_mux, "_FALLBACK_BASE_DIR", str(fallback) if fallback else "/nonexistent-base")
+        return ssh_mux._socket_dir_base(configured)
+
+    def test_the_configured_directory_comes_first(self, tmp_path, monkeypatch):
+        configured = tmp_path / "c"
+        configured.mkdir()
+        assert self._choose(monkeypatch, tmp_path, temp=tmp_path, configured=str(configured)) == str(configured)
+
+    def test_the_temp_directory_is_used_when_the_socket_fits(self, tmp_path, monkeypatch):
+        assert self._choose(monkeypatch, tmp_path, temp=tmp_path, fallback=tmp_path) == str(tmp_path)
+
+    def test_a_long_temp_directory_falls_back_to_the_short_one(self, tmp_path, monkeypatch):
+        long_dir = tmp_path / ("d" * 80)
+        long_dir.mkdir()
+        short = tmp_path / "s"
+        short.mkdir()
+        assert self._choose(monkeypatch, tmp_path, temp=long_dir, fallback=short) == str(short)
+
+    def test_nothing_fits_means_no_multiplexing(self, tmp_path, monkeypatch):
+        long_dir = tmp_path / ("d" * 80)
+        long_dir.mkdir()
+        assert self._choose(monkeypatch, tmp_path, temp=long_dir) is None
+
+    def test_an_unusable_configured_directory_does_not_fall_back(self, tmp_path, monkeypatch):
+        assert self._choose(monkeypatch, tmp_path, temp=tmp_path, configured=str(tmp_path / "missing")) is None
+
+    def test_a_build_makes_its_directory_in_the_temp_directory(self, tmp_path, monkeypatch):
+        from servonaut.services.memory import ssh_mux
+
+        short = tmp_path / "t"
+        short.mkdir()
+        monkeypatch.setattr(ssh_mux.tempfile, "gettempdir", lambda: str(short))
+        monkeypatch.setattr(ssh_mux, "get_os", lambda: "linux")
+        master = ControlMaster(persist_seconds=5, connect_timeout=3)
+        assert master._prepare_dir() is True
+        assert master._dir.parent == short
