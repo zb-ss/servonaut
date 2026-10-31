@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, VerticalScroll
@@ -25,6 +26,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Label, Select, SelectionList, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -195,6 +197,8 @@ class ShareInstanceScreen(Screen):
         self._member_pubkeys: List[Any] = []
         self._keys_by_team: Dict[str, List[Any]] = {}
         self._grant: Any = None
+        # True while an error line is on show: a refresh must not wipe it.
+        self._status_locked = False
 
     # ------------------------------------------------------------------
     # Compose
@@ -294,7 +298,7 @@ class ShareInstanceScreen(Screen):
             logger.error("Failed to load teams: %s", exc)
             self._teams = []
         team_options = [
-            (self._team_label(t), t.get("slug", "?"))
+            (Text(self._team_label(t)), t.get("slug", "?"))
             for t in self._teams
         ] or [("No teams available", "__none__")]
         try:
@@ -316,10 +320,33 @@ class ShareInstanceScreen(Screen):
         return name
 
     def _say(self, widget: Static, markup: str) -> None:
-        """Write one status text. Callers pass fixed text, text run through
-        ``rich.markup.escape``, or names from :func:`_names` (stand-ins in
-        demo mode), so nothing real reaches a demo recording."""
+        """Write one status text.
+
+        Service text never gets here in demo mode (see :meth:`_explain`);
+        the scrub is the second line of defence for anything else.
+        """
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            markup = redaction.scrub_stream(markup)
         widget.update(markup)
+
+    def _explain(self, what: str, exc: Exception) -> str:
+        """A one-line, plain-text reason for a failure.
+
+        In demo mode the service's own wording is dropped: it may name a
+        team, member or server, and nothing there can be redacted reliably.
+        """
+        from servonaut.services.memory.team_service import KeyChangedError
+
+        if isinstance(exc, KeyChangedError):
+            who = _names(self.app, exc.names)
+            return (
+                f"{what}: the memory key of {who} has changed. Nothing was "
+                "changed. Confirming a changed key is not available yet."
+            )
+        if getattr(self.app, "demo_mode", False):
+            return f"{what}. Turn demo mode off to see why."
+        return f"{what}: {exc}"
 
     def _say_to(self, selector: str, markup: str) -> None:
         self._say(self.query_one(selector, Static), markup)
@@ -330,7 +357,7 @@ class ShareInstanceScreen(Screen):
             return
         select = self.query_one("#share-team-select", Select)
         chosen = select.value
-        select.set_options([(self._team_label(t), t.get("slug", "?")) for t in self._teams])
+        select.set_options([(Text(self._team_label(t)), t.get("slug", "?")) for t in self._teams])
         if isinstance(chosen, str):
             select.value = chosen
         self._render_form(self._selected_team(), None)
@@ -347,6 +374,10 @@ class ShareInstanceScreen(Screen):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "share-team-select":
+            # The other team's share is not this one's: drop it at once.
+            self._grant = None
+            self._status_locked = False
+            self._render_existing()
             self._start_refresh(reload=True)
         elif event.select.id == "share-role-select":
             self._start_refresh(reload=False)
@@ -369,7 +400,8 @@ class ShareInstanceScreen(Screen):
             return
         status = self.query_one("#share-status", Static)
         if reload or slug not in self._keys_by_team:
-            self._say(status, "[$text-warning]Checking who can read it…[/$text-warning]")
+            if not self._status_locked:
+                self._say(status, "[$text-warning]Checking who can read it…[/$text-warning]")
             try:
                 self._keys_by_team[slug] = await team_memory_service.list_team_member_keys(slug)
                 self._grant = await team_memory_service.find_live_grant(slug, self._instance_id())
@@ -377,14 +409,41 @@ class ShareInstanceScreen(Screen):
                 logger.error("Could not load the share state: %s", exc)
                 self._grant = None
                 self._keys_by_team.pop(slug, None)
-                self._show_error(f"Could not check the share: {exc}")
+                self._show_error(self._explain("Could not check the share", exc))
                 self._render_form(slug)
                 return
-            self._say(status, "")
+            if not self._status_locked:
+                self._say(status, "")
+            self._adopt_grant_settings()
         self._render_form(slug)
 
+    def _adopt_grant_settings(self) -> None:
+        """Start the role and module controls from the share that exists.
+
+        Share again then re-sends what is shared now unless the user changes
+        it. Done once per load, so later edits are never overwritten.
+        """
+        grant = self._grant
+        if grant is None:
+            return
+        role_select = self.query_one("#share-role-select", Select)
+        modules = self.query_one("#share-modules-list", SelectionList)
+        with self.prevent(Select.Changed):
+            if grant.required_role in {value for _, value in _ROLE_OPTIONS}:
+                role_select.value = grant.required_role
+        if grant.modules is None:
+            modules.select_all()
+            return
+        modules.deselect_all()
+        known = {modules.get_option_at_index(i).value for i in range(modules.option_count)}
+        for name in grant.modules:
+            if name in known:
+                modules.select(name)
+
     def _instance_id(self) -> str:
-        return str(self._instance.get("id") or self._instance.get("name", ""))
+        """The server's real id: in demo mode the row shows a stand-in."""
+        real = connection_instance(self.app, self._instance) or self._instance
+        return str(real.get("id") or real.get("name", ""))
 
     def _render_form(self, slug: str, pending: Optional[List[Dict[str, Any]]] = None) -> None:
         """Draw the readers line and the existing-share panel."""
@@ -432,6 +491,7 @@ class ShareInstanceScreen(Screen):
     def _show_error(self, message: str) -> None:
         from rich.markup import escape
 
+        self._status_locked = True
         self._say_to("#share-status",
             f"[$text-error]{escape(message)}[/$text-error]"
         )
@@ -445,6 +505,7 @@ class ShareInstanceScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
+        self._status_locked = False
         if button_id == "share-btn-confirm":
             self.run_worker(self._do_share(), group="memory_share", name="share_execute", exclusive=True)
         elif button_id == "share-btn-cancel":
@@ -505,17 +566,22 @@ class ShareInstanceScreen(Screen):
             return
         except Exception as exc:  # noqa: BLE001 — shown to the user, not raised from a worker
             logger.error("Share failed: %s", exc)
-            self._show_error(f"Share failed: {exc}")
+            self._show_error(self._explain("Share failed", exc))
             return
         self._finish_share(team_slug, grant)
 
     def _finish_share(self, team_slug: str, grant: Any) -> None:
         """Tell the user it worked; stay open when someone cannot read it yet."""
         pending = list(getattr(grant, "pending_recipients", None) or [])
+        # Built from the labels the screen shows (stand-ins in demo mode),
+        # never from the real id or slug.
+        server = str(self._instance.get("name") or self._instance.get("id") or "the server")
+        team = next(
+            (self._team_label(t) for t in self._teams if t.get("slug") == team_slug),
+            "the team",
+        )
         self.app.notify(
-            f"Shared {self._instance_id()} with team {team_slug}.",
-            severity="information",
-            markup=False,
+            f"Shared {server} with team {team}.", severity="information", markup=False,
         )
         if not pending:
             self.app.pop_screen()
@@ -535,7 +601,7 @@ class ShareInstanceScreen(Screen):
             await service.revoke_grant(team_slug, grant.id)
         except Exception as exc:  # noqa: BLE001
             logger.error("Revoke failed: %s", exc)
-            self._show_error(f"Revoke failed: {exc}")
+            self._show_error(self._explain("Revoke failed", exc))
             return
         self.app.notify("Sharing stopped. Members can no longer read it.", markup=False)
         self._grant = None
@@ -563,7 +629,7 @@ class ShareInstanceScreen(Screen):
             # The revoke may have gone through: show what is true now.
             self._keys_by_team.pop(team_slug, None)
             self._start_refresh(reload=True)
-            self._show_error(f"Share again failed: {exc}")
+            self._show_error(self._explain("Share again failed", exc))
             return
         self._keys_by_team[team_slug] = member_keys
         self._finish_share(team_slug, new_grant)
@@ -577,7 +643,7 @@ class ShareInstanceScreen(Screen):
             deleted = await service.purge_grant(team_slug, grant.id)
         except Exception as exc:  # noqa: BLE001
             logger.error("Purge failed: %s", exc)
-            self._show_error(f"Could not delete the copies: {exc}")
+            self._show_error(self._explain("Could not delete the copies", exc))
             return
         self.app.notify(
             f"Sharing stopped and {deleted} member copies deleted.", markup=False,

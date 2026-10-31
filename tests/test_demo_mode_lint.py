@@ -381,12 +381,6 @@ _ALLOWLIST: List[AllowlistEntry] = [
         "Updates consent disclosure from a closed provider-label map; "
         "no user or server content is interpolated.",
     ),
-    # memory_share.py — every status text goes through _say, whose callers pass
-    # fixed text, escaped text, or names from _names (stand-ins in demo mode).
-    AllowlistEntry("screens/memory_share.py", "_say", "update",
-                   "Callers pass fixed strings, rich-escaped service text, or "
-                   "member names already run through _names, which redacts them "
-                   "in demo mode."),
     # fleet_memory.py — a shared server's cells hold a module count, an age and
     # fixed labels; the team's name is never shown here.
     AllowlistEntry("screens/fleet_memory.py", "_apply_shared_listings", "update",
