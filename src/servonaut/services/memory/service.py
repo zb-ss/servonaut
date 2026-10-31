@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
 from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
-from .ssh_mux import ControlMaster
+from .ssh_mux import DIRECT_OPTIONS, ControlMaster, multiplexing_supported
 from .status import STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, _validate_finding_id
 from .team_merge import share_identity
@@ -89,7 +89,7 @@ _SNAPSHOT_KEPT = "Nothing was probed; the stored memory was kept."
 
 
 _MULTIPLEX_ERROR_MARKERS = (
-    "controlpath", "controlpersist", "controlmaster", "unix_listener", "bad configuration option", "mux_",
+    "controlpath", "controlpersist", "controlmaster", "unix_listener", "mux_",
 )
 
 
@@ -1644,6 +1644,7 @@ class MemoryService(MemoryServiceInterface):
             persist_seconds=self._setting("ssh_control_persist_seconds"),
             connect_timeout=self._setting("ssh_master_connect_timeout_seconds"),
             socket_dir=self._text_setting("ssh_control_socket_dir"),
+            close_timeout=self._setting("ssh_close_timeout_seconds"),
         ) if multiplex else None
         # Connections that cannot be shared are capped per server here and per
         # bastion across every build of this service.
@@ -1664,7 +1665,10 @@ class MemoryService(MemoryServiceInterface):
             # own: OpenSSH silently connects normally when the control socket
             # is gone, outside every gate. A proxy that always fails (first
             # value wins, ahead of any ProxyJump) makes it fail fast instead.
-            bound = remote_command is not None and "ControlMaster=no" in control_options
+            bound = (
+                remote_command is not None and "ControlMaster=no" in control_options
+                and "ControlPath=none" not in control_options
+            )
             return ssh_service.build_ssh_command(
                 host=resolved["host"],
                 username=resolved["username"],
@@ -1808,7 +1812,9 @@ class MemoryService(MemoryServiceInterface):
             *failure* is why ssh itself failed, None when the remote command
             ran (whatever its exit status).
             """
-            ssh_cmd = _argv(command, control)
+            # Not sharing: say so, so the user's own ssh configuration cannot
+            # start a master that nobody owns or closes.
+            ssh_cmd = _argv(command, control or (list(DIRECT_OPTIONS) if multiplexing_supported() else []))
             async with contextlib.AsyncExitStack() as gates:
                 if not control:
                     await gates.enter_async_context(server_gate)
@@ -1860,12 +1866,44 @@ class MemoryService(MemoryServiceInterface):
             # transient overload of the bastion; one retry decides.
             return attempt == 0 and _real_runner.commands_answered == 0  # type: ignore[attr-defined]
 
+        # Commands in flight, and a connection failure that may still be
+        # overturned by a command that is yet to answer (see _fail_verdict).
+        flight: Dict[str, Any] = {"running": 0, "provisional": None}
+
+        def _fail_verdict(reason: str, message: str) -> None:
+            """No command has answered and this one failed for good: the server's verdict.
+
+            With other commands still in flight the verdict waits for them:
+            one of them may yet answer, and a late failure of one command
+            must not discard what the others bring.
+            """
+            if _real_runner.commands_answered:  # type: ignore[attr-defined]
+                return
+            if _is_final(reason) or flight["running"] <= 1:
+                _record_problem(reason, message)
+            else:
+                flight["provisional"] = (reason, message)
+
+        def _settle() -> None:
+            if flight["running"] == 0 and flight["provisional"] and not _real_runner.commands_answered:  # type: ignore[attr-defined]
+                _record_problem(*flight["provisional"])
+            flight["provisional"] = None if flight["running"] == 0 else flight["provisional"]
+
         async def _real_runner(command: str) -> tuple[str, str, int]:
             """Execute *command* on the remote host and return (stdout, stderr, rc)."""
             _real_runner.commands_started += 1  # type: ignore[attr-defined]
+            flight["running"] += 1
+            try:
+                return await _run_command(command)
+            finally:
+                flight["running"] -= 1
+                _settle()
 
+        async def _run_command(command: str) -> tuple[str, str, int]:
             def known_problem() -> Optional[tuple[str, str, int]]:
                 known: Optional[SshConnectionProblem] = _real_runner.connection_problem  # type: ignore[attr-defined]
+                if known is None and flight["provisional"]:
+                    known = SshConnectionProblem(*flight["provisional"])
                 if known is None:
                     return None
                 # Every later command would fail the same way: stop connecting.
@@ -1899,17 +1937,17 @@ class MemoryService(MemoryServiceInterface):
                         instance.get("id", "?"),
                         exc,
                     )
-                    _record_problem("ssh_failed", _SSH_FAILURE_MESSAGES["ssh_failed"])
+                    _fail_verdict("ssh_failed", _SSH_FAILURE_MESSAGES["ssh_failed"])
                     return "", str(exc), 1
                 if failure is None:
                     # Also a remote command that exited non-zero: it ran.
                     _real_runner.commands_answered += 1  # type: ignore[attr-defined]
+                    flight["provisional"] = None
                     return stdout, stderr, code
                 if not _is_final(failure) and _may_retry(attempt):
                     await _wait(retry_backoff)
                     continue
-                if _real_runner.commands_answered == 0:  # type: ignore[attr-defined]
-                    _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
+                _fail_verdict(failure, _SSH_FAILURE_MESSAGES[failure])
                 return stdout, stderr, code
             raise AssertionError("unreachable: the second attempt always returns or raises")  # pragma: no cover
 
@@ -1925,13 +1963,22 @@ class MemoryService(MemoryServiceInterface):
         async def _close() -> None:
             """End the build's shared connection and remove its socket directory.
 
-            Shielded: a second cancel must not leave the master running.
+            Runs as its own task: a cancel of the build is propagated only
+            once the cleanup has finished (bounded), so the master is not
+            left running with its socket directory already removed.
             """
-            await asyncio.shield(asyncio.ensure_future(_cleanup()))
+            task = asyncio.ensure_future(_cleanup())
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await asyncio.wait({task}, timeout=2 * self._setting("ssh_close_timeout_seconds"))
+                raise
 
         # Attach instance so LogsProber can read it from the runner directly,
         # eliminating the shared _instance field race in concurrent build_report calls.
         _real_runner.instance = instance  # type: ignore[attr-defined]
+        # The build's (team_rows, fleet_rows), for modules that resolve connections themselves.
+        _real_runner.connection_rows = connection_rows  # type: ignore[attr-defined]
         # Set when ssh refuses the host key; build_report() reports it.
         _real_runner.host_key_problem = None  # type: ignore[attr-defined]
         # Set when no command can reach the server (login refused, host

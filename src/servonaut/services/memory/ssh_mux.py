@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from servonaut.utils.platform_utils import get_os
-from servonaut.utils.ssh_utils import run_ssh_daemonizing, run_ssh_subprocess
+from servonaut.utils import ssh_utils
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,9 @@ _SOCKET_NAME = "m"
 _STDERR_NAME = "err"
 # Used only when the user's temp directory is too long for a socket path.
 _FALLBACK_BASE_DIR = "/tmp"
+
+#: Options for a command that does not share a connection: never start or use a master.
+DIRECT_OPTIONS = ("ControlMaster=no", "ControlPath=none")
 
 #: ``argv`` builder: the ssh command for these extra ``-o`` options, no remote command.
 ArgvBuilder = Callable[[List[str]], List[str]]
@@ -88,11 +91,15 @@ class ControlMaster:
             its last client, so a master whose build was killed still ends.
         connect_timeout: Seconds the master's own handshake may take (the
             per-command deadline is for commands, not the first handshake).
+        close_timeout: Seconds ``ssh -O exit`` may take to end the master.
         socket_dir: Where to create the private socket folder; empty picks a
             short system location.
     """
 
-    def __init__(self, *, persist_seconds: float, connect_timeout: float, socket_dir: str = "") -> None:
+    def __init__(
+        self, *, persist_seconds: float, connect_timeout: float, socket_dir: str = "", close_timeout: float = 5.0,
+    ) -> None:
+        self._close_timeout = close_timeout
         self._socket_dir = socket_dir
         self._persist = max(1, int(persist_seconds))
         self._connect_timeout = connect_timeout
@@ -157,7 +164,7 @@ class ControlMaster:
         # Only the parent's exit is awaited: the master it forks may keep the
         # output descriptors, which a pipe-reading wait would block on.
         assert self._dir is not None
-        await run_ssh_daemonizing(argv, self._dir / _STDERR_NAME, timeout=self._connect_timeout)
+        await ssh_utils.run_ssh_daemonizing(argv, self._dir / _STDERR_NAME, timeout=self._connect_timeout)
         self._opened = True
         return True
 
@@ -172,9 +179,12 @@ class ControlMaster:
             if build_argv is not None and any(p.name != _STDERR_NAME for p in directory.iterdir()):
                 exit_argv = build_argv(self.command_options())
                 exit_argv[1:1] = ["-O", "exit"]
-                await run_ssh_subprocess(exit_argv, timeout=5)
+                await ssh_utils.run_ssh_subprocess(exit_argv, timeout=self._close_timeout, check=True)
         except Exception as exc:  # noqa: BLE001 - best effort: ControlPersist ends a master anyway
-            logger.debug("Closing the SSH master failed (%s); ControlPersist ends it", type(exc).__name__)
+            logger.info(
+                "The SSH master did not confirm it exited (%s); ControlPersist ends it within %ds",
+                type(exc).__name__, self._persist,
+            )
         finally:
             self._opened = False
             self._dir = None

@@ -90,7 +90,7 @@ class TestBoundCommandsNeverDialOnTheirOwn:
         [report] = _build(service, fake)
 
         assert len(fake.of_kind("master")) == 3 or len(fake.of_kind("master")) >= 2
-        direct = [a for a in fake.of_kind("command") if not any(o.startswith("ControlPath") for o in a)]
+        direct = [a for a in fake.of_kind("command") if "ControlPath=none" in a]
         assert direct and fake.peak["command"] <= 4
         assert report.successes["os"].observed["codes"].count(0) >= 3
 
@@ -278,7 +278,16 @@ class TestSocketBaseChoice:
 
         monkeypatch.setattr(ssh_mux.tempfile, "gettempdir", lambda: str(temp))
         monkeypatch.setattr(ssh_mux, "_FALLBACK_BASE_DIR", str(fallback) if fallback else "/nonexistent-base")
+        self._allow_up_to(monkeypatch, tmp_path)
         return ssh_mux._socket_dir_base(configured)
+
+    @staticmethod
+    def _allow_up_to(monkeypatch, tmp_path, extra=15):
+        """A path limit under which tmp_path plus *extra* characters of base still fits."""
+        from servonaut.services.memory import ssh_mux
+
+        overhead = len("/sv-") + 8 + 1 + len(ssh_mux._SOCKET_NAME) + ssh_mux._BIND_SUFFIX_LENGTH
+        monkeypatch.setattr(ssh_mux, "_SOCKET_PATH_LIMIT", len(str(tmp_path)) + extra + overhead)
 
     def test_the_configured_directory_comes_first(self, tmp_path, monkeypatch):
         configured = tmp_path / "c"
@@ -310,6 +319,7 @@ class TestSocketBaseChoice:
         short.mkdir()
         monkeypatch.setattr(ssh_mux.tempfile, "gettempdir", lambda: str(short))
         monkeypatch.setattr(ssh_mux, "get_os", lambda: "linux")
+        self._allow_up_to(monkeypatch, tmp_path)
         master = ControlMaster(persist_seconds=5, connect_timeout=3)
         assert master._prepare_dir() is True
         assert master._dir.parent == short

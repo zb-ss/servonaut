@@ -94,6 +94,7 @@ class VaultLeaseCache:
         # publish its lease, and a later caller does not join it.
         self._generations: dict[tuple[str, ...], int] = {}
         self._epoch = 0
+        self._waiters: dict["asyncio.Future[Any]", int] = {}
 
     def generation(self, key: tuple[str, ...]) -> tuple[int, int]:
         """A token that changes whenever *key*'s binding is forgotten (or the cache cleared)."""
@@ -133,7 +134,7 @@ class VaultLeaseCache:
         instead of sending their own (two servers behind one bastion share
         the bastion's lease). A failure reaches every waiting caller; the
         next call looks again. A cancelled caller leaves the lookup running
-        for the others.
+        for the others; the lookup ends when the last caller waiting for it goes.
         """
         cached = self.get(key)
         if cached is not None:
@@ -143,7 +144,21 @@ class VaultLeaseCache:
             task = asyncio.ensure_future(fetch())
             self._inflight[key] = task
             task.add_done_callback(lambda done, key=key: self._finish(key, done))
-        return await asyncio.shield(task)
+        self._waiters[task] = self._waiters.get(task, 0) + 1
+        try:
+            return await asyncio.shield(task)
+        finally:
+            remaining = self._waiters[task] - 1
+            if remaining > 0:
+                self._waiters[task] = remaining
+            else:
+                del self._waiters[task]
+                # Nobody is waiting for this lookup any more: do not finish
+                # activating a credential for an abandoned operation.
+                if not task.done():
+                    if self._inflight.get(key) is task:
+                        del self._inflight[key]  # a caller arriving now starts a fresh lookup
+                    task.cancel()
 
     def _finish(self, key: tuple[str, ...], task: "asyncio.Future[Any]") -> None:
         # A lookup started after forget() may have replaced this one.
@@ -468,8 +483,10 @@ def apply_vault_lease(
     profile = _route_profile(applied, instance, connection_service)
     if profile is not None and connection_service is not None:
         proxy_args = connection_service.get_proxy_args(profile, hop=hop)
+    # The route actually used: callers that cap connections per bastion key on it.
     applied.update(
         {
+            **({"profile": profile} if profile is not None else {}),
             "username": getattr(lease, "login_user", None) or applied.get("username"),
             # The lease is the only private-key source: a local key file left
             # here would be offered before the agent's key.
@@ -583,6 +600,7 @@ async def _with_hop(conn: Mapping[str, Any], instance: Mapping[str, Any], connec
     profile = _route_profile(applied, instance, connection_service)
     if profile is None or connection_service is None:
         return applied
+    applied["profile"] = profile  # the route actually used (see apply_vault_lease)
     hop = await hop_for(profile)
     if hop is not None:
         applied["proxy_args"] = connection_service.get_proxy_args(profile, hop=hop)

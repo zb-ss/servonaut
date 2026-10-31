@@ -1216,6 +1216,9 @@ class MemoryConfig:
             connection may take to log in.
         ssh_control_persist_seconds: How long an idle master outlives its
             build when it could not be closed explicitly.
+        ssh_close_timeout_seconds: Time ``ssh -O exit`` may take to end a
+            build's shared connection; past it the connection ends by itself
+            after ``ssh_control_persist_seconds`` of idleness.
         ssh_connect_retry_backoff_seconds: Pause before the one retry of a
             dropped connection; two failures before any answer make the
             server unreachable.
@@ -1298,6 +1301,7 @@ class MemoryConfig:
     # Pause before the one retry of a connection that dropped before any
     # command of the build had answered.
     ssh_connect_retry_backoff_seconds: float = 1.0
+    ssh_close_timeout_seconds: float = 5.0
     ssh_control_socket_dir: str = ""
 
     # ------------------------------------------------------------------

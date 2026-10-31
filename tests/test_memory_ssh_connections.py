@@ -51,6 +51,7 @@ class FakeSsh:
 
     def __init__(self, behaviour: Optional[Callable[["FakeSsh", List[str]], Any]] = None, delay: float = 0.01):
         self.calls: List[List[str]] = []
+        self.timeouts: List[tuple] = []
         self.behaviour = behaviour or (lambda fake, argv: (b"ok", b""))
         self.delay = delay
         self.active = {"master": 0, "exit": 0, "command": 0}
@@ -72,6 +73,7 @@ class FakeSsh:
         argv = list(argv)
         kind = self.kind(argv)
         self.calls.append(argv)
+        self.timeouts.append((kind, timeout))
         self.active[kind] += 1
         self.peak[kind] = max(self.peak[kind], self.active[kind])
         try:
@@ -131,8 +133,7 @@ class _Prober:
 def _patched(fake: FakeSsh, wait: Optional[Callable] = None):
     stack = [
         patch("servonaut.utils.ssh_utils.run_ssh_subprocess", fake),
-        patch("servonaut.services.memory.ssh_mux.run_ssh_subprocess", fake),
-        patch("servonaut.services.memory.ssh_mux.run_ssh_daemonizing", fake.daemonizing),
+        patch("servonaut.utils.ssh_utils.run_ssh_daemonizing", fake.daemonizing),
     ]
     if wait is not None:
         stack.append(patch("servonaut.services.memory.service._wait", wait))
@@ -158,6 +159,10 @@ def _use(monkeypatch, os_name: str) -> None:
 
 async def _no_wait(seconds: float) -> None:
     return None
+
+
+def _control_values(argv: List[str]) -> List[str]:
+    return [o for o in argv if o.startswith("Control")]
 
 
 def _control_path(argv: List[str]) -> str:
@@ -408,7 +413,7 @@ class TestMasterFailures:
         assert report.successes["os"].observed["codes"] == [0, 0]
         assert len(fake.of_kind("master")) == 1
         commands = fake.of_kind("command")
-        assert len(commands) == 2 and not any(o.startswith("Control") for argv in commands for o in argv)
+        assert len(commands) == 2 and all(_control_values(argv) == ["ControlMaster=no", "ControlPath=none"] for argv in commands)
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +608,7 @@ class TestVerdict:
         assert runner.commands_answered == 1 and runner.connection_problem is None
 
 
+@pytest.mark.real_ssh_process
 class TestMasterOpenIgnoresInheritedPipes:
     """``ssh -f`` can leave its master holding ssh's output descriptors."""
 

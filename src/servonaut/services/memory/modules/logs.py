@@ -106,13 +106,18 @@ class LogsProber(ModuleProberInterface):
         probed_paths: List[str] = []
         raw_output = ""
 
+        # The build's own rows ride on its runner, like the instance: the
+        # prober is shared, so concurrent builds would overwrite its fields.
+        carried = getattr(ssh_runner, "connection_rows", None)
+        team_rows, fleet_rows = carried if isinstance(carried, tuple) else (self._team_rows, self._fleet_rows)
+
         try:
             probed_paths = await self._log_viewer_service.probe_log_paths(
                 instance,
                 self._ssh_service,
                 self._connection_service,
-                team_rows=self._team_rows,
-                rows=self._fleet_rows,
+                team_rows=team_rows,
+                rows=fleet_rows,
                 runner=ssh_runner if callable(ssh_runner) else None,
             )
             if probed_paths:
