@@ -17,11 +17,14 @@ import binascii
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import nacl.public
 
 from servonaut.services.memory.path_segments import check_segment
 from servonaut.services.memory.crypto import (
@@ -31,6 +34,8 @@ from servonaut.services.memory.crypto import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FINGERPRINT_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 
@@ -51,9 +56,30 @@ def derive_fingerprint(public_key_b64: Any) -> Optional[str]:
         key = base64.b64decode(public_key_b64, validate=True)
     except (binascii.Error, ValueError):
         return None
-    if len(key) != X25519_KEY_LEN or not any(key):
+    if len(key) != X25519_KEY_LEN or not any(key) or not _can_seal_to(key):
         return None
     return fingerprint(key)
+
+
+def _can_seal_to(key: bytes) -> bool:
+    """Whether a sealed box can be made to *key*.
+
+    libsodium refuses the small-order points; a member holding one could not
+    read anything sealed for it, and Share again would revoke the live share
+    before finding that out. A fixed dummy message is sealed, never a data key.
+    """
+    try:
+        nacl.public.SealedBox(nacl.public.PublicKey(key)).encrypt(b"\x00")
+    except (RuntimeError, ValueError, TypeError):
+        return False
+    return True
+
+
+def optional_fingerprint(value: Any) -> Optional[str]:
+    """*value* when it is a 64-char lowercase hex fingerprint, else None."""
+    if isinstance(value, str) and _FINGERPRINT_HEX.fullmatch(value):
+        return value
+    return None
 
 
 def classify_key(
@@ -148,15 +174,16 @@ def _parse_recipient(raw: Any) -> Optional[Recipient]:
     claimed, key_b64 = raw.get("fingerprint"), raw.get("public_key_b64")
     # The fingerprint we send back is what lets the service skip a member whose
     # key changed since; one that does not belong to this key is not trusted.
-    if derive_fingerprint(key_b64) != claimed:
+    derived = derive_fingerprint(key_b64)
+    if derived is None or derived != claimed:
         return None
     return Recipient(
         user_id=user_id,
-        fingerprint=claimed,
-        public_key=base64.b64decode(key_b64),
+        fingerprint=derived,
+        public_key=base64.b64decode(key_b64, validate=True),
         name=raw["name"] if isinstance(raw.get("name"), str) else "",
         flagged=flagged,
-        previous_fingerprint=_optional_text(raw.get("previous_fingerprint")),
+        previous_fingerprint=optional_fingerprint(raw.get("previous_fingerprint")),
         rotated_at=_optional_text(raw.get("key_rotated_at")),
     )
 

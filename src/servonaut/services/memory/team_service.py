@@ -61,6 +61,8 @@ from servonaut.services.memory.team_wraps import (
     KeyChange,
     KeyTrust,
     classify_key,
+    derive_fingerprint,
+    optional_fingerprint,
     parse_grant_coverage,
     split_recipients,
 )
@@ -204,15 +206,7 @@ class TeamMemberKey:
         pin or a check against it says nothing about the key a wrap is sealed
         for.
         """
-        try:
-            raw = base64.b64decode(self.public_key_b64, validate=True)
-        except ValueError:
-            return None
-        if len(raw) != 32:
-            return None
-        import hashlib
-
-        return hashlib.sha256(raw).hexdigest()
+        return derive_fingerprint(self.public_key_b64)
 
     @property
     def public_key_bytes(self) -> bytes:
@@ -409,18 +403,11 @@ class TeamMemoryService:
 
         members = []
         for item in data.get("members", []):
-            members.append(
-                TeamMemberKey(
-                    user_id=int(item["user_id"]),
-                    fingerprint=item["fingerprint"],
-                    public_key_b64=item["public_key_b64"],
-                    role=item["role"],
-                    name=str(item.get("name") or ""),
-                    key_changed=bool(item.get("key_changed", False)),
-                    previous_fingerprint=_optional_str(item.get("previous_fingerprint")),
-                    key_rotated_at=_optional_str(item.get("key_rotated_at")),
-                )
-            )
+            member = _parse_member_key(item)
+            if member is None:
+                logger.debug("member key ignored: malformed (%s)", type(item).__name__)
+                continue
+            members.append(member)
         return members
 
     def eligible_members(
@@ -1111,6 +1098,35 @@ _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 def _optional_str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
+
+
+def _parse_member_key(item: Any) -> Optional[TeamMemberKey]:
+    """One directory row, or None when it cannot describe a member's key.
+
+    A row that lacks a key or a well-formed fingerprint is dropped on its own,
+    so one bad row never costs the others; a fingerprint that is well formed
+    but not the key's own is kept and refused later as an unusable key.
+    """
+    if not isinstance(item, dict):
+        return None
+    user_id, key_b64, claimed = item.get("user_id"), item.get("public_key_b64"), item.get("fingerprint")
+    if not isinstance(user_id, int) or isinstance(user_id, bool):
+        return None
+    if not isinstance(key_b64, str) or not key_b64 or optional_fingerprint(claimed) is None:
+        return None
+    role = item.get("role")
+    if not isinstance(role, str):
+        return None
+    return TeamMemberKey(
+        user_id=user_id,
+        fingerprint=claimed,
+        public_key_b64=key_b64,
+        role=role,
+        name=str(item.get("name") or ""),
+        key_changed=bool(item.get("key_changed", False)),
+        previous_fingerprint=optional_fingerprint(item.get("previous_fingerprint")),
+        key_rotated_at=_optional_str(item.get("key_rotated_at")),
+    )
 
 
 def _parse_grant(data: Dict[str, Any]) -> Grant:
