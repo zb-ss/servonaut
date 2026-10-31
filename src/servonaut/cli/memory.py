@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.services.memory.provider import instance_provider
-from servonaut.services.memory.status import STOPPED_REASON
+from servonaut.services.memory.status import STOPPED_REASON, is_stopped_instance
 from servonaut.services.ssh_host_keys import home_relative
 from servonaut.utils.editor import editor_argv
 
@@ -309,6 +309,12 @@ async def _build_all(
     """
     sem = asyncio.Semaphore(5)
     failures: List[Tuple[str, str]] = []
+    # Stopped servers are set aside before anything is announced: "Probing"
+    # and the running count cover only the servers a probe will try.
+    stopped = [inst for inst in instances if is_stopped_instance(inst)]
+    instances = [inst for inst in instances if not is_stopped_instance(inst)]
+    if skipped is not None:
+        skipped.extend(inst.get("id") or inst.get("name", "?") for inst in stopped)
     total = len(instances)
     counter = 0
     lock = asyncio.Lock()

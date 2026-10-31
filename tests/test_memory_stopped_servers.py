@@ -162,6 +162,26 @@ class TestCliSurfacesStopped:
         assert "FAILED" not in captured.err
         assert "skipped: stopped" in (captured.out + captured.err)
 
+    def test_build_all_does_not_announce_a_probe_of_a_stopped_server(
+        self, tmp_path: Path, capsys: Any
+    ) -> None:
+        from servonaut.cli.memory import _build_all
+
+        service = MagicMock()
+        service.build_report = AsyncMock(return_value=BuildReport(successes={"os": MagicMock()}))
+        skipped: List[str] = []
+        rows = [_row("off", state="stopped"), _row("on", state="running")]
+
+        failures = asyncio.run(_build_all(rows, service, None, skipped))
+
+        out = capsys.readouterr().out
+        assert failures == []
+        assert skipped == ["off"]
+        assert "Probing on" in out and "[1/1]" in out
+        assert "Probing off" not in out
+        # The stopped server is never handed to the probes at all.
+        assert [call.args[0]["id"] for call in service.build_report.await_args_list] == ["on"]
+
 
 class TestMcpSurfacesStopped:
     def test_build_server_memory_reports_stopped_with_a_distinct_audit_reason(self) -> None:
