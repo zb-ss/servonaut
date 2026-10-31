@@ -19,6 +19,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,70 @@ logger = logging.getLogger(__name__)
 
 
 
+class KeyTrust(Enum):
+    """Whether a member's key may be sealed for."""
+
+    UNUSABLE = "unusable"  # not a key, or not the key its fingerprint names
+    TRUSTED = "trusted"  # sealed for, or confirmed, before
+    CHANGED = "changed"  # needs the user's confirmation
+    NEW = "new"  # first sight: sealed, then pinned
+
+
+def derive_fingerprint(public_key_b64: Any) -> Optional[str]:
+    """The fingerprint of the key held in *public_key_b64*, or None if it is no key."""
+    if not _text(public_key_b64):
+        return None
+    try:
+        key = base64.b64decode(public_key_b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(key) != X25519_KEY_LEN or not any(key):
+        return None
+    return fingerprint(key)
+
+
+def classify_key(
+    public_key_b64: Any, claimed: Any, *, flagged: bool, pinned: Optional[str]
+) -> KeyTrust:
+    """The one rule behind Share, Share again, the catch-up and the top-up.
+
+    The claimed fingerprint is only a claim: it is checked against the key
+    actually held, and a pin is compared with the derived value, so the
+    service's ``key_changed`` flag can neither hide a swapped key nor keep a
+    confirmed one blocked.
+    """
+    derived = derive_fingerprint(public_key_b64)
+    if derived is None or derived != claimed:
+        return KeyTrust.UNUSABLE
+    if pinned is not None:
+        return KeyTrust.TRUSTED if pinned == derived else KeyTrust.CHANGED
+    return KeyTrust.CHANGED if flagged else KeyTrust.NEW
+
+
+@dataclass(frozen=True)
+class KeyChange:
+    """A member's key the user has to confirm before anything is sealed for it.
+
+    ``previous_fingerprint`` is the key last sealed for when that differs from
+    the current one, else what the service reports as the replaced key.
+    """
+
+    team_slug: str
+    user_id: int
+    name: str
+    fingerprint: str
+    previous_fingerprint: Optional[str] = None
+    rotated_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PendingKeyChange:
+    """A changed key a catch-up skipped, and the server it was needed for."""
+
+    change: KeyChange
+    instance_id: str
+
+
 @dataclass(frozen=True)
 class Recipient:
     """A member that still lacks a wrap, with the key the service holds."""
@@ -40,6 +105,10 @@ class Recipient:
     user_id: int
     fingerprint: str
     public_key: bytes
+    name: str = ""
+    flagged: bool = False
+    previous_fingerprint: Optional[str] = None
+    rotated_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -52,38 +121,44 @@ class MissingTeamWrap:
     team_slug: str
     grant_id: str
     recipients: Tuple[Recipient, ...]
-    key_changed_count: int
 
 
 def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def _parse_recipient(raw: Any) -> Tuple[str, Any]:
-    """Return ``("ok", Recipient)``, ``("key_changed", None)`` or ``("bad", None)``."""
+def _optional_text(value: Any) -> Optional[str]:
+    return value if _text(value) else None
+
+
+def _parse_recipient(raw: Any) -> Optional[Recipient]:
+    """The recipient described by *raw*, or None when it is malformed.
+
+    A flagged recipient is validated like any other: the user may confirm its
+    key, so the key has to be one we would be willing to seal for.
+    """
     if not isinstance(raw, dict):
-        return "bad", None
+        return None
     user_id = raw.get("user_id")
     if not isinstance(user_id, int) or isinstance(user_id, bool):
-        return "bad", None
-    changed = raw.get("key_changed")
-    if not isinstance(changed, bool):
-        return "bad", None
-    if changed:
-        # A changed key needs the user's confirmation: never sealed for.
-        return "key_changed", None
+        return None
+    flagged = raw.get("key_changed")
+    if not isinstance(flagged, bool):
+        return None
     claimed, key_b64 = raw.get("fingerprint"), raw.get("public_key_b64")
-    if not _text(claimed) or not _text(key_b64):
-        return "bad", None
-    try:
-        key = base64.b64decode(key_b64, validate=True)
-    except (binascii.Error, ValueError):
-        return "bad", None
     # The fingerprint we send back is what lets the service skip a member whose
     # key changed since; one that does not belong to this key is not trusted.
-    if len(key) != X25519_KEY_LEN or not any(key) or fingerprint(key) != claimed:
-        return "bad", None
-    return "ok", Recipient(user_id=user_id, fingerprint=claimed, public_key=key)
+    if derive_fingerprint(key_b64) != claimed:
+        return None
+    return Recipient(
+        user_id=user_id,
+        fingerprint=claimed,
+        public_key=base64.b64decode(key_b64),
+        name=raw["name"] if isinstance(raw.get("name"), str) else "",
+        flagged=flagged,
+        previous_fingerprint=_optional_text(raw.get("previous_fingerprint")),
+        rotated_at=_optional_text(raw.get("key_rotated_at")),
+    )
 
 
 def _parse_entry(raw: Any) -> Any:
@@ -101,14 +176,7 @@ def _parse_entry(raw: Any) -> Any:
     raw_recipients = raw.get("recipients")
     if not isinstance(raw_recipients, list):
         return None
-    recipients: List[Recipient] = []
-    changed = 0
-    for item in raw_recipients:
-        kind, recipient = _parse_recipient(item)
-        if kind == "ok":
-            recipients.append(recipient)
-        elif kind == "key_changed":
-            changed += 1
+    recipients = [r for r in map(_parse_recipient, raw_recipients) if r is not None]
     return MissingTeamWrap(
         envelope_id=raw["envelope_id"],
         instance_id=raw["instance_id"],
@@ -116,7 +184,6 @@ def _parse_entry(raw: Any) -> Any:
         team_slug=raw["team_slug"],
         grant_id=raw["grant_id"],
         recipients=tuple(recipients),
-        key_changed_count=changed,
     )
 
 
@@ -231,11 +298,115 @@ def pin_fingerprint(store: WrapPinStore, team_slug: str, user_id: int, fp: str) 
     store.set_many({(team_slug, user_id): fp})
 
 
-def differs_from_pin(store: WrapPinStore, entry: MissingTeamWrap) -> Tuple[Tuple[Recipient, ...], int]:
-    """Split *entry*'s recipients into those matching their pin (or new) and a count of the rest."""
-    kept: List[Recipient] = []
-    for recipient in entry.recipients:
-        pinned = pinned_fingerprint(store, entry.team_slug, recipient.user_id)
-        if pinned is None or pinned == recipient.fingerprint:
-            kept.append(recipient)
-    return tuple(kept), len(entry.recipients) - len(kept)
+@dataclass(frozen=True)
+class CoverageEnvelope:
+    """One snapshot of a live share and the members that cannot read it yet."""
+
+    envelope_id: str
+    module: str
+    snapshot_version: Optional[int]
+    wrapped_dek: Optional[str]  # the caller's own wrap; None when it holds none
+    missing: Tuple[Recipient, ...]
+
+
+@dataclass(frozen=True)
+class GrantCoverage:
+    """Who can read the newest snapshots of a live share."""
+
+    envelopes: Tuple[CoverageEnvelope, ...]
+    pending: Tuple[Dict[str, Any], ...]
+
+
+def _parse_coverage_envelope(raw: Any) -> Optional[CoverageEnvelope]:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        check_segment(raw.get("envelope_id"), "envelope")
+    except ValueError:
+        return None
+    wrapped = raw.get("wrapped_dek")
+    if wrapped is not None and not _text(wrapped):
+        return None
+    missing = raw.get("missing_recipients")
+    if not _text(raw.get("module")) or not isinstance(missing, list):
+        return None
+    version = raw.get("snapshot_version")
+    return CoverageEnvelope(
+        envelope_id=raw["envelope_id"],
+        module=raw["module"],
+        snapshot_version=version if isinstance(version, int) and not isinstance(version, bool) else None,
+        wrapped_dek=wrapped,
+        missing=tuple(r for r in map(_parse_recipient, missing) if r is not None),
+    )
+
+
+def parse_grant_coverage(payload: Any) -> GrantCoverage:
+    """The usable part of a share's coverage report.
+
+    A malformed envelope is dropped whole and a malformed recipient on its own;
+    only shapes and counts are logged, never an id or a key.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("envelopes"), list):
+        logger.debug("grant coverage ignored: unexpected shape (%s)", type(payload).__name__)
+        return GrantCoverage((), ())
+    envelopes = []
+    for raw in payload["envelopes"]:
+        envelope = _parse_coverage_envelope(raw)
+        if envelope is None:
+            logger.debug("grant coverage envelope ignored: malformed (%s)", type(raw).__name__)
+            continue
+        envelopes.append(envelope)
+    pending = payload.get("pending_recipients")
+    return GrantCoverage(
+        envelopes=tuple(envelopes),
+        pending=tuple(dict(p) for p in pending if isinstance(p, dict)) if isinstance(pending, list) else (),
+    )
+
+
+@dataclass(frozen=True)
+class TrustSplit:
+    """An entry's recipients, divided by whether they may be sealed for now."""
+
+    sealable: Tuple[Recipient, ...]
+    changed: Tuple[KeyChange, ...]
+
+
+def key_change_for(
+    team_slug: str, recipient: Recipient, pinned: Optional[str]
+) -> KeyChange:
+    """The :class:`KeyChange` describing *recipient*."""
+    previous = pinned if pinned is not None and pinned != recipient.fingerprint else None
+    return KeyChange(
+        team_slug=team_slug,
+        user_id=recipient.user_id,
+        name=recipient.name,
+        fingerprint=recipient.fingerprint,
+        previous_fingerprint=previous or recipient.previous_fingerprint,
+        rotated_at=recipient.rotated_at,
+    )
+
+
+def split_by_trust(store: Optional[WrapPinStore], entry: MissingTeamWrap) -> TrustSplit:
+    """Divide *entry*'s recipients into those to seal for and those awaiting confirmation."""
+    return split_recipients(store, entry.team_slug, entry.recipients)
+
+
+def split_recipients(
+    store: Optional[WrapPinStore], team_slug: str, recipients: Tuple[Recipient, ...]
+) -> TrustSplit:
+    """Like :func:`split_by_trust` for a bare list; no store means nothing is pinned."""
+    sealable: List[Recipient] = []
+    changed: List[KeyChange] = []
+    for recipient in recipients:
+        pinned = pinned_fingerprint(store, team_slug, recipient.user_id) if store else None
+        trust = classify_key(
+            base64.b64encode(recipient.public_key).decode(),
+            recipient.fingerprint,
+            flagged=recipient.flagged,
+            pinned=pinned,
+        )
+        if trust in (KeyTrust.TRUSTED, KeyTrust.NEW):
+            sealable.append(recipient)
+        elif trust is KeyTrust.CHANGED:
+            changed.append(key_change_for(team_slug, recipient, pinned))
+    return TrustSplit(sealable=tuple(sealable), changed=tuple(changed))

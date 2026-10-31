@@ -341,7 +341,17 @@ When the server is already shared with that team, the form shows that share inst
 - **Revoke** stops members reading it;
 - **Revoke and delete members' copies** also removes their access to the snapshots already shared, after a confirmation. Your own memory is kept.
 
-Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need. A member's key is used only while it matches the one Servonaut first shared with. A member whose key changed is skipped until that is confirmed, and Share or Share again refuses, before changing anything, rather than seal for a changed key.
+Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need.
+
+#### A member's key changed
+
+A member's memory key changes when they set up Memory Sync again or use a new computer. Servonaut seals a server's data keys for a member only while their key is one you have confirmed (a key Servonaut shared with before counts as confirmed). A key that changed is never used until you confirm it:
+
+- **Share** and **Share again** open **Confirm changed memory keys** instead of continuing. For each member it shows the new key and, when known, the previous key and when it changed, in the same form as the **Key fingerprint** on the Memory Sync screen. Ask the member to open Memory Sync and read out their Key fingerprint, compare it with the new key, then tick "<name>'s key matches" for each member. **Trust and share** (or **Trust and share again**) is enabled once every member is ticked, because a share cannot leave one out; it then repeats the same action with the same choices. **Cancel** (or Escape) sends nothing and the form says who cannot read the share until you confirm.
+- On a server that is already shared, the form lists "Key changed, waiting for your confirmation" with the members concerned and a **Review changed keys** button. Tick the keys that match and press **Trust checked keys**: Servonaut then seals the latest snapshots for those members. The share itself is not revoked or changed; keys you leave unticked keep waiting.
+- When an upload skips a changed key, a notification names the server (never the member) and points to Fleet Memory: select the server, then `S`.
+
+A key the service sends that does not match its own fingerprint cannot be confirmed: the share stops and nothing is changed.
 
 **As a member**, a server shared with you appears in Fleet Memory with its module count and age, even when you have no other row for it. Its Memory screen and MCP `get_server_memory` show the team's copy, labelled "Shared by <team>, probed <date>". If you have a snapshot of your own that is newer, yours is shown instead. When several teams share the same server, each module comes from the newest copy, and the label names the team behind each one. Shared memory is read-only: it is never merged into your own notes or uploaded from your computer. The standalone `servonaut --mcp` server cannot open shared memory; use it from the app with Memory Sync unlocked.
 
