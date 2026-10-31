@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import base64
 import hashlib
 import itertools
 import json
@@ -154,7 +155,7 @@ class MemoryCloud:
                 {
                     "user_id": user_id,
                     "public_key_b64": public_key_b64,
-                    "fingerprint": hashlib.sha256(public_key_b64.encode()).hexdigest(),
+                    "fingerprint": hashlib.sha256(base64.b64decode(public_key_b64)).hexdigest(),
                     "role": role,
                 }
             )
