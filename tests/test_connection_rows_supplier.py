@@ -221,7 +221,11 @@ class TestBuildReportRows:
         supply = _supplier([_team_row()])
         service.set_connection_rows(supply)
 
-        asyncio.run(service.build_report(dict(OWN), ["logs"]))
+        # The build opens its shared connection before the prober runs.
+        with patch("servonaut.utils.ssh_utils.run_ssh_daemonizing", AsyncMock(return_value=(b"", b""))), patch(
+            "servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(b"ok", b"")),
+        ):
+            asyncio.run(service.build_report(dict(OWN), ["logs"]))
 
         assert len(supply.calls) == 1
         prober.set_connection_rows.assert_called_once()

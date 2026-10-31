@@ -151,6 +151,7 @@ class TestVaultHop:
         # The outer ssh, then the hop's ssh, each expand "%" once.
         assert f'IdentityAgent="{tmp_path}/a%%%%b.sock"' in command
 
+    @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
     @pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client not installed")
     def test_openssh_reads_the_hop_options_as_written(self, tmp_path, known_hosts, posix_hop):
         hop = _hop(tmp_path, certificate_path=str(tmp_path / "c%1.pub"))

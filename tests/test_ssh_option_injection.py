@@ -42,6 +42,7 @@ def test_options_end_before_the_destination():
     assert cmd[destination + 1] == INJECTED
 
 
+@pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
 def test_openssh_does_not_apply_a_dash_remote_command_as_an_option():
     # `ssh -G` prints the effective configuration without connecting.

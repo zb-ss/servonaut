@@ -111,6 +111,7 @@ class TestBoundCommandsNeverDialOnTheirOwn:
         assert len(fake.of_kind("master")) == 2
 
 
+@pytest.mark.real_ssh_process  # runs the real client, against nothing but a failing proxy
 def test_a_real_ssh_without_its_master_fails_fast_instead_of_dialling(tmp_path):
     import shutil
     import subprocess

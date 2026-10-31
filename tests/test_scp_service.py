@@ -1,3 +1,4 @@
+import pytest
 """Tests for SCP service."""
 
 import subprocess
@@ -110,6 +111,7 @@ class TestBuildUploadCommand(TestSCPService):
         assert 'ServerAliveInterval=5' in leased
         assert 'HostKeyAlias=aws:eu-west-2:i-0123456789abcdef0' in plain
 
+    @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
     def test_native_vault_transfer_uses_only_verified_host_key_policy(self):
         command = self.scp_service.build_upload_command(
             local_path='/tmp/file.txt',

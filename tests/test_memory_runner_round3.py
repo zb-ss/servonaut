@@ -243,9 +243,50 @@ class TestLogsProberRows:
 
 
 class TestNoRealSshInUnitTests:
-    def test_starting_ssh_fails_the_test(self):
+    def test_starting_ssh_is_refused_and_recorded(self):
+        from tests.conftest import SSH_LAUNCH_VIOLATIONS
+
         async def go():
             await asyncio.create_subprocess_exec("ssh", "-V")
 
         with pytest.raises(AssertionError, match="replace the subprocess seam"):
             asyncio.run(go())
+        assert SSH_LAUNCH_VIOLATIONS == ["ssh"]
+        SSH_LAUNCH_VIOLATIONS.clear()  # this test provoked it on purpose
+
+    @pytest.mark.parametrize("program", ["ssh", "ssh.exe", b"ssh", "/usr/bin/ssh", Path("/usr/bin/SCP.EXE"), "C:\\Windows\\sftp.exe"])
+    def test_every_spelling_of_an_ssh_client_is_recognised(self, program):
+        from tests.conftest import _is_ssh_program
+
+        assert _is_ssh_program(program)
+
+    def test_other_programs_are_not(self):
+        from tests.conftest import _is_ssh_program
+
+        assert not _is_ssh_program("sshd-helper") and not _is_ssh_program("/bin/echo")
+
+    def test_synchronous_launches_are_refused_too(self):
+        import subprocess
+
+        from tests.conftest import SSH_LAUNCH_VIOLATIONS
+
+        with pytest.raises(AssertionError):
+            subprocess.run(["ssh", "-V"])
+        with pytest.raises(AssertionError):
+            subprocess.Popen(["/usr/bin/ssh.exe", "-V"])
+        assert len(SSH_LAUNCH_VIOLATIONS) == 2
+        SSH_LAUNCH_VIOLATIONS.clear()
+
+    def test_a_refusal_swallowed_by_the_code_under_test_is_still_recorded(self):
+        from tests.conftest import SSH_LAUNCH_VIOLATIONS
+
+        async def production_code():
+            try:
+                await asyncio.create_subprocess_exec("ssh", "-V")
+            except Exception:  # noqa: BLE001 - what the probers do with it
+                return "swallowed"
+
+        assert asyncio.run(production_code()) == "swallowed"
+        # The teardown would fail this test; the self-test consumes the record.
+        assert SSH_LAUNCH_VIOLATIONS == ["ssh"]
+        SSH_LAUNCH_VIOLATIONS.clear()
