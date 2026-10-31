@@ -38,6 +38,7 @@ from servonaut.services.memory.shared_view import (
     shared_source_text,
 )
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -1412,6 +1413,9 @@ class MemoryScreen(Screen):
             draft = await asyncio.to_thread(
                 self._write_unless_changed, memory_service, instance_id, provider, text, expected
             )
+        except RecordLockTimeout:
+            await self._keep_busy_draft(instance_id, provider, memory_service, text)
+            return
         except Exception as exc:
             self.app.notify(
                 f"Could not save annotations: {exc}", severity="error", markup=False
@@ -1429,6 +1433,27 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Annotations saved.", severity="information")
         await self._record_annotations_edit(instance_id, provider, memory_service)
+
+    async def _keep_busy_draft(
+        self, instance_id: str, provider: str, memory_service: Any, text: str
+    ) -> None:
+        """Keep *text* in a draft when another process holds the notes' lock."""
+        try:
+            draft = await asyncio.to_thread(
+                memory_service.write_annotation_draft, instance_id, text, provider
+            )
+        except Exception as exc:
+            self.app.notify(
+                f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        self.app.notify(
+            "Another Servonaut window is saving this server's notes, so nothing was "
+            f"overwritten. Your text is kept in {draft.name} next to the notes: open the "
+            "notes again and copy in what you need from it.",
+            severity="warning",
+            markup=False,
+        )
 
     async def _finish_external_edit(
         self, instance_id: str, provider: str, memory_service: Any

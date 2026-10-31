@@ -37,6 +37,7 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.team_fold import absorbed_share_ids
 from servonaut.services.memory.shared_view import (
     merge_shared,
@@ -2970,6 +2971,9 @@ class ServonautTools:
         except ValueError as exc:
             self._audit.log('remember_server_finding', args, str(exc), False, 'validation')
             return f"validation: {exc}"
+        except RecordLockTimeout as exc:
+            self._audit.log('remember_server_finding', args, str(exc), False, 'record_busy')
+            return f"busy: {exc}; nothing was saved, try again"
         except Exception as exc:
             self._audit.log('remember_server_finding', args, str(exc), False, 'api_error')
             return f"api_error: {exc}"

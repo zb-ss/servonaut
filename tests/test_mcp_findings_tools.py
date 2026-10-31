@@ -440,3 +440,16 @@ class TestToolSchemaGating:
         from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
         assert TOOL_SCHEMAS["remember_server_finding"]["chat_exposed"] is True
         assert TOOL_SCHEMAS["recall_server_findings"]["chat_exposed"] is True
+
+
+class TestRecordBusyAudit:
+    def test_a_busy_record_gets_its_own_audit_reason(self):
+        from servonaut.services.memory.store import RecordLockTimeout
+
+        svc = _make_memory_service()
+        svc.remember_finding.side_effect = RecordLockTimeout("busy")
+        tools = _make_tools(memory_service=svc)
+        result = run(tools.remember_server_finding("i-abc123", "t", "b"))
+        assert "another Servonaut" in result.lower() or "busy" in result.lower()
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is False and audit_call.args[4] == "record_busy"
