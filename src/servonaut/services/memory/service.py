@@ -747,6 +747,10 @@ class MemoryService(MemoryServiceInterface):
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations(instance_id, content, provider)
 
+    def annotation_lock(self, instance_id: str, *, wait: bool = True):
+        """Hold the record lock of *instance_id* (see ``MemoryStore.annotation_lock``)."""
+        return self._store.annotation_lock(self._resolve_id(instance_id), wait=wait)
+
     def write_annotations_if_unchanged(
         self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
     ) -> bool:

@@ -71,7 +71,7 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
-from servonaut.services.memory.store import MemoryCorruptError, check_finding_record
+from servonaut.services.memory.store import MemoryCorruptError, RecordBusy, check_finding_record
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
@@ -716,17 +716,28 @@ class MemorySyncService:
         content: str = decrypted.plaintext.get("content", "")
         server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
 
-        # 5. Read local bookkeeping.
+        # 5-8. Compare and write as one locked step, so a local edit landing
+        # between the two is never overwritten. A record that is busy right
+        # now keeps its local text; the next pull decides again.
+        try:
+            with self._memory_service.annotation_lock(instance_id, wait=False):
+                return self._apply_remote_annotations(instance_id, provider, content, server_ts)
+        except RecordBusy:
+            return "local_newer"
+
+    def _apply_remote_annotations(
+        self, instance_id: str, provider: str, content: str, server_ts: Optional[str]
+    ) -> str:
+        """Last-writer-wins between the service's notes and the local ones (record lock held)."""
         meta = self._memory_service.get_annotations_meta(instance_id)
         local_hash: str = meta.get("annotations_hash", "")
         local_modified: Optional[str] = meta.get("annotations_modified_at") or None
 
-        # 6. Unchanged short-circuit: same content already on disk.
+        # Unchanged short-circuit: same content already on disk.
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if content_hash == local_hash:
             return "unchanged"
 
-        # 7. Last-writer-wins precedence.
         local_dt = self._parse_iso(local_modified)
         server_dt = self._parse_iso(server_ts)
 
@@ -736,7 +747,7 @@ class MemorySyncService:
             # Undatable server copy — keep known-good local.
             return "local_newer"
 
-        # 8. Server wins: write back to local store.
+        # Server wins: write back to local store.
         self._memory_service.write_annotations(instance_id, content, provider)
         self._memory_service.set_annotations_meta(
             instance_id,
