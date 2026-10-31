@@ -2143,12 +2143,32 @@ class ServonautApp(App):
     # App-owned manual fleet scan (survives screen navigation)
     # ------------------------------------------------------------------
 
-    def release_team_memory_hold(self) -> None:
-        """Let share-keyed memory envelopes upload: the shared servers are settled.
+    def expect_team_memory_load(self, name: str) -> None:
+        """Note that the inventory load *name* was started and will settle.
 
-        Called once the team's shared servers were listed and reconciled, or
-        could not be listed at all (nothing then folds).
+        While share-keyed uploads are held, they wait for every such load:
+        the shared servers and each own provider's rows, since a share's
+        twin can arrive from any of them. Counted, so a load restarted by an
+        exclusive worker is awaited once per start.
         """
+        loads = self.__dict__.setdefault("_team_memory_loads", {})
+        loads[name] = loads.get(name, 0) + 1
+
+    def settle_team_memory_load(self, name: str) -> None:
+        """Note that a load started with :meth:`expect_team_memory_load` ended
+        (rows arrived, it failed, or it was cancelled)."""
+        loads = self.__dict__.setdefault("_team_memory_loads", {})
+        if loads.get(name, 0) > 0:
+            loads[name] -= 1
+
+    def release_team_memory_hold(self) -> None:
+        """Let share-keyed memory envelopes upload once every load has settled.
+
+        Call it after a load settled and its reconcile (if any) ended. It does
+        nothing while another load of this run is still outstanding.
+        """
+        if any(self.__dict__.get("_team_memory_loads", {}).values()):
+            return
         sync = getattr(self, "memory_sync_service", None)
         release = getattr(sync, "release_share_hold", None)
         if callable(release):

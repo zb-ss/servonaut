@@ -1131,7 +1131,6 @@ class MemorySyncService:
         merge that fails must not lose a queued note.
         """
         self._folded_ids = set(instance_ids)
-        self._awaiting_folds = False
 
     def hold_unfolded_shares(self) -> None:
         """Keep share-keyed envelopes queued until the folded shares are known.
@@ -1139,7 +1138,7 @@ class MemorySyncService:
         An app that lists a team's shared servers calls this at start-up: a
         drain that ran before the list arrived would upload an envelope for a
         share that then turns out to fold into an own server. The hold ends
-        in :meth:`set_folded_instance_ids` or :meth:`release_share_hold`.
+        in :meth:`release_share_hold`, which the app calls once every inventory load of the run has settled (a share's twin can arrive from any of them).
         """
         self._awaiting_folds = True
 
