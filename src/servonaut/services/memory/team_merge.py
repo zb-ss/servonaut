@@ -615,6 +615,12 @@ class _Pass:
     absent: Set[str]
     remote: Dict[str, Tuple[Any, Any]] = field(default_factory=dict)
     target_mismatch_logged: bool = False
+    #: Every local folder of a share that folds into a target, so the service's
+    #: data is judged against all of them, not just the folder being completed.
+    folders: Dict[Tuple[str, MemoryKey], List[MemoryKey]] = field(default_factory=dict)
+    #: (share id, target) -> (notes, findings) of the service part already
+    #: merged this pass: a second folder of the same share never merges it again.
+    completed: Dict[Tuple[str, MemoryKey], Tuple[bool, bool]] = field(default_factory=dict)
 
     async def read_remote(self, share_id: str, name: str) -> Tuple[Any, Any]:
         """The service's notes and findings for a share id (read once per pass)."""
@@ -744,16 +750,29 @@ def _note_other_target(plan: MergePlan, run: _Pass) -> None:
 
 
 def _beyond_copy(plan: MergePlan, run: _Pass, notes: Any, findings: Any) -> Tuple[str, List[Dict[str, Any]]]:
-    """What the service holds beyond the copy's own data (the copy is never modified)."""
-    store, source = run.memory_service._store, plan.source
+    """What the service holds beyond every local folder of the share (none is modified).
+
+    A share filed in several folders (an older team label and the canonical
+    one) has each of them folded into the same target; a note deleted from the
+    target that any of them held must not return from the service, so the
+    service's data is judged against the union of those folders.
+    """
+    store = run.memory_service._store
+    sources = run.folders.get((plan.source.instance_id, plan.target)) or [plan.source]
     text = ""
     if notes is not None and notes.status == "found":
-        text = text_beyond(notes.text, store.read_annotations_strict(source.instance_id, source.provider))
+        held = "\n".join(
+            store.read_annotations_strict(source.instance_id, source.provider) for source in sources
+        )
+        text = text_beyond(notes.text, held)
     records: List[Dict[str, Any]] = []
     if findings is not None and findings.status == "found":
         records = [
             r for r in findings.records
-            if not finding_contained(r, store.get_finding(source.instance_id, r["id"], source.provider))
+            if not any(
+                finding_contained(r, store.get_finding(source.instance_id, r["id"], source.provider))
+                for source in sources
+            )
         ]
     return text, records
 
@@ -782,8 +801,12 @@ async def _complete_remote(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) 
         report.kept.append(source_id)
     if not (notes_owed_now or findings_owed_now):
         return marker
+    key = (source_id, target)
+    notes_done, findings_done = run.completed.get(key, (False, False))
     text, records = _beyond_copy(
-        plan, run, notes if notes_owed_now else None, findings if findings_owed_now else None
+        plan, run,
+        notes if notes_owed_now and not notes_done else None,
+        findings if findings_owed_now and not findings_done else None,
     )
     stats = run.merger.merge(
         target, target, source_label=plan.label, merged_on=run.merged_on, target_name=name,
@@ -794,6 +817,7 @@ async def _complete_remote(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) 
     if not stats.verified:
         report.kept.append(source_id)
         return marker
+    run.completed[key] = (notes_done or notes_owed_now, findings_done or findings_owed_now)
     owes = bool(marker.get("upload_pending")) or (
         plan.uploads and (stats.held_notes or stats.held_findings)
     )
@@ -917,6 +941,9 @@ async def _merge_pass(
         merger, memory_service, sync_service, sync_state(sync_service), merged_on, report,
         absent_ids if absent_ids is not None else set(),
     )
+    for plan in plans:
+        if not plan.cloud_only:
+            run.folders.setdefault((plan.source.instance_id, plan.target), []).append(plan.source)
     for plan in plans:
         try:
             await _fold(plan, run)
