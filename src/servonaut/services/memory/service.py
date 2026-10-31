@@ -27,7 +27,9 @@ from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .ssh_mux import ControlMaster
 from .status import STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, _validate_finding_id
+from .team_merge import share_identity
 from .summariser import build_summary_markdown
+from servonaut.services.shared_servers import is_shared_row
 from servonaut.services.ssh_host_keys import (
     SSH_FAILURE_EXIT_CODE,
     HostKeyProblem,
@@ -481,6 +483,9 @@ class MemoryService(MemoryServiceInterface):
             probed_modules.append(result.module)
 
         if probed_modules:
+            if is_shared_row(instance):
+                # So a re-share can be matched to this entry, from any surface.
+                self._store.set_share_identity(instance_id, share_identity(instance))
             self._store.update_index(
                 instance_id=instance_id,
                 name=name,

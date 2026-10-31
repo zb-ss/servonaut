@@ -249,3 +249,25 @@ def test_the_message_is_singular_for_one_copy():
     assert TeamMergeReport(copies=2, notes=0, findings=2).message() == (
         "Merged 2 team copies into your servers: 0 notes, 2 findings."
     )
+
+
+def test_a_build_of_a_shared_row_records_which_server_it_is(tmp_path):
+    """Headless surfaces build through the service alone: the identity must land on the entry."""
+    import asyncio
+
+    from servonaut.config.schema import MemoryConfig
+    from servonaut.services.memory.interfaces import ModuleProberInterface, ModuleResult
+    from servonaut.services.memory.service import MemoryService
+    from servonaut.services.memory.team_merge import share_identity
+
+    class Prober(ModuleProberInterface):
+        name, ttl_seconds = "os", 3600
+
+        async def probe(self, ssh_runner):
+            return ModuleResult(module="os", instance_id="", observed={}, probed_at=NEW, ttl_seconds=3600)
+
+    service = MemoryService(store=MemoryStore(root=tmp_path), config=MemoryConfig(), probers=[Prober()])
+    row = _member()
+    asyncio.run(service.build(row))
+    entry = service._store.get_index_entry(SHARE_ID)
+    assert entry["share_identity"] == share_identity(row)
