@@ -247,3 +247,17 @@ class TestSymlinkLoop:
         report = _run(service, [_own(), _shared()] + _second_pair(), _sync(tmp_path, service))
         assert SHARE_ID in report.kept and report.copies == 1
         assert service.read_annotations(OTHER_OWN, "aws") == "second copy note"
+
+    def test_a_looping_provider_folder_is_not_addressable(self, tmp_path):
+        # Python 3.13 stopped raising for a loop in a non-strict resolve().
+        root = tmp_path / "root"
+        root.mkdir()
+        os.symlink(root / "aws", root / "aws")                          # points at itself
+        service = _service(root)
+        assert service._store.is_addressable(OWN_ID, "aws") is False
+
+    def test_a_folder_that_does_not_exist_yet_is_addressable(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        service = _service(root)
+        assert service._store.is_addressable(OWN_ID, "aws") is True
