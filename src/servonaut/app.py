@@ -1586,7 +1586,9 @@ class ServonautApp(App):
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
                 ),
-                pin_store_provider=default_pin_store,
+                pin_store_provider=lambda: default_pin_store(
+                    lock_wait=self.config_manager.get().memory.record_lock_wait
+                ),
                 future_skew_provider=lambda: (
                     self.config_manager.get().memory.team_memory_future_skew_seconds
                 ),

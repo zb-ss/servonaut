@@ -63,6 +63,7 @@ from servonaut.services.memory.team_wraps import (
     classify_key,
     derive_fingerprint,
     optional_fingerprint,
+    previous_pin,
     parse_grant_coverage,
     split_recipients,
 )
@@ -661,7 +662,7 @@ class TeamMemoryService:
         check_segment(team_slug, "team")
         check_segment(instance_id, "server")
         eligible_members = self.eligible_members(member_pubkeys, required_role)
-        self._refuse_changed_keys(team_slug, eligible_members)
+        seen = self._refuse_changed_keys(team_slug, eligible_members)
 
         # Spec §3.2: GET /memory/{instance_id} returns
         # {"instance": ..., "modules": ["os", "runtimes", ...]}  — strings, not dicts.
@@ -701,25 +702,33 @@ class TeamMemoryService:
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug, instance_id=instance_id) from exc
 
-        self._pin_sealed(team_slug, wraps, eligible_members)
+        self._pin_sealed(team_slug, wraps, eligible_members, seen)
         return _parse_grant(data)
 
     def _pins(self) -> Any:
         return self._pin_store_provider() if self._pin_store_provider else None
 
-    def _refuse_changed_keys(self, team_slug: str, members: List[TeamMemberKey]) -> None:
+    def _refuse_changed_keys(
+        self, team_slug: str, members: List[TeamMemberKey]
+    ) -> Dict[tuple, Optional[str]]:
         """Raise before anything is sent if a member's key may not be sealed for.
 
         An unusable key is refused outright; a changed one (flagged by the
         service, or different from what was sealed for before) can be confirmed
         with :meth:`confirm_member_keys`. A confirmed key passes whatever the
         service's flag says.
+
+        Returns:
+            The pin each member was judged against, for the compare-and-set
+            that records what was sealed.
         """
         pins = self._pins()
         unusable: List[str] = []
         changes: List[KeyChange] = []
+        seen: Dict[tuple, Optional[str]] = {}
         for member in members:
             pinned = pins.get(team_slug, member.user_id) if pins else None
+            seen[(team_slug, member.user_id)] = pinned
             trust = classify_key(
                 member.public_key_b64, member.fingerprint,
                 flagged=member.key_changed, pinned=pinned,
@@ -727,7 +736,7 @@ class TeamMemoryService:
             if trust is KeyTrust.UNUSABLE:
                 unusable.append(display_name(member.name, member.user_id))
             elif trust is KeyTrust.CHANGED:
-                previous = pinned if pinned not in (None, member.fingerprint) else None
+                previous = previous_pin(pinned, member.fingerprint)
                 changes.append(KeyChange(
                     team_slug=team_slug,
                     user_id=member.user_id,
@@ -740,6 +749,7 @@ class TeamMemoryService:
             raise UnusableMemberKeyError(unusable)
         if changes:
             raise KeyChangedError(changes)
+        return seen
 
     def confirm_member_keys(self, team_slug: str, changes: List[KeyChange]) -> None:
         """Record that the user checked and trusts these members' current keys.
@@ -766,16 +776,23 @@ class TeamMemoryService:
         pins.set_many(batch)
 
     def _pin_sealed(
-        self, team_slug: str, wraps: List[Dict[str, Any]], members: List[TeamMemberKey]
+        self,
+        team_slug: str,
+        wraps: List[Dict[str, Any]],
+        members: List[TeamMemberKey],
+        seen: Dict[tuple, Optional[str]],
     ) -> None:
-        """Remember the fingerprints a grant was sealed for."""
+        """Remember the fingerprints a grant was sealed for.
+
+        A pin that changed since the trust decision (*seen*) is left alone.
+        """
         pins = self._pins()
         sealed = {w["recipient_user_id"] for w in wraps}
         if pins is None or not sealed:
             return
         try:
-            pins.set_many({(team_slug, m.user_id): m.derived_fingerprint() or m.fingerprint
-                           for m in members if m.user_id in sealed})
+            pins.set_if_seen({(team_slug, m.user_id): m.derived_fingerprint() or m.fingerprint
+                              for m in members if m.user_id in sealed}, seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
@@ -1026,8 +1043,10 @@ class TeamMemoryService:
         wraps: List[Dict[str, Any]] = []
         names: Dict[int, str] = {}
         waiting: Dict[int, KeyChange] = {}
+        seen: Dict[tuple, Optional[str]] = {}
         for envelope in coverage.envelopes:
             split = split_recipients(pins, team_slug, envelope.missing)
+            seen.update(split.seen)
             waiting.update({c.user_id: c for c in split.changed})
             if not split.sealable or envelope.wrapped_dek is None:
                 continue
@@ -1057,16 +1076,18 @@ class TeamMemoryService:
                 if exc.status in (404, 409):
                     raise ShareGoneError() from exc
                 raise
-            self._pin_posted(team_slug, wraps)
+            self._pin_posted(team_slug, wraps, seen)
         return TopUpResult(sealed_names=tuple(names.values()), waiting=tuple(waiting.values()))
 
-    def _pin_posted(self, team_slug: str, wraps: List[Dict[str, Any]]) -> None:
+    def _pin_posted(
+        self, team_slug: str, wraps: List[Dict[str, Any]], seen: Dict[tuple, Optional[str]]
+    ) -> None:
         pins = self._pins()
         if pins is None:
             return
         try:
-            pins.set_many({(team_slug, w["recipient_user_id"]): w["recipient_fingerprint"]
-                           for w in wraps})
+            pins.set_if_seen({(team_slug, w["recipient_user_id"]): w["recipient_fingerprint"]
+                              for w in wraps}, seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 

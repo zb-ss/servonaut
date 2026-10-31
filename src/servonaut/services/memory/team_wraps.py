@@ -19,14 +19,16 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import nacl.public
 
 from servonaut.services.memory.path_segments import check_segment
+from servonaut.utils.file_lock import FileLock
 from servonaut.services.memory.crypto import (
     X25519_KEY_LEN,
     fingerprint,
@@ -262,27 +264,48 @@ def seal_for_recipients(
     ]
 
 
+# What ``WrapPinStore.get`` answers when the file exists but cannot be read.
+# It is never a fingerprint, so every member classifies as changed and the
+# user is asked, instead of the store silently starting over (trust on first use).
+UNREADABLE_PIN = "unreadable"
+
+PinKey = Tuple[str, int]
+
+
 class WrapPinStore:
     """The key fingerprint last sealed for each team member (trust on first use).
 
     A small JSON file, mode 0600, written atomically. It holds fingerprints
-    only (public values), never a key. A missing or unreadable file is an empty
-    store: every member is then new.
+    only (public values), never a key. A missing file is an empty store (first
+    use). An unreadable or corrupt one is not: members then read as changed,
+    automatic writes leave the file alone, and an explicit confirmation moves
+    it aside before starting a new file.
+
+    Every read-modify-write runs under a cross-process lock on a sibling
+    ``.lock`` file; a write that cannot get it within the wait raises
+    ``OSError`` and counts as not saved.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self, path: Path, lock_wait: Optional[Callable[[], Tuple[float, float]]] = None
+    ) -> None:
         self._path = path
+        self._lock_wait = lock_wait
+        self._warned = False
 
-    def _load(self) -> Dict[str, str]:
+    def _read(self) -> Optional[Dict[str, str]]:
+        """The stored pins; ``{}`` when there is no file, None when it is unreadable."""
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
         except (OSError, ValueError):
-            logger.warning("team wrap pins unreadable; treating every member as new")
-            return {}
+            data = None
         if not isinstance(data, dict):
-            return {}
+            if not self._warned:
+                self._warned = True
+                logger.warning("team wrap pins unreadable; every member needs confirming")
+            return None
         return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
     @staticmethod
@@ -290,14 +313,74 @@ class WrapPinStore:
         return f"{team_slug}:{user_id}"
 
     def get(self, team_slug: str, user_id: int) -> Optional[str]:
-        return self._load().get(self._key(team_slug, user_id))
+        """The pin, None when there is none, :data:`UNREADABLE_PIN` when the file is unreadable."""
+        data = self._read()
+        if data is None:
+            return UNREADABLE_PIN
+        return data.get(self._key(team_slug, user_id))
 
-    def set_many(self, pins: Dict[Tuple[str, int], str]) -> None:
-        """Record several pins with one atomic write."""
+    def _wait(self) -> Tuple[float, float]:
+        if self._lock_wait is not None:
+            return self._lock_wait()
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        return MemoryConfig().record_lock_wait()
+
+    def _locked(self) -> Any:
+        timeout, poll = self._wait()
+        return FileLock(self._path.with_name(self._path.name + ".lock")).hold(timeout, poll)
+
+    def set_many(self, pins: Dict[PinKey, str]) -> None:
+        """Record several pins with one atomic write: the user's explicit choice.
+
+        Raises:
+            OSError: the lock stayed busy or the file could not be written.
+        """
         if not pins:
             return
-        data = self._load()
-        data.update({self._key(team, uid): fp for (team, uid), fp in pins.items()})
+        with self._locked():
+            data = self._read()
+            if data is None:
+                self._move_aside()
+                data = {}
+            self._write({**data, **{self._key(*key): fp for key, fp in pins.items()}})
+
+    def set_if_seen(
+        self, pins: Dict[PinKey, str], seen: Dict[PinKey, Optional[str]]
+    ) -> Set[PinKey]:
+        """Record pins an automatic seal produced, unless the pin changed since it was seen.
+
+        *seen* is the pin each trust decision looked at (None for no pin). A
+        pin that is different now, say because the user confirmed another key
+        meanwhile, is left as it is. An unreadable file is never written.
+
+        Returns:
+            The keys written.
+
+        Raises:
+            OSError: the lock stayed busy or the file could not be written.
+        """
+        if not pins:
+            return set()
+        with self._locked():
+            data = self._read()
+            if data is None:
+                return set()
+            written = {
+                key for key in pins
+                if data.get(self._key(*key)) == seen.get(key) and key in seen
+            }
+            if written:
+                self._write({**data, **{self._key(*key): pins[key] for key in written}})
+            return written
+
+    def _move_aside(self) -> None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        aside = self._path.with_name(f"{self._path.name}.unreadable-{stamp}")
+        os.replace(self._path, aside)
+        os.chmod(aside, 0o600)
+
+    def _write(self, data: Dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".pins-")
         try:
@@ -310,9 +393,13 @@ class WrapPinStore:
             raise
 
 
-def default_pin_store() -> WrapPinStore:
+def default_pin_store(
+    lock_wait: Optional[Callable[[], Tuple[float, float]]] = None,
+) -> WrapPinStore:
     """The pin store beside the memory sync queue."""
-    return WrapPinStore(Path.home() / ".servonaut" / "memory" / "team_wrap_pins.json")
+    return WrapPinStore(
+        Path.home() / ".servonaut" / "memory" / "team_wrap_pins.json", lock_wait=lock_wait
+    )
 
 
 def pinned_fingerprint(store: WrapPinStore, team_slug: str, user_id: int) -> Optional[str]:
@@ -396,13 +483,22 @@ class TrustSplit:
 
     sealable: Tuple[Recipient, ...]
     changed: Tuple[KeyChange, ...]
+    # The pin each recipient was judged against, for ``WrapPinStore.set_if_seen``.
+    seen: Dict[PinKey, Optional[str]] = field(default_factory=dict)
+
+
+def previous_pin(pinned: Optional[str], current: str) -> Optional[str]:
+    """The pin to show as the previous key: a real, different fingerprint only."""
+    if pinned is None or pinned == UNREADABLE_PIN or pinned == current:
+        return None
+    return pinned
 
 
 def key_change_for(
     team_slug: str, recipient: Recipient, pinned: Optional[str]
 ) -> KeyChange:
     """The :class:`KeyChange` describing *recipient*."""
-    previous = pinned if pinned is not None and pinned != recipient.fingerprint else None
+    previous = previous_pin(pinned, recipient.fingerprint)
     return KeyChange(
         team_slug=team_slug,
         user_id=recipient.user_id,
@@ -424,8 +520,10 @@ def split_recipients(
     """Like :func:`split_by_trust` for a bare list; no store means nothing is pinned."""
     sealable: List[Recipient] = []
     changed: List[KeyChange] = []
+    seen: Dict[PinKey, Optional[str]] = {}
     for recipient in recipients:
         pinned = pinned_fingerprint(store, team_slug, recipient.user_id) if store else None
+        seen[(team_slug, recipient.user_id)] = pinned
         trust = classify_key(
             base64.b64encode(recipient.public_key).decode(),
             recipient.fingerprint,
@@ -436,4 +534,4 @@ def split_recipients(
             sealable.append(recipient)
         elif trust is KeyTrust.CHANGED:
             changed.append(key_change_for(team_slug, recipient, pinned))
-    return TrustSplit(sealable=tuple(sealable), changed=tuple(changed))
+    return TrustSplit(sealable=tuple(sealable), changed=tuple(changed), seen=seen)

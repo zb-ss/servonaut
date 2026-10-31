@@ -2019,10 +2019,12 @@ class MemorySyncService:
         pins = self._pin_store()
         entries = parse_missing_team_wraps(payload)
         by_grant: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        seen_by_grant: Dict[tuple[str, str], Dict[Any, Optional[str]]] = {}
         changed_by_grant: Dict[tuple[str, str], int] = {}
         for entry in entries:
             grant = (entry.team_slug, entry.grant_id)
             split = split_by_trust(pins, entry)
+            seen_by_grant.setdefault(grant, {}).update(split.seen)
             entry = replace(entry, recipients=split.sealable)
             if split.changed:
                 changed_by_grant[grant] = changed_by_grant.get(grant, 0) + len(split.changed)
@@ -2051,7 +2053,7 @@ class MemorySyncService:
             )
         for (team_slug, grant_id), wraps in by_grant.items():
             if wraps and await self._post_team_wraps(team_slug, grant_id, wraps):
-                self._pin_sealed(pins, team_slug, wraps)
+                self._pin_sealed(pins, team_slug, wraps, seen_by_grant[(team_slug, grant_id)])
 
     def set_key_change_listener(self, listener: Optional[Callable[[Any], None]]) -> None:
         """Call *listener* once for each changed key a catch-up newly skips."""
@@ -2095,13 +2097,18 @@ class MemorySyncService:
         pins: Any,
         team_slug: str,
         wraps: List[Dict[str, Any]],
+        seen: Dict[Any, Optional[str]],
     ) -> None:
-        """Remember the keys a delivered batch of wraps was sealed for."""
+        """Remember the keys a delivered batch of wraps was sealed for.
+
+        A pin the user confirmed (or anything else changed) while the batch
+        was on its way is left as it is.
+        """
         sealed = {
             (team_slug, w["recipient_user_id"]): w["recipient_fingerprint"] for w in wraps
         }
         try:
-            pins.set_many(sealed)
+            pins.set_if_seen(sealed, seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
