@@ -499,14 +499,41 @@ def test_the_launch_repair_names_the_agents_it_fixed(
 def test_the_launch_repair_is_silent_when_nothing_changed(
     home: Path, servonaut_command: str, no_shortcuts: None
 ) -> None:
+    console = Path(_gone(home))
+    console.parent.mkdir(parents=True)
+    console.write_text("", encoding="utf-8")
     _codex_config(
         home,
         "[mcp_servers.servonaut]\n"
         'command = "sh"\n'
         "args = [\"-c\", 'exec \"$HOME/.local/bin/servonaut\" --mcp']\n",
     )
+    _write_json(
+        home / ".claude.json",
+        {"mcpServers": {"servonaut": {"command": servonaut_command, "args": ["--mcp"]}}},
+    )
 
     assert repair_on_launch(_runtime(DistributionKind.PIPX, servonaut_command)) is None
+
+
+def test_the_launch_repair_points_a_broken_wrapper_at_the_repair_command(
+    home: Path, servonaut_command: str, no_shortcuts: None
+) -> None:
+    path = _codex_config(
+        home,
+        "[mcp_servers.servonaut]\n"
+        'command = "sh"\n'
+        "args = [\"-c\", 'exec \"$HOME/.local/bin/servonaut\" --mcp']\n",
+    )
+    before = path.read_bytes()
+
+    message = repair_on_launch(_runtime(DistributionKind.PIPX, servonaut_command))
+
+    assert message == (
+        "Codex runs Servonaut through a hand-written script that still names a "
+        "removed install; run servonaut --mcp-repair to see which path to fix."
+    )
+    assert path.read_bytes() == before
 
 
 def test_launch_message_for_one_agent_and_the_shortcut() -> None:
@@ -525,6 +552,30 @@ def test_launch_message_for_one_agent_and_the_shortcut() -> None:
     assert message.endswith("The terminal shortcut was repaired too.")
     only_shortcut = InstallRepairOutcome(["/opt/servonaut/servonaut", "--mcp"], [], [shortcut])
     assert "terminal shortcut" in (launch_message(only_shortcut) or "")
+
+
+def test_launch_message_adds_the_wrappers_it_left_after_the_repairs() -> None:
+    outcome = InstallRepairOutcome(
+        ["/opt/servonaut/servonaut", "--mcp"],
+        [
+            RegistrationReport("claude", "Claude Code", Path("/a"), RegistrationState.REPAIRED),
+            RegistrationReport("agy", "Antigravity", Path("/b"), RegistrationState.STALE_WRAPPER),
+            RegistrationReport("gemini", "Gemini CLI", Path("/c"), RegistrationState.STALE_WRAPPER),
+            # A config that could not be read stays a --mcp-repair finding only.
+            RegistrationReport("cursor", "Cursor", Path("/d"), RegistrationState.FAILED),
+        ],
+    )
+
+    message = launch_message(outcome)
+
+    assert message is not None
+    assert message.startswith("Servonaut repaired its MCP setup in Claude Code:")
+    assert message.endswith(
+        " Antigravity and Gemini CLI run Servonaut through hand-written scripts that "
+        "still name a removed install; run servonaut --mcp-repair to see which paths "
+        "to fix."
+    )
+    assert "Cursor" not in message
 
 
 def test_the_repair_command_reports_each_agent(

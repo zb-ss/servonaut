@@ -443,6 +443,14 @@ class InstallRepairOutcome:
         ]
 
     @property
+    def stale_wrapper_labels(self) -> list[str]:
+        return [
+            report.label
+            for report in self.registrations
+            if report.state is RegistrationState.STALE_WRAPPER
+        ]
+
+    @property
     def has_problems(self) -> bool:
         """Whether something still points at a removed install or could not be checked."""
         return any(
@@ -493,25 +501,51 @@ def repair_on_launch(runtime: RuntimeLayout | None = None) -> str | None:
 
 
 def launch_message(outcome: InstallRepairOutcome) -> str | None:
-    """The toast that says what the launch-time repair changed, if anything."""
+    """The toast for the launch-time repair: what it changed, and what it had to leave.
+
+    A hand-written wrapper is never rewritten, so without a line here an agent
+    still pointing at a removed install would fail with no hint at startup.
+    """
+    sentences = _repair_sentences(outcome)
+    stale = outcome.stale_wrapper_labels
+    if stale:
+        sentences.append(_stale_wrapper_sentence(stale))
+    return " ".join(sentences) or None
+
+
+def _repair_sentences(outcome: InstallRepairOutcome) -> list[str]:
     repaired = outcome.repaired_labels
     shortcut_repaired = any(shortcut.error is None for shortcut in outcome.shortcuts)
     if repaired:
         pronoun = "it" if len(repaired) == 1 else "them"
-        message = (
+        sentences = [
             f"Servonaut repaired its MCP setup in {_join_names(repaired)}: it still "
             f"pointed at a Servonaut install that was removed. Restart {pronoun} "
             "to reconnect."
-        )
+        ]
         if shortcut_repaired:
-            message += " The terminal shortcut was repaired too."
-        return message
+            sentences.append("The terminal shortcut was repaired too.")
+        return sentences
     if shortcut_repaired:
-        return (
+        return [
             "Servonaut repaired its terminal shortcut: it still opened a Servonaut "
             "install that was removed."
+        ]
+    return []
+
+
+def _stale_wrapper_sentence(labels: Sequence[str]) -> str:
+    if len(labels) == 1:
+        return (
+            f"{labels[0]} runs Servonaut through a hand-written script that still "
+            "names a removed install; run servonaut --mcp-repair to see which path "
+            "to fix."
         )
-    return None
+    return (
+        f"{_join_names(labels)} run Servonaut through hand-written scripts that "
+        "still name a removed install; run servonaut --mcp-repair to see which "
+        "paths to fix."
+    )
 
 
 def run_repair_command(runtime: RuntimeLayout | None = None) -> int:

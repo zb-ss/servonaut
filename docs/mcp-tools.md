@@ -28,7 +28,7 @@ To run the check yourself, for example from a headless install:
 servonaut --mcp-repair
 ```
 
-Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten: `--mcp-repair` names the missing path so you can fix it, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
+Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten. When one names a path that no longer exists, the startup notification says which agent it is, and `--mcp-repair` names the missing path so you can fix it, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
 
 ## Guard levels
 
