@@ -523,6 +523,14 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     min-width: 12;
 }
 
+/* The "Probe server now" call to action. A Container's default height is
+   1fr, which is zero on a page taller than the screen (the notes and
+   findings panels make it so), and the button would be clipped away. */
+MemoryScreen #memory-empty-state {
+    height: auto;
+    margin-bottom: 1;
+}
+
 /* Notes and agent findings: authored text, below the module actions */
 #memory-authored {
     height: auto;

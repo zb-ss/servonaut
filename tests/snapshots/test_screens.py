@@ -105,6 +105,15 @@ async def _memory(pilot: Any) -> None:
     await _harness.wait_until(pilot, lambda: table.row_count > 0, "the memory table")
 
 
+async def _memory_empty(pilot: Any) -> None:
+    """A server with no memory yet: the probe button above the empty panels."""
+    screen = await _open_server(pilot, "web-1", "m", "MemoryScreen")
+    probe = screen.query_one("#btn_empty_probe", Button)
+    await _harness.wait_until(
+        pilot, lambda: probe.region.height > 0 and screen.focused is probe, "the probe button",
+    )
+
+
 async def _memory_authored(pilot: Any) -> None:
     """The notes and agent findings panels, scrolled into view."""
     _harness.seed_authored(pilot.app.memory_service)
@@ -342,6 +351,12 @@ def test_settings_panel_narrow(screen_snapshot, panel_id: str) -> None:
 def test_server_memory(screen_snapshot, size: str) -> None:
     """The memory screen of a server with four cached modules."""
     _capture(screen_snapshot, size, _memory)
+
+
+@sizes
+def test_server_memory_empty(screen_snapshot, size: str) -> None:
+    """The memory screen of a server never probed: the probe button is visible."""
+    _capture(screen_snapshot, size, _memory_empty)
 
 
 @sizes
