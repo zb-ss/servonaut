@@ -54,8 +54,15 @@ class TestHasNotes:
     def test_a_heading_the_user_wrote_is_notes(self):
         assert has_notes("# Do not reboot during business hours") is True
 
-    def test_an_unterminated_comment_hides_the_rest(self):
-        assert has_notes("<!-- started a comment\nand never closed it") is False
+    def test_an_unclosed_comment_opener_is_text(self):
+        # As in rendered Markdown: without a closing --> it is not a comment.
+        assert has_notes("<!-- started a comment\nand never closed it") is True
+
+    def test_a_byte_order_mark_does_not_turn_the_template_into_notes(self):
+        assert has_notes("\ufeff" + TEMPLATE) is False
+
+    def test_a_server_name_with_a_line_break_stays_on_the_title_line(self):
+        assert has_notes(notes_template("web\n1", "i-abc123", "aws")) is False
 
 
 class TestNotesForDisplay:
@@ -71,6 +78,15 @@ class TestNotesForDisplay:
 
     def test_strip_comments_collapses_blank_runs(self):
         assert strip_comments("a\n\n<!-- x -->\n\n\nb") == "a\n\nb"
+
+    def test_comment_markers_inside_code_are_kept(self):
+        runbook = (
+            "Find stray markers with `grep -rn '<!--' templates/`.\n"
+            "```\n<!--#include virtual=\"/footer.html\" -->\n```\n"
+            "Then reload nginx."
+        )
+        assert strip_comments(runbook) == runbook
+        assert "Then reload nginx." in notes_for_display(runbook)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +147,30 @@ def test_sync_backfill_skips_a_bare_template(tmp_path):
 
 
 class TestTeamMerge:
+    def test_a_template_only_copy_is_verified_without_being_merged(self, tmp_path):
+        from servonaut.services.memory.team_merge import MemoryKey, TeamCopyMerger
+
+        service = _memory_service(tmp_path)
+        service.write_annotations("share-1", TEMPLATE, "aws")
+        service.write_annotations("i-abc123", "Primary billing API.", "aws")
+        stats = TeamCopyMerger(service).merge(
+            MemoryKey("aws", "share-1"), MemoryKey("aws", "i-abc123"),
+            source_label="team-a", merged_on="2030-01-01",
+        )
+        assert stats.verified and stats.notes == 0 and not stats.held_notes
+        assert service.read_annotations("i-abc123", "aws") == "Primary billing API."
+
+    def test_a_template_from_the_service_is_verified_too(self, tmp_path):
+        from servonaut.services.memory.team_merge import MemoryKey, TeamCopyMerger
+
+        service = _memory_service(tmp_path)
+        service.write_annotations("i-abc123", "Primary billing API.", "aws")
+        own = MemoryKey("aws", "i-abc123")
+        stats = TeamCopyMerger(service).merge(
+            own, own, source_label="team-a", merged_on="2030-01-01", remote_notes=TEMPLATE,
+        )
+        assert stats.verified and stats.notes == 0
+
     def test_a_template_copy_adds_nothing(self):
         own = "Primary billing API."
         assert merge_annotation_text(own, TEMPLATE, source="team-a", merged_on="2030-01-01") == (
@@ -144,18 +184,26 @@ class TestTeamMerge:
 
 
 class TestEditorExit:
-    """After the external editor closes, only real notes are recorded for sync."""
+    """After the external editor closes, the template it was seeded with is not recorded."""
 
-    def _record(self, service: MemoryService):
+    def _record(self, service: MemoryService, seeded=None):
         from servonaut.screens.memory import MemoryScreen
 
-        return MemoryScreen._store_annotations_hash("i-abc123", "aws", service)
+        return MemoryScreen._store_annotations_hash("i-abc123", "aws", service, seeded)
 
-    def test_an_untouched_template_is_not_recorded(self, tmp_path):
+    def test_the_untouched_seeded_template_is_not_recorded(self, tmp_path):
         service = _memory_service(tmp_path)
         service.write_annotations("i-abc123", TEMPLATE, "aws")
-        assert self._record(service) is None
+        assert self._record(service, seeded=TEMPLATE) is None
         assert not service.get_annotations_meta("i-abc123").get("annotations_hash")
+
+    def test_notes_never_recorded_and_then_emptied_are_recorded(self, tmp_path):
+        # Notes from an older release (no hash on record) cleared by hand:
+        # the deletion must reach sync, or a pull would bring the notes back.
+        service = _memory_service(tmp_path)
+        service.write_annotations("i-abc123", "", "aws")
+        recorded = self._record(service)
+        assert recorded is not None and recorded[0] == ""
 
     def test_filled_notes_are_recorded(self, tmp_path):
         service = _memory_service(tmp_path)
@@ -172,3 +220,25 @@ class TestEditorExit:
         service.write_annotations("i-abc123", TEMPLATE, "aws")
         recorded = self._record(service)
         assert recorded is not None and recorded[0] == TEMPLATE
+
+
+class TestPull:
+    """Pulling the service's notes over a template nobody filled in."""
+
+    def test_an_untouched_template_takes_the_services_notes(self, tmp_path):
+        from tests.test_pull_annotations_cases import _Notes
+
+        notes = _Notes(tmp_path, remote="Real notes from another device")
+        notes.put_file(TEMPLATE.encode())  # seeded just now: newer than the service's
+        assert notes.pull() == "updated"
+        assert notes.on_disk() == b"Real notes from another device"
+
+    def test_a_template_recorded_on_purpose_is_judged_by_its_age(self, tmp_path):
+        from tests.test_pull_annotations_cases import OWN_ID, _Notes
+
+        notes = _Notes(tmp_path, remote="older notes")
+        notes.service.write_annotations(
+            OWN_ID, TEMPLATE, "aws", modified_at="2026-03-01T00:00:00+00:00",
+        )
+        assert notes.pull() == "local_newer"
+        assert notes.on_disk() == TEMPLATE.encode()

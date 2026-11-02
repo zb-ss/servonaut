@@ -743,9 +743,12 @@ class MemorySyncService:
         except (OSError, MemoryCorruptError):
             # Unreadable notes (a link, a permission): keep them untouched.
             return "local_newer"
-        if self._nothing_to_protect(on_disk, local_hash):
-            # No notes, or notes emptied by hand: whatever the bookkeeping says,
-            # there is no local text to lose, so the service's notes win.
+        if self._nothing_to_protect(on_disk, local_hash) or self._only_unrecorded_template(
+            instance_id, provider, on_disk, local_hash
+        ):
+            # No notes, notes emptied by hand, or the template the app seeded
+            # and nobody filled in: whatever the bookkeeping says, there is no
+            # local text to lose, so the service's notes win.
             local_hash, local_modified = "", None
         elif on_disk.digest != local_hash:
             # Edited after the bookkeeping was written (an editor, a copy), or
@@ -795,6 +798,26 @@ class MemorySyncService:
         if on_disk is None:
             return True
         return on_disk.size == 0 and recorded_hash != EMPTY_NOTES_DIGEST
+
+    def _only_unrecorded_template(
+        self,
+        instance_id: str,
+        provider: str,
+        on_disk: Optional[NotesFingerprint],
+        recorded_hash: str,
+    ) -> bool:
+        """Whether the file holds no notes (only the seeded template) and was never recorded.
+
+        A template recorded on purpose (notes cleared back to it in the app)
+        has its hash recorded and is judged by its age like any other edit.
+        """
+        if on_disk is None or on_disk.digest == recorded_hash:
+            return False
+        try:
+            text = self._memory_service.read_annotations_strict(instance_id, provider)
+        except (OSError, ValueError):
+            return False
+        return not has_notes(text)
 
     def _keep_displaced_notes(self, instance_id: str, provider: str) -> bool:
         """Save the local notes as a draft before they are replaced; whether it worked."""

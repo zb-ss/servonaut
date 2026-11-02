@@ -16,8 +16,17 @@ TEMPLATE_HEADINGS = ("## Purpose", "## Runbook", "## Ownership")
 #: The template's first line starts with this (it then names the server).
 _TITLE_PREFIX = "# Notes — "
 
-_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.DOTALL)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
+# A fenced code block opens with three or more backticks or tildes.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# An inline code span on one line: `code`, ``code with ` inside``.
+_CODE_SPAN_RE = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
+_BOM = "\ufeff"
+
+
+def _one_line(value: str) -> str:
+    """*value* as it may appear on the template's title line."""
+    return " ".join(str(value).split())
 
 
 def notes_template(name: str, instance_id: str, provider: str) -> str:
@@ -27,7 +36,7 @@ def notes_template(name: str, instance_id: str, provider: str) -> str:
     (machine-probed data, which is edited with Pin instead).
     """
     return (
-        f"{_TITLE_PREFIX}{name} ({instance_id}) @ {provider}\n"
+        f"{_TITLE_PREFIX}{_one_line(name)} ({_one_line(instance_id)}) @ {_one_line(provider)}\n"
         "\n"
         "<!--\n"
         "Free-form notes about this server.  They appear in the memory\n"
@@ -61,11 +70,57 @@ def notes_template(name: str, instance_id: str, provider: str) -> str:
 def strip_comments(text: str) -> str:
     """*text* without HTML comments (the template's primer and hints).
 
-    An unterminated comment runs to the end, as it does when Markdown is
-    rendered. Runs of blank lines left behind collapse to one.
+    Only a comment that is closed counts, as in rendered Markdown; an opening
+    ``<!--`` with no ``-->`` after it stays as text. Comments inside code
+    (fenced blocks and inline code spans) are text too, so a runbook that
+    shows ``<!--`` in a command keeps it. Runs of blank lines left behind
+    collapse to one.
     """
-    stripped = _COMMENT_RE.sub("", text or "")
+    stripped = "".join(_strip_outside_fences((text or "").lstrip(_BOM)))
     return _BLANK_RUN_RE.sub("\n\n", stripped).strip()
+
+
+def _strip_outside_fences(text: str):
+    """Yield *text* in pieces, comments removed outside fenced code blocks."""
+    prose: list = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        if fence:
+            yield line
+            if line.strip().startswith(fence):
+                fence = ""
+            continue
+        opening = _FENCE_RE.match(line)
+        if opening:
+            yield _strip_prose("".join(prose))
+            prose = []
+            fence = opening.group(1)
+            yield line
+            continue
+        prose.append(line)
+    yield _strip_prose("".join(prose))
+
+
+def _strip_prose(text: str) -> str:
+    """Remove closed comments from *text*, leaving inline code spans alone."""
+    spans = [(m.start(), m.end()) for m in _CODE_SPAN_RE.finditer(text)]
+    out, position = [], 0
+    while True:
+        start = text.find("<!--", position)
+        if start < 0:
+            break
+        in_code = next((end for begin, end in spans if begin <= start < end), None)
+        if in_code is not None:
+            out.append(text[position:in_code])
+            position = in_code
+            continue
+        end = text.find("-->", start + 4)
+        if end < 0:
+            break  # never closed: not a comment
+        out.append(text[position:start])
+        position = end + 3
+    out.append(text[position:])
+    return "".join(out)
 
 
 def _is_template_line(line: str) -> bool:

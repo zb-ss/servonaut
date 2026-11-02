@@ -46,7 +46,7 @@ from servonaut.screens.memory_authored import (
     shared_findings,
     shared_notes_text,
 )
-from servonaut.services.memory.notes import has_notes, notes_for_display, notes_template
+from servonaut.services.memory.notes import notes_for_display, notes_template
 from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
@@ -430,6 +430,8 @@ class MemoryScreen(Screen):
     # Findings panel: superseded findings are hidden until ``f`` shows them;
     # each table row key maps to (record, the list it came from).
     _show_superseded = False
+    # The template _prepare_annotations_file wrote on this open, if it did.
+    _seeded_notes: Optional[str] = None
     _findings_by_key: Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]] = {}
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -1397,7 +1399,9 @@ class MemoryScreen(Screen):
 
         self._report_editor_problems(argv, proc)
         self.run_worker(
-            self._finish_external_edit(instance_id, provider, memory_service),
+            self._finish_external_edit(
+                instance_id, provider, memory_service, self._seeded_notes,
+            ),
             exclusive=False,
             group="memory_mutation",
             name="memory_annotations_record",
@@ -1428,14 +1432,14 @@ class MemoryScreen(Screen):
             needs_seed = (not path.exists()) or path.stat().st_size == 0
         except OSError:
             needs_seed = True
+        self._seeded_notes = None
         if needs_seed:
+            template = self._annotation_template(instance_id)
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch(mode=0o600)
-                path.write_text(
-                    self._annotation_template(instance_id),
-                    encoding="utf-8",
-                )
+                path.write_text(template, encoding="utf-8")
+                self._seeded_notes = template
             except OSError as exc:
                 self.app.notify(
                     f"Could not create annotations file: {exc}", severity="error",
@@ -1633,11 +1637,16 @@ class MemoryScreen(Screen):
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
     async def _finish_external_edit(
-        self, instance_id: str, provider: str, memory_service: Any
+        self, instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> None:
-        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret."""
+        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret.
+
+        *seeded* is the template written just before the editor opened, if
+        any: closing the editor with it untouched records nothing.
+        """
         content = await self._record_annotations_edit(
-            instance_id, provider, memory_service
+            instance_id, provider, memory_service, seeded
         )
         warning = self._secret_warning(content) if content is not None else None
         if warning:
@@ -1650,7 +1659,8 @@ class MemoryScreen(Screen):
             )
 
     async def _record_annotations_edit(
-        self, instance_id: str, provider: str, memory_service: Any
+        self, instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> Optional[str]:
         """Store a changed annotations hash, queue the notes for sync, re-render.
 
@@ -1664,7 +1674,7 @@ class MemoryScreen(Screen):
         content: Optional[str] = None
         try:
             changed = await asyncio.to_thread(
-                self._store_annotations_hash, instance_id, provider, memory_service
+                self._store_annotations_hash, instance_id, provider, memory_service, seeded
             )
             if changed is not None:
                 content, modified_at = changed
@@ -1681,9 +1691,13 @@ class MemoryScreen(Screen):
 
     @staticmethod
     def _store_annotations_hash(
-        instance_id: str, provider: str, memory_service: Any
+        instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> Optional[Tuple[str, str]]:
         """Blocking: when the notes changed, store their new hash.
+
+        Notes still equal to the template seeded for this edit (*seeded*)
+        are not a change: nothing is recorded or synced for them.
 
         Returns:
             ``(content, modified_at)`` when they changed, else ``None``.
@@ -1695,9 +1709,7 @@ class MemoryScreen(Screen):
         )
         if new_hash == prior_hash:
             return None
-        if not prior_hash and not has_notes(content):
-            # The template seeded on first open, closed without notes: there
-            # is nothing to record or sync yet.
+        if seeded is not None and content == seeded:
             return None
         now_iso = datetime.now(timezone.utc).isoformat()
         memory_service.set_annotations_meta(
