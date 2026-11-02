@@ -141,3 +141,34 @@ class TestTeamMerge:
         copy = _filled("## Runbook", "Restart php-fpm after deploys.")
         text, changed = merge_annotation_text("", copy, source="team-a", merged_on="2030-01-01")
         assert changed and "Restart php-fpm" in text
+
+
+class TestEditorExit:
+    """After the external editor closes, only real notes are recorded for sync."""
+
+    def _record(self, service: MemoryService):
+        from servonaut.screens.memory import MemoryScreen
+
+        return MemoryScreen._store_annotations_hash("i-abc123", "aws", service)
+
+    def test_an_untouched_template_is_not_recorded(self, tmp_path):
+        service = _memory_service(tmp_path)
+        service.write_annotations("i-abc123", TEMPLATE, "aws")
+        assert self._record(service) is None
+        assert not service.get_annotations_meta("i-abc123").get("annotations_hash")
+
+    def test_filled_notes_are_recorded(self, tmp_path):
+        service = _memory_service(tmp_path)
+        text = _filled("## Purpose", "Primary billing API.")
+        service.write_annotations("i-abc123", text, "aws")
+        recorded = self._record(service)
+        assert recorded is not None and recorded[0] == text
+
+    def test_notes_cleared_back_to_the_template_are_recorded(self, tmp_path):
+        # Once notes were recorded, emptying them is a change sync must carry.
+        service = _memory_service(tmp_path)
+        service.write_annotations("i-abc123", "Primary billing API.", "aws")
+        assert self._record(service) is not None
+        service.write_annotations("i-abc123", TEMPLATE, "aws")
+        recorded = self._record(service)
+        assert recorded is not None and recorded[0] == TEMPLATE

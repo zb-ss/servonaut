@@ -1517,6 +1517,10 @@ class MemoryScreen(Screen):
         )
         if new_hash == prior_hash:
             return None
+        if not prior_hash and not has_notes(content):
+            # The template seeded on first open, closed without notes: there
+            # is nothing to record or sync yet.
+            return None
         now_iso = datetime.now(timezone.utc).isoformat()
         memory_service.set_annotations_meta(
             instance_id,
