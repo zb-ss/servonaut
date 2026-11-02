@@ -8,6 +8,8 @@ at both terminal sizes (see ``test_screens.py``).
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, List
 
 import pytest
@@ -39,15 +41,38 @@ _TARGETS = [
 
 
 class _TeamMemory:
-    """Stands in for the team memory service: the member keys the form shows."""
+    """Stands in for the team memory service.
+
+    It lists the member keys the form shows, and shares the first server of a
+    batch at once while the second one never finishes, so a capture can show
+    a batch in flight.
+    """
 
     _ROLE_ORDER = TeamMemoryService._ROLE_ORDER
+
+    def __init__(self) -> None:
+        self._shared = 0
 
     async def list_team_member_keys(self, _slug: str) -> List[TeamMemberKey]:
         return list(_MEMBERS)
 
     def eligible_members(self, members: List[TeamMemberKey], role: str) -> List[TeamMemberKey]:
         return TeamMemoryService.eligible_members(self, members, role)  # type: ignore[arg-type]
+
+    def is_unlocked(self) -> bool:
+        return True
+
+    def check_member_keys(self, *_args: Any) -> None:
+        return None
+
+    async def own_live_grants(self, _slug: str, *, fresh: bool = False) -> dict:
+        return {}
+
+    async def share_instance(self, **_kwargs: Any) -> Any:
+        self._shared += 1
+        if self._shared > 1:
+            await asyncio.Event().wait()  # held until the capture is over
+        return SimpleNamespace(pending_recipients=[])
 
 
 class _Entitled:
@@ -104,6 +129,16 @@ async def _bulk_form(pilot: Any) -> None:
     await _open_form(pilot)
 
 
+async def _bulk_sending(pilot: Any) -> None:
+    from textual.widgets import Button
+
+    screen = await _open_form(pilot)
+    screen.query_one("#bulk-btn-confirm", Button).press()
+    progress = screen.query_one("#bulk-progress")
+    await _harness.wait_until(pilot, lambda: "1 / 4" in str(progress.render()), "the first server")
+    await pilot.pause()
+
+
 async def _bulk_summary(pilot: Any) -> None:
     screen = await _open_form(pilot)
     report = bulk.BulkShareReport(
@@ -139,6 +174,12 @@ def test_fleet_memory_with_marks(screen_snapshot, size: str) -> None:
 def test_bulk_share_form(screen_snapshot, size: str) -> None:
     """The bulk form: the servers, team, lowest role, readers, update option, modules."""
     _capture(screen_snapshot, size, _bulk_form)
+
+
+@sizes
+def test_bulk_share_sending(screen_snapshot, size: str) -> None:
+    """A batch in flight: the progress line, and Stop in place of Share."""
+    _capture(screen_snapshot, size, _bulk_sending)
 
 
 @sizes

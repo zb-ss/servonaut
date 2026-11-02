@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +12,7 @@ from textual.widgets import Button, Checkbox, SelectionList, Static
 
 from servonaut.screens.memory_bulk_share import BulkShareScreen
 from servonaut.services.api_client import APIError
+from servonaut.services.memory import bulk_share as bulk
 from servonaut.services.memory.bulk_share import ShareTarget
 from tests._bulk_share_fakes import (
     GRANT_PATH,
@@ -230,3 +232,133 @@ async def test_demo_mode_shows_no_real_team_member_or_server_name():
         for real in ("web-1", "web-2", "Kim Member", "Real Team Name", "Real Person"):
             assert real not in everything, real
         assert "turn demo mode off to see why" in summary
+
+
+# --- while a batch is sending ----------------------------------------------
+
+
+def _three() -> List[ShareTarget]:
+    return [ShareTarget(f"web-{i}", f"web-{i}") for i in (1, 2, 3)]
+
+
+async def _hold_first_post(app: _Host, pilot, screen: BulkShareScreen) -> asyncio.Event:
+    gate = asyncio.Event()
+    app.backend.post_gate = gate
+    screen.query_one("#bulk-btn-confirm", Button).press()
+    await _settle(pilot, lambda: any(c.startswith("POST") for c in app.backend.calls), "the first POST")
+    return gate
+
+
+async def test_stop_ends_the_batch_after_the_current_server():
+    backend = _backend(stored={f"web-{i}": ["os"] for i in (1, 2, 3)})
+    app = _Host(backend, targets=_three())
+    async with app.run_test(size=(140, 50)) as pilot:
+        screen = await _open(app, pilot)
+        gate = await _hold_first_post(app, pilot, screen)
+        stop = screen.query_one("#bulk-btn-stop", Button)
+        assert stop.display and stop.has_class("-shown")
+        await pilot.press("s")
+        assert stop.disabled and "Stopping" in str(stop.label)
+        gate.set()
+        await _settle(pilot, lambda: "Done" in _text(screen, "#bulk-status"), "the summary")
+        summary = _text(screen, "#bulk-summary")
+        assert "Shared (1)" in summary and "Not sent (2)" in summary
+        assert "You stopped the batch" in summary
+        assert backend.writes() == [f"POST {GRANT_PATH} web-1"]
+        assert not stop.has_class("-shown")
+
+
+async def test_the_form_cannot_be_left_while_a_batch_is_sending():
+    backend = _backend(stored={f"web-{i}": ["os"] for i in (1, 2, 3)})
+    app = _Host(backend, targets=_three())
+    async with app.run_test(size=(140, 50)) as pilot:
+        screen = await _open(app, pilot)
+        gate = await _hold_first_post(app, pilot, screen)
+        assert screen.navigation_hold_reason()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert app.screen is screen and app.result is None
+        assert any("Sharing is in progress" in n for n in app.notes)
+        gate.set()
+        await _settle(pilot, lambda: "Done" in _text(screen, "#bulk-status"), "the summary")
+        assert screen.navigation_hold_reason() is None
+
+
+async def test_the_app_keeps_the_screen_while_a_batch_is_sending(monkeypatch):
+    from servonaut.app import ServonautApp
+    from servonaut.widgets.sidebar import Sidebar
+
+    screen = BulkShareScreen(_three())
+    monkeypatch.setattr(BulkShareScreen, "compose", lambda self: iter(()))
+    monkeypatch.setattr(BulkShareScreen, "on_mount", lambda self, event: event.prevent_default())
+    screen._sending = True
+
+    class _App(ServonautApp):
+        def on_mount(self, event):
+            event.prevent_default()
+            self.push_screen(screen)
+
+        async def on_unmount(self, event):
+            event.prevent_default()
+
+    app = _App()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.on_sidebar_navigation_requested(Sidebar.NavigationRequested("nav_list"))
+        await pilot.pause()
+        assert app.screen is screen
+        await pilot.press("q")
+        await pilot.pause()
+        assert not app._exit and app.screen is screen
+        screen._sending = False
+
+
+async def test_an_error_after_servers_were_shared_does_not_say_nothing_was_shared():
+    backend = _backend(stored={f"web-{i}": ["os"] for i in (1, 2, 3)})
+    app = _Host(backend, targets=_three())
+    async with app.run_test(size=(140, 50)) as pilot:
+        screen = await _open(app, pilot)
+        real_share = bulk.BulkMemoryShareService.share
+
+        async def share_then_fail(self, *args, **kwargs):
+            kwargs["on_progress"](1, 3, bulk.ShareOutcome(_three()[0], bulk.SHARED))
+            raise RuntimeError("lost")
+
+        bulk.BulkMemoryShareService.share = share_then_fail
+        try:
+            screen.query_one("#bulk-btn-confirm", Button).press()
+            await _settle(pilot, lambda: "ended early" in _text(screen, "#bulk-status"), "the error")
+        finally:
+            bulk.BulkMemoryShareService.share = real_share
+        assert "Nothing was shared" not in _text(screen, "#bulk-status")
+        assert "1 of 3" in _text(screen, "#bulk-status")
+
+
+async def test_an_old_error_line_is_cleared_when_a_batch_starts():
+    backend = _backend()
+    app = _Host(backend, targets=TARGETS[:1])
+    async with app.run_test(size=(140, 50)) as pilot:
+        screen = await _open(app, pilot)
+        screen.query_one("#bulk-modules-list", SelectionList).deselect_all()
+        screen.query_one("#bulk-btn-confirm", Button).press()
+        await pilot.pause(0.1)
+        assert "Select at least one module" in _text(screen, "#bulk-status")
+        screen.query_one("#bulk-modules-list", SelectionList).select("os")
+        screen.query_one("#bulk-btn-confirm", Button).press()
+        await _settle(pilot, lambda: "Done" in _text(screen, "#bulk-status"), "the summary")
+        assert "Select at least one module" not in _text(screen, "#bulk-status")
+
+
+async def test_no_tick_hint_when_existing_shares_were_to_be_updated():
+    from servonaut.services.api_client import GrantExistsError
+
+    backend = _backend(stored={"web-1": ["os"]})
+    backend.post_errors["web-1"] = [GrantExistsError(code="grant_exists", message="x", status=409)]
+    app = _Host(backend, targets=TARGETS[:1])
+    async with app.run_test(size=(140, 50)) as pilot:
+        screen = await _open(app, pilot)
+        screen.query_one("#bulk-update-existing", Checkbox).value = True
+        summary = await _share(app, pilot, screen)
+        assert "Already shared, left as it was (1)" in summary
+        assert "does not list that share to you" in summary
+        assert "Tick" not in summary

@@ -53,7 +53,14 @@ _REASON_TEXT: Dict[str, str] = {
     bulk.SAME_SETTINGS: "it already has these settings",
     bulk.KEY_RACE: "a member's key changed while sharing; nothing was shared for it",
     bulk.REVOKED_ONLY: "the old share was stopped but the new one was not created; share it again",
+    bulk.UNLISTED: (
+        "already shared, but the service does not list that share to you, "
+        "so it cannot be changed from here"
+    ),
 }
+
+# What the screen says while a batch runs and the user tries to leave.
+_HOLD_TEXT = "Sharing is in progress. Press s (Stop) to end it after the current server."
 
 # The headline counts, in the order the summary lists the groups.
 _GROUPS: Tuple[Tuple[str, str], ...] = (
@@ -157,11 +164,22 @@ class BulkShareScreen(Screen[bool]):
         margin: 0 1;
         min-width: 16;
     }
+    BulkShareScreen #bulk-btn-stop {
+        display: none;
+    }
+    BulkShareScreen #bulk-btn-stop.-shown {
+        display: block;
+    }
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+        Binding("s", "stop_batch", "Stop after this server", show=True),
+    ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "stop_batch":
+            return self._sending
         return check_action_passthrough(self, action)
 
     def __init__(self, targets: Sequence[bulk.ShareTarget]) -> None:
@@ -173,8 +191,10 @@ class BulkShareScreen(Screen[bool]):
         self._ran = False
         self._report: Optional[bulk.BulkShareReport] = None
         self._report_team = ""
-        # True while an error line is on show: a refresh must not wipe it.
-        self._status_locked = False
+        # Set by Stop: the batch ends after the server being sent.
+        self._stop_requested = False
+        # Servers whose share the running batch changed (shared, replaced, or stopped).
+        self._changed = 0
 
     @property
     def targets(self) -> Tuple[bulk.ShareTarget, ...]:
@@ -227,6 +247,7 @@ class BulkShareScreen(Screen[bool]):
                     yield Static("", id="bulk-progress")
                     with Horizontal(id="bulk-btn-row"):
                         yield Button("Cancel", variant="default", id="bulk-btn-cancel")
+                        yield Button("Stop after this server", variant="warning", id="bulk-btn-stop")
                         yield Button(
                             f"Share {count} servers", variant="primary",
                             id="bulk-btn-confirm", disabled=True,
@@ -287,7 +308,6 @@ class BulkShareScreen(Screen[bool]):
         self._say(self.query_one(selector, Static), value)
 
     def _show_error(self, message: str) -> None:
-        self._status_locked = True
         self._say_to("#bulk-status", literal(message, "$text-error"))
 
     def _explain(self, what: str, exc: BaseException) -> str:
@@ -334,7 +354,6 @@ class BulkShareScreen(Screen[bool]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "bulk-team-select":
-            self._status_locked = False
             self.run_worker(
                 functools.partial(self._load_readers, self._selected_team()),
                 group="memory_bulk_share_form", name="bulk_readers", exclusive=True,
@@ -384,17 +403,31 @@ class BulkShareScreen(Screen[bool]):
     # Actions
     # ------------------------------------------------------------------
 
+    def navigation_hold_reason(self) -> Optional[str]:
+        """Why the app must not leave this screen now (it would cancel the batch)."""
+        return _HOLD_TEXT if self._sending else None
+
     def action_cancel(self) -> None:
         if self._sending:
-            self.app.notify("Sharing is in progress; wait for it to finish.", severity="warning")
+            self.app.notify(_HOLD_TEXT, severity="warning", markup=False)
             return
         self.dismiss(self._ran)
+
+    def action_stop_batch(self) -> None:
+        """End the batch after the server being sent; the rest are not sent."""
+        if not self._sending or self._stop_requested:
+            return
+        self._stop_requested = True
+        stop = self.query_one("#bulk-btn-stop", Button)
+        stop.label = "Stopping after this server…"
+        stop.disabled = True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "bulk-btn-cancel":
             self.action_cancel()
+        elif event.button.id == "bulk-btn-stop":
+            self.action_stop_batch()
         elif event.button.id == "bulk-btn-confirm" and not self._sending and not self._ran:
-            self._status_locked = False
             choices = self._form_choices()
             if choices is not None:
                 self._start_batch(choices)
@@ -439,6 +472,8 @@ class BulkShareScreen(Screen[bool]):
         if service is None:
             self._show_error("Team memory service not available.")
             return
+        self._say_to("#bulk-status", "")  # an older batch's error no longer applies
+        self._stop_requested, self._changed = False, 0
         self._set_sending(True)
         try:
             report = await self._share(service, choices)
@@ -459,6 +494,7 @@ class BulkShareScreen(Screen[bool]):
             return await service.share(
                 team, role, list(modules), self._targets,
                 update_existing=update, on_progress=self._on_progress,
+                should_stop=lambda: self._stop_requested,
             )
         except KeyChangedError as exc:
             self._progress(None)
@@ -472,20 +508,34 @@ class BulkShareScreen(Screen[bool]):
             self._progress(None)
             self._show_error("Unlock Memory Sync first. Nothing was shared.")
         except Exception as exc:  # noqa: BLE001 — shown to the user, not raised from a worker
-            logger.error("Bulk share refused: %s", _failure(exc))
+            logger.error("Bulk share failed: %s", _failure(exc))
             self._progress(None)
-            self._show_error(self._explain("Nothing was shared", exc))
+            self._show_error(self._explain(self._interrupted_text(), exc))
         return None
 
+    def _interrupted_text(self) -> str:
+        """How a batch that ended in an error is described: did it change anything?"""
+        if not self._changed:
+            return "Nothing was shared"
+        return (
+            f"Sharing ended early after {self._changed} of {len(self._targets)} servers "
+            "were changed (open Fleet Memory to see what is shared)"
+        )
+
     def _set_sending(self, sending: bool) -> None:
-        """Hold the Share button while a batch runs; the screen may be closing."""
+        """Hold Share and offer Stop while a batch runs; the screen may be closing."""
         self._sending = sending
-        if self._ran or not self.is_mounted:
+        if not self.is_mounted:
             return
         try:
-            self.query_one("#bulk-btn-confirm", Button).disabled = sending or not self._teams
+            stop = self.query_one("#bulk-btn-stop", Button)
+            stop.set_class(sending, "-shown")
+            stop.label, stop.disabled = "Stop after this server", False
+            if not self._ran:
+                self.query_one("#bulk-btn-confirm", Button).disabled = sending or not self._teams
         except NoMatches:
-            pass
+            return
+        self.refresh_bindings()
 
     def _progress(self, value: Optional[Content]) -> None:
         widget = self.query_one("#bulk-progress", Static)
@@ -493,6 +543,8 @@ class BulkShareScreen(Screen[bool]):
         self._say(widget, value if value is not None else "")
 
     def _on_progress(self, index: int, total: int, outcome: bulk.ShareOutcome) -> None:
+        if outcome.status in (bulk.SHARED, bulk.UPDATED) or outcome.reason == bulk.REVOKED_ONLY:
+            self._changed += 1
         good = outcome.status in (bulk.SHARED, bulk.UPDATED)
         bad = outcome.status in (bulk.FAILED, bulk.NOT_SENT)
         mark, style = ("✓", "$text-success") if good else ("✗", "$text-error") if bad else ("–", "")
@@ -535,8 +587,6 @@ class BulkShareScreen(Screen[bool]):
             self._show_error("Could not save the confirmed keys. Nothing was shared.")
             return
         self._keys_by_team.pop(choices[0], None)
-        self._status_locked = False
-        self._say_to("#bulk-status", "")
         await self._run_batch(choices)
 
     # ------------------------------------------------------------------
@@ -562,7 +612,6 @@ class BulkShareScreen(Screen[bool]):
             return
         style = "$text-success" if not (report.with_status(bulk.FAILED) or report.not_sent) \
             else "$text-warning"
-        self._status_locked = False
         self._say_to("#bulk-status", Content.assemble(
             Content.styled("Done: ", f"bold {style}"),
             Content.styled(f"{headline(report)}.", style),
@@ -575,8 +624,9 @@ class BulkShareScreen(Screen[bool]):
         self._group(parts, report.with_status(bulk.SHARED), "Shared")
         self._group(parts, report.with_status(bulk.UPDATED), "Already shared, updated to these settings")
         left = report.with_status(bulk.ALREADY_SHARED)
-        hint = "" if any(o.reason == bulk.SAME_SETTINGS for o in left) else \
-            "Tick \"Update existing shares to these settings\" to change them."
+        # Only for the shares left because the option was off.
+        hint = "Tick \"Update existing shares to these settings\" to change them." \
+            if not report.update_existing and any(not o.reason for o in left) else ""
         self._group(parts, left, "Already shared, left as it was", hint)
         self._group(parts, report.with_status(bulk.SKIPPED), "Skipped")
         self._group(parts, report.with_status(bulk.FAILED), "Failed")
@@ -620,4 +670,6 @@ class BulkShareScreen(Screen[bool]):
             return f"The service kept limiting requests, so the rest was not sent; {wait_text(report.retry_after)}."
         if reason == bulk.KEY_RACE:
             return "A member's key changed while sharing, so the rest was not sent. Try again."
+        if reason == bulk.STOPPED:
+            return "You stopped the batch, so the rest was not sent."
         return "The service could not take more shares, so the rest was not sent."
