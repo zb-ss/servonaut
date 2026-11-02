@@ -445,18 +445,40 @@ class TeamMemoryService:
         """Drop the remembered list of *team_slug*: a share just changed."""
         self._shared_memo.pop(team_slug, None)
 
+    def _caller_user_id(self) -> Optional[int]:
+        """The caller's user id: from the memory key, else the signed-in account."""
+        for source in (self._key_store_provider(), self._auth):
+            user_id = getattr(source, "user_id", None)
+            if isinstance(user_id, int) and not isinstance(user_id, bool):
+                return user_id
+        return None
+
+    async def own_live_grants(self, team_slug: str) -> Dict[str, Grant]:
+        """The caller's own live grants with the team, by server id.
+
+        The list route holds every granter's shares, and server ids (a custom
+        server's name, say) can repeat across a team, so a share is the
+        caller's only when the caller granted it. Empty when the caller
+        cannot be told.
+        """
+        caller = self._caller_user_id()
+        if caller is None:
+            return {}
+        own: Dict[str, Grant] = {}
+        for shared in await self.list_shared_instances(team_slug):
+            grant = shared.grant
+            if grant.is_live and grant.granted_by_user_id == caller:
+                own.setdefault(grant.instance_id, grant)
+        return own
+
     async def find_live_grant(
         self, team_slug: str, instance_id: str
     ) -> Optional[Grant]:
-        """The live grant sharing *instance_id* with the team, if any.
+        """The caller's live grant sharing *instance_id* with the team, if any.
 
         The id comes from the list route, the only place the service gives it.
         """
-        for shared in await self.list_shared_instances(team_slug):
-            grant = shared.grant
-            if grant.instance_id == instance_id and grant.is_live:
-                return grant
-        return None
+        return (await self.own_live_grants(team_slug)).get(instance_id)
 
     async def list_shared_instances(self, team_slug: str) -> List[SharedInstance]:
         """List instances shared with the caller through this team.
