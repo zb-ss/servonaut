@@ -235,7 +235,7 @@ class FindingsScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
-                Static(f"🛡 [bold]Findings[/bold]{scope}", id="findings_title"),
+                Static(f"🛡 [bold]Monitoring findings[/bold]{scope}", id="findings_title"),
                 Static(
                     "Proactive monitoring findings from server-side scans. "
                     "The CLI renders and triages — detection runs in the "
