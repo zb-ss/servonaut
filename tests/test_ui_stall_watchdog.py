@@ -62,3 +62,59 @@ def test_a_disabled_watchdog_starts_no_thread_and_stops_cleanly() -> None:
     assert on._thread is not None and on._thread.is_alive()
     on.stop()
     assert on._thread is None
+
+
+def test_a_paused_watchdog_logs_nothing_and_restarts_its_count(caplog) -> None:
+    """Time the app spends handed over to another program is not a stall."""
+    clock = _Clock()
+    watchdog = UiStallWatchdog(threading.get_ident(), stall_seconds=10, clock=clock)
+    caplog.set_level(logging.WARNING, logger="servonaut.utils.ui_stall_watchdog")
+
+    with watchdog.paused():
+        clock.now += 30
+        watchdog.check()
+    watchdog.check()  # the count starts again when the pause ends
+    assert caplog.records == []
+
+    clock.now += 11
+    watchdog.check()
+    assert "has not responded for 11 s" in caplog.records[-1].getMessage()
+
+
+def test_suspending_the_app_pauses_the_watchdog(caplog) -> None:
+    """While the terminal belongs to an editor, the watchdog stays quiet."""
+    import contextlib
+    from unittest.mock import patch
+
+    from textual.app import SuspendNotSupported
+
+    from servonaut.app import ServonautApp
+
+    clock = _Clock()
+    app = ServonautApp()
+    app._ui_stall_watchdog = UiStallWatchdog(threading.get_ident(), stall_seconds=10, clock=clock)
+    caplog.set_level(logging.WARNING, logger="servonaut.utils.ui_stall_watchdog")
+
+    @contextlib.contextmanager
+    def handed_over(self):
+        yield
+
+    with patch("textual.app.App.suspend", handed_over):
+        with app.suspend():
+            clock.now += 27  # an editor session
+            app._ui_stall_watchdog.check()
+    assert caplog.records == []
+
+    def refused(self):
+        raise SuspendNotSupported("no terminal to hand over")
+
+    with patch("textual.app.App.suspend", contextlib.contextmanager(refused)):
+        try:
+            with app.suspend():
+                pass
+        except SuspendNotSupported:
+            pass
+    # A refused suspend never paused it: a real stall is still reported.
+    clock.now += 11
+    app._ui_stall_watchdog.check()
+    assert "has not responded" in caplog.records[-1].getMessage()

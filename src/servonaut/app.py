@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 import asyncio
+import contextlib
 import importlib
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 from textual.app import App
 from textual.binding import Binding
@@ -1055,6 +1056,21 @@ class ServonautApp(App):
         self._ui_stall_watchdog = watchdog
         self.set_interval(1.0, watchdog.beat)
         watchdog.start()
+
+    @contextlib.contextmanager
+    def suspend(self) -> Iterator[None]:
+        """Hand the terminal to another program, with the stall watchdog paused.
+
+        The event loop waits for that program (an editor, for example), so
+        the wait must not be logged as a frozen interface.
+        """
+        watchdog = getattr(self, "_ui_stall_watchdog", None)
+        with super().suspend():
+            if watchdog is None:
+                yield
+                return
+            with watchdog.paused():
+                yield
 
     async def on_unmount(self) -> None:
         """Cancel the relay listener cleanly as the app exits."""
