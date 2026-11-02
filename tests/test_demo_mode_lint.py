@@ -199,6 +199,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Live per-row scan update writes the fresh/stale/opted-out count "
                    "summary line (integers) only; status/module/age cells go through "
                    "update_cell_at and carry status markup + counts, not server text."),
+    AllowlistEntry("screens/fleet_memory.py", "action_toggle_mark", "update",
+                   "Writes _status_line(): the mark count and the status counts "
+                   "(integers) only; the name cell goes through update_cell_at with "
+                   "the displayed row's name, which the app redacts in place."),
     AllowlistEntry("screens/fleet_memory.py", "_refresh_auto_scan_status", "update",
                    "Writes the auto-scan indicator string derived purely from local "
                    "config ints (enabled flag, interval, last-run epoch) — no "

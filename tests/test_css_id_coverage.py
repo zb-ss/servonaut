@@ -732,6 +732,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "share_outer",          # Reason: Container; layout-only
         "share-role-select",    # Reason: Select; inherits global Select styling
         "share-team-select",
+        "bulk-btn-cancel",      # Reason: Button; styled via #bulk-btn-row Button
+        "bulk-btn-confirm",     # Reason: Button; styled via #bulk-btn-row Button
+        "bulk-modules-list",    # Reason: SelectionList; inherits layout, like share-modules-list
+        "bulk-role-select",     # Reason: Select; inherits global Select styling
+        "bulk-team-select",     # Reason: Select; inherits global Select styling
         # ---- Snapshot form ----
         "snapshot_form",        # Reason: Form container; inherits layout
         "snapshots_title",      # Reason: Static title; inherits global heading style
