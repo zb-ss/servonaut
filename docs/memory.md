@@ -343,6 +343,16 @@ When the server is already shared with that team, the form shows that share inst
 
 Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need.
 
+#### Sharing several servers at once
+
+In Fleet Memory, press `space` to mark a server (the cursor moves to the next row), or `m` to mark every server of your own; `m` again clears the marks. The status line counts the marked servers. A team's servers are read-only and cannot be marked. With servers marked, `S` opens one form for all of them: the team, the lowest role that may read, and the modules, with the same defaults as for one server. It lists once the members who will be able to read them. Memory Sync must be unlocked.
+
+- Servonaut reads the team's member keys once and checks them before it sends anything. A changed key opens **Confirm changed memory keys**, and nothing is shared until you confirm it.
+- A server already shared with that team is reported as already shared and left as it is. Tick **Update existing shares to these settings** to replace those shares with the role and modules on the form; a share that already has them is left alone.
+- Servers are shared one after another, with a progress line, and one server's failure does not stop the others. When the service limits requests, Servonaut waits as long as it asks, once per server, if that fits `team_wrap_max_wait_seconds`. If the limit persists, it stops, and the summary says how many servers were not sent.
+- The summary lists every server: shared, already shared (updated or left as it was), skipped with the reason, failed with the reason, or not sent. A server is skipped when the service holds no snapshot of it yet, when it was never probed, when memory is turned off for it, or when Memory Sync does not accept its id. Memory Sync ids use letters, digits, `-` and `_` only, so a server whose id is a host name with dots cannot be shared.
+- The marks are cleared once the batch has run; closing the form without sharing keeps them.
+
 #### A member's key changed
 
 A member's memory key changes when they set up Memory Sync again or use a new computer. The first time Servonaut sees a member's key, and the service does not report it as replaced, it trusts the key, seals for it and remembers it without asking. After that it seals a server's data keys for a member only while their key is the one it remembers or one you have confirmed. A different key later, or one the service reports as replaced, is never used until you confirm it:
@@ -359,8 +369,8 @@ A key the service sends that does not match its own fingerprint cannot be confir
 | --- | --- | --- |
 | `team_memory_cache_seconds` | `60` | How long a team's list of shared servers is reused before it is read again. |
 | `team_memory_future_skew_seconds` | `300` | How far in the future a shared snapshot's date may be before it counts as now, so a wrong clock cannot outrank your own newer snapshot. |
-| `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads without saying for how long. |
-| `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload; past it, the next sync tries again. |
+| `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads, or a server of a bulk share, without saying for how long. |
+| `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload or bulk share; past it, the next sync tries again, and a bulk share stops and says how many servers were not sent. |
 | `record_lock_timeout_seconds` | `5` | How long a change to a server's notes or findings waits for another Servonaut process (the app, the CLI, an MCP server) that is writing the same record; past it the change fails like any failed write and is kept for a retry. |
 | `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
 
