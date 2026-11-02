@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
 from rich.text import Text
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
@@ -40,6 +40,8 @@ from servonaut.services.memory.shared_view import (
 from servonaut.screens.memory_authored import (
     AUTHORED_MODULES,
     MemoryFindingScreen,
+    Redact,
+    display_record,
     finding_rows,
     findings_heading,
     notes_renderable,
@@ -50,6 +52,7 @@ from servonaut.services.memory.notes import notes_for_display, notes_template
 from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
+from servonaut.services.memory.team_merge import is_contained_text
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -717,8 +720,9 @@ class MemoryScreen(Screen):
         self._show_shared_source(self._shared, shared_names)
 
         if not all_modules:
-            # Empty: show the CTA so users know how to populate memory.
-            self._set_empty_state_visible(True)
+            # Empty: show the CTA so users know how to populate memory (a
+            # read-only row cannot be probed, so it gets none).
+            self._set_empty_state_visible(not self._read_only)
             self._set_summary_actions_enabled(False)
             return
         self._set_empty_state_visible(False)
@@ -807,45 +811,47 @@ class MemoryScreen(Screen):
         section.remove_class("hidden")
         own_notes, own_findings = self._read_own_authored(memory_service, instance_id, provider)
         modules = self._shared.modules if self._shared is not None else {}
-        notes_team = self._shared_team("annotations")
         notes_shared = shared_notes_text(modules.get("annotations"))
-        if notes_for_display(notes_shared) in notes_for_display(own_notes):
+        if is_contained_text(notes_for_display(own_notes), notes_for_display(notes_shared)):
             notes_shared = ""  # the team holds the user's own notes
-        scrub = self._authored_scrub()
+        redact = Redact.for_app(self.app)
         self.query_one("#memory-notes", Static).update(notes_renderable(
-            own_notes, notes_shared, notes_team,
-            preview_lines=self._memory_setting("notes_preview_lines", 12),
+            own_notes, notes_shared, self._shared_team("annotations"),
+            preview_lines=int(self._memory_setting("notes_preview_lines", 12)),
             can_edit=not self._read_only,
-            scrub=scrub,
+            redact=redact,
         ))
-        own_ids = {record.get("id") for record in own_findings}
+        own_ids = {record["id"] for record in own_findings if record["id"]}
         team_findings = [
             record for record in shared_findings(modules.get("findings"), self._shared_team("findings"))
-            if record.get("id") not in own_ids
+            if not record["id"] or record["id"] not in own_ids
         ]
-        self._render_findings(own_findings, team_findings, scrub)
+        self._render_findings(own_findings, team_findings, redact)
 
     def _render_findings(
         self,
         own: List[Dict[str, Any]],
         shared: List[Dict[str, Any]],
-        scrub: Callable[[str], str],
+        redact: Redact,
     ) -> None:
         threshold = float(self._memory_setting("findings_confidence_threshold", 0.6))
         table = self.query_one("#memory-findings-table", DataTable)
         table.clear()
         self._findings_by_key = {}
         everything = [*own, *shared]
-        superseded = sum(1 for record in everything if record.get("superseded_by"))
-        active = len(everything) - superseded
-        for origin in (own, shared):
-            for row in finding_rows(
-                origin, threshold=threshold, show_superseded=self._show_superseded, scrub=scrub,
-            ):
-                table.add_row(*row.cells, key=row.key)
-                self._findings_by_key[row.key] = (row.record, origin)
+        superseded = sum(1 for record in everything if record["superseded_by"])
+        for origin_name, origin in (("own", own), ("shared", shared)):
+            rows = finding_rows(
+                origin, threshold=threshold, show_superseded=self._show_superseded, redact=redact,
+            )
+            for position, row in enumerate(rows):
+                # Positional keys: a team's copy may repeat an id, and a
+                # duplicate DataTable key would raise.
+                key = f"{origin_name}:{position}"
+                table.add_row(*row.cells, key=key)
+                self._findings_by_key[key] = (row.record, origin)
         self.query_one("#memory-findings-heading", Static).update(
-            findings_heading(active, superseded, self._show_superseded)
+            findings_heading(len(everything) - superseded, superseded, self._show_superseded)
         )
         empty = self.query_one("#memory-findings-empty", Static)
         has_rows = bool(self._findings_by_key)
@@ -862,7 +868,7 @@ class MemoryScreen(Screen):
     def _read_own_authored(
         self, memory_service: Any, instance_id: str, provider: str
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        """This device's notes and findings for the server (empty on failure)."""
+        """This device's notes and findings for the server (empty when unreadable)."""
         notes: Any = ""
         findings: Any = []
         try:
@@ -870,29 +876,19 @@ class MemoryScreen(Screen):
             findings = memory_service.list_findings(
                 instance_id, provider, include_superseded=True,
             )
-        except (OSError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - a damaged record must not break the screen
             logger.warning("Could not read notes or findings for %s: %s", instance_id, exc)
         notes = notes if isinstance(notes, str) else ""
-        findings = [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
-        return notes, findings
+        records = findings if isinstance(findings, list) else []
+        shown = (display_record(record) for record in records)
+        return notes, [record for record in shown if record is not None]
 
     def _shared_team(self, module: str) -> str:
-        """The team a shared *module* came from, as it may be shown."""
+        """The team a shared *module* came from (redacted where it is shown)."""
         shared = self._shared
         if shared is None:
             return ""
-        team = shared.sources.get(module) or shared.team_name
-        redaction = getattr(self.app, "redaction_service", None)
-        if getattr(self.app, "demo_mode", False) and redaction is not None:
-            return redaction.redact_name(team)
-        return team
-
-    def _authored_scrub(self) -> Callable[[str], str]:
-        """Demo mode's scrub for authored text; the identity otherwise."""
-        redaction = getattr(self.app, "redaction_service", None)
-        if getattr(self.app, "demo_mode", False) and redaction is not None:
-            return redaction.scrub_stream
-        return lambda text: text
+        return shared.sources.get(module) or shared.team_name
 
     def _memory_setting(self, name: str, default: Any) -> Any:
         """A ``memory`` setting, or *default* when unset or of another type."""
@@ -919,12 +915,10 @@ class MemoryScreen(Screen):
         if entry is None:
             return
         record, origin = entry
-        name = display_name(self._instance) or self._instance.get("id") or "server"
         self.app.push_screen(MemoryFindingScreen(
             record, origin,
-            server_name=str(name),
+            instance=self._instance,
             threshold=float(self._memory_setting("findings_confidence_threshold", 0.6)),
-            scrub=self._authored_scrub(),
         ))
 
     def _request_shared(self) -> None:

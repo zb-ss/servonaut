@@ -184,7 +184,11 @@ async def test_markup_in_a_finding_title_is_shown_literally(tmp_path):
     app = _host(service)
     async with app.run_test(headless=True) as pilot:
         await _until(pilot, lambda: _rows(app), "the finding")
-        assert _rows(app)[0][0] == "[bold]restart[/bold] the worker [/]"
+        table = app.screen.query_one("#memory-findings-table", DataTable)
+        title = table.get_row_at(0)[0]
+        # Literal text with no style of its own: the brackets were not parsed.
+        assert title.plain == "[bold]restart[/bold] the worker [/]" and not title.spans
+        await pilot.pause(0.1)  # drawn: "[/]" as markup would have raised
 
 
 async def test_enter_opens_a_finding_with_its_body_and_what_it_replaced(tmp_path):
@@ -256,3 +260,95 @@ async def test_an_opted_out_server_shows_no_notes_or_findings(tmp_path):
     async with app.run_test(headless=True) as pilot:
         section = app.screen.query_one("#memory-authored")
         await _until(pilot, lambda: section.has_class("hidden"), "the hidden panels")
+
+
+async def test_a_long_notes_setting_written_as_a_float_still_works(tmp_path):
+    service = _service(tmp_path)
+    service.write_annotations("i-abc123", "\n".join(f"line {n}" for n in range(1, 6)), "aws")
+    app = _host(service, config=MemoryConfig(notes_preview_lines=2.0))
+    async with app.run_test(headless=True) as pilot:
+        await _until(pilot, lambda: "line 1" in _notes(app), "the notes")
+        assert _notes(app).startswith("line 1\nline 2\n… 3 more lines")
+
+
+async def test_a_teammates_short_note_is_not_hidden_by_a_longer_line_of_mine(tmp_path):
+    service = _service(tmp_path)
+    service.write_annotations("share-1", "Watch the production database.", "shared")
+    shared = SharedMemory("team-a", "Team A", {
+        "annotations": {"observed": {}, "declared": {}, "content": "production",
+                        "probed_at": "2026-10-20T08:00:00+00:00"},
+    })
+    app = _host(service, SHARED_ROW, shared=shared)
+    async with app.run_test(headless=True) as pilot:
+        await _until(pilot, lambda: "Shared by" in _notes(app), "the team's note")
+        assert _notes(app).endswith("Shared by Team A (read-only)\nproduction")
+
+
+MALFORMED = [
+    {"id": ["not", "text"], "title": "an id that is a list", "created_at": "2026-10-19T08:00:00"},
+    {"id": "f_dup", "title": "first with a repeated id", "tags": 5,
+     "superseded_by": ["x"], "created_at": "2026-10-18T08:00:00"},
+    {"id": "f_dup", "title": "second with a repeated id", "confidence": "high",
+     "created_at": "2026-10-17T08:00:00"},
+    7,
+    "a finding written as plain text",
+]
+
+
+@pytest.mark.parametrize("findings", [5, "not a list", MALFORMED])
+async def test_a_malformed_shared_findings_payload_does_not_break_the_screen(tmp_path, findings):
+    shared = SharedMemory("team-a", "Team A", {
+        "findings": {"observed": {}, "declared": {}, "probed_at": "2026-10-20T08:00:00+00:00",
+                     "findings": findings},
+    })
+    app = _host(_service(tmp_path), SHARED_ROW, shared=shared)
+    async with app.run_test(headless=True) as pilot:
+        heading = "Agent findings (4)" if findings is MALFORMED else "Agent findings (0)"
+        await _until(pilot, lambda: _heading(app).startswith(heading), heading)
+        if findings is MALFORMED:
+            titles = [row[0] for row in _rows(app)]
+            assert "first with a repeated id" in titles and "second with a repeated id" in titles
+            app.screen.query_one("#memory-findings-table", DataTable).focus()
+            await pilot.press("enter")
+            await _until(pilot, lambda: type(app.screen).__name__ == "MemoryFindingScreen",
+                         "the detail")
+
+
+async def test_the_open_finding_follows_a_demo_mode_toggle(tmp_path):
+    from servonaut.screens.memory_authored import MemoryFindingScreen
+
+    service = _service(tmp_path)
+    _remember(service, "restart php-fpm after deploys", body="php-fpm holds the socket")
+    app = _host(service)
+    async with app.run_test(headless=True) as pilot:
+        await _until(pilot, lambda: _rows(app), "the finding")
+        app.screen.query_one("#memory-findings-table", DataTable).focus()
+        await pilot.press("enter")
+        await _until(pilot, lambda: isinstance(app.screen, MemoryFindingScreen), "the detail")
+        screen = app.screen
+        app.demo_mode = True
+        app.redaction_service = MagicMock()
+        app.redaction_service.redact_name = lambda name: "stand-in"
+        app.redaction_service.scrub_stream = lambda text: text.replace("php-fpm", "<svc>")
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert str(screen.query_one("#memory-finding-title", Static).render()) == (
+            "restart <svc> after deploys"
+        )
+        assert str(screen.query_one("#memory-finding-body", Static).render()) == "<svc> holds the socket"
+
+
+async def test_a_read_only_row_with_only_notes_offers_no_probe(tmp_path):
+    row = {
+        "id": "i-owner-1", "name": "owner-web", "provider": "aws", "is_shared": True,
+        "state": "shared", "memory_only": True, "team_slug": "team-a",
+        "team_name": "Team A", "instance_id": "i-owner-1",
+    }
+    shared = SharedMemory("team-a", "Team A", {
+        "annotations": {"observed": {}, "declared": {}, "content": "Owned by payments.",
+                        "probed_at": "2026-10-20T08:00:00+00:00"},
+    })
+    app = _host(_service(tmp_path), row, shared=shared)
+    async with app.run_test(headless=True) as pilot:
+        await _until(pilot, lambda: "Owned by payments." in _notes(app), "the shared note")
+        assert app.screen.query_one("#memory-empty-state").has_class("hidden")

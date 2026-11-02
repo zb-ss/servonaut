@@ -189,18 +189,21 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "obs_str and decl_str are scrubbed inside _render_modules before "
                    "add_row. module_name and key are taxonomy — not scrubbed by "
                    "design (plan §8 item 7)."),
-    # Notes and agent findings: authored text is scrubbed by the helpers in
-    # screens/memory_authored.py, which receive _authored_scrub()
-    # (redaction_service.scrub_stream in demo mode); team names go through
-    # redact_name in _shared_team.
+    # Notes and agent findings: authored text and team names are redacted by
+    # the helpers in screens/memory_authored.py, which receive
+    # Redact.for_app() (scrub_stream / redact_name in demo mode).
     AllowlistEntry("screens/memory.py", "_render_authored", "update",
-                   "notes_renderable() scrubs the notes and the team label with "
-                   "_authored_scrub() before the panel is updated."),
+                   "notes_renderable() redacts the notes and the team label with "
+                   "Redact.for_app() before the panel is updated."),
     AllowlistEntry("screens/memory.py", "_render_findings", "add_row",
-                   "finding_rows() scrubs titles and team labels with "
-                   "_authored_scrub() before the cells reach add_row."),
+                   "finding_rows() redacts titles and team labels with "
+                   "Redact.for_app() before the cells reach add_row."),
     AllowlistEntry("screens/memory.py", "_render_findings", "update",
                    "The heading shows counts only; the empty line is fixed text."),
+    AllowlistEntry("screens/memory_authored.py", "_show_redacted", "update",
+                   "Every field goes through Redact.for_app(self.app) (scrub_stream / "
+                   "redact_name in demo mode); the server name is the displayed row, "
+                   "which the app redacts in place. Re-run on each demo toggle."),
 
     # fleet_memory.py — shows module status summary (count of modules, last probe
     # time) — no raw output values.
