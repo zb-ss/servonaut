@@ -159,7 +159,7 @@ round-trip.
 
 | Surface | How to use it |
 |---------|---------------|
-| **Sidebar → Fleet Memory** | Fleet-wide status table. `s` scans every server, `f` refreshes stale modules, `enter` opens the per-server view. |
+| **Sidebar → Fleet Memory** | Fleet-wide status table. `s` scans every server, `f` refreshes stale modules, `enter` opens the per-server view. `space` marks a server (`m` marks all of yours) and `S` shares the marked servers with a team in one go. |
 | **Instance list → Mem column** | At-a-glance icon per row: `●` green fresh, `●` yellow stale, `○` not probed, `⛔` opted-out. |
 | **Instance list → `m`** | Opens the per-server Memory screen for the selected row. |
 | **Server Actions → `m`** | Same per-server view from the action stack. |
