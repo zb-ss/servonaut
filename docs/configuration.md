@@ -39,6 +39,7 @@ All configuration is stored in `~/.servonaut/config.json`. The file is created a
 | `terminal_emulator` | string | `"auto"` | Terminal preference (see [Supported Terminals](#supported-terminals)) |
 | `theme` | string | `"servonaut"` | Colour theme for the TUI and desktop app: `servonaut`, `servonaut-light`, or any built-in Textual theme (`nord`, `gruvbox`, `tokyo-night`, `dracula`, `catppuccin-mocha`, `solarized-light`, …). Pick one in Settings → General or with Ctrl+P → Theme; the choice is saved. Older values `dark` and `light` mean `servonaut` and `servonaut-light`. The `TEXTUAL_THEME` environment variable overrides it for one run |
 | `keyword_store_path` | string | `"~/.servonaut/keywords.json"` | Path to keyword scan results file |
+| `repair_stale_install_paths` | bool | `true` | When the TUI or desktop app starts, point coding-agent MCP entries and the terminal shortcut that still name a removed Servonaut installation at the one you are running (see [Switching how Servonaut is installed](mcp-tools.md#switching-how-servonaut-is-installed)) |
 | `default_scan_paths` | array | `["~/"]` | Default paths to scan on all instances |
 | `scan_rules` | array | `[]` | Conditional scan rules (see [Scan Rules](#scan-rules)) |
 | `connection_profiles` | array | `[]` | SSH connection profiles (see [Connection Profiles](#connection-profiles)) |

@@ -1576,6 +1576,9 @@ class AppConfig:
         keyword_store_path: Path to keyword store file
         theme: Colour theme name, any registered Textual theme (default:
             servonaut). Legacy ``dark``/``light`` read as the Servonaut pair.
+        repair_stale_install_paths: On launch, repoint coding-agent MCP
+            entries and the terminal shortcut that still name a removed
+            Servonaut install at the running one (default: True)
     """
     version: int = CONFIG_VERSION
     default_key: str = ""
@@ -1687,6 +1690,10 @@ class AppConfig:
     chat_inject_server_memory: bool = False
     chat_inject_server_memory_decision: str = "unset"
     sync_encryption_enabled: bool = True
+    # Switching install method (pipx <-> desktop package) removes the old
+    # executable that agent MCP configs and the terminal shortcut still name.
+    # The launch-time repair only rewrites entries whose command is gone.
+    repair_stale_install_paths: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
     # SSH keepalive and timeout settings applied to every SSH/SCP command.

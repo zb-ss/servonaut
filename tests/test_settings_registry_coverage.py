@@ -99,6 +99,7 @@ _FIELD_TO_PANEL = {
     "chat_inject_server_memory": "ai_chat",
     "chat_inject_server_memory_decision": "ai_chat",
     "sync_encryption_enabled": "memory",
+    "repair_stale_install_paths": "_no_ui",  # launch-time repair switch, documented in the configuration guide
     "memory": "memory",
     "memory_first_connect_dismissed_count": "_no_ui",  # dismissal counter
     "vault": "vault",  # local vault verification, custody and polling policy
