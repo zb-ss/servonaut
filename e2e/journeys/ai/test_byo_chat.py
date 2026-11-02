@@ -72,6 +72,14 @@ def _offered_tools(body: dict) -> set[str]:
     return names
 
 
+def _system_prompt(body: dict) -> str:
+    """The system message of an OpenAI-shaped request."""
+    return "".join(
+        message["content"] for message in body["messages"]
+        if message.get("role") == "system"
+    )
+
+
 async def _pick_own_provider(t, provider: str, fake_ai) -> None:
     modal = t.screen
     existing = plain(modal.query_one("#ai_picker_existing"))
@@ -203,7 +211,9 @@ async def test_the_tool_level_is_shown_and_a_change_applies_to_the_next_call(
     """The stats bar names the level this chat's tools run at. Lowering it
     (as the AI Chat settings save it) applies to the next turn, without a
     restart: the model is no longer offered commands, and one it asks for
-    anyway is refused before it reaches the server."""
+    anyway is refused before it reaches the server. The guidance on saving
+    server findings follows the offer: present while the model may save
+    one, gone once the read-only level hides that tool."""
     seed_byo(
         seed, fake_cloud, "openai", fake_ai.url, signed_in=False,
         custom_servers=[web_1_server()],
@@ -224,7 +234,11 @@ async def test_the_tool_level_is_shown_and_a_change_applies_to_the_next_call(
         await send(t, "And now?")
         assert (await wait_for_reply(t))[-1] == "Not allowed now."
         assert "Tools: read-only" in stats(t)
-        _, _, ask, refused = fake_ai.requests("openai")
+        first, _, ask, refused = fake_ai.requests("openai")
+        assert "remember_server_finding" in _offered_tools(first["body"])
+        assert "Record what you learn" in _system_prompt(first["body"])
         assert "run_command" not in _offered_tools(ask["body"])
+        assert "remember_server_finding" not in _offered_tools(ask["body"])
+        assert "Record what you learn" not in _system_prompt(ask["body"])
         assert refused["body"]["messages"][-1]["content"].startswith("Blocked:")
         assert len(journey.shims.calls("ssh")) == 1

@@ -248,6 +248,14 @@ List every instance that has cached memory.  Pass `stale_only=true` to show only
 
 *chat_exposed: yes*
 
+### `remember_server_finding` and `recall_server_findings`
+
+A finding is a short note an agent saves about a server: a root cause, a quirk, or a setting it changed and why, anything a fresh probe would not show. `remember_server_finding(instance_id, title, body, tags, confidence, supersede_id)` saves one locally and queues it for Memory Sync. `recall_server_findings(instance_id, query)` lists or searches them. Findings at or above `memory.findings_confidence_threshold` (default 0.6) are added to the AI chat's memory block automatically.
+
+When an agent can save findings (memory on, guard level `standard` or `dangerous`), the MCP server's instructions and the built-in chat's system prompt include a short "Record what you learn" section. It asks agents to save each non-obvious discovery once, check existing findings first and supersede an outdated one instead of adding a duplicate, and never store secrets. A custom chat system prompt gets the same section appended while the chat offers the tool.
+
+*chat_exposed: yes*
+
 ### Audit trail
 
 Every memory MCP tool call is recorded in `~/.servonaut/mcp_audit.jsonl` with timestamp, arguments, success/failure, and a short reason code on early returns.  Guard levels (`readonly` / `standard` / `dangerous`) apply here exactly as they do to the other MCP tools.
