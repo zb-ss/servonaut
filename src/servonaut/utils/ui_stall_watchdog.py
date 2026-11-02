@@ -77,9 +77,11 @@ class UiStallWatchdog:
         try:
             yield
         finally:
-            self._pauses -= 1
+            # Restart the count before the pause ends, so the watching
+            # thread never measures the pause itself as a stall.
             self._stalled_since = None
             self._last_beat = self._clock()
+            self._pauses -= 1
 
     def check(self) -> None:
         """One check from the watching thread."""

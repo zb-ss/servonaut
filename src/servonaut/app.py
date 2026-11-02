@@ -1062,15 +1062,22 @@ class ServonautApp(App):
         """Hand the terminal to another program, with the stall watchdog paused.
 
         The event loop waits for that program (an editor, for example), so
-        the wait must not be logged as a frozen interface.
+        the wait must not be logged as a frozen interface. An error inside
+        (an editor that is not installed) is raised only after the terminal
+        is given back: Textual's own suspend skips that step when the code
+        it wraps raises, which left the app without its screen.
         """
         watchdog = getattr(self, "_ui_stall_watchdog", None)
+        paused = watchdog.paused() if watchdog is not None else contextlib.nullcontext()
+        failure: Optional[Exception] = None
         with super().suspend():
-            if watchdog is None:
-                yield
-                return
-            with watchdog.paused():
-                yield
+            with paused:
+                try:
+                    yield
+                except Exception as exc:  # noqa: BLE001 - re-raised below
+                    failure = exc
+        if failure is not None:
+            raise failure
 
     async def on_unmount(self) -> None:
         """Cancel the relay listener cleanly as the app exits."""
