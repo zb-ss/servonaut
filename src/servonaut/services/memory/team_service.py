@@ -728,6 +728,25 @@ class TeamMemoryService:
     def _pins(self) -> Any:
         return self._pin_store_provider() if self._pin_store_provider else None
 
+    def is_unlocked(self) -> bool:
+        """Whether the caller's memory key is at hand, so data keys can be sealed."""
+        return self._key_store_provider() is not None
+
+    def check_member_keys(
+        self, team_slug: str, member_pubkeys: List[TeamMemberKey], required_role: str
+    ) -> None:
+        """Raise before anything is sent if a reader's key may not be sealed for.
+
+        The check :meth:`share_instance` runs, for callers that share several
+        servers with one set of keys and must refuse them all up front.
+
+        Raises:
+            UnusableMemberKeyError: The service sent a key that is not the key it names.
+            KeyChangedError: A reader's key changed and needs confirming.
+        """
+        check_segment(team_slug, "team")
+        self._refuse_changed_keys(team_slug, self.eligible_members(member_pubkeys, required_role))
+
     def _refuse_changed_keys(
         self, team_slug: str, members: List[TeamMemberKey]
     ) -> Dict[tuple, Optional[str]]:

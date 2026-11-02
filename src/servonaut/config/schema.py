@@ -1136,6 +1136,8 @@ DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS = 75.0
 DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_RECORD_LOCK_POLL_SECONDS = 0.05
+DEFAULT_TEAM_WRAP_RETRY_SECONDS = 5.0
+DEFAULT_TEAM_WRAP_MAX_WAIT_SECONDS = 30.0
 
 
 def _usable_seconds(value: Any, default: float) -> float:
@@ -1244,12 +1246,13 @@ class MemoryConfig:
             used as is, and refused (no sharing) when it contains a space or
             ``%``, is missing, or is too long (Unix sockets hold about 100
             bytes).
-        team_wrap_retry_seconds: Pause before the one retry of a catch-up
-            post for team members that the service refused as rate limited
-            without saying how long to wait.
+        team_wrap_retry_seconds: Pause before the one retry of a team memory
+            write (a catch-up post for team members, or one server of a bulk
+            share) that the service refused as rate limited without saying
+            how long to wait.
         team_wrap_max_wait_seconds: Longest pause honoured before that
-            retry; a longer ask gives up for this upload and the next sync
-            asks again.
+            retry; a longer ask gives up: for a catch-up upload the next sync
+            asks again, and a bulk share stops and sends no more servers.
         record_lock_timeout_seconds: How long a change to one server's notes
             or findings waits for another Servonaut process (the app, the
             CLI, an MCP server) that is writing the same record, before it
@@ -1336,9 +1339,10 @@ class MemoryConfig:
     team_memory_cache_seconds: float = 60.0
     team_memory_future_skew_seconds: float = 300.0
 
-    # Catch-up wraps for team members after an upload (see the docstring).
-    team_wrap_retry_seconds: float = 5.0
-    team_wrap_max_wait_seconds: float = 30.0
+    # Rate-limited team memory writes: catch-up wraps after an upload and the
+    # servers of a bulk share (see the docstring).
+    team_wrap_retry_seconds: float = DEFAULT_TEAM_WRAP_RETRY_SECONDS
+    team_wrap_max_wait_seconds: float = DEFAULT_TEAM_WRAP_MAX_WAIT_SECONDS
 
     # Wait for another process holding the same server's record (see above).
     record_lock_timeout_seconds: float = DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS
@@ -1359,6 +1363,17 @@ class MemoryConfig:
         )
         poll = _usable_seconds(self.record_lock_poll_seconds, DEFAULT_RECORD_LOCK_POLL_SECONDS)
         return timeout, poll or DEFAULT_RECORD_LOCK_POLL_SECONDS
+
+    def team_wrap_wait(self) -> tuple[float, float]:
+        """The validated ``(retry, max_wait)`` seconds for a rate-limited team write.
+
+        A value that is not a finite, non-negative number (a hand-edited
+        config) falls back to its default.
+        """
+        return (
+            _usable_seconds(self.team_wrap_retry_seconds, DEFAULT_TEAM_WRAP_RETRY_SECONDS),
+            _usable_seconds(self.team_wrap_max_wait_seconds, DEFAULT_TEAM_WRAP_MAX_WAIT_SECONDS),
+        )
 
     def is_module_enabled(self, instance_id: str, module: str) -> bool:
         """Return ``True`` if *module* should be probed for *instance_id*.
