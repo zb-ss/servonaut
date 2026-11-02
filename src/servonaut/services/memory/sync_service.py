@@ -75,6 +75,7 @@ from servonaut.services.memory.store import (
     EMPTY_NOTES_DIGEST, MemoryCorruptError, NotesFingerprint, RecordBusy,
     RecordLockTimeout, check_finding_record,
 )
+from servonaut.services.memory.notes import has_notes
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
@@ -1044,7 +1045,7 @@ class MemorySyncService:
                     )
                 except Exception:
                     content = ""
-                if content.strip():
+                if has_notes(content):
                     meta = self._memory_service.get_annotations_meta(entry_instance_id)
                     before = len(self._pending)
                     self.enqueue_annotations(

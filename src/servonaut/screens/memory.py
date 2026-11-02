@@ -37,6 +37,7 @@ from servonaut.services.memory.shared_view import (
     share_candidates,
     shared_source_text,
 )
+from servonaut.services.memory.notes import has_notes, notes_for_display, notes_template
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.status import (
@@ -1173,37 +1174,7 @@ class MemoryScreen(Screen):
         distinction obvious without fighting the data-table surface.
         """
         name = self._target.get("name") or instance_id
-        provider = instance_provider(self._target)
-        return (
-            f"# Notes — {name} ({instance_id}) @ {provider}\n"
-            "\n"
-            "<!--\n"
-            "Free-form notes about this server.  They appear in the memory\n"
-            "summary alongside machine-probed data (OS, runtimes, services,\n"
-            "logs), which is what the chat panel and MCP agents read.\n"
-            "\n"
-            "The read-only table you saw on the Memory screen is the probed\n"
-            "data — edit observed values with 'p' (Pin) instead of writing\n"
-            "them here.  Everything below this comment block is yours: use\n"
-            "it for purpose / runbook notes / ownership / known quirks.\n"
-            "\n"
-            "Delete this comment block freely; it is only a one-shot primer.\n"
-            "-->\n"
-            "\n"
-            "## Purpose\n"
-            "\n"
-            '<!-- What does this server do? e.g. "primary billing API, '
-            'reads from RDS, serves api.example.com" -->\n'
-            "\n"
-            "## Runbook\n"
-            "\n"
-            "<!-- Deploy path, log locations, key commands, known quirks. -->\n"
-            "\n"
-            "## Ownership\n"
-            "\n"
-            "<!-- Team, owner, Slack channel, escalation path. -->\n"
-            "\n"
-        )
+        return notes_template(name, instance_id, instance_provider(self._target))
 
     def action_annotate(self) -> None:
         """Edit this server's free-form notes (``annotations.md``).

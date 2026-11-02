@@ -59,6 +59,7 @@ from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple,
 )
 
+from servonaut.services.memory.notes import has_notes
 from servonaut.services.memory.provider import (
     SHARED_MEMORY_PROVIDER,
     instance_provider,
@@ -208,7 +209,7 @@ def merge_annotation_text(
     already contain is skipped, so a second merge adds nothing.
     """
     wanted = copy.strip()
-    if not wanted or is_contained_text(own, wanted):
+    if not has_notes(wanted) or is_contained_text(own, wanted):
         return own, False
     if not own.strip():
         return copy, True

@@ -36,6 +36,7 @@ from servonaut.services.accounts.headless import (
     usable_account,
 )
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.memory.notes import has_notes
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.team_fold import absorbed_share_ids
@@ -2655,7 +2656,7 @@ class ServonautTools:
         memory = self._memory_service
         try:
             notes = memory.read_annotations(iid, provider)
-            if isinstance(notes, str) and notes.strip():
+            if isinstance(notes, str) and has_notes(notes):
                 return True
             findings = memory.list_findings(iid, provider)
             return isinstance(findings, list) and bool(findings)
