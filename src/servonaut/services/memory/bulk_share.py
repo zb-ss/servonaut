@@ -68,6 +68,8 @@ RATE_LIMITED = "rate_limited"
 KEY_RACE = "key_race"
 UNAVAILABLE = "unavailable"
 REVOKED_ONLY = "revoked_only"
+STOPPED = "stopped"  # the user stopped the batch
+UNLISTED = "unlisted"  # shared, but the service does not list that share to the caller
 
 # A batch stops at these: every later server would meet the same answer.
 _STOPS = frozenset({RATE_LIMITED, KEY_RACE, UNAVAILABLE})
@@ -92,7 +94,8 @@ class ShareTarget:
     Attributes:
         instance_id: The id the service knows the server by (the real id,
             never a demo-mode stand-in).
-        label: What the user sees for it (a stand-in in demo mode).
+        label: The server's name. The screen shows a stand-in for it in
+            demo mode; the service never logs it.
         probed: Whether this computer holds memory for it. A server the
             service holds no snapshot of is then "never probed" rather than
             "not uploaded yet".
@@ -130,6 +133,8 @@ class BulkShareReport:
     outcomes: Tuple[ShareOutcome, ...]
     # Eligible members with no memory key yet, once each ({user_id, name, ...}).
     pending: Tuple[Dict[str, Any], ...] = ()
+    # Whether existing shares were to be replaced (the form's option).
+    update_existing: bool = False
 
     def with_status(self, status: str) -> List[ShareOutcome]:
         return [o for o in self.outcomes if o.status == status]
@@ -225,6 +230,7 @@ class BulkMemoryShareService:
         *,
         update_existing: bool = False,
         on_progress: Optional[Callable[[int, int, ShareOutcome], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> BulkShareReport:
         """Share every server of *targets* with team *team_slug*, in order.
 
@@ -236,7 +242,12 @@ class BulkMemoryShareService:
             update_existing: Replace a share that exists with these settings.
                 Off: such a server is reported and left as it is.
             on_progress: Called with ``(index, total, outcome)`` after each
-                server, counting from 1.
+                server, counting from 1. An error it raises is logged and the
+                batch goes on.
+            should_stop: Asked before each server; once it answers True, no
+                further server is sent (the remaining ones are "not sent",
+                reason ``STOPPED``). A server already started is finished, so
+                a replacement never stops between its revoke and its grant.
 
         Raises:
             ValueError: No module was chosen, or the slug is not well formed.
@@ -264,6 +275,8 @@ class BulkMemoryShareService:
         pending: Dict[int, Dict[str, Any]] = {}
         stop: Optional[_Stopped] = None
         for index, target in enumerate(targets, start=1):
+            if stop is None and should_stop is not None and should_stop():
+                stop = _Stopped(STOPPED)
             grant = live.get(target.instance_id)
             outcome = self._without_request(target, grant, required_role, chosen, update_existing)
             if outcome is None and stop is not None:
@@ -274,14 +287,30 @@ class BulkMemoryShareService:
                 stop = stopped or stop
                 self._note_pending(pending, created)
             outcomes.append(outcome)
-            if on_progress is not None:
-                on_progress(index, len(targets), outcome)
-        return BulkShareReport(tuple(outcomes), tuple(pending.values()))
+            self._report_progress(on_progress, index, len(targets), outcome)
+        return BulkShareReport(tuple(outcomes), tuple(pending.values()), update_existing)
+
+    @staticmethod
+    def _report_progress(
+        on_progress: Optional[Callable[[int, int, ShareOutcome], None]],
+        index: int, total: int, outcome: ShareOutcome,
+    ) -> None:
+        """Tell the caller; its failure (a closed screen, say) never stops the batch."""
+        if on_progress is None:
+            return
+        try:
+            on_progress(index, total, outcome)
+        except Exception as exc:  # noqa: BLE001 — progress is for show only
+            logger.warning("Bulk share: the progress display failed: %s", type(exc).__name__)
 
     async def _live_grants(self, team_slug: str) -> Dict[str, Any]:
-        """The team's live shares by server id, read once for the batch."""
-        shared = await self._call(lambda: self._team.list_shared_instances(team_slug))
-        return {s.grant.instance_id: s.grant for s in shared if s.grant.is_live}
+        """The caller's own live shares by server id, read once and afresh for the batch.
+
+        Afresh: Fleet Memory reuses the team's list for a while, and a share
+        made since then must count. Own only: a teammate's share of a server
+        with the same id is not the caller's to report or replace.
+        """
+        return await self._call(lambda: self._team.own_live_grants(team_slug, fresh=True))
 
     @staticmethod
     def _note_pending(pending: Dict[int, Dict[str, Any]], created: Any) -> None:
@@ -369,7 +398,9 @@ class BulkMemoryShareService:
         if isinstance(exc, _Stopped):
             return ShareOutcome(target, NOT_SENT, exc.reason, exc.detail, exc.retry_after)
         if isinstance(exc, GrantAlreadyExistsError):
-            return ShareOutcome(target, ALREADY_SHARED)  # shared meanwhile
+            # Live, yet not in the caller's list: shared meanwhile, or listed
+            # only to roles above the caller's. Either way it is left as it is.
+            return ShareOutcome(target, ALREADY_SHARED, UNLISTED)
         if isinstance(exc, MemoryNotFound):
             return ShareOutcome(target, SKIPPED, NO_SNAPSHOT if target.probed else NEVER_PROBED)
         if isinstance(exc, (KeyChangedError, UnusableMemberKeyError, InsufficientWrapsRequired)):

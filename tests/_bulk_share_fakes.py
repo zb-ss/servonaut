@@ -6,6 +6,7 @@ and the owner's stored envelopes are faked. Neutral fixtures only.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
@@ -63,6 +64,8 @@ class FakeTeamBackend:
         self.get_errors: Dict[str, List[Exception]] = {}
         self.delete_errors: Dict[str, List[Exception]] = {}
         self.envelope_errors: Dict[str, List[Exception]] = {}
+        # When set, every grant POST waits for it: a batch held mid-flight.
+        self.post_gate: Optional[asyncio.Event] = None
         self.pending: Dict[str, List[Dict[str, Any]]] = {}
         self.api = MagicMock(spec=APIClient)
         self.api.get.side_effect = self._get
@@ -84,6 +87,8 @@ class FakeTeamBackend:
     async def _post(self, path: str, **kw: Any) -> Dict[str, Any]:
         body = kw.get("json") or {}
         self.calls.append(f"POST {path} {body.get('instance_id', '')}".rstrip())
+        if self.post_gate is not None:
+            await self.post_gate.wait()
         queued = self.post_errors.get(body.get("instance_id", ""), [])
         if queued:
             raise queued.pop(0)
@@ -138,11 +143,18 @@ def _retrieval(backend: "FakeTeamBackend", owner: Any) -> MagicMock:
     return retrieval
 
 
-def team_memory_service(backend: "FakeTeamBackend", *, locked: bool = False) -> TeamMemoryService:
-    """The real team memory service over *backend*; *locked* = no memory key at hand."""
+def team_memory_service(
+    backend: "FakeTeamBackend", *, locked: bool = False, cache_seconds: float = 0.0,
+) -> TeamMemoryService:
+    """The real team memory service over *backend*, as user 1 (the owner).
+
+    *locked*: no memory key at hand. *cache_seconds*: how long the team's
+    list of shares is reused.
+    """
     owner = _owner()
     return TeamMemoryService(
         api_client=backend.api, auth_service=MagicMock(has_feature=MagicMock(return_value=True)),
         crypto=crypto_module, key_store_provider=lambda: None if locked else owner,
         retrieval_service=_retrieval(backend, owner),
+        cache_ttl_provider=lambda: cache_seconds,
     )

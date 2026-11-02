@@ -464,17 +464,20 @@ class TeamMemoryService:
                 return user_id
         return None
 
-    async def own_live_grants(self, team_slug: str) -> Dict[str, Grant]:
+    async def own_live_grants(self, team_slug: str, *, fresh: bool = False) -> Dict[str, Grant]:
         """The caller's own live grants with the team, by server id.
 
         The list route holds every granter's shares, and server ids (a custom
         server's name, say) can repeat across a team, so a share is the
         caller's only when the caller granted it. Empty when the caller
-        cannot be told.
+        cannot be told. *fresh* asks the service again instead of reusing a
+        remembered list.
         """
         caller = self._caller_user_id()
         if caller is None:
             return {}
+        if fresh:
+            self._forget_shared(team_slug)
         own: Dict[str, Grant] = {}
         for shared in await self.list_shared_instances(team_slug):
             grant = shared.grant

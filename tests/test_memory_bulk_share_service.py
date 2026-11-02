@@ -27,9 +27,12 @@ from servonaut.services.memory.bulk_share import (
     SAME_SETTINGS,
     SHARED,
     SKIPPED,
+    STOPPED,
     ShareTarget,
+    UNLISTED,
     UNRESOLVED,
     UPDATED,
+    REVOKED_ONLY,
     memory_sync_accepts,
 )
 from servonaut.services.memory.team_service import KeyChangedError, UnusableMemberKeyError
@@ -342,4 +345,135 @@ async def test_an_envelope_read_that_stays_rate_limited_stops_the_batch():
     report = await service.share(SLUG, "member", ["os"], _targets("web-1", "web-2"))
     assert [(o.status, o.reason) for o in report.outcomes] == [
         (NOT_SENT, RATE_LIMITED), (NOT_SENT, RATE_LIMITED)]
+    assert backend.writes() == []
+
+
+# --- whose shares count, and how fresh ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_teammates_share_of_the_same_id_is_never_taken_for_the_callers():
+    backend = _Backend(members=[_member(2, "Kim")], stored={"custom-web": ["os"]},
+                       live=[_grant("custom-web", grant_id="g-teammate", granted_by_user_id=9)])
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "viewer", ["os"], _targets("custom-web"),
+                                 update_existing=True)
+    assert report.outcomes[0].status == SHARED
+    assert not any(c.startswith("DELETE") for c in backend.calls)  # never the teammate's
+
+
+@pytest.mark.asyncio
+async def test_the_teams_shares_are_read_afresh_for_the_batch():
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os"]})
+    team = team_memory_service(backend, cache_seconds=60.0)
+    await team.list_shared_instances(SLUG)  # Fleet Memory's prefetch filled the memo
+    backend.live = [_grant("web-1")]  # shared since, from elsewhere
+    service = BulkMemoryShareService(team, waits=MemoryConfig().team_wrap_wait, sleep=_Sleeps())
+    report = await service.share(SLUG, "member", ["os"], _targets("web-1"))
+    assert report.outcomes[0].status == ALREADY_SHARED
+
+
+@pytest.mark.asyncio
+async def test_a_share_the_service_does_not_list_to_the_caller_gets_a_reason():
+    from servonaut.services.api_client import GrantExistsError
+
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os"]})
+    backend.post_errors["web-1"] = [GrantExistsError(code="grant_exists", message="exists", status=409)]
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os"], _targets("web-1"), update_existing=True)
+    assert (report.outcomes[0].status, report.outcomes[0].reason) == (ALREADY_SHARED, UNLISTED)
+    assert report.update_existing is True
+
+
+# --- the progress callback and Stop ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failing_progress_callback_does_not_stop_the_batch():
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os"], "web-2": ["os"]})
+    service, _ = _service(backend)
+
+    def boom(_index: int, _total: int, _outcome: Any) -> None:
+        raise LookupError("the screen is gone")
+
+    report = await service.share(SLUG, "member", ["os"], _targets("web-1", "web-2"),
+                                 on_progress=boom)
+    assert [o.status for o in report.outcomes] == [SHARED, SHARED]
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_the_batch_after_the_current_server():
+    backend = _Backend(members=[_member(2, "Kim")],
+                       stored={"web-1": ["os"], "web-2": ["os"], "web-3": ["os"]})
+    service, _ = _service(backend)
+    asked = {"stop": False}
+
+    def progress(index: int, _total: int, _outcome: Any) -> None:
+        asked["stop"] = index == 1  # the user presses Stop while web-1 is sent
+
+    report = await service.share(SLUG, "member", ["os"], _targets("web-1", "web-2", "web-3"),
+                                 on_progress=progress, should_stop=lambda: asked["stop"])
+    assert [(o.status, o.reason) for o in report.outcomes] == [
+        (SHARED, ""), (NOT_SENT, STOPPED), (NOT_SENT, STOPPED)]
+    assert report.stop_reason == STOPPED
+    assert backend.writes() == [f"POST {GRANT_PATH} web-1"]
+
+
+# --- replacing a share that exists -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_new_share_after_the_revoke_says_the_old_one_is_gone():
+    backend = _Backend(members=[_member(2, "Kim")], live=[_grant("web-1")], stored={"web-1": ["os"]})
+    backend.post_errors["web-1"] = [APIError(code="x", message="boom", status=500)]
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "viewer", ["os"], _targets("web-1"), update_existing=True)
+    assert (report.outcomes[0].status, report.outcomes[0].reason) == (FAILED, REVOKED_ONLY)
+    assert "500" in report.outcomes[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_revoke_sends_nothing_and_keeps_the_share():
+    backend = _Backend(members=[_member(2, "Kim")], live=[_grant("web-1")],
+                       stored={"web-1": ["os"], "web-2": ["os"]})
+    backend.delete_errors["g-1"] = [_rate_limited("999")]
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "viewer", ["os"], _targets("web-1", "web-2"),
+                                 update_existing=True)
+    assert [(o.status, o.reason) for o in report.outcomes] == [
+        (NOT_SENT, RATE_LIMITED), (NOT_SENT, RATE_LIMITED)]
+    assert not any(c.startswith("POST") for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_share_already_gone_at_the_revoke_is_shared_afresh():
+    backend = _Backend(members=[_member(2, "Kim")], live=[_grant("web-1")], stored={"web-1": ["os"]})
+    service, _ = _service(backend)
+    backend.live = []  # revoked elsewhere after the batch read the list...
+    service._team.own_live_grants = _stale_listing([_grant("web-1")], service._team)
+    report = await service.share(SLUG, "viewer", ["os"], _targets("web-1"), update_existing=True)
+    assert report.outcomes[0].status == UPDATED
+    assert backend.writes() == [f"DELETE {GRANT_PATH}/g-1", f"POST {GRANT_PATH} web-1"]
+
+
+def _stale_listing(grants: List[Any], team: Any):
+    """own_live_grants answering from a list read before the share was revoked."""
+    from servonaut.services.memory.team_service import _parse_grant
+
+    async def own_live_grants(_slug: str, *, fresh: bool = False) -> Any:
+        return {g["instance_id"]: _parse_grant(g) for g in grants}
+
+    return own_live_grants
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_before_the_first_server_refuses_the_batch():
+    from servonaut.services.memory.bulk_share import BatchRateLimitedError
+
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os"]})
+    backend.get_errors[KEYS_PATH] = [_rate_limited("999")]
+    service, _ = _service(backend)
+    with pytest.raises(BatchRateLimitedError) as caught:
+        await service.share(SLUG, "member", ["os"], _targets("web-1"))
+    assert caught.value.retry_after == 999.0
     assert backend.writes() == []
