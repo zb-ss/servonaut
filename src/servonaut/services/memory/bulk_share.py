@@ -39,6 +39,7 @@ from servonaut.services.memory.team_service import (
     GrantAlreadyExistsError,
     InsufficientWrapsRequired,
     KeyChangedError,
+    MemorySyncLockedError,
     ShareGoneError,
     UnusableMemberKeyError,
 )
@@ -70,13 +71,6 @@ REVOKED_ONLY = "revoked_only"
 
 # A batch stops at these: every later server would meet the same answer.
 _STOPS = frozenset({RATE_LIMITED, KEY_RACE, UNAVAILABLE})
-
-
-class MemorySyncLockedError(MemoryBackendError):
-    """Raised when the caller's memory key is locked: nothing can be sealed."""
-
-    def __init__(self) -> None:
-        super().__init__("Unlock Memory Sync first. Nothing was shared.")
 
 
 class BatchRateLimitedError(MemoryBackendError):
@@ -380,7 +374,7 @@ class BulkMemoryShareService:
             return ShareOutcome(target, SKIPPED, NO_SNAPSHOT if target.probed else NEVER_PROBED)
         if isinstance(exc, (KeyChangedError, UnusableMemberKeyError, InsufficientWrapsRequired)):
             return ShareOutcome(target, FAILED, KEY_RACE)
-        if isinstance(exc, (UpsellRequired, BackendMaintenance, BetaWaitlist)):
+        if isinstance(exc, (UpsellRequired, BackendMaintenance, BetaWaitlist, MemorySyncLockedError)):
             return ShareOutcome(target, FAILED, UNAVAILABLE, failure_text(exc))
         if isinstance(exc, ReservedInstanceIdError):  # an id the service routes refuse
             return ShareOutcome(target, SKIPPED, ID_NOT_ACCEPTED)

@@ -497,3 +497,20 @@ async def test_odd_names_are_shown_literally_in_the_status_and_existing_lines(na
         screen._say_to("#share-existing-text", Content.assemble("Key changed, waiting: ", literal(name)))
         await pilot.pause()
         assert name in _text(screen, "#share-existing-text")
+
+
+async def test_a_rate_limited_envelope_read_says_so_not_that_a_key_changed():
+    from tests._bulk_share_fakes import rate_limited
+
+    backend = _Backend(members=[_member(1, "Kim Member")], inventory=["os"])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        retrieval = app.team_memory_service._retrieval_service
+        retrieval.get_module_envelope_raw.side_effect = rate_limited("120")
+        screen.query_one("#share-btn-confirm", Button).press()
+        await _settle(pilot, screen, lambda: "limiting requests" in _text(screen, "#share-status"),
+                      "the rate-limit message")
+        assert "key changed" not in _text(screen, "#share-status").lower()
+        assert "try again in 2 min" in _text(screen, "#share-status")
+        assert not backend.posted

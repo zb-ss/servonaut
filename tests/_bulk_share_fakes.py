@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import nacl.public
 
 import servonaut.services.memory.crypto as crypto_module
-from servonaut.services.api_client import APIClient, RateLimitedError
+from servonaut.services.api_client import APIClient, NotFoundError, RateLimitedError
 from servonaut.services.memory.interfaces import MemoryNotFound
 from servonaut.services.memory.team_service import TeamMemoryService
 
@@ -58,6 +58,11 @@ class FakeTeamBackend:
         self.posted: List[Dict[str, Any]] = []
         # instance id -> errors the next grant POSTs for it raise, in order.
         self.post_errors: Dict[str, List[Exception]] = {}
+        # Errors the next calls raise, in order: GETs by path, revokes by
+        # grant id, the owner's envelope reads by "<instance id>/<module>".
+        self.get_errors: Dict[str, List[Exception]] = {}
+        self.delete_errors: Dict[str, List[Exception]] = {}
+        self.envelope_errors: Dict[str, List[Exception]] = {}
         self.pending: Dict[str, List[Dict[str, Any]]] = {}
         self.api = MagicMock(spec=APIClient)
         self.api.get.side_effect = self._get
@@ -66,6 +71,9 @@ class FakeTeamBackend:
 
     async def _get(self, path: str, **_kw: Any) -> Dict[str, Any]:
         self.calls.append(f"GET {path}")
+        queued = self.get_errors.get(path, [])
+        if queued:
+            raise queued.pop(0)
         if path == KEYS_PATH:
             return {"members": self.members}
         return {"instances": [
@@ -87,7 +95,12 @@ class FakeTeamBackend:
     async def _delete(self, path: str, **_kw: Any) -> Dict[str, Any]:
         self.calls.append(f"DELETE {path}")
         grant_id = path.rsplit("/", 1)[1]
-        found = next(g for g in self.live if g["id"] == grant_id)
+        queued = self.delete_errors.get(grant_id, [])
+        if queued:
+            raise queued.pop(0)
+        found = next((g for g in self.live if g["id"] == grant_id), None)
+        if found is None:
+            raise NotFoundError(code="not_found", message="no such grant", status=404)
         return {**found, "status": "revoked", "revoked_at": "2026-10-02T10:00:00Z"}
 
     def writes(self) -> List[str]:
@@ -111,7 +124,10 @@ def _retrieval(backend: "FakeTeamBackend", owner: Any) -> MagicMock:
             raise MemoryNotFound("access_revoked")
         return {"modules": list(backend.stored[instance_id])}
 
-    async def raw(_instance_id: str, module: str) -> Dict[str, Any]:
+    async def raw(instance_id: str, module: str) -> Dict[str, Any]:
+        queued = backend.envelope_errors.get(f"{instance_id}/{module}", [])
+        if queued:
+            raise queued.pop(0)
         env = crypto_module.encrypt_envelope(
             b"{}", self_public_key=owner.public_key, self_user_id=owner.user_id).to_dict()
         return {"id": f"e-{module}", "wrapped_dek": env["dek_wraps"][0]["wrapped_dek"]}
@@ -120,8 +136,6 @@ def _retrieval(backend: "FakeTeamBackend", owner: Any) -> MagicMock:
     retrieval.list_instance_modules.side_effect = modules
     retrieval.get_module_envelope_raw.side_effect = raw
     return retrieval
-
-
 
 
 def team_memory_service(backend: "FakeTeamBackend", *, locked: bool = False) -> TeamMemoryService:

@@ -33,6 +33,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
 from servonaut.services.memory.interfaces import MemoryBackendError
+from servonaut.services.retry_after import is_rate_limited, retry_after_seconds, wait_text
 from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -393,6 +394,9 @@ class ShareInstanceScreen(Screen):
                 f"{what}: the service sent a memory key for {who} that does not "
                 "match its fingerprint. Nothing was changed."
             )
+        if is_rate_limited(exc):
+            wait = wait_text(retry_after_seconds(exc))
+            return f"{what}: the service is limiting requests; {wait}."
         if getattr(self.app, "demo_mode", False):
             return f"{what}. Turn demo mode off to see why."
         return f"{what}: {exc}"

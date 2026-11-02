@@ -145,6 +145,17 @@ class UnusableMemberKeyError(MemoryBackendError):
         )
 
 
+class MemorySyncLockedError(MemoryBackendError):
+    """Raised when sharing needs the caller's memory key and it is locked.
+
+    Nothing is revoked or posted: without the key no data key can be sealed
+    for a member.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Unlock Memory Sync first. Nothing was shared.")
+
+
 class ShareGoneError(MemoryBackendError):
     """Raised when a share is no longer live (HTTP 404 or 409 from the service)."""
 
@@ -721,6 +732,8 @@ class TeamMemoryService:
             wraps: List[Dict[str, Any]] = []
         else:
             key_material = self._key_store_provider()
+            if key_material is None:
+                raise MemorySyncLockedError()
             wraps = await self._build_wraps(
                 instance_id=instance_id,
                 module_names=module_names,
@@ -890,9 +903,12 @@ class TeamMemoryService:
 
         There is no purge in between: the service reuses the wraps that are
         already stored, so deleting them would only recreate them. A failed
-        revoke raises before any new grant is requested.
+        revoke raises before any new grant is requested, and so does a locked
+        memory key: the share is never stopped when no new one can be made.
         """
         self._refuse_changed_keys(team_slug, self.eligible_members(member_pubkeys, required_role))
+        if not self.is_unlocked():
+            raise MemorySyncLockedError()
         await self.revoke_grant(team_slug, grant_id)
         return await self.share_instance(
             team_slug, instance_id, required_role, modules, member_pubkeys
@@ -929,16 +945,19 @@ class TeamMemoryService:
             if not module_name:
                 continue
 
-            # Fetch the raw (encrypted) envelope from the server
+            # Fetch the raw (encrypted) envelope from the server. Only a module
+            # with no envelope is left out: any other failed read (a rate
+            # limit, a server error) is raised, because a grant missing that
+            # module's wraps would be refused as insufficient_wraps and read
+            # as a member's changed key.
             try:
                 raw_env = await self._retrieval_service.get_module_envelope_raw(
                     instance_id, module_name
                 )
             except Exception as exc:
-                logger.warning(
-                    "Could not fetch envelope for %r/%r: %s — skipping",
-                    instance_id, module_name, exc
-                )
+                if not _is_missing(exc):
+                    raise
+                logger.info("No envelope for module %r — skipping", module_name)
                 continue
 
             actual_env_id = raw_env.get("id")
@@ -1264,6 +1283,14 @@ class TeamMemoryService:
 # ---------------------------------------------------------------------------
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+
+
+def _is_missing(exc: BaseException) -> bool:
+    """Whether *exc* says there is nothing stored there (a 404), as opposed to a failure."""
+    from servonaut.services.api_client import APIError
+    from servonaut.services.memory.interfaces import MemoryNotFound
+
+    return isinstance(exc, MemoryNotFound) or (isinstance(exc, APIError) and exc.status == 404)
 
 
 def _optional_str(value: Any) -> Optional[str]:

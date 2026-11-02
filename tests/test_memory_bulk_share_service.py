@@ -321,3 +321,25 @@ def test_the_rate_limit_settings_fall_back_when_they_are_unusable():
     cfg = MemoryConfig(team_wrap_retry_seconds=float("nan"), team_wrap_max_wait_seconds=-1)
     defaults = MemoryConfig()
     assert cfg.team_wrap_wait() == (defaults.team_wrap_retry_seconds, defaults.team_wrap_max_wait_seconds)
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_envelope_read_is_retried_not_reported_as_a_key_change():
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os", "logs"]})
+    backend.envelope_errors["web-1/logs"] = [_rate_limited("3")]
+    service, sleeps = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1"))
+    assert report.outcomes[0].status == SHARED
+    assert sleeps.waits == [3.0]
+    assert {w["envelope_id"] for w in backend.posted[0]["wraps"]} == {"e-os", "e-logs"}
+
+
+@pytest.mark.asyncio
+async def test_an_envelope_read_that_stays_rate_limited_stops_the_batch():
+    backend = _Backend(members=[_member(2, "Kim")], stored={"web-1": ["os"], "web-2": ["os"]})
+    backend.envelope_errors["web-1/os"] = [_rate_limited("2"), _rate_limited("2")]
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os"], _targets("web-1", "web-2"))
+    assert [(o.status, o.reason) for o in report.outcomes] == [
+        (NOT_SENT, RATE_LIMITED), (NOT_SENT, RATE_LIMITED)]
+    assert backend.writes() == []
