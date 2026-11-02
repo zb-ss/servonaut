@@ -456,7 +456,7 @@ class TeamMemoryService:
         """Drop the remembered list of *team_slug*: a share just changed."""
         self._shared_memo.pop(team_slug, None)
 
-    def _caller_user_id(self) -> Optional[int]:
+    def caller_user_id(self) -> Optional[int]:
         """The caller's user id: from the memory key, else the signed-in account."""
         for source in (self._key_store_provider(), self._auth):
             user_id = getattr(source, "user_id", None)
@@ -473,7 +473,7 @@ class TeamMemoryService:
         cannot be told. *fresh* asks the service again instead of reusing a
         remembered list.
         """
-        caller = self._caller_user_id()
+        caller = self.caller_user_id()
         if caller is None:
             return {}
         if fresh:

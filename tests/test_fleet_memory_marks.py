@@ -54,10 +54,10 @@ def _probe(store: MemoryStore, instance_id: str) -> None:
     store.update_index(instance_id, instance_id, "custom", ["os"])
 
 
-def _listing(instance_id: str) -> SharedInstance:
+def _listing(instance_id: str, granted_by: int = 9) -> SharedInstance:
     grant = Grant(
         id="g-9", instance_id=instance_id, required_role="member", modules=None,
-        status="active", granted_by_user_id=9,
+        status="active", granted_by_user_id=granted_by,
         created_at=datetime.fromisoformat("2026-10-01T10:00:00+00:00"), revoked_at=None,
     )
     return SharedInstance(grant=grant, readable_modules=["os"], instance={
@@ -73,7 +73,8 @@ class _Team:
         return list(self.listings.get(slug, []))
 
 
-def _host(tmp_path, *, rows=None, listings=None, entitled: bool = True, opt_out=()):
+def _host(tmp_path, *, rows=None, listings=None, entitled: bool = True, opt_out=(),
+          caller: int = 1):
     store = MemoryStore(root=tmp_path, redactor=noop_redactor)
     _probe(store, "web-1")
     config = MemoryConfig(per_server_overrides={i: {"memory_disabled": True} for i in opt_out})
@@ -93,7 +94,8 @@ def _host(tmp_path, *, rows=None, listings=None, entitled: bool = True, opt_out=
         instances = listed
         fleet_service = None
         auth_service = auth
-        team_memory_service = None
+        # Only who the user is: the marks never call the service.
+        team_memory_service = MagicMock(caller_user_id=MagicMock(return_value=caller))
 
         def compose(self) -> ComposeResult:
             yield SafeHeader()
@@ -299,3 +301,34 @@ async def test_a_row_scanned_while_shown_as_a_teams_copy_counts_as_probed(tmp_pa
         assert screen._share_target(row).probed is True
         row.update(status=STATUS_SHARED)
         assert screen._share_target(row).probed is False
+
+
+# A server the user lists but has no memory of, shown from a team's list.
+LISTED_ONLY = {"id": "i-owner-9", "name": "web-9", "provider": "aws", "public_ip": "10.0.0.9"}
+
+
+async def test_a_teammates_copy_of_a_listed_server_cannot_be_marked(tmp_path):
+    app = _host(tmp_path, rows=[LISTED_ONLY], listings={"team-a": [_listing("i-owner-9")]})
+    async with app.run_test(headless=True) as pilot:
+        screen = await _ready(app, pilot, rows=1)
+        await _wait_for(pilot, lambda: "Shared" in str(_table(app).get_row_at(0)[4]),
+                        "the team's copy shown")
+        await pilot.press("space")
+        assert screen.marked_ids() == []
+        assert any("read-only" in n for n in app.notes)
+        await pilot.press("m")
+        assert screen.marked_ids() == []
+        await pilot.press("S")
+        await pilot.pause(0.1)
+        assert app.screen is screen  # no share form for someone else's server
+
+
+async def test_the_users_own_share_shown_from_the_teams_list_can_be_marked(tmp_path):
+    app = _host(tmp_path, rows=[LISTED_ONLY],
+                listings={"team-a": [_listing("i-owner-9", granted_by=1)]})
+    async with app.run_test(headless=True) as pilot:
+        screen = await _ready(app, pilot, rows=1)
+        await _wait_for(pilot, lambda: "Shared" in str(_table(app).get_row_at(0)[4]),
+                        "the share shown")
+        await pilot.press("space")
+        assert screen.marked_ids() == ["i-owner-9"]

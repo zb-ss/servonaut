@@ -880,11 +880,42 @@ class FleetMemoryScreen(Screen):
         """Only the user's own servers: a team's shared server is read-only."""
         from servonaut.services.shared_servers import is_shared_row
 
-        if row.get("memory_only"):
+        if row.get("memory_only") or self._only_a_teams_copy(row):
             return False
         inst = row.get("instance") or {}
         real = connection_instance(self.app, inst)
         return not (is_shared_row(inst) or (isinstance(real, dict) and is_shared_row(real)))
+
+    def _only_a_teams_copy(self, row: Dict[str, Any]) -> bool:
+        """True for a row shown only from teams' lists, none of them the user's own share.
+
+        Such a row has no memory of the user's on this computer (its status is
+        the team's), and someone else shared it, so there is nothing of the
+        user's to share. A share the user made, shown the same way because
+        its memory is on the service only, stays the user's.
+        """
+        if row.get("status") != STATUS_SHARED:
+            return False
+        reader = getattr(self.app, "shared_memory_reader", None)
+        candidates = row.get("grant_candidates") or []
+        if reader is None or not candidates:
+            return False
+        caller = self._caller_user_id()
+        granters = {
+            listing.granted_by_user_id for c in candidates
+            if (listing := reader.cached_listing(c.team_slug, c.instance_id)) is not None
+        }
+        return caller is None or caller not in granters
+
+    def _caller_user_id(self) -> Optional[int]:
+        """The signed-in user, as the team memory service knows them, or None."""
+        service = getattr(self.app, "team_memory_service", None)
+        getter = getattr(service, "caller_user_id", None)
+        try:
+            caller = getter() if callable(getter) else None
+        except Exception:  # noqa: BLE001 — unknown: the row stays read-only
+            return None
+        return caller if isinstance(caller, int) and not isinstance(caller, bool) else None
 
     def marked_ids(self) -> List[str]:
         """The keys of the marked rows, in table order."""
@@ -1024,7 +1055,7 @@ class FleetMemoryScreen(Screen):
         if not marked and not row:
             self.app.notify("Select a row first.", severity="warning")
             return
-        if not marked and row.get("memory_only"):
+        if not marked and (row.get("memory_only") or self._only_a_teams_copy(row)):
             self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
         auth = getattr(self.app, "auth_service", None)
