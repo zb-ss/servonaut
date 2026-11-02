@@ -268,3 +268,34 @@ async def test_marks_stay_when_the_bulk_form_is_cancelled(tmp_path):
         await pilot.press("escape")
         await _wait_for(pilot, lambda: app.screen is screen, "the fleet again")
         assert screen.marked_ids() == ["web-1"]
+
+
+async def test_marks_survive_a_demo_toggle(tmp_path):
+    app = _host(tmp_path)
+    async with app.run_test(headless=True) as pilot:
+        screen = await _ready(app, pilot)
+        await pilot.press("space")  # marks web-1
+        # Demo mode redacts the listed rows in place; the app maps stand-ins back.
+        stand_ins = {f"fake-{row['id']}": row["id"] for row in OWN_ROWS}
+        app.real_instance_id = lambda i: stand_ins.get(i, i)
+        app.instances[:] = [{**row, "id": f"fake-{row['id']}", "name": "stand-in"} for row in OWN_ROWS]
+        screen.refresh_after_demo_toggle()
+        await _wait_for(pilot, lambda: "fake-web-1" in str(_table(app).get_row_at(0)[1]), "the redacted rows")
+        assert screen.marked_ids() == ["web-1"]
+        assert "✓" in _names(app)[0]
+
+
+async def test_a_row_scanned_while_shown_as_a_teams_copy_counts_as_probed(tmp_path):
+    from servonaut.services.memory.status import STATUS_FRESH, STATUS_NONE
+    from servonaut.screens.fleet_memory import STATUS_SHARED
+
+    app = _host(tmp_path)
+    async with app.run_test(headless=True) as pilot:
+        screen = await _ready(app, pilot)
+        row = dict(screen._rows[1])
+        # Shown as the team's copy, then probed here: the live scan writes the
+        # row's status, while the status underneath the decoration is older.
+        row.update(status=STATUS_FRESH, _before_share={"status": STATUS_NONE})
+        assert screen._share_target(row).probed is True
+        row.update(status=STATUS_SHARED)
+        assert screen._share_target(row).probed is False

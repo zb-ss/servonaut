@@ -867,10 +867,14 @@ class FleetMemoryScreen(Screen):
     # Marks: the user's own servers picked to share together
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _row_key(row: Dict[str, Any]) -> str:
-        """What a mark is kept under: the row's id, stable across redraws."""
-        return str(row.get("raw_id") or row.get("id") or "")
+    def _row_key(self, row: Dict[str, Any]) -> str:
+        """What a mark is kept under: the row's real id.
+
+        Real, not as listed: demo mode lists stand-ins, and a mark must
+        survive it being turned on or off.
+        """
+        listed = str(row.get("raw_id") or row.get("id") or "")
+        return str(real_instance_id(self.app, listed) or listed)
 
     def _is_markable(self, row: Dict[str, Any]) -> bool:
         """Only the user's own servers: a team's shared server is read-only."""
@@ -895,7 +899,9 @@ class FleetMemoryScreen(Screen):
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))
-        return f"[bold]✓[/bold] {name}" if self._row_key(row) in self._marked else name
+        if self._marked and self._row_key(row) in self._marked:
+            return f"[bold]✓[/bold] {name}"
+        return name
 
     def _status_line(self) -> str:
         """The status summary, led by the mark count while servers are marked.
@@ -950,8 +956,11 @@ class FleetMemoryScreen(Screen):
         real = real if isinstance(real, dict) else inst
         instance_id = str(real.get("id") or real.get("name") or "")
         name = display_name(real) if real.get("account_qualified") else str(real.get("name") or "")
-        # A row a team's listing decorated keeps its own status underneath.
-        status = (row.get("_before_share") or {}).get("status", row.get("status"))
+        # A row shown as a team's copy keeps its own status underneath, but a
+        # scan since then writes the row's status itself.
+        status = row.get("status")
+        if status == STATUS_SHARED:
+            status = (row.get("_before_share") or {}).get("status", status)
         return ShareTarget(
             instance_id=instance_id,
             label=name or instance_id,
