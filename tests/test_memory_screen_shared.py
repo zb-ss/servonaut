@@ -67,6 +67,17 @@ def _reader(shared: Any) -> MagicMock:
     return reader
 
 
+async def _notes(app, pilot, expected: str) -> str:
+    """The Notes panel's text once it shows *expected*."""
+    text = ""
+    for _ in range(200):
+        await pilot.pause(0.05)
+        text = str(app.screen.query_one("#memory-notes", Static).render())
+        if expected in text:
+            break
+    return text
+
+
 async def _cells(app, pilot) -> list:
     for _ in range(200):
         await pilot.pause(0.05)
@@ -156,10 +167,13 @@ async def test_shared_notes_and_findings_are_shown_read_only(tmp_path):
     })
     app = _host(tmp_path, dict(SHARED_ROW), _reader(shared))
     async with app.run_test(headless=True) as pilot:
-        rows = await _cells(app, pilot)
-        assert ["annotations", "note", "Restart workers after deploy."] == [str(c) for c in rows[0][:3]]
+        notes = await _notes(app, pilot, "Restart workers")
+        assert notes == "Shared by Team A (read-only)\nRestart workers after deploy."
+        # Notes have their own panel; the module table lists probe results only.
+        assert app.screen.query_one("#memory-table", DataTable).row_count == 0
     # Nothing was written into the member's own editable record.
     assert app.memory_service.get_all_modules("share-1", "shared") == {}
+    assert app.memory_service.read_annotations("share-1", "shared") == ""
 
 
 MEMORY_ONLY_ROW: Dict[str, Any] = {
@@ -256,17 +270,18 @@ async def test_annotate_is_off_for_a_memory_only_row(tmp_path):
 
 
 async def test_shared_authored_text_is_shown_literally(tmp_path):
-    from rich.text import Text
-
     shared = SharedMemory("team-a", "Team A", {
         "annotations": {"observed": {"note": "[bold]Keep literal[/bold] and [/]"}, "declared": {},
                         "probed_at": "2026-10-20T08:00:00+00:00"},
     })
     app = _host(tmp_path, dict(SHARED_ROW), _reader(shared))
     async with app.run_test(headless=True) as pilot:
-        rows = await _cells(app, pilot)
-        cell = rows[0][2]
-        assert isinstance(cell, Text) and cell.plain == "[bold]Keep literal[/bold] and [/]"
+        await _notes(app, pilot, "Keep literal")
+        rendered = app.screen.query_one("#memory-notes", Static).render()
+        label = "Shared by Team A (read-only)\n"
+        assert rendered.plain == label + "[bold]Keep literal[/bold] and [/]"
+        # The only style is the label's: the note's own text is not markup.
+        assert all(span.end <= len(label) for span in rendered.spans)
 
 
 async def test_disjoint_grants_from_two_teams_both_show_with_their_own_label(tmp_path):

@@ -523,3 +523,74 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     min-width: 12;
 }
 
+/* Notes and agent findings: authored text, below the module actions */
+#memory-authored {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.memory-section-heading {
+    height: auto;
+    margin-top: 1;
+}
+
+#memory-notes {
+    height: auto;
+    padding: 0 1;
+    border-left: thick $primary;
+}
+
+#memory-findings-notice {
+    height: auto;
+    color: $text-muted;
+}
+
+#memory-findings-table {
+    height: auto;
+    max-height: 12;
+}
+
+#memory-findings-empty {
+    height: auto;
+    color: $text-muted;
+}
+
+/* One finding in full (MemoryFindingScreen) */
+#memory-finding-container {
+    width: 1fr;
+    padding: 1 1 0 1;
+}
+
+#memory-finding-server {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#memory-finding-notice {
+    height: auto;
+    color: $text-muted;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: thick $warning;
+}
+
+#memory-finding-scroll {
+    height: 1fr;
+    border: round $primary;
+    background: $surface;
+    padding: 0 1;
+}
+
+#memory-finding-title,
+#memory-finding-meta,
+#memory-finding-body,
+#memory-finding-chain {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#memory-finding-actions {
+    height: auto;
+    align: right middle;
+    padding: 1 0;
+}

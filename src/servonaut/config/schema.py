@@ -1277,6 +1277,9 @@ class MemoryConfig:
     # Maximum characters budgeted for the findings title index when building
     # a summary or injector context block.
     findings_index_char_cap: int = 1200
+    # Lines of a server's notes the Memory screen shows before it says how
+    # many more there are (the whole text opens with ``a``).
+    notes_preview_lines: int = 12
 
     # ------------------------------------------------------------------
     # Auto-scan / auto-sync feature flags (ADDITIVE — no migration needed)

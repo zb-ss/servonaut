@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
 from rich.text import Text
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
@@ -37,7 +37,17 @@ from servonaut.services.memory.shared_view import (
     share_candidates,
     shared_source_text,
 )
+from servonaut.screens.memory_authored import (
+    AUTHORED_MODULES,
+    MemoryFindingScreen,
+    finding_rows,
+    findings_heading,
+    notes_renderable,
+    shared_findings,
+    shared_notes_text,
+)
 from servonaut.services.memory.notes import has_notes, notes_for_display, notes_template
+from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.status import (
@@ -396,6 +406,7 @@ class MemoryScreen(Screen):
         Binding("S", "sync_now", "Sync Server", show=True),
         Binding("A", "enhance_with_ai", "Enhance Local", show=True),
         Binding("H", "build_ai_summary", "Generate Hosted", show=True),
+        Binding("f", "toggle_superseded", "Superseded", show=False),
     ]
 
     # Actions that reach the server itself or change its stored memory.
@@ -416,6 +427,10 @@ class MemoryScreen(Screen):
     # defaults so a screen built without ``__init__`` still renders.
     _shared: Any = None
     _shared_requested = False
+    # Findings panel: superseded findings are hidden until ``f`` shows them;
+    # each table row key maps to (record, the list it came from).
+    _show_superseded = False
+    _findings_by_key: Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]] = {}
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._read_only and action in self._HOST_ACTIONS:
@@ -518,6 +533,17 @@ class MemoryScreen(Screen):
                     Button("a. Annotate", id="btn_annotate"),
                     id="memory-actions",
                 ),
+                # Authored text: the operator's notes and agents' findings.
+                Container(
+                    Static(Text("Notes", style="bold"), id="memory-notes-heading",
+                           classes="memory-section-heading"),
+                    Static("", id="memory-notes"),
+                    Static("", id="memory-findings-heading", classes="memory-section-heading"),
+                    Static(FINDINGS_READER_NOTICE, id="memory-findings-notice", markup=False),
+                    DataTable(id="memory-findings-table"),
+                    Static("", id="memory-findings-empty", classes="hidden"),
+                    id="memory-authored",
+                ),
                 Horizontal(
                     Static(
                         "[bold]Local summary[/bold]  [dim]Built on this device; "
@@ -576,6 +602,12 @@ class MemoryScreen(Screen):
         table.add_column("Declared", key="declared")
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
+        findings = self.query_one("#memory-findings-table", DataTable)
+        findings.cursor_type = "row"
+        findings.add_column("Title", key="title")
+        findings.add_column("Source", key="source")
+        findings.add_column("Confidence", key="confidence")
+        findings.add_column("Created", key="created")
         self._render_table()
         self._apply_read_only()
         self._request_shared()
@@ -619,6 +651,11 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
 
     def _render_table(self) -> None:
+        """Redraw the module table and the notes and findings panels."""
+        self._render_modules()
+        self._render_authored()
+
+    def _render_modules(self) -> None:
         """Populate the DataTable with stored memory module data.
 
         Checks opt-out first; shows the banner and clears the table if
@@ -663,7 +700,11 @@ class MemoryScreen(Screen):
             return
 
         local_modules = all_modules
-        all_modules = merge_shared(local_modules, self._shared)
+        # Notes and findings have their own panels (see _render_authored).
+        all_modules = {
+            name: module for name, module in merge_shared(local_modules, self._shared).items()
+            if name not in AUTHORED_MODULES
+        }
         # Modules shown from the team's copy: their text is the owner's, so
         # it is drawn literally (never as markup).
         shared_names = {
@@ -746,6 +787,143 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _render_authored(self) -> None:
+        """Fill the Notes and Agent findings panels.
+
+        The user's own notes and findings come first; a team's shared copy
+        is added (read-only, labelled) only where the share includes them.
+        Hidden when memory is off for this server.
+        """
+        section = self.query_one("#memory-authored")
+        memory_service = getattr(self.app, "memory_service", None)
+        instance_id = self._target.get("id") or self._target.get("name", "")
+        provider = instance_provider(self._target)
+        if memory_service is None or self._is_opted_out(instance_id, memory_service):
+            section.add_class("hidden")
+            return
+        section.remove_class("hidden")
+        own_notes, own_findings = self._read_own_authored(memory_service, instance_id, provider)
+        modules = self._shared.modules if self._shared is not None else {}
+        notes_team = self._shared_team("annotations")
+        notes_shared = shared_notes_text(modules.get("annotations"))
+        if notes_for_display(notes_shared) in notes_for_display(own_notes):
+            notes_shared = ""  # the team holds the user's own notes
+        scrub = self._authored_scrub()
+        self.query_one("#memory-notes", Static).update(notes_renderable(
+            own_notes, notes_shared, notes_team,
+            preview_lines=self._memory_setting("notes_preview_lines", 12),
+            can_edit=not self._read_only,
+            scrub=scrub,
+        ))
+        own_ids = {record.get("id") for record in own_findings}
+        team_findings = [
+            record for record in shared_findings(modules.get("findings"), self._shared_team("findings"))
+            if record.get("id") not in own_ids
+        ]
+        self._render_findings(own_findings, team_findings, scrub)
+
+    def _render_findings(
+        self,
+        own: List[Dict[str, Any]],
+        shared: List[Dict[str, Any]],
+        scrub: Callable[[str], str],
+    ) -> None:
+        threshold = float(self._memory_setting("findings_confidence_threshold", 0.6))
+        table = self.query_one("#memory-findings-table", DataTable)
+        table.clear()
+        self._findings_by_key = {}
+        everything = [*own, *shared]
+        superseded = sum(1 for record in everything if record.get("superseded_by"))
+        active = len(everything) - superseded
+        for origin in (own, shared):
+            for row in finding_rows(
+                origin, threshold=threshold, show_superseded=self._show_superseded, scrub=scrub,
+            ):
+                table.add_row(*row.cells, key=row.key)
+                self._findings_by_key[row.key] = (row.record, origin)
+        self.query_one("#memory-findings-heading", Static).update(
+            findings_heading(active, superseded, self._show_superseded)
+        )
+        empty = self.query_one("#memory-findings-empty", Static)
+        has_rows = bool(self._findings_by_key)
+        table.display = has_rows
+        self.query_one("#memory-findings-notice").display = has_rows
+        empty.set_class(has_rows, "hidden")
+        if not has_rows:
+            empty.update(Text(
+                "No findings recorded yet. AI agents save what they learn about "
+                "this server here.",
+                style="dim",
+            ))
+
+    def _read_own_authored(
+        self, memory_service: Any, instance_id: str, provider: str
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """This device's notes and findings for the server (empty on failure)."""
+        notes: Any = ""
+        findings: Any = []
+        try:
+            notes = memory_service.read_annotations(instance_id, provider)
+            findings = memory_service.list_findings(
+                instance_id, provider, include_superseded=True,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read notes or findings for %s: %s", instance_id, exc)
+        notes = notes if isinstance(notes, str) else ""
+        findings = [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
+        return notes, findings
+
+    def _shared_team(self, module: str) -> str:
+        """The team a shared *module* came from, as it may be shown."""
+        shared = self._shared
+        if shared is None:
+            return ""
+        team = shared.sources.get(module) or shared.team_name
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            return redaction.redact_name(team)
+        return team
+
+    def _authored_scrub(self) -> Callable[[str], str]:
+        """Demo mode's scrub for authored text; the identity otherwise."""
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            return redaction.scrub_stream
+        return lambda text: text
+
+    def _memory_setting(self, name: str, default: Any) -> Any:
+        """A ``memory`` setting, or *default* when unset or of another type."""
+        config_manager = getattr(self.app, "config_manager", None)
+        try:
+            value = getattr(config_manager.get().memory, name)
+        except AttributeError:
+            return default
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        return value
+
+    def action_toggle_superseded(self) -> None:
+        """Show or hide the findings later ones replaced."""
+        self._show_superseded = not self._show_superseded
+        self._render_authored()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a finding opens it in full."""
+        if event.data_table.id != "memory-findings-table":
+            return
+        event.stop()
+        entry = self._findings_by_key.get(str(event.row_key.value))
+        if entry is None:
+            return
+        record, origin = entry
+        name = display_name(self._instance) or self._instance.get("id") or "server"
+        self.app.push_screen(MemoryFindingScreen(
+            record, origin,
+            server_name=str(name),
+            threshold=float(self._memory_setting("findings_confidence_threshold", 0.6)),
+            scrub=self._authored_scrub(),
+        ))
 
     def _request_shared(self) -> None:
         """Once per screen, look for memory a team shares of this server.

@@ -185,10 +185,22 @@ _ALLOWLIST: List[AllowlistEntry] = [
 
     # Memory screen — module-name and key columns are taxonomy (scrub is intentionally
     # skipped for those). obs_str and decl_str ARE scrubbed inside _render_table.
-    AllowlistEntry("screens/memory.py", "_render_table", "add_row",
-                   "obs_str and decl_str are scrubbed inside _render_table before "
+    AllowlistEntry("screens/memory.py", "_render_modules", "add_row",
+                   "obs_str and decl_str are scrubbed inside _render_modules before "
                    "add_row. module_name and key are taxonomy — not scrubbed by "
                    "design (plan §8 item 7)."),
+    # Notes and agent findings: authored text is scrubbed by the helpers in
+    # screens/memory_authored.py, which receive _authored_scrub()
+    # (redaction_service.scrub_stream in demo mode); team names go through
+    # redact_name in _shared_team.
+    AllowlistEntry("screens/memory.py", "_render_authored", "update",
+                   "notes_renderable() scrubs the notes and the team label with "
+                   "_authored_scrub() before the panel is updated."),
+    AllowlistEntry("screens/memory.py", "_render_findings", "add_row",
+                   "finding_rows() scrubs titles and team labels with "
+                   "_authored_scrub() before the cells reach add_row."),
+    AllowlistEntry("screens/memory.py", "_render_findings", "update",
+                   "The heading shows counts only; the empty line is fixed text."),
 
     # fleet_memory.py — shows module status summary (count of modules, last probe
     # time) — no raw output values.

@@ -260,6 +260,44 @@ def seed_home() -> None:
     _seed_memory(FOCUS_SERVER, FROZEN_NOW - timedelta(hours=2))
 
 
+#: Notes and findings for the focus server, written by ``seed_authored``.
+NOTES = (
+    "## Runbook\n"
+    "\n"
+    "Restart php-fpm after each deploy; nginx answers 502 until it is back.\n"
+    "Logs rotate daily at 03:00.\n"
+)
+
+
+def _finding(fid: str, title: str, days_ago: int, confidence: float, **extra: Any) -> dict:
+    stamp = (FROZEN_NOW - timedelta(days=days_ago)).isoformat()
+    return {
+        "id": fid, "instance_id": FOCUS_SERVER["id"], "title": title,
+        "body": "Seen in the deploy logs.", "tags": ["deploy"], "confidence": confidence,
+        "source": "agent", "created_at": stamp, "updated_at": stamp,
+        "superseded_by": None, **extra,
+    }
+
+
+FINDINGS: List[dict] = [
+    _finding("f_0000000000000000old", "nginx reload needs php-fpm first", 30, 0.9,
+             superseded_by="f_0000000000000000new"),
+    _finding("f_0000000000000000new", "nginx reload waits for the php-fpm socket", 12, 0.9),
+    _finding("f_0000000000000000low", "cron may run twice on a DST change", 3, 0.4),
+]
+
+
+def seed_authored(memory_service: Any) -> None:
+    """Give the focus server notes and findings, with fixed timestamps."""
+    host = FOCUS_SERVER
+    provider = instance_provider(host)
+    memory_service.write_annotations(host["id"], NOTES, provider)
+    # The public API stamps findings with the current time; the snapshot
+    # needs fixed dates, so the records are stored as they are.
+    for record in FINDINGS:
+        memory_service._store.save_finding(host["id"], dict(record), provider)
+
+
 def _seed_memory(host: dict, probed_at: datetime) -> None:
     """Store module snapshots for *host* exactly as a probe would."""
     store = MemoryStore()
