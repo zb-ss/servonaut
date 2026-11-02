@@ -101,7 +101,11 @@ async def test_annotate_the_server_notes(tui, seed, journey, sshd):
         await t.wait_for_toast(r"^Memory refreshed\.$")
         await t.press("a")
         await t.wait_for_screen("TextEditorModal")
-        await t.click("#text-editor-area")
+        # Type where the editor opens (the top of the file). A click lands
+        # mid-template, inside its primer comment, which notes never show.
+        editor = t.on_screen("#text-editor-area")
+        editor.focus()
+        await t.wait_until(lambda: editor.has_focus, desc="the editor focused")
         await t.type(NOTE)
         await t.press("ctrl+s")
         await t.wait_for_screen("MemoryScreen")
