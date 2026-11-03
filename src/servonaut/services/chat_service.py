@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from servonaut.config.manager import ConfigManager
+from servonaut.mcp.agent_guidance import RECORD_FINDINGS_GUIDANCE
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,19 @@ def _load_default_system_prompt() -> str:
             "log analysis, networking, and general DevOps questions. "
             "Be concise and practical."
         )
+
+
+def _with_tool_guidance(system_prompt: str, tool_defs: List[Dict[str, Any]]) -> str:
+    """Append the guidance for tools the model is offered this turn.
+
+    Applied wherever the model is given tools, so a custom system prompt gets
+    it too: the tool definitions reach every prompt alike. Without the tool
+    (no tools, or a guard level that hides it) the prompt is unchanged.
+    """
+    offered = {definition.get("name") for definition in tool_defs}
+    if "remember_server_finding" not in offered:
+        return system_prompt
+    return f"{system_prompt}\n\n{RECORD_FINDINGS_GUIDANCE}"
 
 
 class ChatService:
@@ -478,6 +492,7 @@ class ChatService:
 
         # Get tool definitions formatted for the provider
         tool_defs = self._tool_executor.get_tool_definitions()
+        system_prompt = _with_tool_guidance(system_prompt, tool_defs)
         provider_tools = self._format_tools_for_provider(tool_defs, provider_name)
 
         # Build initial API messages from session history

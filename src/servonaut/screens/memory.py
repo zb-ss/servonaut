@@ -37,8 +37,22 @@ from servonaut.services.memory.shared_view import (
     share_candidates,
     shared_source_text,
 )
+from servonaut.screens.memory_authored import (
+    AUTHORED_MODULES,
+    MemoryFindingScreen,
+    Redact,
+    display_record,
+    finding_rows,
+    findings_heading,
+    notes_renderable,
+    shared_findings,
+    shared_notes_text,
+)
+from servonaut.services.memory.notes import notes_for_display, notes_template
+from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
+from servonaut.services.memory.team_merge import is_contained_text
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -395,6 +409,7 @@ class MemoryScreen(Screen):
         Binding("S", "sync_now", "Sync Server", show=True),
         Binding("A", "enhance_with_ai", "Enhance Local", show=True),
         Binding("H", "build_ai_summary", "Generate Hosted", show=True),
+        Binding("f", "toggle_superseded", "Superseded", show=False),
     ]
 
     # Actions that reach the server itself or change its stored memory.
@@ -415,6 +430,12 @@ class MemoryScreen(Screen):
     # defaults so a screen built without ``__init__`` still renders.
     _shared: Any = None
     _shared_requested = False
+    # Findings panel: superseded findings are hidden until ``f`` shows them;
+    # each table row key maps to (record, the list it came from).
+    _show_superseded = False
+    # The template _prepare_annotations_file wrote on this open, if it did.
+    _seeded_notes: Optional[str] = None
+    _findings_by_key: Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]] = {}
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._read_only and action in self._HOST_ACTIONS:
@@ -517,6 +538,17 @@ class MemoryScreen(Screen):
                     Button("a. Annotate", id="btn_annotate"),
                     id="memory-actions",
                 ),
+                # Authored text: the operator's notes and agents' findings.
+                Container(
+                    Static(Text("Notes", style="bold"), id="memory-notes-heading",
+                           classes="memory-section-heading"),
+                    Static("", id="memory-notes"),
+                    Static("", id="memory-findings-heading", classes="memory-section-heading"),
+                    Static(FINDINGS_READER_NOTICE, id="memory-findings-notice", markup=False),
+                    DataTable(id="memory-findings-table"),
+                    Static("", id="memory-findings-empty", classes="hidden"),
+                    id="memory-authored",
+                ),
                 Horizontal(
                     Static(
                         "[bold]Local summary[/bold]  [dim]Built on this device; "
@@ -575,6 +607,12 @@ class MemoryScreen(Screen):
         table.add_column("Declared", key="declared")
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
+        findings = self.query_one("#memory-findings-table", DataTable)
+        findings.cursor_type = "row"
+        findings.add_column("Title", key="title")
+        findings.add_column("Source", key="source")
+        findings.add_column("Confidence", key="confidence")
+        findings.add_column("Created", key="created")
         self._render_table()
         self._apply_read_only()
         self._request_shared()
@@ -618,6 +656,11 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
 
     def _render_table(self) -> None:
+        """Redraw the module table and the notes and findings panels."""
+        self._render_modules()
+        self._render_authored()
+
+    def _render_modules(self) -> None:
         """Populate the DataTable with stored memory module data.
 
         Checks opt-out first; shows the banner and clears the table if
@@ -662,7 +705,11 @@ class MemoryScreen(Screen):
             return
 
         local_modules = all_modules
-        all_modules = merge_shared(local_modules, self._shared)
+        # Notes and findings have their own panels (see _render_authored).
+        all_modules = {
+            name: module for name, module in merge_shared(local_modules, self._shared).items()
+            if name not in AUTHORED_MODULES
+        }
         # Modules shown from the team's copy: their text is the owner's, so
         # it is drawn literally (never as markup).
         shared_names = {
@@ -673,8 +720,9 @@ class MemoryScreen(Screen):
         self._show_shared_source(self._shared, shared_names)
 
         if not all_modules:
-            # Empty: show the CTA so users know how to populate memory.
-            self._set_empty_state_visible(True)
+            # Empty: show the CTA so users know how to populate memory (a
+            # read-only row cannot be probed, so it gets none).
+            self._set_empty_state_visible(not self._read_only)
             self._set_summary_actions_enabled(False)
             return
         self._set_empty_state_visible(False)
@@ -745,6 +793,133 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _render_authored(self) -> None:
+        """Fill the Notes and Agent findings panels.
+
+        The user's own notes and findings come first; a team's shared copy
+        is added (read-only, labelled) only where the share includes them.
+        Hidden when memory is off for this server.
+        """
+        section = self.query_one("#memory-authored")
+        memory_service = getattr(self.app, "memory_service", None)
+        instance_id = self._target.get("id") or self._target.get("name", "")
+        provider = instance_provider(self._target)
+        if memory_service is None or self._is_opted_out(instance_id, memory_service):
+            section.add_class("hidden")
+            return
+        section.remove_class("hidden")
+        own_notes, own_findings = self._read_own_authored(memory_service, instance_id, provider)
+        modules = self._shared.modules if self._shared is not None else {}
+        notes_shared = shared_notes_text(modules.get("annotations"))
+        if is_contained_text(notes_for_display(own_notes), notes_for_display(notes_shared)):
+            notes_shared = ""  # the team holds the user's own notes
+        redact = Redact.for_app(self.app)
+        self.query_one("#memory-notes", Static).update(notes_renderable(
+            own_notes, notes_shared, self._shared_team("annotations"),
+            preview_lines=int(self._memory_setting("notes_preview_lines", 12)),
+            can_edit=not self._read_only,
+            redact=redact,
+        ))
+        own_ids = {record["id"] for record in own_findings if record["id"]}
+        team_findings = [
+            record for record in shared_findings(modules.get("findings"), self._shared_team("findings"))
+            if not record["id"] or record["id"] not in own_ids
+        ]
+        self._render_findings(own_findings, team_findings, redact)
+
+    def _render_findings(
+        self,
+        own: List[Dict[str, Any]],
+        shared: List[Dict[str, Any]],
+        redact: Redact,
+    ) -> None:
+        threshold = float(self._memory_setting("findings_confidence_threshold", 0.6))
+        table = self.query_one("#memory-findings-table", DataTable)
+        table.clear()
+        self._findings_by_key = {}
+        everything = [*own, *shared]
+        superseded = sum(1 for record in everything if record["superseded_by"])
+        for origin_name, origin in (("own", own), ("shared", shared)):
+            rows = finding_rows(
+                origin, threshold=threshold, show_superseded=self._show_superseded, redact=redact,
+            )
+            for position, row in enumerate(rows):
+                # Positional keys: a team's copy may repeat an id, and a
+                # duplicate DataTable key would raise.
+                key = f"{origin_name}:{position}"
+                table.add_row(*row.cells, key=key)
+                self._findings_by_key[key] = (row.record, origin)
+        self.query_one("#memory-findings-heading", Static).update(
+            findings_heading(len(everything) - superseded, superseded, self._show_superseded)
+        )
+        empty = self.query_one("#memory-findings-empty", Static)
+        has_rows = bool(self._findings_by_key)
+        table.display = has_rows
+        self.query_one("#memory-findings-notice").display = has_rows
+        empty.set_class(has_rows, "hidden")
+        if not has_rows:
+            empty.update(Text(
+                "No findings recorded yet. AI agents save what they learn about "
+                "this server here.",
+                style="dim",
+            ))
+
+    def _read_own_authored(
+        self, memory_service: Any, instance_id: str, provider: str
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """This device's notes and findings for the server (empty when unreadable)."""
+        notes: Any = ""
+        findings: Any = []
+        try:
+            notes = memory_service.read_annotations(instance_id, provider)
+            findings = memory_service.list_findings(
+                instance_id, provider, include_superseded=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a damaged record must not break the screen
+            logger.warning("Could not read notes or findings for %s: %s", instance_id, exc)
+        notes = notes if isinstance(notes, str) else ""
+        records = findings if isinstance(findings, list) else []
+        shown = (display_record(record) for record in records)
+        return notes, [record for record in shown if record is not None]
+
+    def _shared_team(self, module: str) -> str:
+        """The team a shared *module* came from (redacted where it is shown)."""
+        shared = self._shared
+        if shared is None:
+            return ""
+        return shared.sources.get(module) or shared.team_name
+
+    def _memory_setting(self, name: str, default: Any) -> Any:
+        """A ``memory`` setting, or *default* when unset or of another type."""
+        config_manager = getattr(self.app, "config_manager", None)
+        try:
+            value = getattr(config_manager.get().memory, name)
+        except AttributeError:
+            return default
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        return value
+
+    def action_toggle_superseded(self) -> None:
+        """Show or hide the findings later ones replaced."""
+        self._show_superseded = not self._show_superseded
+        self._render_authored()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a finding opens it in full."""
+        if event.data_table.id != "memory-findings-table":
+            return
+        event.stop()
+        entry = self._findings_by_key.get(str(event.row_key.value))
+        if entry is None:
+            return
+        record, origin = entry
+        self.app.push_screen(MemoryFindingScreen(
+            record, origin,
+            instance=self._instance,
+            threshold=float(self._memory_setting("findings_confidence_threshold", 0.6)),
+        ))
 
     def _request_shared(self) -> None:
         """Once per screen, look for memory a team shares of this server.
@@ -1173,37 +1348,7 @@ class MemoryScreen(Screen):
         distinction obvious without fighting the data-table surface.
         """
         name = self._target.get("name") or instance_id
-        provider = instance_provider(self._target)
-        return (
-            f"# Notes — {name} ({instance_id}) @ {provider}\n"
-            "\n"
-            "<!--\n"
-            "Free-form notes about this server.  They appear in the memory\n"
-            "summary alongside machine-probed data (OS, runtimes, services,\n"
-            "logs), which is what the chat panel and MCP agents read.\n"
-            "\n"
-            "The read-only table you saw on the Memory screen is the probed\n"
-            "data — edit observed values with 'p' (Pin) instead of writing\n"
-            "them here.  Everything below this comment block is yours: use\n"
-            "it for purpose / runbook notes / ownership / known quirks.\n"
-            "\n"
-            "Delete this comment block freely; it is only a one-shot primer.\n"
-            "-->\n"
-            "\n"
-            "## Purpose\n"
-            "\n"
-            '<!-- What does this server do? e.g. "primary billing API, '
-            'reads from RDS, serves api.example.com" -->\n'
-            "\n"
-            "## Runbook\n"
-            "\n"
-            "<!-- Deploy path, log locations, key commands, known quirks. -->\n"
-            "\n"
-            "## Ownership\n"
-            "\n"
-            "<!-- Team, owner, Slack channel, escalation path. -->\n"
-            "\n"
-        )
+        return notes_template(name, instance_id, instance_provider(self._target))
 
     def action_annotate(self) -> None:
         """Edit this server's free-form notes (``annotations.md``).
@@ -1248,7 +1393,9 @@ class MemoryScreen(Screen):
 
         self._report_editor_problems(argv, proc)
         self.run_worker(
-            self._finish_external_edit(instance_id, provider, memory_service),
+            self._finish_external_edit(
+                instance_id, provider, memory_service, self._seeded_notes,
+            ),
             exclusive=False,
             group="memory_mutation",
             name="memory_annotations_record",
@@ -1279,14 +1426,14 @@ class MemoryScreen(Screen):
             needs_seed = (not path.exists()) or path.stat().st_size == 0
         except OSError:
             needs_seed = True
+        self._seeded_notes = None
         if needs_seed:
+            template = self._annotation_template(instance_id)
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch(mode=0o600)
-                path.write_text(
-                    self._annotation_template(instance_id),
-                    encoding="utf-8",
-                )
+                path.write_text(template, encoding="utf-8")
+                self._seeded_notes = template
             except OSError as exc:
                 self.app.notify(
                     f"Could not create annotations file: {exc}", severity="error",
@@ -1484,11 +1631,16 @@ class MemoryScreen(Screen):
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
     async def _finish_external_edit(
-        self, instance_id: str, provider: str, memory_service: Any
+        self, instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> None:
-        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret."""
+        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret.
+
+        *seeded* is the template written just before the editor opened, if
+        any: closing the editor with it untouched records nothing.
+        """
         content = await self._record_annotations_edit(
-            instance_id, provider, memory_service
+            instance_id, provider, memory_service, seeded
         )
         warning = self._secret_warning(content) if content is not None else None
         if warning:
@@ -1501,7 +1653,8 @@ class MemoryScreen(Screen):
             )
 
     async def _record_annotations_edit(
-        self, instance_id: str, provider: str, memory_service: Any
+        self, instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> Optional[str]:
         """Store a changed annotations hash, queue the notes for sync, re-render.
 
@@ -1515,7 +1668,7 @@ class MemoryScreen(Screen):
         content: Optional[str] = None
         try:
             changed = await asyncio.to_thread(
-                self._store_annotations_hash, instance_id, provider, memory_service
+                self._store_annotations_hash, instance_id, provider, memory_service, seeded
             )
             if changed is not None:
                 content, modified_at = changed
@@ -1532,9 +1685,13 @@ class MemoryScreen(Screen):
 
     @staticmethod
     def _store_annotations_hash(
-        instance_id: str, provider: str, memory_service: Any
+        instance_id: str, provider: str, memory_service: Any,
+        seeded: Optional[str] = None,
     ) -> Optional[Tuple[str, str]]:
         """Blocking: when the notes changed, store their new hash.
+
+        Notes still equal to the template seeded for this edit (*seeded*)
+        are not a change: nothing is recorded or synced for them.
 
         Returns:
             ``(content, modified_at)`` when they changed, else ``None``.
@@ -1545,6 +1702,8 @@ class MemoryScreen(Screen):
             "annotations_hash", ""
         )
         if new_hash == prior_hash:
+            return None
+        if seeded is not None and content == seeded:
             return None
         now_iso = datetime.now(timezone.utc).isoformat()
         memory_service.set_annotations_meta(

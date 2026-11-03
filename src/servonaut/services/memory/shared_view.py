@@ -53,6 +53,7 @@ class SharedListing:
         team_name: Name of that team.
         module_count: How many modules the user can read.
         last_probe_at: When the server was last probed (``""`` if unknown).
+        granted_by_user_id: Who shared it (None if the list did not say).
     """
 
     team_slug: str
@@ -61,6 +62,7 @@ class SharedListing:
     last_probe_at: str
     instance: Dict[str, Any] = field(default_factory=dict)
     modules: tuple = ()
+    granted_by_user_id: Optional[int] = None
 
     @property
     def instance_id(self) -> str:
@@ -141,6 +143,7 @@ class SharedMemoryReader:
                 last_probe_at=str(item.instance.get("last_probe_at") or ""),
                 instance=dict(item.instance),
                 modules=tuple(item.readable_modules),
+                granted_by_user_id=item.grant.granted_by_user_id,
             )
         self._listings = {k: v for k, v in self._listings.items() if k[0] != team_slug}
         self._listings.update(fresh)

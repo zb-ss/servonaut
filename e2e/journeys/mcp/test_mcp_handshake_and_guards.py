@@ -133,6 +133,21 @@ async def test_handshake_and_tool_list(mcp, journey, fake_cloud):
     assert len(names) == len(set(names))
 
 
+@pytest.mark.parametrize("level", LEVELS)
+async def test_the_instructions_ask_agents_to_record_findings_they_can_save(
+    level, mcp, journey, fake_cloud
+):
+    """The handshake's instructions carry the record-findings guidance only
+    when the guard level lets the agent call remember_server_finding."""
+    sandbox = _mcp_home(journey, guard_level=level)
+    async with mcp(sandbox) as session:
+        instructions = session.initialize_result.instructions or ""
+    assert "get_server_memory(instance_id) FIRST" in instructions
+    expected = _allowed(level, "remember_server_finding")
+    assert ("Record what you learn" in instructions) is expected
+    assert ("remember_server_finding" in instructions) is expected
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("ovh") is None or importlib.util.find_spec("hcloud") is None,
     reason="needs the ovh and hetzner extras",

@@ -57,7 +57,7 @@ _ACTION_HELP: dict[str, str] = {
     "btn_browse": "Browse the remote filesystem in a tree view (over SSH).",
     "btn_command": "Run a one-off command on this server in an overlay panel.",
     "btn_ssh": "Open a full SSH session in a new terminal window.",
-    "btn_memory": "Build / view the AI-queryable fact cache for this server.",
+    "btn_memory": "Build / view the AI-queryable fact cache, notes and agent findings for this server.",
     "btn_findings": "View proactive monitoring findings for this server and trigger a scan.",
     "btn_logs": "Stream live log files via SSH (tail -f).",
     "btn_scan": "View keyword scan results collected from this server.",
@@ -825,7 +825,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         Binding("8", "action_8", "Ban IP", show=True),
         Binding("m", "open_memory", "Memory", show=True),
         Binding("d", "scan_db_creds", "Scan DB", show=True),
-        Binding("f", "open_findings", "Findings", show=True),
+        Binding("f", "open_findings", "Monitoring", show=True),
         Binding("l", "toggle_live", "Live", show=True),
         Binding("L", "toggle_live", "Live", show=False),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
@@ -940,7 +940,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     # Memory promoted to the top of INSPECT — highest-leverage
                     # feature for AI / MCP workflows.
                     Button("M. Memory", id="btn_memory"),
-                    Button("F. Findings", id="btn_findings"),
+                    Button("F. Monitoring", id="btn_findings"),
                     Button("6. View Logs", id="btn_logs"),
                     Button("5. Scan Results", id="btn_scan"),
                     Button("D. Scan DB Creds", id="btn_db_creds"),

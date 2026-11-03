@@ -196,8 +196,17 @@ Press `m` while hovering over an instance in the main list to open the memory sc
 | `e` | Export summary to Markdown           |
 | `A` | Enhance the local summary with a chosen AI provider |
 | `H` | Generate a hosted summary from encrypted Memory Sync data |
+| `f` | Show or hide superseded agent findings |
+| `Enter` | Open the agent finding under the cursor in full |
 
 If the DataTable is empty and the server is not opted out, a CTA banner appears prompting you to press `r` or click **Probe server now** — this resolves the UAT gap where new users couldn't find the build trigger.
+
+Below the module table the screen shows two panels:
+
+- **Notes**: the server's free-form notes, without the comments of the template that `a` seeds. A template nobody filled in counts as no notes, here and in the summary, the MCP tools and sync. Long notes show their first `memory.notes_preview_lines` lines (default 12) and how many more there are.
+- **Agent findings**: what AI agents or operators saved about the server with `remember_server_finding`, newest first, with their source, confidence and date. A finding below `memory.findings_confidence_threshold` is marked "recall only": agents can look it up, but it is not added to their context automatically. Findings replaced by a newer one are hidden until you press `f`. `Enter` opens one with its full text, tags and the findings it replaced.
+
+Findings and notes are written by agents or people, not probed, so they are shown as plain text and labelled as unverified. When a team shares a server with you and the share includes notes or findings, they appear in these panels labelled "Shared by <team>" and are read-only. The Server Actions screen's **Monitoring** (`F`) is a different feature: problems that Servonaut's server-side monitoring found.
 
 ### First-connect prompt
 
@@ -236,6 +245,14 @@ Re-probe one or more modules, bypassing the TTL.  Use after significant server c
 ### `list_server_memories(stale_only=false)`
 
 List every instance that has cached memory.  Pass `stale_only=true` to show only instances with at least one module past its TTL — useful for a "what should I re-probe?" dashboard.
+
+*chat_exposed: yes*
+
+### `remember_server_finding` and `recall_server_findings`
+
+A finding is a short note an agent saves about a server: a root cause, a quirk, or a setting it changed and why, anything a fresh probe would not show. `remember_server_finding(instance_id, title, body, tags, confidence, supersede_id)` saves one locally and queues it for Memory Sync. `recall_server_findings(instance_id, query)` lists or searches them. Findings at or above `memory.findings_confidence_threshold` (default 0.6) are added to the AI chat's memory block automatically.
+
+When an agent can save findings (memory on, guard level `standard` or `dangerous`), the MCP server's instructions and the built-in chat's system prompt include a short "Record what you learn" section. It asks agents to save each non-obvious discovery once, check existing findings first and supersede an outdated one instead of adding a duplicate, and never store secrets. A custom chat system prompt gets the same section appended while the chat offers the tool.
 
 *chat_exposed: yes*
 
@@ -343,6 +360,17 @@ When the server is already shared with that team, the form shows that share inst
 
 Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need.
 
+#### Sharing several servers at once
+
+In Fleet Memory, press `space` to mark a server (the cursor moves to the next row), or `m` to mark every server of your own; `m` again clears the marks. The status line counts the marked servers. A team's servers are read-only and cannot be marked. With servers marked, `S` opens one form for all of them: the team, the lowest role that may read, and the modules, with the same defaults as for one server. It lists once the members who will be able to read them. Memory Sync must be unlocked.
+
+- Servonaut reads the team's member keys once and checks them before it sends anything. A changed key opens **Confirm changed memory keys**, and nothing is shared until you confirm it.
+- A server you already share with that team is reported as already shared and left as it is. Tick **Update existing shares to these settings** to replace those shares with the role and modules on the form; a share that already has them is left alone. Only your own shares count: a teammate's share of a server with the same id is never reported or replaced.
+- Servers are shared one after another, with a progress line, and one server's failure does not stop the others. When the service limits requests, Servonaut waits as long as it asks, once per request, if that fits `team_wrap_max_wait_seconds`. If the limit persists, it stops, and the summary says how many servers were not sent.
+- While the batch runs, the app stays on the form: leaving now would stop it halfway. Press `s` (**Stop after this server**) to end it early; the server being sent is finished first, so a share being replaced is never left stopped without its new one, and the rest are listed as not sent.
+- The summary lists every server: shared, already shared (updated or left as it was), skipped with the reason, failed with the reason, or not sent. A server is skipped when the service holds no snapshot of it yet, when it was never probed, when memory is turned off for it, or when Memory Sync does not accept its id. Memory Sync ids use letters, digits, `-` and `_` only, so a server whose id is a host name with dots cannot be shared.
+- The marks are cleared once the batch has run; closing the form without sharing keeps them.
+
 #### A member's key changed
 
 A member's memory key changes when they set up Memory Sync again or use a new computer. The first time Servonaut sees a member's key, and the service does not report it as replaced, it trusts the key, seals for it and remembers it without asking. After that it seals a server's data keys for a member only while their key is the one it remembers or one you have confirmed. A different key later, or one the service reports as replaced, is never used until you confirm it:
@@ -359,8 +387,8 @@ A key the service sends that does not match its own fingerprint cannot be confir
 | --- | --- | --- |
 | `team_memory_cache_seconds` | `60` | How long a team's list of shared servers is reused before it is read again. |
 | `team_memory_future_skew_seconds` | `300` | How far in the future a shared snapshot's date may be before it counts as now, so a wrong clock cannot outrank your own newer snapshot. |
-| `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads without saying for how long. |
-| `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload; past it, the next sync tries again. |
+| `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads, or a server of a bulk share, without saying for how long. |
+| `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload or bulk share; past it, the next sync tries again, and a bulk share stops and says how many servers were not sent. |
 | `record_lock_timeout_seconds` | `5` | How long a change to a server's notes or findings waits for another Servonaut process (the app, the CLI, an MCP server) that is writing the same record; past it the change fails like any failed write and is kept for a retry. |
 | `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
 

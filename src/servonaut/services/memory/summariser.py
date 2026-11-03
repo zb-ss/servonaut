@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from servonaut.config.schema import MemoryConfig
 
 from .interfaces import ModuleResult
+from .notes import has_notes, strip_comments
 from .provider import instance_provider
 from .trust_notices import FINDINGS_PROVENANCE_NOTICE
 
@@ -728,7 +729,9 @@ class Summariser:
         return section
 
     def _load_annotations(self) -> str:
-        """Load annotations.md verbatim up to _MAX_ANNOTATIONS_CHARS chars.
+        """Load annotations.md up to _MAX_ANNOTATIONS_CHARS chars, comments removed.
+
+        Returns ``""`` when the file holds no notes, only the seeded template.
 
         Annotations are free text and may now be authored by other operators
         in a shared workspace (Teams sync), so any ``<CONTEXT>``/``</CONTEXT>``
@@ -742,7 +745,12 @@ class Summariser:
         if not ann_path.exists():
             return ""
         try:
-            text = ann_path.read_text(encoding="utf-8")
+            raw = ann_path.read_text(encoding="utf-8")
+            # A seeded template nobody filled in is not notes; the primer
+            # comments are for whoever edits the file, not for the reader.
+            if not has_notes(raw):
+                return ""
+            text = strip_comments(raw)
             if len(text) > _MAX_ANNOTATIONS_CHARS:
                 text = text[:_MAX_ANNOTATIONS_CHARS] + "\n_(truncated)_"
             return _CONTEXT_OPENER_RE.sub(

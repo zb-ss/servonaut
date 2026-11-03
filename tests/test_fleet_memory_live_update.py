@@ -33,6 +33,15 @@ from servonaut.screens.fleet_memory import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _restore_screen_app():
+    """Put FleetMemoryScreen.app back: _set_app replaces it on the class."""
+    original = FleetMemoryScreen.__dict__["app"]
+    yield
+    FleetMemoryScreen.app = original
+
+
+
 def _make_screen() -> FleetMemoryScreen:
     """Return a FleetMemoryScreen skipping the Textual widget init."""
     screen = object.__new__(FleetMemoryScreen)

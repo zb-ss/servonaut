@@ -19,7 +19,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
@@ -273,11 +273,18 @@ class FleetMemoryScreen(Screen):
         Binding("r", "refresh_view", "Refresh View", show=True),
         Binding("s", "scan_all", "Scan All", show=True),
         Binding("S", "share_selected", "Share", show=True),
+        Binding("space", "toggle_mark", "Mark", show=True),
+        Binding("m", "mark_all", "Mark all", show=True),
         Binding("f", "refresh_stale", "Refresh Stale", show=True),
         Binding("enter", "open_selected", "Open", show=True),
         Binding("x", "clear_selected", "Clear", show=True),
         Binding("a", "toggle_auto_scan", "Toggle Auto-scan", show=True),
     ]
+
+    # Row keys (see _row_key) of the servers marked to share together. Kept
+    # immutable and replaced on change, so a screen built without __init__
+    # (as some tests do) still reads "nothing marked".
+    _marked: FrozenSet[str] = frozenset()
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -290,6 +297,7 @@ class FleetMemoryScreen(Screen):
         super().__init__()
         self._rows: List[Dict[str, Any]] = []
         self._scanning = False
+        self._marked = frozenset()
 
     # ------------------------------------------------------------------
     # Compose / mount
@@ -535,13 +543,14 @@ class FleetMemoryScreen(Screen):
 
     def _redraw_table(self) -> None:
         """Draw ``self._rows`` again (cursor kept), without rebuilding them."""
+        self._prune_marks()
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
             cursor = table.cursor_row
             table.clear()
             for row in self._rows:
                 table.add_row(
-                    escape(str(row["name"])),
+                    self._name_cell(row),
                     escape(str(row["id"])),
                     escape(str(row["provider"])),
                     _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
@@ -553,9 +562,7 @@ class FleetMemoryScreen(Screen):
                 )
             if self._rows and cursor is not None:
                 table.move_cursor(row=min(cursor, len(self._rows) - 1))
-            self.query_one("#fleet-memory-status", Static).update(
-                self._summary_line_from_rows(self._rows)
-            )
+            self.query_one("#fleet-memory-status", Static).update(self._status_line())
         except Exception:  # noqa: BLE001 — the screen was left meanwhile
             return
 
@@ -718,12 +725,13 @@ class FleetMemoryScreen(Screen):
             self._decorate_shared(row)
             self._rows.append(row)
 
+        self._prune_marks()
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
         for row in self._rows:
             source_cell = _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]")
             table.add_row(
-                escape(str(row["name"])),
+                self._name_cell(row),
                 escape(str(row["id"])),
                 escape(str(row["provider"])),
                 source_cell,
@@ -734,9 +742,7 @@ class FleetMemoryScreen(Screen):
                 row["reason"],
             )
 
-        self.query_one("#fleet-memory-status", Static).update(
-            self._summary_line_from_rows(self._rows)
-        )
+        self.query_one("#fleet-memory-status", Static).update(self._status_line())
         self._start_shared_prefetch()
 
     def _start_shared_prefetch(self) -> None:
@@ -795,11 +801,12 @@ class FleetMemoryScreen(Screen):
             self._decorate_shared(row)
             self._rows.append(row)
 
+        self._prune_marks()
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
         for row in self._rows:
             table.add_row(
-                escape(str(row["name"])),
+                self._name_cell(row),
                 escape(str(row["id"])),
                 escape(str(row["provider"])),
                 _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
@@ -811,9 +818,7 @@ class FleetMemoryScreen(Screen):
             )
 
         # Status footer — one glance tells the operator where to act.
-        self.query_one("#fleet-memory-status", Static).update(
-            self._summary_line_from_rows(self._rows)
-        )
+        self.query_one("#fleet-memory-status", Static).update(self._status_line())
         self._start_shared_prefetch()
 
     # ------------------------------------------------------------------
@@ -859,6 +864,166 @@ class FleetMemoryScreen(Screen):
         return self._rows[cursor]
 
     # ------------------------------------------------------------------
+    # Marks: the user's own servers picked to share together
+    # ------------------------------------------------------------------
+
+    def _row_key(self, row: Dict[str, Any]) -> str:
+        """What a mark is kept under: the row's real id.
+
+        Real, not as listed: demo mode lists stand-ins, and a mark must
+        survive it being turned on or off.
+        """
+        listed = str(row.get("raw_id") or row.get("id") or "")
+        return str(real_instance_id(self.app, listed) or listed)
+
+    def _is_markable(self, row: Dict[str, Any]) -> bool:
+        """Only the user's own servers: a team's shared server is read-only."""
+        from servonaut.services.shared_servers import is_shared_row
+
+        if row.get("memory_only") or self._only_a_teams_copy(row):
+            return False
+        inst = row.get("instance") or {}
+        real = connection_instance(self.app, inst)
+        return not (is_shared_row(inst) or (isinstance(real, dict) and is_shared_row(real)))
+
+    def _only_a_teams_copy(self, row: Dict[str, Any]) -> bool:
+        """True for a row shown only from teams' lists, none of them the user's own share.
+
+        Such a row has no memory of the user's on this computer (its status is
+        the team's), and someone else shared it, so there is nothing of the
+        user's to share. A share the user made, shown the same way because
+        its memory is on the service only, stays the user's.
+        """
+        if row.get("status") != STATUS_SHARED:
+            return False
+        reader = getattr(self.app, "shared_memory_reader", None)
+        candidates = row.get("grant_candidates") or []
+        if reader is None or not candidates:
+            return False
+        caller = self._caller_user_id()
+        granters = {
+            listing.granted_by_user_id for c in candidates
+            if (listing := reader.cached_listing(c.team_slug, c.instance_id)) is not None
+        }
+        return caller is None or caller not in granters
+
+    def _caller_user_id(self) -> Optional[int]:
+        """The signed-in user, as the team memory service knows them, or None."""
+        service = getattr(self.app, "team_memory_service", None)
+        getter = getattr(service, "caller_user_id", None)
+        try:
+            caller = getter() if callable(getter) else None
+        except Exception:  # noqa: BLE001 — unknown: the row stays read-only
+            return None
+        return caller if isinstance(caller, int) and not isinstance(caller, bool) else None
+
+    def marked_ids(self) -> List[str]:
+        """The keys of the marked rows, in table order."""
+        return [key for row in self._rows if (key := self._row_key(row)) in self._marked]
+
+    def _prune_marks(self) -> None:
+        """Drop marks whose row is gone or can no longer be marked."""
+        if not self._marked:
+            return
+        keep = {self._row_key(row) for row in self._rows if self._is_markable(row)}
+        self._marked = self._marked & keep
+
+    def _name_cell(self, row: Dict[str, Any]) -> str:
+        name = escape(str(row["name"]))
+        if self._marked and self._row_key(row) in self._marked:
+            return f"[bold]✓[/bold] {name}"
+        return name
+
+    def _status_line(self) -> str:
+        """The status summary, led by the mark count while servers are marked.
+
+        The count comes first: the line is one row high, and a narrow
+        terminal cuts its end.
+        """
+        line = self._summary_line_from_rows(self._rows)
+        count = len(self.marked_ids())
+        if not count:
+            return line
+        return (
+            f"[bold $text-accent]{count} marked[/bold $text-accent]"
+            f"[dim] (S shares them)  ·  [/dim]{line}"
+        )
+
+    def action_toggle_mark(self) -> None:
+        """Mark or unmark the selected server, then move to the next row."""
+        row = self._selected_row()
+        if not row:
+            self.app.notify("Select a row first.", severity="warning")
+            return
+        if not self._is_markable(row):
+            self.app.notify(
+                "This server is shared by a team and is read-only.", severity="warning"
+            )
+            return
+        key = self._row_key(row)
+        self._marked = self._marked - {key} if key in self._marked else self._marked | {key}
+        table = self.query_one("#fleet-memory-table", DataTable)
+        index = table.cursor_row
+        table.update_cell_at(Coordinate(index, 0), self._name_cell(row), update_width=True)
+        self.query_one("#fleet-memory-status", Static).update(self._status_line())
+        if index < len(self._rows) - 1:
+            table.move_cursor(row=index + 1)
+
+    def action_mark_all(self) -> None:
+        """Mark every server of the user's own; when all are marked, clear the marks."""
+        keys = {self._row_key(row) for row in self._rows if self._is_markable(row)}
+        if not keys:
+            self.app.notify("There is no server of your own to mark.", severity="warning")
+            return
+        self._marked = frozenset() if keys <= self._marked else self._marked | keys
+        self._redraw_table()
+
+    def _share_target(self, row: Dict[str, Any]) -> Any:
+        """The batch's view of one marked row: the real id and name behind it."""
+        from servonaut.services.memory.bulk_share import ShareTarget
+
+        inst = row.get("instance") or {}
+        real = connection_instance(self.app, inst)
+        real = real if isinstance(real, dict) else inst
+        instance_id = str(real.get("id") or real.get("name") or "")
+        name = display_name(real) if real.get("account_qualified") else str(real.get("name") or "")
+        # A row shown as a team's copy keeps its own status underneath, but a
+        # scan since then writes the row's status itself.
+        status = row.get("status")
+        if status == STATUS_SHARED:
+            status = (row.get("_before_share") or {}).get("status", status)
+        return ShareTarget(
+            instance_id=instance_id,
+            label=name or instance_id,
+            probed=status in (STATUS_FRESH, STATUS_STALE),
+            memory_off=status == STATUS_OPT_OUT,
+            resolved=self._has_real_record(inst),
+        )
+
+    def _has_real_record(self, inst: Dict[str, Any]) -> bool:
+        """False when demo mode cannot name the real server (or cannot tell)."""
+        check = getattr(self.app, "has_real_record", None)
+        if not callable(check):
+            return True
+        try:
+            return check(inst) is not False
+        except Exception:  # noqa: BLE001 — unsure: never send a stand-in's id
+            return False
+
+    def _share_marked(self, rows: List[Dict[str, Any]]) -> None:
+        from servonaut.screens.memory_bulk_share import BulkShareScreen
+
+        targets = [self._share_target(row) for row in rows]
+        self.app.push_screen(BulkShareScreen(targets), self._after_bulk_share)
+
+    def _after_bulk_share(self, ran: Optional[bool]) -> None:
+        """Clear the marks once the batch ran; a cancelled form keeps them."""
+        if not ran:
+            return
+        self._marked = frozenset()
+        self._launch_populate()
+
+    # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
@@ -884,17 +1049,22 @@ class FleetMemoryScreen(Screen):
         )
 
     def action_share_selected(self) -> None:
+        """Share the marked servers together, or else the selected one."""
+        marked = [row for row in self._rows if self._row_key(row) in self._marked]
         row = self._selected_row()
-        if not row:
+        if not marked and not row:
             self.app.notify("Select a row first.", severity="warning")
             return
-        if row.get("memory_only"):
+        if not marked and (row.get("memory_only") or self._only_a_teams_copy(row)):
             self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
         auth = getattr(self.app, "auth_service", None)
         if auth is None or not auth.has_feature("memory_team_share"):
             from servonaut.widgets.upsell_modal import UpsellModal
             self.app.push_screen(UpsellModal("memory_team_share"))
+            return
+        if marked:
+            self._share_marked(marked)
             return
         from servonaut.screens.memory_share import ShareInstanceScreen
         self.app.push_screen(ShareInstanceScreen(row["instance"]))
@@ -1171,9 +1341,7 @@ class FleetMemoryScreen(Screen):
 
         # Recompute the summary count line so fresh/stale totals track live.
         try:
-            self.query_one("#fleet-memory-status", Static).update(
-                self._summary_line_from_rows(self._rows)
-            )
+            self.query_one("#fleet-memory-status", Static).update(self._status_line())
         except Exception:
             pass
 

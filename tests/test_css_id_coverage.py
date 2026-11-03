@@ -615,6 +615,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "memory-empty-state-label", # Reason: Static; inherits global Static
         "memory-opt-out-banner",    # Reason: Static; inherits global Static
         "memory-table",             # Reason: DataTable; styled via ancestor container
+        "memory-notes-heading",     # Reason: Static heading; styled via .memory-section-heading
+        "memory-findings-heading",  # Reason: Static heading; styled via .memory-section-heading
+        "btn_memory_finding_back",  # Reason: Button; inherits global Button styling inside #memory-finding-actions
         # ---- Generic modal containers ----
         "modal_container",      # Reason: Modal container; styled by parent ModalScreen
         "modal_description",    # Reason: Static; inherits global Static
@@ -732,6 +735,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "share_outer",          # Reason: Container; layout-only
         "share-role-select",    # Reason: Select; inherits global Select styling
         "share-team-select",
+        "bulk-btn-cancel",      # Reason: Button; styled via #bulk-btn-row Button
+        "bulk-btn-confirm",     # Reason: Button; styled via #bulk-btn-row Button
+        "bulk-modules-list",    # Reason: SelectionList; inherits layout, like share-modules-list
+        "bulk-role-select",     # Reason: Select; inherits global Select styling
+        "bulk-team-select",     # Reason: Select; inherits global Select styling
         # ---- Snapshot form ----
         "snapshot_form",        # Reason: Form container; inherits layout
         "snapshots_title",      # Reason: Static title; inherits global heading style

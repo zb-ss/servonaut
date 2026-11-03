@@ -185,10 +185,25 @@ _ALLOWLIST: List[AllowlistEntry] = [
 
     # Memory screen — module-name and key columns are taxonomy (scrub is intentionally
     # skipped for those). obs_str and decl_str ARE scrubbed inside _render_table.
-    AllowlistEntry("screens/memory.py", "_render_table", "add_row",
-                   "obs_str and decl_str are scrubbed inside _render_table before "
+    AllowlistEntry("screens/memory.py", "_render_modules", "add_row",
+                   "obs_str and decl_str are scrubbed inside _render_modules before "
                    "add_row. module_name and key are taxonomy — not scrubbed by "
                    "design (plan §8 item 7)."),
+    # Notes and agent findings: authored text and team names are redacted by
+    # the helpers in screens/memory_authored.py, which receive
+    # Redact.for_app() (scrub_stream / redact_name in demo mode).
+    AllowlistEntry("screens/memory.py", "_render_authored", "update",
+                   "notes_renderable() redacts the notes and the team label with "
+                   "Redact.for_app() before the panel is updated."),
+    AllowlistEntry("screens/memory.py", "_render_findings", "add_row",
+                   "finding_rows() redacts titles and team labels with "
+                   "Redact.for_app() before the cells reach add_row."),
+    AllowlistEntry("screens/memory.py", "_render_findings", "update",
+                   "The heading shows counts only; the empty line is fixed text."),
+    AllowlistEntry("screens/memory_authored.py", "_show_redacted", "update",
+                   "Every field goes through Redact.for_app(self.app) (scrub_stream / "
+                   "redact_name in demo mode); the server name is the displayed row, "
+                   "which the app redacts in place. Re-run on each demo toggle."),
 
     # fleet_memory.py — shows module status summary (count of modules, last probe
     # time) — no raw output values.
@@ -199,6 +214,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Live per-row scan update writes the fresh/stale/opted-out count "
                    "summary line (integers) only; status/module/age cells go through "
                    "update_cell_at and carry status markup + counts, not server text."),
+    AllowlistEntry("screens/fleet_memory.py", "action_toggle_mark", "update",
+                   "Writes _status_line(): the mark count and the status counts "
+                   "(integers) only; the name cell goes through update_cell_at with "
+                   "the displayed row's name, which the app redacts in place."),
     AllowlistEntry("screens/fleet_memory.py", "_refresh_auto_scan_status", "update",
                    "Writes the auto-scan indicator string derived purely from local "
                    "config ints (enabled flag, interval, last-run epoch) — no "

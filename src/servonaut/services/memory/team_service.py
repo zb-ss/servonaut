@@ -145,6 +145,17 @@ class UnusableMemberKeyError(MemoryBackendError):
         )
 
 
+class MemorySyncLockedError(MemoryBackendError):
+    """Raised when sharing needs the caller's memory key and it is locked.
+
+    Nothing is revoked or posted: without the key no data key can be sealed
+    for a member.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Unlock Memory Sync first. Nothing was shared.")
+
+
 class ShareGoneError(MemoryBackendError):
     """Raised when a share is no longer live (HTTP 404 or 409 from the service)."""
 
@@ -445,18 +456,43 @@ class TeamMemoryService:
         """Drop the remembered list of *team_slug*: a share just changed."""
         self._shared_memo.pop(team_slug, None)
 
+    def caller_user_id(self) -> Optional[int]:
+        """The caller's user id: from the memory key, else the signed-in account."""
+        for source in (self._key_store_provider(), self._auth):
+            user_id = getattr(source, "user_id", None)
+            if isinstance(user_id, int) and not isinstance(user_id, bool):
+                return user_id
+        return None
+
+    async def own_live_grants(self, team_slug: str, *, fresh: bool = False) -> Dict[str, Grant]:
+        """The caller's own live grants with the team, by server id.
+
+        The list route holds every granter's shares, and server ids (a custom
+        server's name, say) can repeat across a team, so a share is the
+        caller's only when the caller granted it. Empty when the caller
+        cannot be told. *fresh* asks the service again instead of reusing a
+        remembered list.
+        """
+        caller = self.caller_user_id()
+        if caller is None:
+            return {}
+        if fresh:
+            self._forget_shared(team_slug)
+        own: Dict[str, Grant] = {}
+        for shared in await self.list_shared_instances(team_slug):
+            grant = shared.grant
+            if grant.is_live and grant.granted_by_user_id == caller:
+                own.setdefault(grant.instance_id, grant)
+        return own
+
     async def find_live_grant(
         self, team_slug: str, instance_id: str
     ) -> Optional[Grant]:
-        """The live grant sharing *instance_id* with the team, if any.
+        """The caller's live grant sharing *instance_id* with the team, if any.
 
         The id comes from the list route, the only place the service gives it.
         """
-        for shared in await self.list_shared_instances(team_slug):
-            grant = shared.grant
-            if grant.instance_id == instance_id and grant.is_live:
-                return grant
-        return None
+        return (await self.own_live_grants(team_slug)).get(instance_id)
 
     async def list_shared_instances(self, team_slug: str) -> List[SharedInstance]:
         """List instances shared with the caller through this team.
@@ -699,6 +735,8 @@ class TeamMemoryService:
             wraps: List[Dict[str, Any]] = []
         else:
             key_material = self._key_store_provider()
+            if key_material is None:
+                raise MemorySyncLockedError()
             wraps = await self._build_wraps(
                 instance_id=instance_id,
                 module_names=module_names,
@@ -727,6 +765,25 @@ class TeamMemoryService:
 
     def _pins(self) -> Any:
         return self._pin_store_provider() if self._pin_store_provider else None
+
+    def is_unlocked(self) -> bool:
+        """Whether the caller's memory key is at hand, so data keys can be sealed."""
+        return self._key_store_provider() is not None
+
+    def check_member_keys(
+        self, team_slug: str, member_pubkeys: List[TeamMemberKey], required_role: str
+    ) -> None:
+        """Raise before anything is sent if a reader's key may not be sealed for.
+
+        The check :meth:`share_instance` runs, for callers that share several
+        servers with one set of keys and must refuse them all up front.
+
+        Raises:
+            UnusableMemberKeyError: The service sent a key that is not the key it names.
+            KeyChangedError: A reader's key changed and needs confirming.
+        """
+        check_segment(team_slug, "team")
+        self._refuse_changed_keys(team_slug, self.eligible_members(member_pubkeys, required_role))
 
     def _refuse_changed_keys(
         self, team_slug: str, members: List[TeamMemberKey]
@@ -849,9 +906,12 @@ class TeamMemoryService:
 
         There is no purge in between: the service reuses the wraps that are
         already stored, so deleting them would only recreate them. A failed
-        revoke raises before any new grant is requested.
+        revoke raises before any new grant is requested, and so does a locked
+        memory key: the share is never stopped when no new one can be made.
         """
         self._refuse_changed_keys(team_slug, self.eligible_members(member_pubkeys, required_role))
+        if not self.is_unlocked():
+            raise MemorySyncLockedError()
         await self.revoke_grant(team_slug, grant_id)
         return await self.share_instance(
             team_slug, instance_id, required_role, modules, member_pubkeys
@@ -888,16 +948,19 @@ class TeamMemoryService:
             if not module_name:
                 continue
 
-            # Fetch the raw (encrypted) envelope from the server
+            # Fetch the raw (encrypted) envelope from the server. Only a module
+            # with no envelope is left out: any other failed read (a rate
+            # limit, a server error) is raised, because a grant missing that
+            # module's wraps would be refused as insufficient_wraps and read
+            # as a member's changed key.
             try:
                 raw_env = await self._retrieval_service.get_module_envelope_raw(
                     instance_id, module_name
                 )
             except Exception as exc:
-                logger.warning(
-                    "Could not fetch envelope for %r/%r: %s — skipping",
-                    instance_id, module_name, exc
-                )
+                if not _is_missing(exc):
+                    raise
+                logger.info("No envelope for module %r — skipping", module_name)
                 continue
 
             actual_env_id = raw_env.get("id")
@@ -1223,6 +1286,14 @@ class TeamMemoryService:
 # ---------------------------------------------------------------------------
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+
+
+def _is_missing(exc: BaseException) -> bool:
+    """Whether *exc* says there is nothing stored there (a 404), as opposed to a failure."""
+    from servonaut.services.api_client import APIError
+    from servonaut.services.memory.interfaces import MemoryNotFound
+
+    return isinstance(exc, MemoryNotFound) or (isinstance(exc, APIError) and exc.status == 404)
 
 
 def _optional_str(value: Any) -> Optional[str]:
