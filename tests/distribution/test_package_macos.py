@@ -563,6 +563,8 @@ def _hdiutil_result(returncode: int, stderr: str = "") -> subprocess.CompletedPr
 
 
 _BUSY = "hdiutil: create failed - Resource busy"
+# The exact error a macOS arm64 runner gave while mounting a fresh image (EAGAIN).
+_UNAVAILABLE = "hdiutil: attach failed - Resource temporarily unavailable"
 
 
 class _ScriptedRunner:
@@ -594,6 +596,23 @@ class TestHdiutilRetry:
         assert runner.commands == [["/usr/bin/hdiutil", "create", "image.dmg"]] * 2
         assert pauses == [2.0]
         assert "hdiutil create failed with a busy resource (attempt 1 of 4)" in (
+            capsys.readouterr().err
+        )
+
+    def test_a_temporarily_unavailable_resource_is_retried_until_it_succeeds(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        runner = _ScriptedRunner(_hdiutil_result(1, _UNAVAILABLE), _hdiutil_result(0))
+        pauses: list[float] = []
+
+        result = package_macos.run_hdiutil(
+            "/usr/bin/hdiutil", ["attach", "image.dmg"], run=runner, sleep=pauses.append
+        )
+
+        assert result.returncode == 0
+        assert runner.commands == [["/usr/bin/hdiutil", "attach", "image.dmg"]] * 2
+        assert pauses == [2.0]
+        assert "hdiutil attach failed with a busy resource (attempt 1 of 4)" in (
             capsys.readouterr().err
         )
 
@@ -679,7 +698,7 @@ class TestImageVerification:
             if Path(cmd[0]).name == "codesign":
                 signing.append(list(cmd))
                 return codesign
-            if cmd[1] == "attach":
+            if cmd[1] == "attach" and hdiutil.results[0].returncode == 0:
                 (Path(cmd[cmd.index("-mountpoint") + 1]) / "Servonaut.app").mkdir()
             elif cmd[1] == "detach" and hdiutil.results[0].returncode == 0:
                 (Path(cmd[-1]) / "Servonaut.app").rmdir()
@@ -710,6 +729,23 @@ class TestImageVerification:
         mount_point = Path(attach[attach.index("-mountpoint") + 1])
         assert signing[0][1:4] == ["--verify", "--deep", "--strict"]
         assert Path(signing[0][-1]) == mount_point.resolve() / "Servonaut.app"
+        assert not mount_point.exists()
+
+    def test_a_temporarily_unavailable_attach_is_retried(
+        self, image: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hdiutil = _ScriptedRunner(
+            _hdiutil_result(1, _UNAVAILABLE),
+            _hdiutil_result(0),
+            _hdiutil_result(0),
+        )
+        self._mount_with(monkeypatch, hdiutil, _hdiutil_result(0))
+
+        message = package_macos.verify_image_app_signature(image)
+
+        assert "successfully verified" in message
+        assert [command[1] for command in hdiutil.commands] == ["attach", "attach", "detach"]
+        mount_point = Path(hdiutil.commands[0][hdiutil.commands[0].index("-mountpoint") + 1])
         assert not mount_point.exists()
 
     def test_an_invalid_signature_fails_after_detaching(
