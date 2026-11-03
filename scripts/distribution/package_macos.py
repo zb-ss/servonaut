@@ -40,10 +40,14 @@ _MACOS_DIR = _REPO_ROOT / "packaging" / "macos"
 # Dry-run disk images get this suffix so they can never pass for a release artifact.
 SIMULATED_SUFFIX = ".simulated"
 
-# hdiutil intermittently fails with "Resource busy" while the system still
-# holds a disk image or device it has just used; the same command then works.
-# Only that failure is retried, a few times with a growing pause.
-HDIUTIL_BUSY_MARKER = "Resource busy"
+# hdiutil intermittently fails with "Resource busy" (EBUSY) or "Resource
+# temporarily unavailable" (EAGAIN) while the system still holds a disk image
+# or device it has just used; the same command then works. Only those
+# failures are retried, a few times with a growing pause.
+HDIUTIL_TRANSIENT_MARKERS: tuple[str, ...] = (
+    "Resource busy",
+    "Resource temporarily unavailable",
+)
 HDIUTIL_RETRY_DELAYS_SECONDS: tuple[float, ...] = (2.0, 5.0, 10.0)
 
 REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = EXECUTABLES
@@ -283,6 +287,8 @@ def run_hdiutil(
 ) -> subprocess.CompletedProcess[str]:
     """Run one hdiutil command, repeating it only while hdiutil reports a busy resource.
 
+    A busy resource is either of ``HDIUTIL_TRANSIENT_MARKERS``.
+
     It runs at most ``len(retry_delays) + 1`` times, pausing for the next delay
     before each repeat, and says so on stderr.
 
@@ -299,7 +305,8 @@ def run_hdiutil(
         if res.returncode == 0:
             return res
         output = f"{res.stderr or ''}{res.stdout or ''}".strip()
-        if HDIUTIL_BUSY_MARKER not in output or attempt == attempts:
+        is_transient = any(marker in output for marker in HDIUTIL_TRANSIENT_MARKERS)
+        if not is_transient or attempt == attempts:
             break
         delay = retry_delays[attempt - 1]
         print(
