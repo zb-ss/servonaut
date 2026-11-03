@@ -196,8 +196,17 @@ Press `m` while hovering over an instance in the main list to open the memory sc
 | `e` | Export summary to Markdown           |
 | `A` | Enhance the local summary with a chosen AI provider |
 | `H` | Generate a hosted summary from encrypted Memory Sync data |
+| `f` | Show or hide superseded agent findings |
+| `Enter` | Open the agent finding under the cursor in full |
 
 If the DataTable is empty and the server is not opted out, a CTA banner appears prompting you to press `r` or click **Probe server now** — this resolves the UAT gap where new users couldn't find the build trigger.
+
+Below the module table the screen shows two panels:
+
+- **Notes**: the server's free-form notes, without the comments of the template that `a` seeds. A template nobody filled in counts as no notes, here and in the summary, the MCP tools and sync. Long notes show their first `memory.notes_preview_lines` lines (default 12) and how many more there are.
+- **Agent findings**: what AI agents or operators saved about the server with `remember_server_finding`, newest first, with their source, confidence and date. A finding below `memory.findings_confidence_threshold` is marked "recall only": agents can look it up, but it is not added to their context automatically. Findings replaced by a newer one are hidden until you press `f`. `Enter` opens one with its full text, tags and the findings it replaced.
+
+Findings and notes are written by agents or people, not probed, so they are shown as plain text and labelled as unverified. When a team shares a server with you and the share includes notes or findings, they appear in these panels labelled "Shared by <team>" and are read-only. The Server Actions screen's **Monitoring** (`F`) is a different feature: problems that Servonaut's server-side monitoring found.
 
 ### First-connect prompt
 
@@ -236,6 +245,14 @@ Re-probe one or more modules, bypassing the TTL.  Use after significant server c
 ### `list_server_memories(stale_only=false)`
 
 List every instance that has cached memory.  Pass `stale_only=true` to show only instances with at least one module past its TTL — useful for a "what should I re-probe?" dashboard.
+
+*chat_exposed: yes*
+
+### `remember_server_finding` and `recall_server_findings`
+
+A finding is a short note an agent saves about a server: a root cause, a quirk, or a setting it changed and why, anything a fresh probe would not show. `remember_server_finding(instance_id, title, body, tags, confidence, supersede_id)` saves one locally and queues it for Memory Sync. `recall_server_findings(instance_id, query)` lists or searches them. Findings at or above `memory.findings_confidence_threshold` (default 0.6) are added to the AI chat's memory block automatically.
+
+When an agent can save findings (memory on, guard level `standard` or `dangerous`), the MCP server's instructions and the built-in chat's system prompt include a short "Record what you learn" section. It asks agents to save each non-obvious discovery once, check existing findings first and supersede an outdated one instead of adding a duplicate, and never store secrets. A custom chat system prompt gets the same section appended while the chat offers the tool.
 
 *chat_exposed: yes*
 

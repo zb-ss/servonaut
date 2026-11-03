@@ -59,6 +59,7 @@ from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple,
 )
 
+from servonaut.services.memory.notes import has_notes
 from servonaut.services.memory.provider import (
     SHARED_MEMORY_PROVIDER,
     instance_provider,
@@ -208,7 +209,7 @@ def merge_annotation_text(
     already contain is skipped, so a second merge adds nothing.
     """
     wanted = copy.strip()
-    if not wanted or is_contained_text(own, wanted):
+    if not has_notes(wanted) or is_contained_text(own, wanted):
         return own, False
     if not own.strip():
         return copy, True
@@ -339,7 +340,7 @@ class TeamCopyMerger:
         target_modules = store.get_all_modules(target.instance_id, target.provider, strict=True)
         everything = list(records) + list(remote_records)
         stats = MergeStats(
-            held_notes=bool((theirs + remote_notes).strip()), held_findings=bool(everything)
+            held_notes=has_notes(theirs) or has_notes(remote_notes), held_findings=bool(everything)
         )
         before = self._finding_snapshot(target)
         if local:
@@ -371,6 +372,8 @@ class TeamCopyMerger:
         return sum(1 for fid, record in after.items() if before.get(fid) != record)
 
     def _notes_contain(self, target: MemoryKey, text: str) -> bool:
+        if not has_notes(text):
+            return True  # a bare template is not merged, so there is nothing to find
         kept = self._store.read_annotations_strict(target.instance_id, target.provider)
         return is_contained_text(kept, text)
 

@@ -11,13 +11,14 @@ long the stall lasted when the loop answers again.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class UiStallWatchdog:
         self._check_every = check_every
         self._last_beat = clock()
         self._stalled_since: Optional[float] = None
+        self._pauses = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -64,8 +66,27 @@ class UiStallWatchdog:
             self._stalled_since = None
         self._last_beat = now
 
+    @contextlib.contextmanager
+    def paused(self) -> Iterator[None]:
+        """Stop counting while the app has handed the terminal to another program.
+
+        The event loop is blocked on purpose then (an external editor runs in
+        the foreground), so it is not a stall. Counting restarts at the end.
+        """
+        self._pauses += 1
+        try:
+            yield
+        finally:
+            # Restart the count before the pause ends, so the watching
+            # thread never measures the pause itself as a stall.
+            self._stalled_since = None
+            self._last_beat = self._clock()
+            self._pauses -= 1
+
     def check(self) -> None:
         """One check from the watching thread."""
+        if self._pauses:
+            return
         idle = self._clock() - self._last_beat
         if self._stalled_since is not None or idle < self._stall_seconds:
             return
