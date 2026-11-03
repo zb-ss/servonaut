@@ -21,7 +21,9 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import logging
 import types
 from types import SimpleNamespace
 from typing import Any
@@ -90,6 +92,7 @@ def _make_stub(
         auth_service=auth_service,
         config_manager=config_manager,
         notify=MagicMock(),
+        _propagate_memory_key_material=MagicMock(),
     )
 
     # bootstrap_memory_cloud is always async
@@ -1050,3 +1053,161 @@ class TestRotateWithRemember:
                     f"sync_remember_device must not be True when remember=False; "
                     f"got {flag!r}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# The unlocked key always reaches sharing and the memory reader
+# ---------------------------------------------------------------------------
+
+
+class TestKeyHandedOnWhenAlreadyUnlocked:
+    """Memory Sync already unlocked: every unlock entry point hands the key on.
+
+    A start-up unlock that stopped after loading the key leaves Memory Sync
+    unlocked while sharing has no key. Opening a memory section must repair
+    that, not return early.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_unlock_hands_on_the_key(self) -> None:
+        sync = _make_sync_service(is_configured=True)
+        stub = _make_stub(sync_service=sync, auth_service=_make_auth_service())
+        await _run_prompt(stub)
+        stub._propagate_memory_key_material.assert_called_once()
+        stub.bootstrap_memory_cloud.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_startup_reactivation_hands_on_the_key(self) -> None:
+        sync = _make_sync_service(is_configured=True)
+        stub = _make_stub(sync_service=sync, auth_service=_make_auth_service())
+        await _run_reactivate(stub)
+        stub._propagate_memory_key_material.assert_called_once()
+        stub.bootstrap_memory_cloud.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_silent_unlock_hands_on_the_key(self) -> None:
+        sync = _make_sync_service(is_configured=True)
+        stub = _make_stub(sync_service=sync, auth_service=_make_auth_service())
+        assert await stub._try_silent_memory_unlock() is True
+        stub._propagate_memory_key_material.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_unlock_after_the_key_loaded_is_logged_and_handed_on(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import servonaut.services.memory.passphrase_store as ps
+
+        sync = _make_sync_service(enrolled_locally=True, is_configured=False)
+        sync.can_unwrap_local = MagicMock(return_value=True)
+
+        def load_key_then_fail(*_args: Any, **_kwargs: Any) -> None:
+            sync.is_configured = True
+            raise IOError("connection reset")
+
+        stub = _make_stub(
+            sync_service=sync,
+            auth_service=_make_auth_service(),
+            memory_config=_make_memory_config(sync_remember_device=True),
+            bootstrap_side_effect=load_key_then_fail,
+        )
+        kr = _make_fake_keyring(
+            backend_module="keyring.backends.SecretService", pw="valid-pw"
+        )
+        with (
+            patch.object(ps, "_HAS_KEYRING", True),
+            patch.object(ps, "_keyring", kr),
+            caplog.at_level(logging.WARNING, logger="servonaut.app"),
+        ):
+            assert await stub._try_silent_memory_unlock() is True
+
+        assert "connection reset" in caplog.text
+        stub._propagate_memory_key_material.assert_called_once()
+
+
+def _make_bootstrap_stub(sync: Any) -> SimpleNamespace:
+    """A stub that runs the real ``bootstrap_memory_cloud`` against *sync*."""
+    auth = _make_auth_service()
+    auth.fetch_user_id = AsyncMock(return_value=42)
+    stub = SimpleNamespace(
+        memory_sync_service=sync,
+        auth_service=auth,
+        memory_settings_service=None,
+        _prompt_memory_passphrase=AsyncMock(return_value="pw"),
+        _propagate_memory_key_material=MagicMock(),
+        _start_memory_sync_loop=MagicMock(),
+    )
+    for name in ("bootstrap_memory_cloud", "_run_memory_bootstrap"):
+        if hasattr(ServonautApp, name):
+            stub.__dict__[name] = types.MethodType(getattr(ServonautApp, name), stub)
+    return stub
+
+
+async def _settle() -> None:
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+class TestStartupUnlockSurvivesItsCaller:
+    """Opening Fleet Memory replaces the start-up unlock worker (same exclusive
+    group). The unlock itself must finish anyway: hand the key on and start
+    the sync loop."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_does_not_stop_the_unlock(self) -> None:
+        registering = asyncio.Event()
+        release = asyncio.Event()
+        sync = MagicMock()
+
+        async def bootstrap(passphrase_provider: Any) -> None:
+            registering.set()
+            await release.wait()
+
+        sync.bootstrap = bootstrap
+        stub = _make_bootstrap_stub(sync)
+
+        caller = asyncio.ensure_future(stub.bootstrap_memory_cloud())
+        await registering.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        release.set()
+        await _settle()
+
+        stub._propagate_memory_key_material.assert_called_once()
+        stub._start_memory_sync_loop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_share_one_unlock(self) -> None:
+        release = asyncio.Event()
+        sync = MagicMock()
+        calls = []
+
+        async def bootstrap(passphrase_provider: Any) -> None:
+            calls.append(passphrase_provider)
+            await release.wait()
+
+        sync.bootstrap = bootstrap
+        stub = _make_bootstrap_stub(sync)
+
+        first = asyncio.ensure_future(stub.bootstrap_memory_cloud())
+        await _settle()
+        second = asyncio.ensure_future(stub.bootstrap_memory_cloud())
+        await _settle()
+        release.set()
+        await asyncio.gather(first, second)
+
+        assert len(calls) == 1
+        stub._propagate_memory_key_material.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_unlock_is_retried_by_the_next_caller(self) -> None:
+        sync = MagicMock()
+        sync.bootstrap = AsyncMock(side_effect=[IOError("offline"), None])
+        stub = _make_bootstrap_stub(sync)
+
+        with pytest.raises(IOError):
+            await stub.bootstrap_memory_cloud()
+        await stub.bootstrap_memory_cloud()
+
+        assert sync.bootstrap.await_count == 2
+        stub._propagate_memory_key_material.assert_called_once()

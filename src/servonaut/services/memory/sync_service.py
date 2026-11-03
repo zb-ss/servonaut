@@ -327,6 +327,21 @@ class MemorySyncService:
         """
         self._key_material_listener = listener
 
+    def _announce_key_material(self) -> None:
+        """Fire the key-material listener: a keypair was just unwrapped or rotated.
+
+        Called the moment the key is in memory, not at the end of
+        :meth:`bootstrap`: the steps after it (registering servers, replaying
+        the queue) can take a minute or be cancelled, and sharing must not
+        wait for them. A listener error is logged, never raised.
+        """
+        if self._key_material_listener is None:
+            return
+        try:
+            self._key_material_listener()
+        except Exception:
+            logger.warning("key_material_listener raised", exc_info=True)
+
     def set_entitlement_check(self, fn: Callable[[], bool]) -> None:
         """Wire an entitlement predicate for the enqueue gate.
 
@@ -1699,13 +1714,7 @@ class MemorySyncService:
             new_kp.fingerprint,
             user_id=self._self_user_id,
         )
-        if self._key_material_listener is not None:
-            try:
-                self._key_material_listener()
-            except Exception:
-                logger.warning(
-                    "key_material_listener raised after rotate", exc_info=True
-                )
+        self._announce_key_material()
         logger.info("Rotated memory keypair fingerprint=%s", new_kp.fingerprint)
 
     # ------------------------------------------------------------------
@@ -1934,6 +1943,7 @@ class MemorySyncService:
                                 "Bootstrap: loaded keypair from local cache fingerprint=%s",
                                 fingerprint,
                             )
+                            self._announce_key_material()
                             return
 
         # ------------------------------------------------------------------
@@ -1962,6 +1972,7 @@ class MemorySyncService:
                 "Bootstrap: loaded existing keypair fingerprint=%s",
                 fingerprint,
             )
+            self._announce_key_material()
             return
 
         except RateLimitedError as exc:
@@ -1996,6 +2007,7 @@ class MemorySyncService:
             pub_b64, wrapped.to_json(), kp.fingerprint, user_id=self._self_user_id
         )
         logger.info("Bootstrap: enrolled new keypair fingerprint=%s", kp.fingerprint)
+        self._announce_key_material()
 
     async def _post_batch(self, batch: List[SyncEnvelope]) -> SyncBatchResult:
         """Encrypt and POST a batch of SyncEnvelopes. Returns SyncBatchResult."""
