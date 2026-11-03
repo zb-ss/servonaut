@@ -850,7 +850,9 @@ jobs:
 
       # notarytool takes the app as a zip archive, which ditto writes with the
       # bundle's links and signatures intact; the ticket is stapled to the
-      # app itself, so the disk image made from it carries it.
+      # app itself, so the disk image made from it carries it. Stapling and
+      # validating fetch the ticket from Apple and are retried after a
+      # dropped connection.
       - name: Notarize and staple the app
         env:
           QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
@@ -863,13 +865,14 @@ jobs:
           set -euo pipefail
           archive="${NOTARY_DIR}/Servonaut-${TARGET}.zip"
           ditto -c -k --keepParent "${APP}" "${archive}"
-          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
-            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
-            "${QUALIFIED_PYTHON}" -m scripts.distribution.notarize_macos --artifact "${archive}" \
+          distribution() {
+            env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+              PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" -m "$@"
+          }
+          distribution scripts.distribution.notarize_macos --artifact "${archive}" \
             --api-key-file "${NOTARY_KEY}" --api-key-id "${APPLE_NOTARY_KEY_ID}" \
             --api-issuer "${APPLE_NOTARY_ISSUER_ID}"
-          xcrun stapler staple "${APP}"
-          xcrun stapler validate "${APP}"
+          distribution scripts.distribution.notarize_macos --artifact "${APP}" --staple-only
           # Gatekeeper runs the app as a user who downloaded it would.
           if ! assessment="$(spctl --assess --type execute -vv "${APP}" 2>&1)"; then
             echo "::error::Gatekeeper rejects the notarized app: ${assessment}"
@@ -883,7 +886,8 @@ jobs:
 
       # The stapled app becomes the drag-to-Applications disk image, whose
       # app must keep its signature; the image is then signed, notarized and
-      # stapled itself, so Gatekeeper accepts it offline too.
+      # stapled itself, so Gatekeeper accepts it offline too. --staple also
+      # validates the stapled ticket, retrying after a dropped connection.
       - name: Package, sign and notarize the disk image
         id: dmg
         env:
@@ -910,7 +914,6 @@ jobs:
           distribution scripts.distribution.notarize_macos --artifact "${dmg}" \
             --api-key-file "${NOTARY_KEY}" --api-key-id "${APPLE_NOTARY_KEY_ID}" \
             --api-issuer "${APPLE_NOTARY_ISSUER_ID}" --staple
-          xcrun stapler validate "${dmg}"
           if ! assessment="$(spctl --assess --type open --context context:primary-signature -vv "${dmg}" 2>&1)"; then
             echo "::error::Gatekeeper rejects the notarized disk image: ${assessment}"
             exit 1

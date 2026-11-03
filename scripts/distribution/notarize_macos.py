@@ -6,6 +6,9 @@ with an App Store Connect API key file.
 
 When Apple refuses a submission, the command line fetches the submission's
 log, which lists the issues that made it fail, and prints it.
+
+Stapling also validates the stapled ticket. Both stapler steps fetch the
+ticket from Apple and are repeated after a dropped connection.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Optional
 
 # The final statuses of a submission Apple refused; its log says why.
@@ -25,6 +29,13 @@ REJECTED_STATUSES = frozenset({"Invalid", "Rejected"})
 _SUBMISSION_ID = re.compile(
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 )
+
+# stapler fetches the notarization ticket from Apple for both staple and
+# validate. When that connection drops, the step fails with an NSURLErrorDomain
+# error although the ticket exists; the same step then works.
+# Only those network failures are retried, a few times with a growing pause.
+STAPLER_NETWORK_ERROR_MARKER = "NSURLErrorDomain"
+STAPLER_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 30.0, 60.0)
 
 
 class MacosNotarizationError(Exception):
@@ -171,11 +182,7 @@ def staple_ticket(
     if dry_run:
         return True, f"[simulated] ticket stapled to {path.name}"
 
-    cmd = [*_xcrun_tool_command("stapler"), "staple", str(path)]
-
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    msg = (res.stdout + "\n" + res.stderr).strip()
-    return res.returncode == 0, msg
+    return _run_stapler("staple", path)
 
 
 def validate_staple(
@@ -191,11 +198,49 @@ def validate_staple(
     if dry_run:
         return True, f"[simulated] staple validated on {path.name}"
 
-    cmd = [*_xcrun_tool_command("stapler"), "validate", str(path)]
+    return _run_stapler("validate", path)
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    msg = (res.stdout + "\n" + res.stderr).strip()
-    return res.returncode == 0, msg
+
+def _run_stapler(action: str, path: Path) -> tuple[bool, str]:
+    """Run ``stapler <action>``, repeating it only after a network failure.
+
+    It runs at most ``len(STAPLER_RETRY_DELAYS_SECONDS) + 1`` times, pausing
+    for the next delay before each repeat, and says so on stderr.
+
+    Returns:
+        tuple[bool, str]: (is_success, stapler's output of the last attempt)
+    """
+    cmd = [*_xcrun_tool_command("stapler"), action, str(path)]
+    attempts = len(STAPLER_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        msg = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+        if res.returncode == 0:
+            return True, msg
+        if STAPLER_NETWORK_ERROR_MARKER not in msg or attempt == attempts:
+            break
+        delay = STAPLER_RETRY_DELAYS_SECONDS[attempt - 1]
+        print(
+            f"stapler {action} lost its connection to Apple (attempt {attempt} of "
+            f"{attempts}); retrying in {delay:g}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+    return False, msg
+
+
+def _staple_and_validate(artifact: Path, *, dry_run: bool) -> int:
+    """Staple the artifact's ticket and validate it; 0 when both work."""
+    stapled, staple_msg = staple_ticket(artifact, dry_run=dry_run)
+    if not stapled:
+        print(f"Stapling failed:\n{staple_msg}", file=sys.stderr)
+        return 1
+    validated, validate_msg = validate_staple(artifact, dry_run=dry_run)
+    if not validated:
+        print(f"The stapled ticket does not validate:\n{validate_msg}", file=sys.stderr)
+        return 1
+    print(f"Stapling verified for {artifact.name}")
+    return 0
 
 
 def _print_rejection_log(args: argparse.Namespace, details: dict[str, Any]) -> None:
@@ -226,7 +271,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--artifact",
         required=True,
         type=Path,
-        help="Path to .dmg or .zip artifact to notarize.",
+        help="Path to .dmg or .zip artifact to notarize (or, with --staple-only, to staple).",
     )
     parser.add_argument(
         "--keychain-profile",
@@ -257,7 +302,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--staple",
         action="store_true",
-        help="Automatically staple ticket upon success.",
+        help="Staple the ticket upon success and validate it.",
+    )
+    parser.add_argument(
+        "--staple-only",
+        action="store_true",
+        help=(
+            "Submit nothing: staple and validate the ticket of an artifact notarized "
+            "earlier, such as an app whose zip archive was submitted."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -268,6 +321,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.staple_only:
+            return _staple_and_validate(args.artifact, dry_run=args.dry_run)
+
         success, log, details = submit_notarization(
             artifact_path=args.artifact,
             keychain_profile=args.keychain_profile,
@@ -288,11 +344,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  Submission ID: {sub_id}")
 
         if args.staple and not args.no_wait:
-            stapled, staple_msg = staple_ticket(args.artifact, dry_run=args.dry_run)
-            if not stapled:
-                print(f"Stapling failed:\n{staple_msg}", file=sys.stderr)
-                return 1
-            print(f"Stapling verified for {args.artifact.name}")
+            return _staple_and_validate(args.artifact, dry_run=args.dry_run)
 
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

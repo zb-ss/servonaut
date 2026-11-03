@@ -570,12 +570,14 @@ def test_gatekeeper_must_accept_the_notarized_app_and_image(workflow: str) -> No
         assert '--api-key-file "${NOTARY_KEY}" --api-key-id "${APPLE_NOTARY_KEY_ID}"' in script
         assert '--api-issuer "${APPLE_NOTARY_ISSUER_ID}"' in script
         assert "grep -qx 'source=Notarized Developer ID'" in script
+        # Stapling and validating fetch the ticket from Apple; only the script
+        # retries them after a dropped connection.
+        assert "xcrun stapler" not in script
     stapled = _positions(
         app,
         [
             "scripts.distribution.notarize_macos",
-            'xcrun stapler staple "${APP}"',
-            'xcrun stapler validate "${APP}"',
+            'scripts.distribution.notarize_macos --artifact "${APP}" --staple-only',
             "spctl --assess --type execute -vv",
         ],
     )
@@ -586,7 +588,6 @@ def test_gatekeeper_must_accept_the_notarized_app_and_image(workflow: str) -> No
         'scripts.distribution.sign_macos --target "${dmg}"',
         'codesign --verify --strict --verbose=2 "${dmg}"',
         "--staple",
-        'xcrun stapler validate "${dmg}"',
         "spctl --assess --type open --context context:primary-signature -vv",
         'shasum -a 256 "${dmg}"',
     ]

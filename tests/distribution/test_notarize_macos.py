@@ -318,3 +318,144 @@ class TestRejectedSubmissionLog:
         assert rejected_submission_id({"id": _SUBMISSION.upper(), "status": "Rejected"})
         assert rejected_submission_id({"id": 7, "status": "Invalid"}) is None
         assert rejected_submission_id({"status": "Invalid"}) is None
+
+
+# What stapler printed on a macOS runner when the connection to Apple dropped
+# right after a successful notarization (exit code 68).
+_CONNECTION_LOST = (
+    "Processing: /tmp/servonaut.dmg\n"
+    'error is Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."\n'
+    "CloudKit's response is inconsistent with expections: (null)\n"
+    "The staple and validate action failed! Error 68."
+)
+_NOT_FOUND = (
+    'CloudKit query for servonaut.dmg failed due to "Record not found".\n'
+    "The validate action failed! Error 65."
+)
+
+
+def _stapler(
+    monkeypatch: pytest.MonkeyPatch, *results: tuple[int, str]
+) -> tuple[list[list[str]], list[float]]:
+    """Answer stapler with the given (exit code, output) in order; record the pauses."""
+    monkeypatch.setattr(notarize_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+    answers = list(results)
+    commands: list[list[str]] = []
+    pauses: list[float] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        if cmd[1] == "notarytool":
+            body = {"id": _SUBMISSION, "status": "Accepted"}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        returncode, output = answers.pop(0)
+        return subprocess.CompletedProcess(cmd, returncode, "", output)
+
+    monkeypatch.setattr(notarize_macos.subprocess, "run", fake_run)
+    monkeypatch.setattr(notarize_macos.time, "sleep", pauses.append)
+    return commands, pauses
+
+
+class TestStaplerRetry:
+    """stapler is repeated only after the connection to Apple dropped."""
+
+    @pytest.mark.parametrize(
+        ("step", "action"), [(staple_ticket, "staple"), (validate_staple, "validate")]
+    )
+    def test_a_lost_connection_is_retried_until_it_works(
+        self,
+        dmg: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        step,
+        action: str,
+    ) -> None:
+        commands, pauses = _stapler(monkeypatch, (68, _CONNECTION_LOST), (0, "worked"))
+
+        assert step(dmg) == (True, "worked")
+
+        assert commands == [["/usr/bin/xcrun", "stapler", action, str(dmg.resolve())]] * 2
+        assert pauses == [15.0]
+        assert f"stapler {action} lost its connection to Apple (attempt 1 of 4)" in (
+            capsys.readouterr().err
+        )
+
+    def test_a_connection_lost_every_time_fails_with_the_last_output(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, pauses = _stapler(
+            monkeypatch, *((68, f"{_CONNECTION_LOST} ({attempt})") for attempt in range(1, 5))
+        )
+
+        stapled, output = staple_ticket(dmg)
+
+        assert stapled is False
+        assert output.endswith("Error 68. (4)")
+        assert len(commands) == 4
+        assert pauses == list(notarize_macos.STAPLER_RETRY_DELAYS_SECONDS)
+
+    def test_any_other_failure_is_not_retried(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, pauses = _stapler(monkeypatch, (65, _NOT_FOUND))
+
+        assert validate_staple(dmg) == (False, _NOT_FOUND)
+        assert len(commands) == 1
+        assert pauses == []
+
+
+class TestStapleCommandLine:
+    """--staple and --staple-only staple the ticket and then validate it."""
+
+    def test_staple_validates_the_ticket_after_a_lost_connection(
+        self,
+        dmg: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        commands, _ = _stapler(monkeypatch, (0, "stapled"), (68, _CONNECTION_LOST), (0, "valid"))
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "profile", "--staple"]) == 0
+
+        assert [command[2] for command in commands] == ["submit", "staple", "validate", "validate"]
+        assert "Stapling verified for test.dmg" in capsys.readouterr().out
+
+    def test_a_ticket_that_does_not_validate_fails(
+        self,
+        dmg: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _stapler(monkeypatch, (0, "stapled"), (65, _NOT_FOUND))
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "profile", "--staple"]) == 1
+
+        captured = capsys.readouterr()
+        assert "The stapled ticket does not validate:" in captured.err
+        assert "Record not found" in captured.err
+        assert "Stapling verified" not in captured.out
+
+    def test_staple_only_submits_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app = tmp_path / "Servonaut.app"
+        app.mkdir()
+        commands, _ = _stapler(monkeypatch, (68, _CONNECTION_LOST), (0, "stapled"), (0, "valid"))
+
+        assert main(["--artifact", str(app), "--staple-only"]) == 0
+
+        assert [command[1:3] for command in commands] == [["stapler", "staple"]] * 2 + [
+            ["stapler", "validate"]
+        ]
+        assert "Stapling verified for Servonaut.app" in capsys.readouterr().out
+
+    def test_a_dry_run_staple_only_contacts_nobody(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, _ = _stapler(monkeypatch)
+
+        assert main(["--artifact", str(dmg), "--staple-only", "--dry-run"]) == 0
+        assert commands == []
