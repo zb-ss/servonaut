@@ -369,3 +369,94 @@ class TestOtherMethods:
         svc = _make_service(api_client=api)
         instances = await svc.list_instances()
         assert len(instances) == 2
+
+
+# ---------------------------------------------------------------------------
+# Where the reader gets its key
+# ---------------------------------------------------------------------------
+
+
+class TestKeySource:
+    """The reader uses Memory Sync's unlocked key before unlocking on its own,
+    and its own unlock resolves the user id it decrypts for."""
+
+    @staticmethod
+    def _bare_service(**kwargs: Any) -> MemoryRetrievalService:
+        return MemoryRetrievalService(
+            api_client=_make_api_client(),
+            crypto=MagicMock(),
+            passphrase_provider=AsyncMock(return_value="test-pass-ABCDEF!!"),
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_uses_the_unlocked_memory_sync_key_without_prompting(self):
+        from servonaut.services.memory.interfaces import KeyMaterial
+
+        material = KeyMaterial(user_id=42, public_key=b"\x01" * 32, private_key=b"\x02" * 32)
+        svc = self._bare_service(key_material_provider=lambda: material)
+
+        with patch(
+            "servonaut.services.memory.crypto.decrypt_envelope",
+            return_value=json.dumps({"observed": {}}).encode(),
+        ) as decrypt:
+            await svc._decrypt_envelope_dict(_make_envelope_raw())
+
+        svc._passphrase_provider.assert_not_called()
+        svc._api.get.assert_not_called()
+        assert decrypt.call_args.kwargs["self_user_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_own_unlock_resolves_the_user_id(self):
+        api = _make_api_client(get_return={
+            "public_key": base64.b64encode(b"\x01" * 32).decode(),
+            "wrapped_private_key": "{}",
+            "fingerprint": "a" * 64,
+        })
+        svc = MemoryRetrievalService(
+            api_client=api,
+            crypto=MagicMock(),
+            passphrase_provider=AsyncMock(return_value="test-pass-ABCDEF!!"),
+            key_material_provider=lambda: None,
+            user_id_provider=AsyncMock(return_value=42),
+        )
+
+        with (
+            patch("servonaut.services.memory.crypto.WrappedPrivateKey.from_json"),
+            patch(
+                "servonaut.services.memory.crypto.unwrap_private_key",
+                return_value=b"\x02" * 32,
+            ),
+            patch(
+                "servonaut.services.memory.crypto.decrypt_envelope",
+                return_value=json.dumps({"observed": {}}).encode(),
+            ) as decrypt,
+        ):
+            await svc._decrypt_envelope_dict(_make_envelope_raw())
+
+        assert decrypt.call_args.kwargs["self_user_id"] == 42
+
+
+class TestCommandLineReader:
+    """``servonaut memory pull`` unlocks the reader itself; it must decrypt for
+    the signed-in user rather than prompt and then fail."""
+
+    @pytest.mark.asyncio
+    async def test_cli_reader_resolves_the_user_id_after_its_own_unlock(self, monkeypatch):
+        from servonaut.cli import memory as mem_mod
+
+        auth = MagicMock()
+        auth.is_authenticated = True
+        auth.fetch_user_id = AsyncMock(return_value=77)
+        monkeypatch.setattr("servonaut.services.auth_service.AuthService", lambda: auth)
+        monkeypatch.setattr("servonaut.services.api_client.APIClient", lambda _auth: _make_api_client())
+
+        _, reader = mem_mod._init_headless_sync_services(MagicMock(), MagicMock(), MagicMock())
+
+        async def unlock() -> None:
+            reader._self_pubkey = b"\x01" * 32
+            reader._self_privkey = b"\x02" * 32
+
+        monkeypatch.setattr(reader, "_ensure_keypair", unlock)
+        await reader._ensure_key_material()
+        assert reader._self_user_id == 77

@@ -1987,3 +1987,131 @@ class TestCanUnwrapLocal:
 
         assert svc._self_pubkey is None, "can_unwrap_local must not set _self_pubkey"
         assert svc._self_privkey is None, "can_unwrap_local must not set _self_privkey"
+
+
+# ---------------------------------------------------------------------------
+# The key is announced the moment it is unwrapped
+# ---------------------------------------------------------------------------
+
+
+class TestKeyMaterialAnnouncedOnLoad:
+    """The key-material listener fires as soon as the keypair is in memory.
+
+    Bootstrap goes on to register every server and replay the queue, which
+    can take a minute and can be cancelled; sharing and the memory reader
+    must not depend on those steps finishing.
+    """
+
+    @staticmethod
+    def _recording_listener(svc: MemorySyncService) -> List[Any]:
+        seen: List[Any] = []
+        svc.set_key_material_listener(lambda: seen.append(svc.get_key_material()))
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_key_from_the_local_cache_is_announced(self, tmp_path: Path) -> None:
+        import base64
+
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        svc._self_user_id = 42
+        _write_cache(svc._key_cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+        seen = self._recording_listener(svc)
+
+        with patch(
+            "servonaut.services.memory.sync_service.unwrap_private_key",
+            return_value=b"\x02" * 32,
+        ):
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        assert len(seen) == 1
+        assert seen[0] is not None and seen[0].private_key == b"\x02" * 32
+
+    @pytest.mark.asyncio
+    async def test_key_from_the_server_is_announced(self, tmp_path: Path) -> None:
+        import base64
+
+        api = _make_api_client(get_return={
+            "public_key": base64.b64encode(b"\x01" * 32).decode(),
+            "wrapped_private_key": _fake_wrapped_json(),
+            "fingerprint": "a" * 64,
+        })
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        svc._self_user_id = 42
+        seen = self._recording_listener(svc)
+
+        with patch(
+            "servonaut.services.memory.sync_service.unwrap_private_key",
+            return_value=b"\x02" * 32,
+        ):
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        assert len(seen) == 1 and seen[0] is not None
+
+    @pytest.mark.asyncio
+    async def test_newly_enrolled_key_is_announced(self, tmp_path: Path) -> None:
+        from servonaut.services.memory.crypto import KeyPair
+
+        async def get_side(path, **kwargs):
+            raise NotFoundError(code="not_found", message="no key", status=404)
+
+        api = _make_api_client(get_side_effect=get_side)
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        svc._self_user_id = 42
+        seen = self._recording_listener(svc)
+        wrapped = MagicMock()
+        wrapped.to_json.return_value = _fake_wrapped_json()
+
+        with (
+            patch(
+                "servonaut.services.memory.sync_service.generate_keypair",
+                return_value=KeyPair(b"\x01" * 32, b"\x02" * 32, "a" * 64),
+            ),
+            patch(
+                "servonaut.services.memory.sync_service.wrap_private_key",
+                return_value=wrapped,
+            ),
+        ):
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        assert len(seen) == 1 and seen[0] is not None
+
+    @pytest.mark.asyncio
+    async def test_key_is_announced_before_servers_are_registered(
+        self, tmp_path: Path
+    ) -> None:
+        import base64
+
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        _write_cache(svc._key_cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+        order: List[str] = []
+        svc.set_key_material_listener(lambda: order.append("key"))
+
+        async def register() -> Dict[str, str]:
+            order.append("register")
+            return {}
+
+        svc.upsert_all_instances = register  # type: ignore[method-assign]
+        with patch(
+            "servonaut.services.memory.sync_service.unwrap_private_key",
+            return_value=b"\x02" * 32,
+        ):
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc.bootstrap(passphrase_provider=AsyncMock(return_value="pw"))
+
+        assert order == ["key", "register"]
+
+    def test_a_failing_listener_is_logged_not_raised(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+
+        def broken() -> None:
+            raise ValueError("listener broke")
+
+        svc.set_key_material_listener(broken)
+        with caplog.at_level("WARNING"):
+            svc._announce_key_material()
+        assert "listener broke" in caplog.text

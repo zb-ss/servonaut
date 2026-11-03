@@ -757,6 +757,7 @@ def _init_headless_sync_services(
             crypto=_memory_crypto,
             passphrase_provider=_stdin_passphrase,
             rate_limiter=rate_limiter,  # type: ignore[possibly-undefined]
+            user_id_provider=auth.fetch_user_id,
         )
         sync_service.set_retrieval_service(retrieval_service)
     except Exception as exc:  # noqa: BLE001
