@@ -327,7 +327,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Server Actions** — clicking any instance row opens a per-instance dashboard: the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), and the action rail covers:
 
 - Browse Files (inline) · Run Command · SSH Connect · SCP Transfer
-- View Scan Results · View Logs (`tail -f`) · AI Analysis · Findings (`F`)
+- View Scan Results · View Logs (`tail -f`) · AI Analysis · Monitoring (`F`)
 - Ban IP · Manage/Verify SSH Ref
 
 The **SSH Ref** editor pairs with a Bitwarden vault — pick an SSH key from a list instead of pasting a UUID, or import keys straight from `~/.ssh` (passphrase-protected included), so a machine with no local keys can still connect. The TUI, CLI, and MCP agents all resolve the key from your vault at connect time *(Solo+)*. → [docs](docs/bitwarden-ssh.md)
@@ -562,7 +562,7 @@ only runs **read-only** probes over your relay connection and renders the
 results — nothing is analysed or decided locally.
 
 - **Fleet inbox / per-instance** — `🛡 Findings` in the sidebar for the
-  whole fleet, `F` on any server for that instance.
+  whole fleet, `F` (Monitoring) on any server for that instance.
 - **Scan now** (`s`) — dispatches read-only probes over the relay
   (`servonaut connect` or the TUI autostart must be running); inapplicable
   detectors report the reason instead of failing silently.

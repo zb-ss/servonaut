@@ -5,7 +5,9 @@ server now" runs every prober over real SSH and the table fills with what
 the server reports (its ``/etc/os-release``, its services and containers).
 After the server changes, refreshing one module picks up the change;
 exporting writes a Markdown summary; clearing a module removes its rows.
-Annotating opens ``$EDITOR`` on the server's notes.
+Annotating opens ``$EDITOR`` on the server's notes, and the saved notes show
+in the screen's Notes panel. A finding an agent saves over MCP is listed in
+the Agent findings panel, and Enter opens it.
 """
 
 from __future__ import annotations
@@ -99,7 +101,11 @@ async def test_annotate_the_server_notes(tui, seed, journey, sshd):
         await t.wait_for_toast(r"^Memory refreshed\.$")
         await t.press("a")
         await t.wait_for_screen("TextEditorModal")
-        await t.click("#text-editor-area")
+        # Type where the editor opens (the top of the file). A click lands
+        # mid-template, inside its primer comment, which notes never show.
+        editor = t.on_screen("#text-editor-area")
+        editor.focus()
+        await t.wait_until(lambda: editor.has_focus, desc="the editor focused")
         await t.type(NOTE)
         await t.press("ctrl+s")
         await t.wait_for_screen("MemoryScreen")
@@ -108,3 +114,34 @@ async def test_annotate_the_server_notes(tui, seed, journey, sshd):
             lambda: any(NOTE in p.read_text() for p in notes.rglob("annotations.md")),
             desc="notes saved",
         )
+        panel = t.on_screen("#memory-notes")
+        await t.wait_until(lambda: NOTE in str(panel.render()), desc="the notes panel")
+
+
+FINDING = "nginx reload waits for the php-fpm socket"
+FINDING_BODY = "Reloading before the socket exists answers 502 for about two seconds."
+
+
+async def test_a_finding_an_agent_saved_is_listed_and_opens(tui, seed, journey, sshd, mcp, e2e_ctx):
+    remote_fleet.seed_web_1(sshd, seed, seed.home)
+    seed.cache([], fresh=True)
+    async with mcp(e2e_ctx.sandbox) as session:  # the same home as the TUI
+        saved = await session.call("remember_server_finding", {
+            "instance_id": WEB_1.name, "title": FINDING, "body": FINDING_BODY, "confidence": 0.8,
+        })
+    assert "finding_id:" in saved
+
+    async with tui() as t:
+        await _open_memory(t)
+        await t.wait_until(
+            lambda: [row[:3] for row in t.table_rows("#memory-findings-table")]
+            == [[FINDING, "agent", "0.80"]],
+            desc="the finding listed",
+        )
+        assert "Agent findings (1)" in str(t.on_screen("#memory-findings-heading").render())
+        t.on_screen("#memory-findings-table").focus()
+        await t.press("enter")
+        await t.wait_for_screen("MemoryFindingScreen")
+        assert str(t.on_screen("#memory-finding-body").render()) == FINDING_BODY
+        await t.press("escape")
+        await t.wait_for_screen("MemoryScreen")

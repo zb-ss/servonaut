@@ -615,6 +615,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "memory-empty-state-label", # Reason: Static; inherits global Static
         "memory-opt-out-banner",    # Reason: Static; inherits global Static
         "memory-table",             # Reason: DataTable; styled via ancestor container
+        "memory-notes-heading",     # Reason: Static heading; styled via .memory-section-heading
+        "memory-findings-heading",  # Reason: Static heading; styled via .memory-section-heading
+        "btn_memory_finding_back",  # Reason: Button; inherits global Button styling inside #memory-finding-actions
         # ---- Generic modal containers ----
         "modal_container",      # Reason: Modal container; styled by parent ModalScreen
         "modal_description",    # Reason: Static; inherits global Static

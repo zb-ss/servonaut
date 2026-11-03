@@ -196,8 +196,17 @@ Press `m` while hovering over an instance in the main list to open the memory sc
 | `e` | Export summary to Markdown           |
 | `A` | Enhance the local summary with a chosen AI provider |
 | `H` | Generate a hosted summary from encrypted Memory Sync data |
+| `f` | Show or hide superseded agent findings |
+| `Enter` | Open the agent finding under the cursor in full |
 
 If the DataTable is empty and the server is not opted out, a CTA banner appears prompting you to press `r` or click **Probe server now** — this resolves the UAT gap where new users couldn't find the build trigger.
+
+Below the module table the screen shows two panels:
+
+- **Notes**: the server's free-form notes, without the comments of the template that `a` seeds. A template nobody filled in counts as no notes, here and in the summary, the MCP tools and sync. Long notes show their first `memory.notes_preview_lines` lines (default 12) and how many more there are.
+- **Agent findings**: what AI agents or operators saved about the server with `remember_server_finding`, newest first, with their source, confidence and date. A finding below `memory.findings_confidence_threshold` is marked "recall only": agents can look it up, but it is not added to their context automatically. Findings replaced by a newer one are hidden until you press `f`. `Enter` opens one with its full text, tags and the findings it replaced.
+
+Findings and notes are written by agents or people, not probed, so they are shown as plain text and labelled as unverified. When a team shares a server with you and the share includes notes or findings, they appear in these panels labelled "Shared by <team>" and are read-only. The Server Actions screen's **Monitoring** (`F`) is a different feature: problems that Servonaut's server-side monitoring found.
 
 ### First-connect prompt
 

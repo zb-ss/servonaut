@@ -105,6 +105,27 @@ async def _memory(pilot: Any) -> None:
     await _harness.wait_until(pilot, lambda: table.row_count > 0, "the memory table")
 
 
+async def _memory_empty(pilot: Any) -> None:
+    """A server with no memory yet: the probe button above the empty panels."""
+    screen = await _open_server(pilot, "web-1", "m", "MemoryScreen")
+    probe = screen.query_one("#btn_empty_probe", Button)
+    await _harness.wait_until(
+        pilot, lambda: probe.region.height > 0 and screen.focused is probe, "the probe button",
+    )
+
+
+async def _memory_authored(pilot: Any) -> None:
+    """The notes and agent findings panels, scrolled into view."""
+    _harness.seed_authored(pilot.app.memory_service)
+    screen = await _open_focus_server(pilot, "m", "MemoryScreen")
+    findings = screen.query_one("#memory-findings-table", DataTable)
+    await _harness.wait_until(pilot, lambda: findings.row_count == 2, "the findings")
+    container = screen.query_one("#memory-container")
+    container.scroll_to_widget(screen.query_one("#memory-authored"), animate=False, top=True)
+    await _harness.wait_until(pilot, lambda: container.scroll_y > 0, "the panels in view")
+    findings.focus(scroll_visible=False)
+
+
 def _settings(panel_id: str) -> Scenario:
     async def scenario(pilot: Any) -> None:
         pilot.app.open_settings_screen(panel_id)
@@ -330,6 +351,18 @@ def test_settings_panel_narrow(screen_snapshot, panel_id: str) -> None:
 def test_server_memory(screen_snapshot, size: str) -> None:
     """The memory screen of a server with four cached modules."""
     _capture(screen_snapshot, size, _memory)
+
+
+@sizes
+def test_server_memory_empty(screen_snapshot, size: str) -> None:
+    """The memory screen of a server never probed: the probe button is visible."""
+    _capture(screen_snapshot, size, _memory_empty)
+
+
+@sizes
+def test_server_memory_notes_and_findings(screen_snapshot, size: str) -> None:
+    """The memory screen's notes and agent findings (one superseded, hidden)."""
+    _capture(screen_snapshot, size, _memory_authored)
 
 
 @sizes

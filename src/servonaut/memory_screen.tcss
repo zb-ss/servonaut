@@ -40,15 +40,18 @@
 /* The per-server screen stacks a title, status, banner, table and four
    action rows; together they are taller than a small terminal. The page
    scrolls instead of clipping, the title keeps a row between itself and the
-   header, and the table keeps enough height to show its rows (a 1fr share
-   of an over-full page is zero). */
+   header, and the table is as tall as its rows (8 to 16): a 1fr share of an
+   over-full page is zero, and the notes and findings panels below it make
+   the page over-full even on a large terminal. */
 MemoryScreen #memory-container {
     padding: 1 1 0 1;
     overflow-y: auto;
 }
 
 MemoryScreen #memory-table {
+    height: auto;
     min-height: 8;
+    max-height: 16;
 }
 
 /* Narrow terminals (see MemoryScreen.HORIZONTAL_BREAKPOINTS): the five
