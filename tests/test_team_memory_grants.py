@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -81,7 +82,8 @@ def service(api: MagicMock) -> TeamMemoryService:
         api_client=api,
         auth_service=auth,
         crypto=crypto_module,
-        key_store_provider=MagicMock(),
+        # The caller is user 1, the granter of every grant _grant_json builds.
+        key_store_provider=lambda: SimpleNamespace(user_id=1),
         retrieval_service=retrieval,
     )
 
@@ -138,6 +140,36 @@ class TestLiveGrantLookup:
         api.get.return_value = _listing(other)
         assert run(service.find_live_grant(SLUG, INSTANCE)) is None
 
+    def test_a_teammates_grant_on_the_same_id_is_not_the_callers(self, service, api):
+        # Ids such as custom server names can repeat across a team: the list
+        # holds every granter's share, and only the caller's own is theirs.
+        api.get.return_value = _listing(_grant_json("g-teammate", granted_by_user_id=9))
+        assert run(service.find_live_grant(SLUG, INSTANCE)) is None
+
+    def test_the_callers_grant_is_found_beside_a_teammates(self, service, api):
+        api.get.return_value = _listing(
+            _grant_json("g-teammate", granted_by_user_id=9), _grant_json("g-own"))
+        grant = run(service.find_live_grant(SLUG, INSTANCE))
+        assert grant is not None and grant.id == "g-own"
+
+    def test_the_signed_in_user_counts_when_memory_sync_is_locked(self, api):
+        auth = MagicMock(has_feature=MagicMock(return_value=True), user_id=1)
+        locked = TeamMemoryService(
+            api_client=api, auth_service=auth, crypto=crypto_module,
+            key_store_provider=lambda: None, retrieval_service=MagicMock(),
+        )
+        api.get.return_value = _listing(_grant_json("g-own"))
+        assert run(locked.find_live_grant(SLUG, INSTANCE)).id == "g-own"
+
+    def test_an_unknown_caller_matches_no_grant(self, api):
+        auth = MagicMock(has_feature=MagicMock(return_value=True), user_id=None)
+        unknown = TeamMemoryService(
+            api_client=api, auth_service=auth, crypto=crypto_module,
+            key_store_provider=lambda: None, retrieval_service=MagicMock(),
+        )
+        api.get.return_value = _listing(_grant_json("g-own"))
+        assert run(unknown.find_live_grant(SLUG, INSTANCE)) is None
+
 
 class TestShareAgain:
     def test_revokes_then_grants_in_order_without_a_purge(self, service, api):
@@ -165,7 +197,7 @@ class TestListMemo:
         auth.has_feature = MagicMock(return_value=True)
         svc = TeamMemoryService(
             api_client=api, auth_service=auth, crypto=crypto_module,
-            key_store_provider=MagicMock(), retrieval_service=MagicMock(),
+            key_store_provider=lambda: SimpleNamespace(user_id=1), retrieval_service=MagicMock(),
             cache_ttl_provider=lambda: 60.0,
         )
         run(svc.find_live_grant(SLUG, INSTANCE))
@@ -177,7 +209,7 @@ class TestListMemo:
         auth.has_feature = MagicMock(return_value=True)
         svc = TeamMemoryService(
             api_client=api, auth_service=auth, crypto=crypto_module,
-            key_store_provider=MagicMock(), retrieval_service=MagicMock(),
+            key_store_provider=lambda: SimpleNamespace(user_id=1), retrieval_service=MagicMock(),
             cache_ttl_provider=lambda: 60.0,
         )
         run(svc.find_live_grant(SLUG, INSTANCE))
