@@ -376,7 +376,7 @@ class TestStaplerRetry:
 
         assert commands == [["/usr/bin/xcrun", "stapler", action, str(dmg.resolve())]] * 2
         assert pauses == [15.0]
-        assert f"stapler {action} lost its connection to Apple (attempt 1 of 4)" in (
+        assert f"stapler {action} lost its connection to Apple (attempt 1 of 6)" in (
             capsys.readouterr().err
         )
 
@@ -384,15 +384,20 @@ class TestStaplerRetry:
         self, dmg: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         commands, pauses = _stapler(
-            monkeypatch, *((68, f"{_CONNECTION_LOST} ({attempt})") for attempt in range(1, 5))
+            monkeypatch, *((68, f"{_CONNECTION_LOST} ({attempt})") for attempt in range(1, 7))
         )
 
         stapled, output = staple_ticket(dmg)
 
         assert stapled is False
-        assert output.endswith("Error 68. (4)")
-        assert len(commands) == 4
+        assert output.endswith("Error 68. (6)")
+        assert len(commands) == 6
         assert pauses == list(notarize_macos.STAPLER_RETRY_DELAYS_SECONDS)
+
+    def test_it_keeps_retrying_through_a_several_minute_outage(self) -> None:
+        # Apple's ticket server has stayed unreachable from a build machine
+        # for over two minutes; a shorter window fails a notarized build.
+        assert sum(notarize_macos.STAPLER_RETRY_DELAYS_SECONDS) >= 5 * 60
 
     def test_any_other_failure_is_not_retried(
         self, dmg: Path, monkeypatch: pytest.MonkeyPatch

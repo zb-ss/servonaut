@@ -33,9 +33,11 @@ _SUBMISSION_ID = re.compile(
 # stapler fetches the notarization ticket from Apple for both staple and
 # validate. When that connection drops, the step fails with an NSURLErrorDomain
 # error although the ticket exists; the same step then works.
-# Only those network failures are retried, a few times with a growing pause.
+# Only those network failures are retried, with a growing pause. The ticket
+# server can stay unreachable from a build machine for several minutes, so the
+# pauses add up to almost eight minutes before stapling gives up.
 STAPLER_NETWORK_ERROR_MARKER = "NSURLErrorDomain"
-STAPLER_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 30.0, 60.0)
+STAPLER_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 30.0, 60.0, 120.0, 240.0)
 
 
 class MacosNotarizationError(Exception):
