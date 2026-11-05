@@ -203,6 +203,31 @@ class TestPassphraseEnrolFeedback:
             assert "3 character types" in str(feedback.content)
             assert feedback.content_size.height > 0
 
+    @pytest.mark.parametrize(
+        ("passphrase", "confirmation", "feedback_text"),
+        [
+            ("private1234", "private1234", "Use at least 16 characters."),
+            ("PrivatePassphrase01!", "DifferentPassphrase02!", "Passphrases do not match."),
+            ("PrivatePassphrase01!", "PrivatePassphrase01!", "You can enrol."),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_demo_feedback_keeps_passphrases_private(
+        self, passphrase, confirmation, feedback_text,
+    ):
+        app = _StyledEnrolApp()
+        app.demo_mode = True
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.screen.query_one("#enrol-pass1", Input).value = passphrase
+            app.screen.query_one("#enrol-pass2", Input).value = confirmation
+            await pilot.pause()
+            assert feedback_text in str(app.screen.query_one("#enrol-mismatch", Static).render())
+            for selector in ("#enrol-rules", "#enrol-strength", "#enrol-mismatch"):
+                text = str(app.screen.query_one(selector, Static).render())
+                assert text
+                assert passphrase not in text
+                assert confirmation not in text
+
     @pytest.mark.asyncio
     async def test_confirmation_feedback_changes_from_missing_to_mismatch_to_ready(self):
         app = _StyledEnrolApp()
