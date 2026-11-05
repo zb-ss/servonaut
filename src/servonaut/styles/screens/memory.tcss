@@ -307,7 +307,9 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 /* --- Passphrase enrol modal --- */
 #enrol-container {
     width: 66;
+    max-width: 95%;
     height: auto;
+    max-height: 95%;
     border: round $primary;
     background: $surface;
     padding: 1 2;
@@ -323,14 +325,15 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     color: $warning;
 }
 
+#enrol-rules,
 #enrol-strength {
     margin-bottom: 1;
-    height: 1;
+    height: auto;
 }
 
 #enrol-mismatch {
-    color: $error;
-    height: 1;
+    color: $text-error;
+    height: auto;
     margin-bottom: 1;
 }
 

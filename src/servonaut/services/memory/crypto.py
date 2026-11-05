@@ -40,6 +40,9 @@ AES_TAG_LEN = 16
 MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024
 MAX_WRAPPED_PRIVKEY_BYTES = 8 * 1024
 MIN_PW_SCORE = 3
+# Each score has a minimum length and a minimum number of character types.
+# The assessment uses these rules for both acceptance and user guidance.
+_FALLBACK_SCORE_RULES = ((8, 0), (12, 0), (16, 3), (20, 4))
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +76,22 @@ class NoSelfWrapError(CryptoError):
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PassphraseAssessment:
+    """The active passphrase rules, score, and unmet requirements."""
+
+    score: int
+    minimum_score: int
+    requirements: Tuple[str, ...]
+    feedback: Tuple[str, ...]
+    checked: bool = True
+
+    @property
+    def acceptable(self) -> bool:
+        """Return whether the score meets the active requirement."""
+        return self.checked and self.score >= self.minimum_score
+
 
 @dataclass(frozen=True)
 class KeyPair:
@@ -258,48 +277,72 @@ def short_fingerprint(full_fingerprint: str) -> str:
 
 
 def estimate_pw_score(passphrase: str) -> int:
-    """Estimate the strength of a passphrase on a 0–4 scale.
+    """Return the score from the active passphrase assessment."""
+    return assess_passphrase(passphrase).score
 
-    Attempts to import ``zxcvbn`` and delegates to it. Falls back to a simple
-    heuristic when zxcvbn is not installed:
 
-    - score 0: < 8 chars
-    - score 1: < 12 chars
-    - score 2: < 16 chars OR missing a character class
-    - score 3: >= 16 chars with >= 3 distinct character classes
-    - score 4: >= 20 chars with all 4 character classes (upper, lower, digit, symbol)
+def assess_passphrase(passphrase: str) -> PassphraseAssessment:
+    """Assess a passphrase and describe the same rules that control acceptance.
 
-    Mixed-class = upper + lower + digit + symbol all present.
-
-    Args:
-        passphrase: The passphrase string to evaluate.
-
-    Returns:
-        Integer in [0, 4].
+    Use zxcvbn when available. Otherwise, use the fallback score rules.
+    Do not store the passphrase in the result.
     """
     try:
         from zxcvbn import zxcvbn  # type: ignore[import]
-        return zxcvbn(passphrase)["score"]
     except ImportError:
-        pass
+        zxcvbn = None
+
+    if zxcvbn is not None:
+        requirements = (
+            f"Use a passphrase with a strength score of at least {MIN_PW_SCORE}/4.",
+        )
+        try:
+            result = zxcvbn(passphrase)
+        except Exception:
+            return PassphraseAssessment(
+                0, MIN_PW_SCORE, requirements,
+                ("Cannot check passphrase strength. Try a different passphrase.",),
+                checked=False,
+            )
+        score = result["score"]
+        details = result.get("feedback", {})
+        feedback = tuple(message for message in (
+            details.get("warning", ""), *details.get("suggestions", []),
+        ) if message)
+        return PassphraseAssessment(
+            score, MIN_PW_SCORE, requirements,
+            (feedback or requirements) if score < MIN_PW_SCORE else (),
+        )
 
     length = len(passphrase)
-    if length < 8:
-        return 0
-    if length < 12:
-        return 1
-
     has_upper = any(c.isupper() for c in passphrase)
     has_lower = any(c.islower() for c in passphrase)
     has_digit = any(c.isdigit() for c in passphrase)
     has_symbol = any(not c.isalnum() for c in passphrase)
     class_count = sum([has_upper, has_lower, has_digit, has_symbol])
 
-    if length < 16 or class_count < 3:
-        return 2
-    if length >= 20 and class_count == 4:
-        return 4
-    return 3
+    score = max((
+        score for score, (minimum_length, minimum_classes)
+        in enumerate(_FALLBACK_SCORE_RULES, start=1)
+        if length >= minimum_length and class_count >= minimum_classes
+    ), default=0)
+    requirements = []
+    feedback = []
+    if MIN_PW_SCORE > 0:
+        minimum_length, minimum_classes = _FALLBACK_SCORE_RULES[MIN_PW_SCORE - 1]
+        length_rule = f"Use at least {minimum_length} characters."
+        requirements.append(length_rule)
+        if length < minimum_length:
+            feedback.append(length_rule)
+        if minimum_classes:
+            types_rule = (
+                f"Use at least {minimum_classes} character types: "
+                "uppercase letters, lowercase letters, digits, or symbols."
+            )
+            requirements.append(types_rule)
+            if class_count < minimum_classes:
+                feedback.append(types_rule)
+    return PassphraseAssessment(score, MIN_PW_SCORE, tuple(requirements), tuple(feedback))
 
 
 def wrap_private_key(
@@ -327,10 +370,11 @@ def wrap_private_key(
         ValueError: If *strength* is not a recognised preset.
         WrappedKeyTooLargeError: If the serialised blob exceeds 8 KB.
     """
-    if estimate_pw_score(passphrase) < MIN_PW_SCORE:
+    assessment = assess_passphrase(passphrase)
+    if not assessment.acceptable:
         raise WeakPassphraseError(
-            f"Passphrase is too weak (score < {MIN_PW_SCORE}). "
-            "Use at least 16 characters with mixed character classes."
+            f"Passphrase is too weak (score < {assessment.minimum_score}). "
+            + " ".join(assessment.feedback)
         )
 
     _STRENGTH_MAP = {
@@ -371,7 +415,7 @@ def wrap_private_key(
 
         wrapped = WrappedPrivateKey(
             kdf="argon2id",
-            pw_score=estimate_pw_score(passphrase),
+            pw_score=assessment.score,
             salt=base64.b64encode(salt).decode(),
             nonce=base64.b64encode(nonce_bytes).decode(),
             ct=base64.b64encode(ct_bytes).decode(),
