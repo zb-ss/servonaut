@@ -13,7 +13,7 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 from servonaut.widgets.secret_input import SecretInput
@@ -66,34 +66,46 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     #enrol-container {
         width: 66;
         max-width: 95%;
-        height: auto;
+        height: 28;
         max-height: 95%;
         background: $surface;
         border: round $accent;
-        padding: 1 2;
+        padding: 0 2;
+    }
+
+    #enrol-body {
+        height: 1fr;
+        min-height: 0;
     }
 
     #enrol-title {
         text-style: bold;
-        padding: 0 0 1 0;
+        margin-bottom: 1;
     }
 
     #enrol-blurb {
-        padding: 0 0 1 0;
+        margin-bottom: 1;
         color: $text-muted;
     }
 
     #enrol-pass1_field,
     #enrol-pass2_field {
-        margin: 0 0 1 0;
+        margin: 0;
         width: 1fr;
+    }
+
+    #enrol-pass1_field {
+        margin-bottom: 1;
     }
 
     #enrol-rules,
     #enrol-strength {
-        margin-bottom: 1;
         height: auto;
         color: $text-muted;
+    }
+
+    #enrol-rules {
+        margin-bottom: 1;
     }
 
     #enrol-mismatch {
@@ -109,7 +121,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     #enrol-remember-row {
         height: auto;
         align: left middle;
-        padding: 0 0 1 0;
+        padding: 0;
     }
 
     #enrol-remember-label {
@@ -131,6 +143,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         layout: horizontal;
         height: auto;
         align: right middle;
+        margin-top: 1;
     }
 
     #enrol-btn-row Button {
@@ -176,26 +189,29 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         )
         btn_label = "Enrol" if is_enrol else "Unlock"
         remember_classes = "" if self._remember_available else "hidden"
-        yield VerticalScroll(
-            Static(title, id="enrol-title"),
-            Static(blurb, id="enrol-blurb"),
-            Static("", id="enrol-rules", markup=False, classes="" if is_enrol else "hidden"),
-            SecretInput(placeholder="Passphrase", id="enrol-pass1"),
-            SecretInput(
-                placeholder="Confirm passphrase",
-                id="enrol-pass2",
-                classes="" if is_enrol else "hidden",
-            ),
-            Static("Strength: —", id="enrol-strength", classes="" if is_enrol else "hidden"),
-            Static("", id="enrol-mismatch", markup=False, classes="" if is_enrol else "hidden"),
-            Horizontal(
-                Static(
-                    "Keep unlocked for 30 days (secure OS keychain)",
-                    id="enrol-remember-label",
+        yield Container(
+            VerticalScroll(
+                Static(title, id="enrol-title"),
+                Static(blurb, id="enrol-blurb"),
+                Static("", id="enrol-rules", markup=False, classes="" if is_enrol else "hidden"),
+                SecretInput(placeholder="Passphrase", id="enrol-pass1"),
+                SecretInput(
+                    placeholder="Confirm passphrase",
+                    id="enrol-pass2",
+                    classes="" if is_enrol else "hidden",
                 ),
-                Switch(value=self._remember_default, id="enrol-remember"),
-                id="enrol-remember-row",
-                classes=remember_classes,
+                Static("Strength: —", id="enrol-strength", classes="" if is_enrol else "hidden"),
+                Static("", id="enrol-mismatch", markup=False, classes="" if is_enrol else "hidden"),
+                Horizontal(
+                    Static(
+                        "Keep unlocked for 30 days (secure OS keychain)",
+                        id="enrol-remember-label",
+                    ),
+                    Switch(value=self._remember_default, id="enrol-remember"),
+                    id="enrol-remember-row",
+                    classes=remember_classes,
+                ),
+                id="enrol-body",
             ),
             Horizontal(
                 Button("Cancel", variant="default", id="enrol-btn-cancel"),
@@ -223,7 +239,10 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             from servonaut.services.memory.crypto import assess_passphrase
 
             assessment = assess_passphrase(pass1)
-            self.query_one("#enrol-rules", Static).update("\n".join(assessment.requirements))
+            self.query_one("#enrol-rules", Static).update("\n".join(
+                f"{'✓' if met else '○'} {rule}"
+                for rule, met in zip(assessment.requirements, assessment.requirements_met, strict=True)
+            ))
             score = assessment.score
             color = _STRENGTH_COLOR[score]
             strength = (
@@ -234,7 +253,10 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
                 f"Strength: {strength}. "
                 f"Required: {_STRENGTH_LABEL[assessment.minimum_score]} ({assessment.minimum_score}/4)."
             )
-            feedback = list(assessment.feedback) if pass1 else ["Enter a passphrase."]
+            feedback = (
+                [message for message in assessment.feedback if message not in assessment.requirements]
+                if pass1 else ["Enter a passphrase."]
+            )
             if pass1 and not pass2:
                 feedback.append("Enter the same passphrase in the confirmation field.")
             elif pass2 and pass1 != pass2:
@@ -242,6 +264,8 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             ok = bool(pass1) and assessment.acceptable and pass1 == pass2
             if ok:
                 feedback = ["Passphrases match. You can enrol."]
+            elif pass1 and pass1 == pass2 and not feedback:
+                feedback = ["Passphrases match. Meet the rules to enrol."]
             message = self.query_one("#enrol-mismatch", Static)
             message.update("\n".join(feedback))
             message.set_class(ok, "ready")

@@ -308,11 +308,16 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 #enrol-container {
     width: 66;
     max-width: 95%;
-    height: auto;
+    height: 28;
     max-height: 95%;
     border: round $primary;
     background: $surface;
-    padding: 1 2;
+    padding: 0 2;
+}
+
+#enrol-body {
+    height: 1fr;
+    min-height: 0;
 }
 
 #enrol-title {
@@ -325,9 +330,12 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     color: $warning;
 }
 
-#enrol-rules,
-#enrol-strength {
+#enrol-rules {
     margin-bottom: 1;
+    height: auto;
+}
+
+#enrol-strength {
     height: auto;
 }
 
@@ -337,8 +345,16 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     margin-bottom: 1;
 }
 
+#enrol-mismatch.ready {
+    color: $text-success;
+}
+
 #enrol-pass1_field,
 #enrol-pass2_field {
+    margin: 0;
+}
+
+#enrol-pass1_field {
     margin-bottom: 1;
 }
 

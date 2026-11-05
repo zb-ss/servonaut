@@ -86,6 +86,7 @@ class PassphraseAssessment:
     requirements: Tuple[str, ...]
     feedback: Tuple[str, ...]
     checked: bool = True
+    requirements_met: Tuple[bool, ...] = ()
 
     @property
     def acceptable(self) -> bool:
@@ -303,6 +304,7 @@ def assess_passphrase(passphrase: str) -> PassphraseAssessment:
                 0, MIN_PW_SCORE, requirements,
                 ("Cannot check passphrase strength. Try a different passphrase.",),
                 checked=False,
+                requirements_met=(False,),
             )
         score = result["score"]
         details = result.get("feedback", {})
@@ -312,6 +314,7 @@ def assess_passphrase(passphrase: str) -> PassphraseAssessment:
         return PassphraseAssessment(
             score, MIN_PW_SCORE, requirements,
             (feedback or requirements) if score < MIN_PW_SCORE else (),
+            requirements_met=(score >= MIN_PW_SCORE,),
         )
 
     length = len(passphrase)
@@ -327,12 +330,15 @@ def assess_passphrase(passphrase: str) -> PassphraseAssessment:
         if length >= minimum_length and class_count >= minimum_classes
     ), default=0)
     requirements = []
+    requirements_met = []
     feedback = []
     if MIN_PW_SCORE > 0:
         minimum_length, minimum_classes = _FALLBACK_SCORE_RULES[MIN_PW_SCORE - 1]
         length_rule = f"Use at least {minimum_length} characters."
         requirements.append(length_rule)
-        if length < minimum_length:
+        length_met = length >= minimum_length
+        requirements_met.append(length_met)
+        if not length_met:
             feedback.append(length_rule)
         if minimum_classes:
             types_rule = (
@@ -340,9 +346,14 @@ def assess_passphrase(passphrase: str) -> PassphraseAssessment:
                 "uppercase letters, lowercase letters, digits, or symbols."
             )
             requirements.append(types_rule)
-            if class_count < minimum_classes:
+            types_met = class_count >= minimum_classes
+            requirements_met.append(types_met)
+            if not types_met:
                 feedback.append(types_rule)
-    return PassphraseAssessment(score, MIN_PW_SCORE, tuple(requirements), tuple(feedback))
+    return PassphraseAssessment(
+        score, MIN_PW_SCORE, tuple(requirements), tuple(feedback),
+        requirements_met=tuple(requirements_met),
+    )
 
 
 def wrap_private_key(

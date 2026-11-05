@@ -45,6 +45,22 @@ def test_fallback_guidance_explains_each_failed_rule(fallback_policy):
     assert assessment.feedback == assessment.requirements
 
 
+@pytest.mark.parametrize(
+    ("passphrase", "requirements_met"),
+    [
+        ("lower1234567", (False, False)),
+        ("abcdefghijklmnop", (True, False)),
+        ("Short1!", (False, True)),
+        ("Abcdefghijklmno1", (True, True)),
+    ],
+)
+def test_each_fallback_rule_has_an_independent_status(fallback_policy, passphrase, requirements_met):
+    assessment = crypto.assess_passphrase(passphrase)
+
+    assert assessment.requirements_met == requirements_met
+    assert len(assessment.requirements_met) == len(assessment.requirements)
+
+
 def test_score_threshold_changes_guidance_and_key_acceptance(fallback_policy, monkeypatch):
     monkeypatch.setattr(crypto, "MIN_PW_SCORE", 4)
     passphrase = "Abcdefghijklmno1"
@@ -89,6 +105,7 @@ def test_optional_estimator_supplies_feedback_without_fallback_rules(monkeypatch
     assert not assessment.acceptable
     assert assessment.score == 2
     assert assessment.requirements == ("Use a passphrase with a strength score of at least 3/4.",)
+    assert assessment.requirements_met == (False,)
     assert "This passphrase is common." in assessment.feedback
     assert "Add another word." in assessment.feedback
     assert not any("16 characters" in rule for rule in assessment.requirements)
@@ -101,6 +118,7 @@ def test_accepted_optional_estimator_does_not_apply_fallback_rules(monkeypatch):
     assessment = crypto.assess_passphrase("an example")
 
     assert assessment.acceptable
+    assert assessment.requirements_met == (True,)
     assert assessment.feedback == ()
     assert crypto.estimate_pw_score("an example") == assessment.score
 
@@ -115,6 +133,7 @@ def test_optional_estimator_failure_rejects_the_passphrase(monkeypatch, minimum_
     assessment = crypto.assess_passphrase("A" * 73)
 
     assert not assessment.checked
+    assert assessment.requirements_met == (False,)
     assert not assessment.acceptable
     assert assessment.feedback == ("Cannot check passphrase strength. Try a different passphrase.",)
     with pytest.raises(crypto.WeakPassphraseError):

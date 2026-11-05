@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Select, Static, Switch
 
 from servonaut.styles import CSS_FILES
@@ -199,14 +200,16 @@ class TestPassphraseEnrolFeedback:
             await pilot.pause()
             assert app.screen.query_one("#enrol-btn-confirm", Button).disabled
             feedback = app.screen.query_one("#enrol-mismatch", Static)
-            assert "16 characters" in str(feedback.content)
-            assert "3 character types" in str(feedback.content)
+            assert "Meet the rules to enrol." in str(feedback.content)
+            rules = str(app.screen.query_one("#enrol-rules", Static).content)
+            assert "16 characters" in rules
+            assert "3 character types" in rules
             assert feedback.content_size.height > 0
 
     @pytest.mark.parametrize(
         ("passphrase", "confirmation", "feedback_text"),
         [
-            ("private1234", "private1234", "Use at least 16 characters."),
+            ("private1234", "private1234", "Meet the rules to enrol."),
             ("PrivatePassphrase01!", "DifferentPassphrase02!", "Passphrases do not match."),
             ("PrivatePassphrase01!", "PrivatePassphrase01!", "You can enrol."),
         ],
@@ -229,7 +232,8 @@ class TestPassphraseEnrolFeedback:
                 assert confirmation not in text
 
     @pytest.mark.asyncio
-    async def test_confirmation_feedback_changes_from_missing_to_mismatch_to_ready(self):
+    async def test_confirmation_feedback_changes_from_missing_to_mismatch_to_ready(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
         app = _StyledEnrolApp()
         async with app.run_test(size=(100, 40)) as pilot:
             app.screen.query_one("#enrol-pass1", Input).value = "Abcdefghijklmno1"
@@ -240,11 +244,13 @@ class TestPassphraseEnrolFeedback:
             app.screen.query_one("#enrol-pass2", Input).value = "Abcdefghijklmno2"
             await pilot.pause()
             assert "Passphrases do not match." in str(feedback.content)
+            error_color = feedback.styles.color
             assert feedback.content_size.height > 0
             assert app.screen.query_one("#enrol-btn-confirm", Button).disabled
             app.screen.query_one("#enrol-pass2", Input).value = "Abcdefghijklmno1"
             await pilot.pause()
             assert "You can enrol." in str(feedback.content)
+            assert feedback.styles.color != error_color
             assert not app.screen.query_one("#enrol-btn-confirm", Button).disabled
             await pilot.click("#enrol-btn-confirm")
             await pilot.pause()
@@ -332,22 +338,105 @@ class TestPassphraseEnrolFeedback:
             await pilot.pause()
             assert app.dismissed_value.passphrase == "short"
 
-    @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
+    @pytest.mark.parametrize("size", [(60, 20), (80, 24), (100, 30), (100, 40), (120, 30), (160, 50)])
+    @pytest.mark.parametrize("keychain_available", [False, True])
     @pytest.mark.asyncio
-    async def test_small_terminal_keeps_confirm_accessible(self, size):
+    async def test_window_sizes_keep_actions_visible(self, size, keychain_available, monkeypatch):
+        from servonaut.services.memory import passphrase_store
+
+        monkeypatch.setattr(passphrase_store, "keyring_available", lambda: keychain_available)
         app = _StyledEnrolApp()
         async with app.run_test(size=size) as pilot:
+            for state, passphrase, confirmation, enabled in [
+                ("empty", "", "", False),
+                ("unconfirmed", "Abcdefghijklmno1", "", False),
+                ("weak", "lower1234567", "lower1234567", False),
+                ("mismatched", "Abcdefghijklmno1", "Abcdefghijklmno2", False),
+                ("accepted", "Abcdefghijklmno1", "Abcdefghijklmno1", True),
+            ]:
+                app.screen.query_one("#enrol-pass1", Input).value = passphrase
+                app.screen.query_one("#enrol-pass2", Input).value = confirmation
+                await pilot.pause()
+                container = app.screen.query_one("#enrol-container")
+                for selector in ("#enrol-btn-cancel", "#enrol-btn-confirm"):
+                    button = app.screen.query_one(selector, Button)
+                    assert app.screen.region.contains_region(button.region), (size, state, selector)
+                    assert container.content_region.contains_region(button.region), (size, state, selector)
+                assert app.screen.query_one("#enrol-btn-confirm", Button).disabled is not enabled
+                if size[0] >= 100 and size[1] >= 30:
+                    assert all(scroll.max_scroll_y == 0 for scroll in app.screen.query(VerticalScroll)), state
+            await pilot.click("#enrol-btn-cancel")
+            await pilot.pause()
+            assert app.dismissed_value is None
+
+    @pytest.mark.asyncio
+    async def test_resize_keeps_actions_visible(self):
+        app = _StyledEnrolApp()
+        async with app.run_test(size=(160, 50)) as pilot:
+            app.screen.query_one("#enrol-pass1", Input).value = "lower1234567"
+            app.screen.query_one("#enrol-pass2", Input).value = "lower1234567"
+            for width, height in [(100, 30), (80, 24), (60, 20), (120, 30), (160, 50)]:
+                await pilot.resize_terminal(width, height)
+                await pilot.pause()
+                container = app.screen.query_one("#enrol-container")
+                for selector in ("#enrol-btn-cancel", "#enrol-btn-confirm"):
+                    button = app.screen.query_one(selector, Button)
+                    assert container.content_region.contains_region(button.region), (width, height, selector)
+
+    @pytest.mark.asyncio
+    async def test_each_rule_appears_once_with_its_status(self):
+        from servonaut.services.memory import crypto
+
+        app = _StyledEnrolApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.screen.query_one("#enrol-pass1", Input).value = "lower1234567"
+            await pilot.pause()
+            rules = str(app.screen.query_one("#enrol-rules", Static).render())
+            all_text = "\n".join(str(widget.render()) for widget in app.screen.query(Static))
+            for rule in crypto.assess_passphrase("lower1234567").requirements:
+                assert all_text.count(rule) == 1
+                assert f"○ {rule}" in rules
+            app.screen.query_one("#enrol-pass1", Input).value = "abcdefghijklmnop"
+            await pilot.pause()
+            rules = str(app.screen.query_one("#enrol-rules", Static).render())
+            length_rule, types_rule = crypto.assess_passphrase("abcdefghijklmnop").requirements
+            assert f"✓ {length_rule}" in rules
+            assert f"○ {types_rule}" in rules
+            app.screen.query_one("#enrol-pass1", Input).value = "Abcdefghijklmno1"
+            await pilot.pause()
+            rules = str(app.screen.query_one("#enrol-rules", Static).render())
+            for rule in crypto.assess_passphrase("Abcdefghijklmno1").requirements:
+                assert f"✓ {rule}" in rules
+
+    @pytest.mark.asyncio
+    async def test_long_estimator_advice_keeps_actions_visible(self, monkeypatch):
+        advice = "Add more words to this passphrase. " * 12
+        monkeypatch.setitem(sys.modules, "zxcvbn", SimpleNamespace(zxcvbn=lambda _value: {
+            "score": 2, "feedback": {"warning": advice},
+        }))
+        app = _StyledEnrolApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.screen.query_one("#enrol-pass1", Input).value = "an example"
+            await pilot.pause()
+            assert app.screen.query_one("#enrol-body", VerticalScroll).max_scroll_y > 0
+            container = app.screen.query_one("#enrol-container")
+            for selector in ("#enrol-btn-cancel", "#enrol-btn-confirm"):
+                assert container.content_region.contains_region(app.screen.query_one(selector).region)
+            await pilot.click("#enrol-btn-cancel")
+            await pilot.pause()
+            assert app.dismissed_value is None
+
+    @pytest.mark.asyncio
+    async def test_keychain_switch_and_enrol_work_at_100_by_30(self):
+        app = _StyledEnrolApp()
+        async with app.run_test(size=(100, 30)) as pilot:
             app.screen.query_one("#enrol-pass1", Input).value = "Abcdefghijklmno1"
             app.screen.query_one("#enrol-pass2", Input).value = "Abcdefghijklmno1"
             await pilot.pause()
-            button = app.screen.query_one("#enrol-btn-confirm", Button)
-            button.focus()
-            await pilot.pause()
-            await pilot.wait_for_scheduled_animations()
-            assert app.screen.region.contains_region(button.region)
+            await pilot.click("#enrol-remember")
             await pilot.click("#enrol-btn-confirm")
             await pilot.pause()
-            assert app.dismissed_value.passphrase == "Abcdefghijklmno1"
+            assert app.dismissed_value.remember is True
 
 
 # ---------------------------------------------------------------------------
