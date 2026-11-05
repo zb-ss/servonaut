@@ -966,6 +966,7 @@ class TestDebArchiveFormat:
                 "--force-not-root",
                 "--force-script-chrootless",
                 "--force-depends",
+                "--force-architecture",
                 f"--root={root}",
                 f"--admindir={admin}",
                 "--log=/dev/null",
