@@ -43,12 +43,32 @@ WATCHDOG_MESSAGE = "the test run that started this process is gone"
 
 def _ready(roots: Path):
     found = list(roots.glob(f"*/{READY_FILE}"))
-    return json.loads(found[0].read_text(encoding="utf-8")) if found else None
+    if not found:
+        return None
+    try:
+        return json.loads(found[0].read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        # The child can create the file before it completes the JSON.
+        return None
 
 
 def _nested_file(roots: Path, pattern: str) -> str:
     found = list(roots.glob(f"*/tests/*/{pattern}"))
     return found[0].read_text(encoding="utf-8", errors="replace") if found else ""
+
+
+@pytest.mark.parametrize("partial", ["", '{"foreground":'])
+def test_readiness_waits_for_a_complete_document(partial, journey):
+    roots = journey.staging / "roots"
+    root = roots / "nested"
+    root.mkdir(parents=True)
+    ready_file = root / READY_FILE
+    ready_file.write_text(partial, encoding="utf-8")
+
+    assert _ready(roots) is None
+
+    ready_file.write_text('{"foreground": 101, "background": 202}', encoding="utf-8")
+    assert _ready(roots) == {"foreground": 101, "background": 202}
 
 
 @pytest.mark.parametrize("ending", ["time-limit", "sigterm", "sigkill"])
