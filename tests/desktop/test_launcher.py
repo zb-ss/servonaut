@@ -171,9 +171,17 @@ def test_run_desktop_missing_webview(tmp_path: Path) -> None:
     runtime = _test_runtime(tmp_path)
     request = DesktopLaunchRequest(runtime=runtime, child_argv=["python"])
 
-    with patch.dict("sys.modules", {"webview": None}):
+    with (
+        patch.dict("sys.modules", {"webview": None}),
+        patch.object(launcher, "show_native_error") as show_error,
+    ):
         ret = run_desktop(request)
         assert ret == 1
+
+    show_error.assert_called_once()
+    title, message = show_error.call_args.args
+    assert title == request.title
+    assert "pywebview is unavailable" in message
 
 
 def test_run_desktop_navigation_rejection(tmp_path: Path) -> None:
