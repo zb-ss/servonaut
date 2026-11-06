@@ -113,6 +113,9 @@ def _make_stub(
     stub._remember_passphrase_expired = types.MethodType(
         ServonautApp._remember_passphrase_expired, stub
     )
+    stub._unlock_memory_sync_with_prompt = types.MethodType(
+        ServonautApp._unlock_memory_sync_with_prompt, stub
+    )
 
     return stub
 
@@ -473,6 +476,112 @@ class TestPromptPath:
         for call_args in stub.notify.call_args_list:
             kw = call_args.kwargs
             assert kw.get("severity", "information") != "error"
+
+
+class TestPromptPathFailures:
+    """A failed unlock from the prompt is reported, never silent."""
+
+    @pytest.fixture(autouse=True)
+    def _no_passphrase_in_environment(self, monkeypatch) -> None:
+        monkeypatch.delenv("SERVONAUT_MEMORY_PASSPHRASE", raising=False)
+
+    @staticmethod
+    def _wrong_passphrase() -> Exception:
+        from servonaut.services.memory.crypto import DecryptionFailedError
+
+        return DecryptionFailedError("decryption failed")
+
+    @staticmethod
+    def _notified(stub: SimpleNamespace) -> list[tuple[str, str | None, Any]]:
+        return [
+            (c.args[0], c.kwargs.get("severity"), c.kwargs.get("markup", True))
+            for c in stub.notify.call_args_list
+        ]
+
+    @pytest.mark.asyncio
+    async def test_wrong_passphrase_says_so_and_asks_again(self) -> None:
+        stub = _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            bootstrap_side_effect=[self._wrong_passphrase(), None],
+        )
+        await _run_prompt(stub)
+
+        assert stub.bootstrap_memory_cloud.await_count == 2
+        assert self._notified(stub) == [
+            ("Wrong passphrase — try again.", "error", False),
+            ("Memory Sync unlocked.", "information", True),
+        ]
+        assert not getattr(stub, "_memory_sync_prompt_skipped", False)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_a_wrong_passphrase_leaves_sync_locked(self) -> None:
+        stub = _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            bootstrap_side_effect=[self._wrong_passphrase(), RuntimeError("cancelled")],
+        )
+        await _run_prompt(stub)
+
+        assert stub.bootstrap_memory_cloud.await_count == 2
+        assert [message for message, _, _ in self._notified(stub)] == [
+            "Wrong passphrase — try again.",
+            "Memory Sync locked — open Memory Sync to unlock.",
+        ]
+        assert stub._memory_sync_prompt_skipped is True
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_passphrase_from_the_environment_is_not_retried(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("SERVONAUT_MEMORY_PASSPHRASE", "not-the-passphrase")
+        stub = _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            bootstrap_side_effect=self._wrong_passphrase(),
+        )
+        await asyncio.wait_for(_run_prompt(stub), timeout=5)
+
+        stub.bootstrap_memory_cloud.assert_awaited_once()
+        assert self._notified(stub) == [
+            (
+                "The passphrase in SERVONAUT_MEMORY_PASSPHRASE does not unlock Memory Sync.",
+                "error",
+                False,
+            )
+        ]
+        assert "not-the-passphrase" not in repr(stub.notify.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_other_failures_are_reported_with_their_reason(self) -> None:
+        from servonaut.services.memory.interfaces import BackendMaintenance
+
+        stub = _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            bootstrap_side_effect=BackendMaintenance("Server feature_disabled"),
+        )
+        await _run_prompt(stub)
+
+        stub.bootstrap_memory_cloud.assert_awaited_once()
+        assert self._notified(stub) == [
+            ("Memory backend is in maintenance — try again later.", "error", False)
+        ]
+        # A failure is not a cancel: the next memory section asks again.
+        assert not getattr(stub, "_memory_sync_prompt_skipped", False)
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_failure_shows_its_text_without_markup(self) -> None:
+        stub = _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            bootstrap_side_effect=OSError("[bold]connection reset[/bold]"),
+        )
+        await _run_prompt(stub)
+
+        assert self._notified(stub) == [
+            ("Could not unlock Memory Sync: [bold]connection reset[/bold]", "error", False)
+        ]
 
 
 # ---------------------------------------------------------------------------

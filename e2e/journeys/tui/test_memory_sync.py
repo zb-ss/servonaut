@@ -17,7 +17,8 @@ on the highlighted event does nothing).
 
 A restart finds the store locked. A wrong passphrase is refused with a
 clear message; the right one unlocks from the local key cache, without
-asking the service for the key again.
+asking the service for the key again. The same holds for the passphrase
+dialog that opens with Fleet Memory: a wrong entry says so and asks again.
 
 "Remember on this device" needs a real OS keychain (the harness keyring is
 the null backend), so it is left to a nightly run with a Secret Service.
@@ -32,8 +33,10 @@ from e2e.harness.fake_cloud.routes_memory import KEYS_PATH, SYNC_PATH
 from e2e.harness.fake_cloud.wire import expected
 from e2e.harness.known_gap import KnownGap
 from e2e.harness.memory_seed import seed_memory, seed_notes
+from e2e.harness.artifacts import register_secret
 from e2e.harness.memory_sync import (
     PASSPHRASE,
+    PASSPHRASE_ENV,
     enrolled_keypair,
     envelope_key,
     open_envelope,
@@ -212,4 +215,40 @@ async def test_restart_unlocks_from_the_local_key_cache(tui, seed, fake_cloud, m
     assert len(fake_cloud.requests(f"{KEYS_PATH}/me")) == key_reads
     assert fake_cloud.statuses(KEYS_PATH) == [201]
     assert fake_cloud.memory.enrolled_key() == enrolled
+    fake_cloud.assert_no_unexpected_errors(*FIRST_RUN)
+
+
+async def test_a_wrong_passphrase_at_the_memory_prompt_is_refused_and_asked_again(
+    tui, seed, fake_cloud, monkeypatch
+):
+    _seed(seed, fake_cloud)
+    use_passphrase(monkeypatch)
+    async with tui() as t:
+        await open_memory_sync(t)
+        await unlock(t)
+
+    # The next session has no passphrase in the environment: opening Fleet
+    # Memory asks for it in the passphrase dialog.
+    monkeypatch.delenv(PASSPHRASE_ENV)
+    register_secret(WRONG_PASSPHRASE)
+    async with tui() as t:
+        await t.nav("nav_memory")
+        await t.wait_for_screen("PassphraseEnrolModal")
+        await t.fill("#enrol-pass1", WRONG_PASSPHRASE)
+        await t.click("#enrol-btn-confirm")
+        refused = await t.wait_for_toast_record(
+            r"^Wrong passphrase — try again\.$", severity="error"
+        )
+        assert refused.markup is False
+
+        # Asked again, in a fresh dialog.
+        await t.wait_for_screen("PassphraseEnrolModal")
+        assert t.on_screen("#enrol-pass1").value == ""
+        await t.fill("#enrol-pass1", PASSPHRASE)
+        await t.click("#enrol-btn-confirm")
+        await t.wait_for_toast(r"^Memory Sync unlocked\.$")
+        await t.wait_for_screen("FleetMemoryScreen")
+        assert t.app.memory_sync_service.is_configured
+        assert t.opened_screens().count("PassphraseEnrolModal") == 2
+
     fake_cloud.assert_no_unexpected_errors(*FIRST_RUN)

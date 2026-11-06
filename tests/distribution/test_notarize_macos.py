@@ -17,6 +17,7 @@ from scripts.distribution.notarize_macos import (
     staple_ticket,
     submit_notarization,
     validate_staple,
+    wait_for_submission,
 )
 
 
@@ -463,4 +464,161 @@ class TestStapleCommandLine:
         commands, _ = _stapler(monkeypatch)
 
         assert main(["--artifact", str(dmg), "--staple-only", "--dry-run"]) == 0
+        assert commands == []
+
+
+# What notarytool printed on a macOS runner when its wait for the result lost
+# the connection to Apple after the upload (exit code 1). The id is synthetic.
+_WAIT_TIMED_OUT = (
+    "Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain Code=-1001 "
+    '"The request timed out." UserInfo={NSLocalizedDescription=The request timed out., '
+    "NSErrorFailingURLStringKey=https://appstoreconnect.apple.com/notary/v2/submissions/"
+    + _SUBMISSION
+    + "?})"
+)
+_UPLOAD_LOST = (
+    "Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain Code=-1005 "
+    '"The network connection was lost.")'
+)
+
+
+def _accepted(submission_id: str = _SUBMISSION) -> tuple[int, str, str]:
+    body = {"id": submission_id, "status": "Accepted", "message": "Processing complete"}
+    return 0, json.dumps(body), ""
+
+
+def _notary_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    submit: tuple[int, str, str],
+    *waits: tuple[int, str, str],
+) -> tuple[list[list[str]], list[float]]:
+    """Answer submit once, then each wait in order, the way notarytool does; record pauses."""
+    monkeypatch.setattr(notarize_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+    answers = list(waits)
+    commands: list[list[str]] = []
+    pauses: list[float] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        if cmd[2] == "submit":
+            return subprocess.CompletedProcess(cmd, *submit)
+        if cmd[2] == "wait":
+            return subprocess.CompletedProcess(cmd, *answers.pop(0))
+        if cmd[2] == "log":
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(_ISSUES, indent=2), "")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    monkeypatch.setattr(notarize_macos.subprocess, "run", fake_run)
+    monkeypatch.setattr(notarize_macos.time, "sleep", pauses.append)
+    return commands, pauses
+
+
+class TestLostNotarizationWait:
+    """A wait that lost the connection to Apple waits for the same submission again."""
+
+    def test_the_same_submission_is_waited_for_with_the_same_credentials(
+        self,
+        dmg: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        commands, pauses = _notary_waits(monkeypatch, (1, "", _WAIT_TIMED_OUT), _accepted())
+        key_file = tmp_path / "AuthKey_TEST.p8"
+        key_file.write_text("PRIVATE-KEY-MATERIAL-FOR-TEST", encoding="utf-8")
+        argv = _api_key_argv(dmg, key_file)
+        argv.remove("--staple")
+
+        assert main(argv) == 0
+
+        submit, wait = commands
+        assert wait[:6] == [
+            "/usr/bin/xcrun", "notarytool", "wait", _SUBMISSION, "--output-format", "json",
+        ]
+        assert wait[6:] == submit[submit.index("--key") : submit.index("--wait")]
+        assert pauses == []
+        captured = capsys.readouterr()
+        assert f"waiting for submission {_SUBMISSION}" in captured.err
+        assert "Notarization succeeded" in captured.out
+
+    def test_the_wait_is_repeated_while_the_connection_keeps_dropping(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, pauses = _notary_waits(
+            monkeypatch,
+            (1, "", _WAIT_TIMED_OUT),
+            (1, "", _WAIT_TIMED_OUT),
+            (1, "", _WAIT_TIMED_OUT),
+            _accepted(),
+        )
+
+        accepted, _, details = submit_notarization(dmg, keychain_profile="profile")
+
+        assert accepted
+        assert details["status"] == "Accepted"
+        assert [command[2] for command in commands] == ["submit", "wait", "wait", "wait"]
+        assert pauses == list(notarize_macos.NOTARY_WAIT_RETRY_DELAYS_SECONDS[:2])
+
+    def test_a_wait_that_never_reconnects_fails_with_the_last_output(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        attempts = len(notarize_macos.NOTARY_WAIT_RETRY_DELAYS_SECONDS) + 1
+        last = _WAIT_TIMED_OUT.replace("timed out.", "timed out (last).", 1)
+        waits = [(1, "", _WAIT_TIMED_OUT)] * (attempts - 1) + [(1, "", last)]
+        commands, pauses = _notary_waits(monkeypatch, (1, "", _WAIT_TIMED_OUT), *waits)
+
+        accepted, output, _ = submit_notarization(dmg, keychain_profile="profile")
+
+        assert not accepted
+        assert "timed out (last)" in output
+        assert [command[2] for command in commands] == ["submit"] + ["wait"] * attempts
+        assert pauses == list(notarize_macos.NOTARY_WAIT_RETRY_DELAYS_SECONDS)
+
+    def test_a_refused_submission_still_prints_its_log(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        refused = {"id": _SUBMISSION, "status": "Invalid", "message": "Processing complete"}
+        commands, _ = _notary_waits(
+            monkeypatch, (1, "", _WAIT_TIMED_OUT), (2, json.dumps(refused), "")
+        )
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "profile"]) == 1
+
+        assert [command[2] for command in commands] == ["submit", "wait", "log"]
+        assert "does not have the hardened runtime enabled" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "submit",
+        [
+            # The upload itself lost the connection: Apple may have nothing.
+            (1, "", _UPLOAD_LOST),
+            # Any other failure, even one that names a submission.
+            (1, "", "Error: HTTP status code: 401. Unauthenticated. /notary/v2/submissions/"
+             + _SUBMISSION),
+        ],
+    )
+    def test_nothing_is_waited_for_or_submitted_again_otherwise(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch, submit: tuple[int, str, str]
+    ) -> None:
+        commands, pauses = _notary_waits(monkeypatch, submit)
+
+        accepted, _, _ = submit_notarization(dmg, keychain_profile="profile")
+
+        assert not accepted
+        assert [command[2] for command in commands] == ["submit"]
+        assert pauses == []
+
+    def test_no_wait_never_waits(self, dmg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        commands, _ = _notary_waits(monkeypatch, (1, "", _WAIT_TIMED_OUT))
+
+        accepted, _, _ = submit_notarization(dmg, keychain_profile="profile", wait=False)
+
+        assert not accepted
+        assert [command[2] for command in commands] == ["submit"]
+
+    def test_only_submission_ids_are_waited_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        commands, _ = _notary_waits(monkeypatch, _accepted())
+
+        with pytest.raises(MacosNotarizationError, match="submission id"):
+            wait_for_submission("--keychain-profile", ["--keychain-profile", "profile"])
         assert commands == []
