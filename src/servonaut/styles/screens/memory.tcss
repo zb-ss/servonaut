@@ -308,16 +308,37 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 #enrol-container {
     width: 66;
     max-width: 95%;
-    height: 28;
-    max-height: 95%;
+    height: auto;
+    max-height: 100%;
     border: round $primary;
     background: $surface;
     padding: 0 2;
 }
 
+#enrol-container.enrol-mode {
+    height: 28;
+}
+
 #enrol-body {
-    height: 1fr;
+    height: auto;
+    max-height: 100%;
     min-height: 0;
+}
+
+#enrol-container.enrol-mode #enrol-body {
+    height: 1fr;
+}
+
+PassphraseEnrolModal ToastRack {
+    layer: default;
+    margin: 0;
+}
+
+PassphraseEnrolModal Toast {
+    width: auto;
+    max-width: 100%;
+    margin: 0;
+    padding: 0 1;
 }
 
 #enrol-title {
@@ -359,6 +380,7 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 }
 
 #enrol-btn-row {
+    dock: bottom;
     height: auto;
     align: right middle;
 }

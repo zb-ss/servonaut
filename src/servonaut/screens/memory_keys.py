@@ -66,16 +66,37 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     #enrol-container {
         width: 66;
         max-width: 95%;
-        height: 28;
-        max-height: 95%;
+        height: auto;
+        max-height: 100%;
         background: $surface;
         border: round $accent;
         padding: 0 2;
     }
 
+    #enrol-container.enrol-mode {
+        height: 28;
+    }
+
     #enrol-body {
-        height: 1fr;
+        height: auto;
+        max-height: 100%;
         min-height: 0;
+    }
+
+    #enrol-container.enrol-mode #enrol-body {
+        height: 1fr;
+    }
+
+    PassphraseEnrolModal ToastRack {
+        layer: default;
+        margin: 0;
+    }
+
+    PassphraseEnrolModal Toast {
+        width: auto;
+        max-width: 100%;
+        margin: 0;
+        padding: 0 1;
     }
 
     #enrol-title {
@@ -140,6 +161,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     }
 
     #enrol-btn-row {
+        dock: bottom;
         layout: horizontal;
         height: auto;
         align: right middle;
@@ -219,11 +241,20 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
                 id="enrol-btn-row",
             ),
             id="enrol-container",
+            classes="enrol-mode" if is_enrol else "",
         )
 
     def on_mount(self) -> None:
         self._update_validation()
         self.query_one("#enrol-pass1", Input).focus()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._show_focused_control)
+
+    def _show_focused_control(self) -> None:
+        """Keep the active control visible after a viewport resize."""
+        if self.focused is not None:
+            self.focused.scroll_visible(animate=False, immediate=True)
 
     # ------------------------------------------------------------------
     # Input change handler — updates strength readout and button state
