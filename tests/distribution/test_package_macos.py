@@ -565,6 +565,10 @@ def _hdiutil_result(returncode: int, stderr: str = "") -> subprocess.CompletedPr
 _BUSY = "hdiutil: create failed - Resource busy"
 # The exact error a macOS arm64 runner gave while mounting a fresh image (EAGAIN).
 _UNAVAILABLE = "hdiutil: attach failed - Resource temporarily unavailable"
+# What a macOS x64 runner gave when a detach reported as busy finished in the
+# background: the repeat found nothing left to detach.
+_EJECT_BUSY = 'hdiutil: couldn\'t eject "disk2" - Resource busy'
+_DETACH_GONE = "hdiutil: detach failed - No such file or directory"
 
 
 class _ScriptedRunner:
@@ -641,6 +645,44 @@ class TestHdiutilRetry:
 
         assert len(runner.commands) == 1
         assert pauses == []
+
+    def test_a_detach_that_finished_in_the_background_counts_as_done(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        runner = _ScriptedRunner(_hdiutil_result(1, _EJECT_BUSY), _hdiutil_result(1, _DETACH_GONE))
+        pauses: list[float] = []
+        mount_point = str(tmp_path / "mnt")
+
+        result = package_macos.run_hdiutil(
+            "/usr/bin/hdiutil", ["detach", mount_point], run=runner, sleep=pauses.append
+        )
+
+        assert result.returncode == 1
+        assert runner.commands == [["/usr/bin/hdiutil", "detach", mount_point]] * 2
+        assert pauses == [2.0]
+        assert "already detached by the busy attempt before" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("results", "args", "runs"),
+        [
+            # A first detach that finds nothing was never busy: a wrong path.
+            ([_DETACH_GONE], ["detach", "/tmp/not-mounted"], 1),
+            # Something is still mounted there, so the image did not go away.
+            ([_EJECT_BUSY, _DETACH_GONE], ["detach", "/"], 2),
+            # Only detach can have finished in the background.
+            ([_UNAVAILABLE, "hdiutil: attach failed - No such file or directory"],
+             ["attach", "image.dmg"], 2),
+        ],
+    )
+    def test_a_missing_image_fails_unless_a_busy_detach_removed_it(
+        self, results: list[str], args: list[str], runs: int
+    ) -> None:
+        runner = _ScriptedRunner(*(_hdiutil_result(1, output) for output in results))
+
+        with pytest.raises(MacosPackagingError, match="No such file or directory"):
+            package_macos.run_hdiutil("/usr/bin/hdiutil", args, run=runner, sleep=lambda s: None)
+
+        assert len(runner.commands) == runs
 
     def test_the_release_image_survives_a_busy_create(
         self, mock_payload: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -746,6 +788,34 @@ class TestImageVerification:
         assert "successfully verified" in message
         assert [command[1] for command in hdiutil.commands] == ["attach", "attach", "detach"]
         mount_point = Path(hdiutil.commands[0][hdiutil.commands[0].index("-mountpoint") + 1])
+        assert not mount_point.exists()
+
+    def test_a_busy_detach_that_finished_in_the_background_still_verifies(
+        self, image: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(list(cmd))
+            if Path(cmd[0]).name == "codesign":
+                return _hdiutil_result(0)
+            if cmd[1] == "attach":
+                (Path(cmd[cmd.index("-mountpoint") + 1]) / "Servonaut.app").mkdir()
+                return _hdiutil_result(0)
+            if [c[1] for c in commands if Path(c[0]).name == "hdiutil"].count("detach") == 1:
+                # Reported busy, yet the image goes away a moment later.
+                (Path(cmd[-1]) / "Servonaut.app").rmdir()
+                return _hdiutil_result(1, _EJECT_BUSY)
+            return _hdiutil_result(1, _DETACH_GONE)
+
+        monkeypatch.setattr(package_macos.subprocess, "run", fake_run)
+
+        message = package_macos.verify_image_app_signature(image)
+
+        assert "successfully verified" in message
+        hdiutil = [command for command in commands if Path(command[0]).name == "hdiutil"]
+        assert [command[1] for command in hdiutil] == ["attach", "detach", "detach"]
+        mount_point = Path(hdiutil[0][hdiutil[0].index("-mountpoint") + 1])
         assert not mount_point.exists()
 
     def test_an_invalid_signature_fails_after_detaching(
