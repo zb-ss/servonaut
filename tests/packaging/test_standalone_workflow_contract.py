@@ -1582,6 +1582,14 @@ def test_linux_preflight_accepts_quoted_and_unquoted_os_release(tmp_path: Path) 
     end = WORKFLOW.index("          PY\n", start)
     snippet = "\n".join(line[10:] for line in WORKFLOW[start:end].splitlines())
     snippet = snippet.replace("(3, 12)", repr(sys.version_info[:2]))
+    # Supply the declared platform for this OS-release parser test.
+    snippet = (
+        "import platform\n"
+        "import sys\n"
+        "sys.platform = 'linux'\n"
+        "platform.machine = lambda: 'x86_64'\n"
+        + snippet
+    )
     for facts in ("ID=ubuntu\nVERSION_ID=22.04\n", 'ID="ubuntu"\nVERSION_ID="22.04"\n'):
         release = tmp_path / "os-release"
         release.write_text(facts, encoding="utf-8")
