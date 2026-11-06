@@ -49,6 +49,10 @@ _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 # the package) neither bundles it nor reports this import as missing.
 _DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
 
+# A headless or scripted session supplies the Memory Sync passphrase here
+# instead of through the passphrase dialog.
+MEMORY_PASSPHRASE_ENV = "SERVONAUT_MEMORY_PASSPHRASE"
+
 if TYPE_CHECKING:
     from servonaut.config.schema import VoiceConfig
     from servonaut.services.relay_manager import RelayManager
@@ -1999,9 +2003,6 @@ class ServonautApp(App):
         sync dormant until the user explicitly unlocks from the Memory Sync
         screen.
         """
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-
         sync = getattr(self, "memory_sync_service", None)
         if sync is None:
             return
@@ -2023,30 +2024,61 @@ class ServonautApp(App):
             return
         if sync.is_configured:
             return
+        await self._unlock_memory_sync_with_prompt()
 
-        try:
-            await self.bootstrap_memory_cloud()
-            self.notify(
-                "Memory Sync unlocked.",
-                severity="information",
-                timeout=4,
-            )
-        except RuntimeError:
-            # User cancelled the modal — leave sync dormant, no error toast.
-            self._memory_sync_prompt_skipped = True
-            _logger.info(
-                "prompt_memory_sync_unlock: user cancelled passphrase prompt; "
-                "sync stays dormant"
-            )
-            self.notify(
-                "Memory Sync locked — open Memory Sync to unlock.",
-                severity="information",
-                timeout=5,
-            )
-        except Exception as exc:
-            _logger.warning(
-                "prompt_memory_sync_unlock: prompt path failed: %s", exc
-            )
+    async def _unlock_memory_sync_with_prompt(self) -> None:
+        """Ask for the passphrase until it unlocks Memory Sync or the user cancels.
+
+        A wrong passphrase says so and opens the prompt again. Any other
+        failure is reported with its reason, and the next visit to a memory
+        section asks again. A cancel leaves sync dormant for this session.
+        """
+        from servonaut.services.memory.sync_errors import (
+            WRONG_PASSPHRASE_MESSAGE,
+            describe_sync_error,
+            is_wrong_passphrase,
+        )
+
+        while True:
+            try:
+                await self.bootstrap_memory_cloud()
+            except RuntimeError:
+                # User cancelled the modal — leave sync dormant, no error toast.
+                self._memory_sync_prompt_skipped = True
+                logger.info(
+                    "prompt_memory_sync_unlock: user cancelled passphrase prompt; "
+                    "sync stays dormant"
+                )
+                self.notify(
+                    "Memory Sync locked — open Memory Sync to unlock.",
+                    severity="information",
+                    timeout=5,
+                )
+                return
+            except Exception as exc:
+                if not is_wrong_passphrase(exc):
+                    logger.warning("prompt_memory_sync_unlock: unlock failed: %s", exc)
+                    self.notify(
+                        describe_sync_error(exc, failure_prefix="Could not unlock Memory Sync"),
+                        severity="error",
+                        timeout=8,
+                        markup=False,
+                    )
+                    return
+                if os.environ.get(MEMORY_PASSPHRASE_ENV):
+                    # No dialog to reopen: asking again would reuse the same passphrase.
+                    self.notify(
+                        f"The passphrase in {MEMORY_PASSPHRASE_ENV} does not unlock Memory Sync.",
+                        severity="error",
+                        timeout=8,
+                        markup=False,
+                    )
+                    return
+                logger.info("prompt_memory_sync_unlock: wrong passphrase; asking again")
+                self.notify(WRONG_PASSPHRASE_MESSAGE, severity="error", timeout=6, markup=False)
+                continue
+            self.notify("Memory Sync unlocked.", severity="information", timeout=4)
+            return
 
     def _refresh_fleet_auto_scan_loop(self) -> None:
         """Re-evaluate the fleet auto-scan loop after the config flag changes.
@@ -2547,8 +2579,7 @@ class ServonautApp(App):
         Raises:
             RuntimeError: If the user cancels the modal.
         """
-        import os as _os
-        env = _os.environ.get("SERVONAUT_MEMORY_PASSPHRASE")
+        env = os.environ.get(MEMORY_PASSPHRASE_ENV)
         if env:
             return env
         from servonaut.screens.memory_keys import PassphraseEnrolModal
