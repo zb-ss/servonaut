@@ -255,13 +255,16 @@ async def test_import_from_bitwarden_retains_names_and_matches_auto_bind(
         await wait_for_async(lambda: not auto_bind_btn.disabled, desc="auto-bind button")
         auto_bind_btn.press()
 
-        auto_screen = await wait_for_async(
-            lambda: app.screen if isinstance(app.screen, VaultAutoBindScreen) else None,
-            desc="the VaultAutoBindScreen",
+        auto_table = await wait_for_async(
+            lambda: (
+                app.screen.query_one("#auto_bind_table", DataTable)
+                if isinstance(app.screen, VaultAutoBindScreen) and app.screen.query("#auto_bind_table")
+                else None
+            ),
+            desc="the auto-bind review table",
         )
 
         # The review table matches edge-1 to ops-key and bastion-1 to web-key by key pair.
-        auto_table = auto_screen.query_one("#auto_bind_table", DataTable)
         await wait_for_async(
             lambda: auto_table.row_count == 2,
             desc="auto-bind review table with both server rows",
