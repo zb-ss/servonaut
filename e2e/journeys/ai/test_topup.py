@@ -104,16 +104,22 @@ LOOKALIKES = {
 async def test_other_checkout_urls_are_never_opened(tui, seed, fake_cloud, journey, group):
     """Invalid checkout URLs are never opened or exposed in the TUI."""
     seed_hosted(seed, fake_cloud)
+    warning = "Top-up checkout returned an invalid Stripe checkout URL."
     async with tui() as t:
         for number, url in enumerate(LOOKALIKES[group], start=1):
             fake_cloud.ai.configure(topup_url=url)
             await _out_of_tokens(t, fake_cloud)
+            seen = len(t.toast_records())
             await t.click("#btn_topup_1")
-            await wait_for_literal_toast(
-                t,
-                "Top-up checkout returned an invalid Stripe checkout URL.",
-                severity="warning",
+            toast = await t.wait_until(
+                lambda: next(
+                    (record for record in t.toast_records()[seen:]
+                     if record.severity == "warning" and record.message == warning),
+                    None,
+                ),
+                desc="a new invalid checkout warning",
             )
+            assert toast.markup is False
             assert len(fake_cloud.ai.topups()) == number
             assert journey.shims.calls("browser") == [], url
             assert all(url not in message for _, message in t.toasts())

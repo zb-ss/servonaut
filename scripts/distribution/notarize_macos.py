@@ -9,6 +9,10 @@ log, which lists the issues that made it fail, and prints it.
 
 Stapling also validates the stapled ticket. Both stapler steps fetch the
 ticket from Apple and are repeated after a dropped connection.
+
+When the connection to Apple drops while notarytool waits for the result of
+a submission Apple has already received, the same submission is waited for
+again; the artifact is never uploaded twice.
 """
 
 from __future__ import annotations
@@ -38,6 +42,15 @@ _SUBMISSION_ID = re.compile(
 # pauses add up to almost eight minutes before stapling gives up.
 STAPLER_NETWORK_ERROR_MARKER = "NSURLErrorDomain"
 STAPLER_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+# notarytool's wait for a submission's result can lose its connection to Apple
+# (an NSURLErrorDomain error, such as a timed-out request) after Apple has
+# received the submission. The error names the submission in the address it
+# was polling. Waiting for that submission is repeated with the same pauses as
+# stapling; nothing is submitted again.
+NOTARY_NETWORK_ERROR_MARKER = STAPLER_NETWORK_ERROR_MARKER
+NOTARY_WAIT_RETRY_DELAYS_SECONDS: tuple[float, ...] = STAPLER_RETRY_DELAYS_SECONDS
+_POLLED_SUBMISSION = re.compile(rf"/notary/v2/submissions/({_SUBMISSION_ID.pattern})")
 
 
 class MacosNotarizationError(Exception):
@@ -121,18 +134,90 @@ def submit_notarization(
     if wait:
         cmd.append("--wait")
 
+    returncode, raw_out, details = _run_notarytool(cmd)
+    if returncode == 0 and (details.get("status") == "Accepted" or not wait):
+        return True, raw_out, details
+
+    submission_id = _submission_lost_while_waiting(raw_out, details) if wait else None
+    if submission_id is not None:
+        print(
+            f"notarytool lost its connection to Apple while waiting for submission "
+            f"{submission_id}; waiting for the same submission again",
+            file=sys.stderr,
+        )
+        return wait_for_submission(submission_id, credential_args)
+
+    return False, raw_out, details
+
+
+def _run_notarytool(cmd: list[str]) -> tuple[int, str, dict[str, Any]]:
+    """Run one notarytool command that prints JSON; return its exit code, output and JSON."""
     res = subprocess.run(cmd, capture_output=True, text=True)
     raw_out = (res.stdout or "") + "\n" + (res.stderr or "")
-
     try:
         details: dict[str, Any] = json.loads(res.stdout)
     except json.JSONDecodeError:
         details = {"raw_output": raw_out}
+    if not isinstance(details, dict):
+        details = {"raw_output": raw_out}
+    return res.returncode, raw_out, details
 
-    status = details.get("status")
-    if res.returncode == 0 and (status == "Accepted" or not wait):
-        return True, raw_out, details
 
+def _submission_lost_while_waiting(raw_out: str, details: dict[str, Any]) -> Optional[str]:
+    """The submission whose wait lost the connection to Apple, or None.
+
+    Only a network failure counts, and only with a submission id: without one
+    Apple may never have received the artifact.
+    """
+    if NOTARY_NETWORK_ERROR_MARKER not in raw_out:
+        return None
+    submission_id = details.get("id")
+    if isinstance(submission_id, str) and _SUBMISSION_ID.fullmatch(submission_id):
+        return submission_id
+    polled = _POLLED_SUBMISSION.search(raw_out)
+    return polled.group(1) if polled else None
+
+
+def wait_for_submission(
+    submission_id: str, credential_args: list[str]
+) -> tuple[bool, str, dict[str, Any]]:
+    """Wait for the result of a submission Apple has already received.
+
+    The wait runs at most ``len(NOTARY_WAIT_RETRY_DELAYS_SECONDS) + 1`` times,
+    repeating only after a dropped connection, with the next pause in between.
+
+    Returns:
+        tuple[bool, str, dict]: (is_accepted, notarytool's output, its JSON),
+        the same shape as ``submit_notarization``.
+
+    Raises:
+        MacosNotarizationError: If the id is not a submission id or notarytool
+            is unavailable.
+    """
+    if not _SUBMISSION_ID.fullmatch(submission_id):
+        raise MacosNotarizationError(f"Not a notarization submission id: {submission_id!r}")
+    cmd = [
+        *_xcrun_tool_command("notarytool"),
+        "wait",
+        submission_id,
+        "--output-format",
+        "json",
+        *credential_args,
+    ]
+    attempts = len(NOTARY_WAIT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        returncode, raw_out, details = _run_notarytool(cmd)
+        if returncode == 0 and details.get("status") == "Accepted":
+            return True, raw_out, details
+        if NOTARY_NETWORK_ERROR_MARKER not in raw_out or attempt == attempts:
+            break
+        delay = NOTARY_WAIT_RETRY_DELAYS_SECONDS[attempt - 1]
+        print(
+            f"notarytool wait lost its connection to Apple (attempt {attempt} of "
+            f"{attempts}); retrying in {delay:g}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
     return False, raw_out, details
 
 

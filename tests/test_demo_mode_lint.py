@@ -577,14 +577,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes '[red]Export service not available.[/red]' — "
                    "hard-coded error string, no user data."),
 
-    # memory_keys.py — _update_strength and _update_confirm_state write
-    # code-controlled strength labels and match/mismatch indicators.
-    AllowlistEntry("screens/memory_keys.py", "_update_strength", "update",
-                   "Writes password-strength label (Weak/Fair/Strong) "
-                   "— code-controlled taxonomy, not user PII."),
-    AllowlistEntry("screens/memory_keys.py", "_update_confirm_state", "update",
-                   "Writes 'Passwords match / do not match' indicator "
-                   "— code-controlled string."),
+    # memory_keys.py — _update_validation shows local rules and validation results.
+    AllowlistEntry("screens/memory_keys.py", "_update_validation", "update",
+                   "Only local rules, scores, and validation messages. "
+                   "No passphrase values or server data."),
 
     # memory_share.py — _do_share writes hard-coded status strings for each
     # phase of the share operation; exception is escaped before embedding.

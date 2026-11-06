@@ -49,6 +49,10 @@ HDIUTIL_TRANSIENT_MARKERS: tuple[str, ...] = (
     "Resource temporarily unavailable",
 )
 HDIUTIL_RETRY_DELAYS_SECONDS: tuple[float, ...] = (2.0, 5.0, 10.0)
+# A detach reported as busy can still finish in the background, and repeating
+# it then fails because the image is gone. On a repeat of detach, this answer
+# with nothing mounted at the mount point means the image is already detached.
+HDIUTIL_ALREADY_DETACHED_MARKER = "No such file or directory"
 
 REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = EXECUTABLES
 
@@ -290,7 +294,10 @@ def run_hdiutil(
     A busy resource is either of ``HDIUTIL_TRANSIENT_MARKERS``.
 
     It runs at most ``len(retry_delays) + 1`` times, pausing for the next delay
-    before each repeat, and says so on stderr.
+    before each repeat, and says so on stderr. A repeated detach that finds the
+    image gone (``HDIUTIL_ALREADY_DETACHED_MARKER``, nothing mounted at the
+    mount point) counts as done: the busy attempt before it detached the image
+    in the background. That result is returned as hdiutil gave it.
 
     Raises:
         MacosPackagingError: With hdiutil's last error, when it fails for any
@@ -305,6 +312,13 @@ def run_hdiutil(
         if res.returncode == 0:
             return res
         output = f"{res.stderr or ''}{res.stdout or ''}".strip()
+        if attempt > 1 and _detached_in_the_background(args, output):
+            print(
+                f"hdiutil detach: the image was already detached by the busy attempt "
+                f"before: {output}",
+                file=sys.stderr,
+            )
+            return res
         is_transient = any(marker in output for marker in HDIUTIL_TRANSIENT_MARKERS)
         if not is_transient or attempt == attempts:
             break
@@ -316,6 +330,15 @@ def run_hdiutil(
         )
         pause(delay)
     raise MacosPackagingError(f"hdiutil {args[0]} failed ({res.returncode}): {output}")
+
+
+def _detached_in_the_background(args: Sequence[str], output: str) -> bool:
+    """Whether a failed detach found its image already gone and nothing mounted."""
+    return (
+        args[0] == "detach"
+        and HDIUTIL_ALREADY_DETACHED_MARKER in output
+        and not os.path.ismount(args[-1])
+    )
 
 
 def _create_dmg_with_hdiutil(app_path: Path, dest_path: Path, volume_name: str) -> None:
