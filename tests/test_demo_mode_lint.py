@@ -951,6 +951,18 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "fresh provider data before calling _update_table(); safe "
                    "by the time load_text is called."),
 
+    # instance_list.py — _update_inspector_panel writes either a fixed
+    # "No server selected" line or the header for the selected row of
+    # self._instances. Every path that fills self._instances goes through
+    # replace_instances(), which redacts in demo mode, and a demo toggle
+    # redraws through refresh_after_demo_toggle(), so the header only ever
+    # shows redacted values.
+    AllowlistEntry("screens/instance_list.py", "_update_inspector_panel", "update",
+                   "Writes a fixed placeholder or the selected row of "
+                   "self._instances. Rows enter the list through "
+                   "replace_instances(), which redacts in demo mode; proven "
+                   "per row by test_fleet_inspector's demo-mode test."),
+
     # chat_panel.py — _send clears the chat input TextArea with '' after reading
     # the user's message — no server-origin data involved.
     AllowlistEntry("widgets/chat_panel.py", "_send", "load_text",

@@ -2492,6 +2492,8 @@ class TestInstanceListProviderRefreshDemoMode:
             return MagicMock()
 
         screen.query_one = _query_one
+        # The inspector also looks its quick-action buttons up by selector.
+        screen.query = lambda *_args, **_kwargs: []
 
         # Stub _sync_memory_banner and _update_status_bar (not under test here)
         screen._sync_memory_banner = lambda: None
