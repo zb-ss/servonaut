@@ -6,6 +6,7 @@ from typing import Optional, List
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
@@ -890,7 +891,7 @@ class InstanceListScreen(WorkspaceScreen):
         """Update the right-hand Selected Server quick-action inspector."""
         try:
             header = self.query_one("#fleet_inspector_header", Static)
-        except Exception:
+        except NoMatches:
             return
         for btn in self.query("#fleet_inspector Button"):
             btn.disabled = not instance
@@ -898,18 +899,20 @@ class InstanceListScreen(WorkspaceScreen):
             header.update("[bold]Selected Server[/bold]\n[dim]No server selected[/dim]")
             return
         name = escape(display_name(instance) or str(instance.get("id") or "Unnamed"))
-        state_raw = str(instance.get("state") or "running")
         provider = escape(str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS")))
         ip = escape(str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—"))
-        state_badge = (
-            f"[$text-success]● {escape(state_raw)}[/$text-success]"
-            if state_raw == "running"
-            else f"[dim]○ {escape(state_raw)}[/dim]"
-        )
         header.update(
-            f"[bold $text-accent]{name}[/bold $text-accent]  {state_badge}\n"
+            f"[bold $text-accent]{name}[/bold $text-accent]  {self._inspector_state_badge(instance)}\n"
             f"[dim]{provider} · {ip}[/dim]"
         )
+
+    @staticmethod
+    def _inspector_state_badge(instance: dict) -> str:
+        """The state marker; a server without a state reads as unknown, not running."""
+        state = str(instance.get("state") or "").strip() or "unknown"
+        if state == "running":
+            return f"[$text-success]● {escape(state)}[/$text-success]"
+        return f"[dim]○ {escape(state)}[/dim]"
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
