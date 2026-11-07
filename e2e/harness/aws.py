@@ -67,7 +67,8 @@ class MotoAws:
         self._networks: dict[tuple[str, str], tuple[str, str]] = {}
         self._key_pairs: set[tuple[str, str, str]] = set()
         # moto serves the same Amazon-owned images in every region and
-        # account, and listing them takes over a second, so it is done once.
+        # account, and listing them takes over a second, so it is done once. The
+        # same images are loaded again after a reset, so reset() keeps the id.
         self._image_id: Optional[str] = None
 
     def start(self) -> "MotoAws":
