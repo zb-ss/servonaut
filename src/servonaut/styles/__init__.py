@@ -7,7 +7,20 @@ order is the cascade order.
 """
 from pathlib import Path
 
+from textual.cache import LRUCache
+
 _S = Path(__file__).parent
+
+# Textual keeps parsed rule sets in an LRU cache of 64 entries.  The bundle
+# plus the DEFAULT_CSS of every widget class is well past that, so each
+# re-parse (one per newly mounted widget class) evicted entries it was about
+# to need and parsed the whole bundle again.
+PARSE_CACHE_SIZE = 1024
+
+
+def widen_parse_cache(stylesheet) -> None:
+    """Let *stylesheet* keep a parsed rule set for every CSS source it holds."""
+    stylesheet._parse_cache = LRUCache(PARSE_CACHE_SIZE)
 
 CSS_FILES = [
     _S / "base.tcss",

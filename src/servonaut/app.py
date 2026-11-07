@@ -15,7 +15,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
-from servonaut.styles import CSS_FILES
+from servonaut.styles import CSS_FILES, widen_parse_cache
 from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
 from servonaut.styles.themes import (
     SERVONAUT_ANSI_DARK,
@@ -258,6 +258,7 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        widen_parse_cache(self.stylesheet)
         from servonaut import get_version
         self.sub_title = f"v{get_version()}"
         for theme in SERVONAUT_THEMES:
