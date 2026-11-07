@@ -99,25 +99,96 @@ async def test_actions_stay_visible_with_chat_open() -> None:
         _assert_action_geometry(screen)
 
 
-@pytest.mark.asyncio
-async def test_labels_share_one_key_prefix_format() -> None:
-    app = _LayoutHost()
-    async with app.run_test(size=(160, 50)) as pilot:
-        screen = await _open_actions(app, pilot)
-        for button in screen.query("#action_buttons Button"):
-            label = button.label.plain
-            assert label[1:3] == ". ", label
+def _bound_keys(screen: ServerActionsScreen) -> set[str]:
+    return {binding.key.lower() for binding in ServerActionsScreen.BINDINGS}
+
+
+def _assert_prefix_matches_binding(screen: ServerActionsScreen) -> None:
+    """A button shows a key prefix exactly when that key is bound."""
+    keys = _bound_keys(screen)
+    for button in screen.query("#action_buttons Button"):
+        label = button.label.plain
+        prefixed = label[1:3] == ". "
+        if prefixed:
+            assert label[0].lower() in keys, label
+        else:
+            assert button.id.startswith("btn_ovh_"), label
 
 
 @pytest.mark.asyncio
-async def test_vault_key_has_a_key_binding() -> None:
+async def test_labels_show_a_key_prefix_exactly_when_the_key_is_bound() -> None:
     app = _LayoutHost()
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
+        _assert_prefix_matches_binding(screen)
+        assert not screen.query("#btn_ovh_reinstall")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_ovh_group_follows_the_label_rule_and_precedes_back(size) -> None:
+    app = _LayoutHost()
+    app.instances[0].update(is_ovh=True)
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
+        await pilot.pause()
+        _assert_prefix_matches_binding(screen)
+        _assert_action_geometry(screen)
+        groups = list(screen.query("#action_buttons .sa-group"))
+        assert groups[-2].query_one(".section_label").content.plain == "OVH"
+        assert groups[-1].query_one(Button).id == "btn_back"
+
+
+@pytest.mark.asyncio
+async def test_vault_key_is_bound_to_u_and_not_k() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert screen.query_one("#btn_use_vault_key", Button).label.plain.startswith("U. ")
+        assert "k" not in _bound_keys(screen)
         calls: list[str] = []
         screen.action_use_vault_key = lambda: calls.append("vault")
-        await pilot.press("k")
+        await pilot.press("u")
         assert calls == ["vault"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_back_is_set_apart_from_the_last_category(size) -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_actions(app, pilot)
+        groups = list(screen.query("#action_buttons .sa-group"))
+        assert groups[-1].region.y - groups[-2].region.bottom >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_toolbar_keeps_its_one_cell_inset(size) -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_actions(app, pilot)
+        _assert_inset(screen)
+
+
+@pytest.mark.asyncio
+async def test_toolbar_keeps_its_inset_with_chat_open() -> None:
+    app = _LayoutHost(navigation_visible=False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await _open_chat(app, pilot)
+        await wait_until(lambda: not screen._layout_required)
+        _assert_inset(screen)
+
+
+def _assert_inset(screen: ServerActionsScreen) -> None:
+    toolbar = screen.query_one("#action_buttons")
+    content = toolbar.content_region
+    assert content.x == toolbar.region.x + 1
+    assert content.right == toolbar.region.right - 1
+    for button in screen.query("#action_buttons Button"):
+        assert content.contains_region(button.region), button.id
 
 
 @pytest.mark.asyncio
