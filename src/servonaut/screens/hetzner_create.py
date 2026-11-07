@@ -36,6 +36,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -512,16 +513,22 @@ class HetznerCreateScreen(Screen):
 
         # With several projects, say which one is billed.
         project = (
-            f" in project [bold]{escape(shown_label(self.app, self._account))}[/bold]"
+            shown_label(self.app, self._account)
             if len(provider_accounts(self.app, "hetzner")) > 1 else ""
         )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Create Hetzner Cloud Server",
                 description=(
-                    f"Create [bold]{name}[/bold] in [bold]{location_name}[/bold] "
-                    f"as [bold]{type_name}[/bold] / [bold]{image_name}[/bold] "
-                    f"with SSH key [bold]{ssh_key_label}[/bold]{project}."
+                    with_bold_values(
+                        "Create {} in {} as {} / {} with SSH key {} in project {}.",
+                        name, location_name, type_name, image_name, ssh_key_label, project,
+                    )
+                    if project
+                    else with_bold_values(
+                        "Create {} in {} as {} / {} with SSH key {}.",
+                        name, location_name, type_name, image_name, ssh_key_label,
+                    )
                 ),
                 consequences=[
                     f"Billing starts immediately (~€{monthly_price}/month gross)",

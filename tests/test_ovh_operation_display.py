@@ -60,12 +60,12 @@ def test_volume_confirmation_preserves_mutation_target(operation: str, is_demo: 
     ):
         getattr(screen, method)()
     confirmation = app.push_screen_wait.call_args.args[0]
-    assert ("private-volume" not in confirmation._description) is is_demo
+    assert ("private-volume" not in str(confirmation._description)) is is_demo
     assert (confirmation._confirm_text != "private-volume") is is_demo
     if operation == "delete":
         mutation.assert_awaited_once_with("project-id", "volume-id", "private-volume")
     else:
-        assert ("12345" not in confirmation._description) is is_demo
+        assert ("12345" not in str(confirmation._description)) is is_demo
         mutation.assert_awaited_once_with("project-id", "volume-id", "12345", "private-volume")
 
 
