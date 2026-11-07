@@ -19,6 +19,7 @@ from rich.markup import escape
 from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.utils.markup import literal as literal_text
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.app import ComposeResult, SuspendNotSupported
@@ -982,7 +983,7 @@ class MemoryScreen(Screen):
             def redact(team: str) -> str:
                 return redaction.redact_name(team) if demo else team
 
-            lines.append(escape(shared_source_text(shared, shared.team_name, redact, shown)))
+            lines.append(shared_source_text(shared, shared.team_name, redact, shown))
         if self._read_only:
             lines.append(
                 "Read-only: this server has no connection of its own, so it "
@@ -991,7 +992,7 @@ class MemoryScreen(Screen):
         if not lines:
             label.add_class("hidden")
             return
-        label.update("[dim]" + "\n".join(lines) + "[/dim]")
+        label.update(literal_text("\n".join(lines), "dim"))
         label.remove_class("hidden")
 
     def _set_empty_state_visible(self, visible: bool) -> None:

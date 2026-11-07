@@ -15,13 +15,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.content import Content
 from textual.events import Key
 from textual.widget import Widget
 from textual.widgets import Button, Static
+
+from servonaut.utils.markup import literal
 
 logger = logging.getLogger(__name__)
 
@@ -76,23 +78,27 @@ class MemoryPrompt(Widget):
         super().__init__()
         self._instance = instance
 
-    def _label_markup(self) -> str:
-        """Build the Rich-markup body used in the banner label.
+    def _label_content(self) -> Content:
+        """Build the banner label.
 
-        Exposed as a method so tests can verify markup-injection safety
-        without mounting the widget inside a Textual pilot app.
+        Exposed as a method so tests can verify that the server's name is
+        shown literally without mounting the widget inside a Textual pilot app.
         """
         name = self._instance.get("name") or self._instance.get("id", "server")
-        # Rich markup escape — instance names come from user/cloud data and
-        # must never be interpolated into markup verbatim.
-        return (
-            f"[b]Build memory[/b] for [$text-accent]{escape(str(name))}[/$text-accent]?  "
-            "Press [bold $text-warning]y[/bold $text-warning] to probe, [bold]n[/bold] to dismiss."
+        return Content.assemble(
+            Content.styled("Build memory", "bold"),
+            " for ",
+            literal(str(name), "$text-accent"),
+            "?  Press ",
+            Content.styled("y", "bold $text-warning"),
+            " to probe, ",
+            Content.styled("n", "bold"),
+            " to dismiss.",
         )
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
-            Static(self._label_markup(), id="memory_prompt_label"),
+            Static(self._label_content(), id="memory_prompt_label"),
             Button("y. Build", variant="primary", id="memory_prompt_accept"),
             Button("n. Dismiss", variant="default", id="memory_prompt_dismiss"),
             id="memory_prompt_row",
@@ -147,7 +153,7 @@ class MemoryPrompt(Widget):
         async def _run_build() -> None:
             try:
                 await memory_service.build(instance)
-                app.notify(f"Memory probed for {name}.")
+                app.notify(f"Memory probed for {name}.", markup=False)
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.warning("First-connect build failed for %s: %s", name, exc)
                 app.notify(f"Memory probe failed: {exc}", severity="error", markup=False)
