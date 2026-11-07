@@ -62,6 +62,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     """
 
     DEFAULT_CLASSES = "dialog-screen"
+    # on_mount focuses the first field itself; the automatic focus would
+    # animate a scroll against the first, not yet final, layout.
+    AUTO_FOCUS = ""
+
+    # Enrol shows rules, two fields and feedback, so on shorter terminals the
+    # shared frame gives its padding to the content (see dialogs.tcss).
+    VERTICAL_BREAKPOINTS = [(0, "-dialog-minimal"), (24, "-dialog-tight"), (40, "-dialog-roomy")]
 
     DEFAULT_CSS = """
     #enrol-blurb {
@@ -196,7 +203,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     def on_mount(self) -> None:
         self._update_validation()
-        self.query_one("#enrol-pass1", Input).focus()
+        self.query_one("#enrol-pass1", Input).focus(scroll_visible=False)
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._show_focused_control)
