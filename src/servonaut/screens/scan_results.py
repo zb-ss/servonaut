@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import List
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -112,7 +113,7 @@ class ScanResultsScreen(Screen):
             # Replace newlines with spaces for table display
             content_display = _s(content_display.replace('\n', ' '))
 
-            table.add_row(source, content_display, timestamp)
+            table.add_row(Text(source), Text(content_display), Text(str(timestamp)))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.

@@ -7,6 +7,7 @@ import logging
 import shlex
 from typing import List, Optional, Dict, TYPE_CHECKING
 
+from rich.text import Text
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from textual.worker import Worker
@@ -404,7 +405,7 @@ class RemoteTree(Tree):
         for entry in entries:
             if entry['type'] == 'directory':
                 icon = "📁"
-                child = parent.add(f"{icon} {entry['name']}", expand=False)
+                child = parent.add(Text(f"{icon} {entry['name']}"), expand=False)
                 child.data = {
                     "path": entry['path'],
                     "type": "directory"
@@ -413,7 +414,7 @@ class RemoteTree(Tree):
             else:
                 icon = "📄"
                 size_str = self._format_size(entry['size'])
-                child = parent.add(f"{icon} {entry['name']} ({size_str})")
+                child = parent.add(Text(f"{icon} {entry['name']} ({size_str})"))
                 child.data = {
                     "path": entry['path'],
                     "type": "file"
