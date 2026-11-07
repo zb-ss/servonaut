@@ -44,6 +44,7 @@ import math
 import threading
 import time
 import webbrowser
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 from rich.markup import escape as _rich_escape
@@ -64,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Minimal AI Logo (Matches Website)
 SERVONAUT_LOGO = (
     "[bold $text-accent]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
-    "   [bold $text-success]●[/] [dim $text-success]MCP Server Online[/]"
+    "   [bold $text-success]●[/] MCP Server Online"
 )
 
 # Inline bot marker for assistant messages
@@ -486,6 +487,13 @@ class ChatPanel(Widget):
     # Partials replace each other, so they are rendered after this prefix
     # rather than on top of whatever the user had typed.
     _partial_prefix: str = ""
+    _collapsed: bool = False
+    _voice_generation: int = 0
+    _content_focus: Optional[Widget] = None
+    _turn_target: Optional[Tuple[Optional[dict], str]] = None
+    _turn_muted: bool = False
+    _capture_pending: bool = False
+    _conversation_starting: bool = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-panel", **kwargs)
@@ -533,6 +541,9 @@ class ChatPanel(Widget):
         self._empty_state_modal_shown: bool = False
 
     def compose(self) -> ComposeResult:
+        with Horizontal(id="chat-restore-controls"):
+            yield Button("Restore chat", id="btn-chat-restore")
+            yield Button("End chat", id="btn-chat-end", tooltip="End chat and stop its reply · F3")
         with Vertical(id="chat-inner"):
             # Header with logo and controls
             with Vertical(id="chat-header"):
@@ -548,7 +559,7 @@ class ChatPanel(Widget):
                         id="btn-chat-provider",
                         classes="chat-btn",
                     )
-                    yield Button("Close", id="btn-chat-close", classes="chat-btn error")
+                    yield Button("End chat", id="btn-chat-close", classes="chat-btn error")
             # Session history list (hidden by default)
             with VerticalScroll(id="chat-history-list", classes="hidden"):
                 yield Static("[dim]No saved chats[/dim]", id="chat-history-empty")
@@ -570,36 +581,40 @@ class ChatPanel(Widget):
                     "Ollama provider to keep chatting.",
                     id="chat-pinned-error-text",
                 )
-                yield Button(
-                    "Resubscribe",
-                    id="btn-pinned-resubscribe",
-                    variant="primary",
-                )
-                yield Button(
-                    "Add a provider",
-                    id="btn-pinned-add-provider",
-                )
+                with Horizontal(id="chat-pinned-error-actions"):
+                    yield Button(
+                        "Resubscribe",
+                        id="btn-pinned-resubscribe",
+                        variant="primary",
+                    )
+                    yield Button(
+                        "Add a provider",
+                        id="btn-pinned-add-provider",
+                    )
             # Message area
             yield VerticalScroll(id="chat-messages")
-            # Stats bar
-            yield Static("", id="chat-stats")
-            # Quota footer (T3) — Servonaut-only; hidden for user-keyed providers.
-            yield Static("", id="chat-quota-footer", classes="hidden")
-            # Input row
-            with Horizontal(id="chat-input-row"):
-                yield TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
-                yield Button(
-                    _MIC_IDLE, id="btn-chat-mic",
-                    tooltip="Voice input (ctrl+t)",
-                )
-                yield Button(
-                    _CONVO_IDLE, id="btn-chat-convo",
-                    tooltip=f"Hands-free conversation ({_CONVO_TOGGLE_KEY})",
-                )
-                yield Button(
-                    "➤", id="btn-chat-send", variant="primary",
-                    tooltip="Send message (enter)",
-                )
+            with Vertical(id="chat-composer"):
+                # Stats bar
+                yield Static("", id="chat-stats")
+                # Quota footer (T3) — Servonaut-only; hidden for user-keyed providers.
+                yield Static("", id="chat-quota-footer", classes="hidden")
+                # Input row
+                with Horizontal(id="chat-input-row"):
+                    editor = TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
+                    editor.border_title = "Message"
+                    yield editor
+                    yield Button(
+                        _MIC_IDLE, id="btn-chat-mic",
+                        tooltip="Voice input (ctrl+t)",
+                    )
+                    yield Button(
+                        _CONVO_IDLE, id="btn-chat-convo",
+                        tooltip=f"Hands-free conversation ({_CONVO_TOGGLE_KEY})",
+                    )
+                    yield Button(
+                        "➤", id="btn-chat-send", variant="primary",
+                        tooltip="Send message (enter)",
+                    )
 
     def on_mount(self) -> None:
         """Load or create a chat session when mounted."""
@@ -616,6 +631,8 @@ class ChatPanel(Widget):
 
     def on_unmount(self) -> None:
         """Drop a live capture so closing the panel can't leave the mic open."""
+        self._collapsed = True
+        self._voice_generation += 1
         # Unconditional: a panel closed while the model was still decoding
         # has no capture to cancel but does have a timer to stop — and a
         # reply still being read aloud must not outlive the panel either.
@@ -648,14 +665,114 @@ class ChatPanel(Widget):
         the render set, so a late write updates state harmlessly instead
         of scheduling the fatal repaint.
         """
+        self._collapsed = True
+        self._voice_generation += 1
+        self._restore_content_focus()
+        screen = self.screen if self.is_attached else None
         self.display = False
-        self.remove()
+        if screen is not None:
+            # A nested parent's layout message may reach the screen after
+            # its next paint; retire our subtree before component teardown.
+            screen.refresh(layout=True)
+        removal = self.remove()
+        sync = getattr(screen, "sync_workspace_controls", None)
+        if sync is not None:
+            async def sync_after_removal() -> None:
+                await removal
+                if screen.is_attached:
+                    sync()
+
+            screen.call_later(sync_after_removal)
+
+    def collapse_panel(self) -> None:
+        """Hide conversation content while its text turn remains mounted."""
+        from servonaut.widgets.workspace.screen import WorkspaceScreen
+
+        # Native screen copy must not target the transcript after it is hidden.
+        # Retain selections outside this panel and the editor's own selection.
+        screen = self.screen
+        remaining = {
+            widget: selection for widget, selection in screen.selections.items()
+            if widget is not self and self not in widget.ancestors
+        }
+        # End even a just-started drag, before its first range is published.
+        screen.clear_selection()
+        screen.selections = remaining
+        self._collapsed = True
+        self._voice_generation += 1
+        self._speak_seq += 1
+        self._turn_muted = True
+        self.set_class(not isinstance(self.screen, WorkspaceScreen), "--compact-collapsed")
+        self._restore_content_focus()
+        self.display = not isinstance(self.screen, WorkspaceScreen)
+        self._stop_spinner()
+        self._teardown_conversation()
+        self._abort_turn_speech()
+        self._turn_speech_suppressed = True
+        self._interrupt_speech()
+        owned_capture = self._recording or self._starting or self._transcribing
+        self._starting = False
+        self._set_mic_state(recording=False, transcribing=False)
+        if owned_capture:
+            service = getattr(self.app, "voice_input_service", None)
+            if service is not None:
+                service.cancel_recording()
+            self.app.notify(
+                "Dictation stopped. Your draft was kept.",
+                severity="information",
+                markup=False,
+            )
+        self._sync_convo_button()
+        self._sync_workspace_controls()
+
+    def restore_panel(self) -> None:
+        """Restore this same conversation without restarting microphone input."""
+        self._collapsed = False
+        self.remove_class("--compact-collapsed")
+        self.display = True
+        self.focus_input()
+        self._sync_workspace_controls()
+
+    def _restore_content_focus(self) -> None:
+        """Return a hidden or ending panel's focus to visible screen content."""
+        if not self.is_attached or not self.has_focus_within:
+            return
+        prepare = getattr(self.screen, "prepare_chat_hide", None)
+        if prepare is not None and prepare(self._content_focus):
+            return
+        previous = self._content_focus
+        if (previous is not None and previous.is_attached
+                and previous.screen is self.screen and previous.focusable
+                and previous.region):
+            previous.focus()
+            return
+        selector = self.screen.AUTO_FOCUS
+        if selector:
+            for widget in self.screen.query(selector):
+                if widget.focusable and widget not in self.walk_children() and widget.region:
+                    widget.focus()
+                    return
+        self.screen.focus_next()
+
+    def _sync_workspace_controls(self) -> None:
+        """Update external activity/actions only while attached to a screen."""
+        if getattr(self, "_parent", None) is None:
+            return
+        sync = getattr(self.screen, "sync_workspace_controls", None)
+        if sync is not None:
+            sync()
+
+    def _voice_is_current(self, generation: int) -> bool:
+        """A collapse retires delayed audio work even after a quick restore."""
+        return not self._collapsed and generation == self._voice_generation
 
     def focus_input(self) -> None:
         """Focus the chat input field."""
         self.call_after_refresh(self._do_focus_input)
 
     def _do_focus_input(self) -> None:
+        if self._collapsed:
+            return
         try:
             self.query_one("#chat-input", TextArea).focus()
         except Exception as exc:  # noqa: BLE001
@@ -949,6 +1066,7 @@ class ChatPanel(Widget):
         - Tool note when the active provider is a bring-your-own one:
           the guard level its tools run at, or "Tools off".
         """
+        self._sync_workspace_controls()
         try:
             stats_widget = self.query_one("#chat-stats", Static)
         except Exception:
@@ -1669,8 +1787,15 @@ class ChatPanel(Widget):
             self._toggle_conversation()
         elif button_id == "btn-chat-send":
             self._send()
-        elif button_id == "btn-chat-close":
-            self.close_panel()
+        elif button_id in {"btn-chat-close", "btn-chat-end"}:
+            if self.is_attached and self.screen is self.app.screen:
+                end_chat = getattr(self.app, "action_end_chat", None)
+                if callable(end_chat):
+                    end_chat()
+                else:
+                    self.close_panel()
+        elif button_id == "btn-chat-restore":
+            self.restore_panel()
         elif button_id == "btn-pinned-resubscribe":
             # B1 — open pricing in the user's default browser.
             try:
@@ -2084,6 +2209,8 @@ class ChatPanel(Widget):
 
     def _toggle_recording(self) -> None:
         """Start voice capture, or stop it and transcribe into the input box."""
+        if self._collapsed:
+            return
         voice_config = self._voice_config()
         if voice_config is not None and not voice_config.enabled:
             self.app.notify(
@@ -2105,7 +2232,7 @@ class ChatPanel(Widget):
         # The hands-free loop owns the capture stream; a push-to-talk
         # toggle poking the same service mid-session would tear down a
         # stream the loop believes it is reading.
-        if self._conversation_active:
+        if self._conversation_active or self._conversation_starting:
             self.app.notify(
                 "Conversation mode owns the microphone — "
                 f"{_CONVO_TOGGLE_KEY} stops it first.",
@@ -2117,7 +2244,7 @@ class ChatPanel(Widget):
         # A second toggle while the model is decoding would stop a stream
         # that is already closed, and one while the device is still being
         # opened would race the start worker, so swallow both.
-        if self._transcribing or self._starting:
+        if self._capture_pending or self._transcribing or self._starting:
             return
 
         # One service instance backs every mounted panel, so a panel can
@@ -2135,7 +2262,7 @@ class ChatPanel(Widget):
         if self._recording:
             self._set_mic_state(recording=False, transcribing=True)
             self.run_worker(
-                self._do_transcribe(service),
+                self._do_transcribe(service, generation=self._voice_generation),
                 exclusive=False,
                 name="voice_transcribe",
                 # Dedicated group: the ``ai_chat`` group runs exclusive
@@ -2161,14 +2288,20 @@ class ChatPanel(Widget):
         self._starting = True
         self._set_mic_state(recording=False, transcribing=False)
         self.run_worker(
-            self._do_start_recording(service),
+            self._do_start_recording(service, generation=self._voice_generation),
             exclusive=False,
             name="voice_start",
             group="voice",
         )
 
-    async def _do_start_recording(self, service: Any) -> None:
+    async def _do_start_recording(
+        self, service: Any, *, generation: int | None = None,
+    ) -> None:
         """Worker: probe the device and open the stream off the event loop."""
+        generation = self._voice_generation if generation is None else generation
+        if not self._voice_is_current(generation):
+            return
+        self._capture_pending = True
         started = False
         try:
             if not await asyncio.to_thread(service.is_available):
@@ -2177,11 +2310,20 @@ class ChatPanel(Widget):
                     severity="warning",
                     markup=False,
                 )
-            else:
+            elif self._voice_is_current(generation):
                 self._capture_partial_prefix()
                 self._attach_partial_listener(service)
-                await asyncio.to_thread(service.start_recording)
-                started = True
+
+                def start_owned_capture() -> bool:
+                    service.start_recording()
+                    # The device thread outlives cancellation of this worker.
+                    # Retire it here even if End or app exit skipped the await.
+                    if not self._voice_is_current(generation):
+                        service.cancel_recording()
+                        return False
+                    return True
+
+                started = await asyncio.to_thread(start_owned_capture)
         except Exception as exc:  # noqa: BLE001 — a dead mic must not kill the panel
             logger.debug("voice start_recording failed", exc_info=True)
             self.app.notify(
@@ -2194,6 +2336,7 @@ class ChatPanel(Widget):
             # disabled would strand the user with no way back to an
             # idle mic.
             self._starting = False
+            self._capture_pending = False
             self._set_mic_state(recording=started, transcribing=False)
 
     def _capture_partial_prefix(self) -> None:
@@ -2214,7 +2357,7 @@ class ChatPanel(Widget):
             return
         # The decoder thread invokes this, so hop to the UI thread before
         # touching a widget.
-        register(lambda text: self._post_partial(text))
+        register(self._voice_callback(self._render_partial, self._voice_generation))
 
     def _post_partial(self, text: str) -> None:
         """Marshal a partial transcript from the decoder thread to the UI."""
@@ -2250,13 +2393,19 @@ class ChatPanel(Widget):
         except Exception:  # noqa: BLE001 — cursor API is best-effort here
             pass
 
-    async def _do_transcribe(self, service: Any) -> None:
+    async def _do_transcribe(
+        self, service: Any, *, generation: int | None = None,
+    ) -> None:
         """Worker: transcribe the captured audio and append it to the input.
 
         ``stop_and_transcribe`` loads a local model and decodes audio;
         awaiting it inline would freeze every widget in the TUI, so it
         runs on a worker thread.
         """
+        generation = self._voice_generation if generation is None else generation
+        if not self._voice_is_current(generation):
+            return
+        self._capture_pending = True
         try:
             transcript = await asyncio.to_thread(
                 service.stop_and_transcribe,
@@ -2273,7 +2422,11 @@ class ChatPanel(Widget):
         finally:
             # Every exit path, cancellation included, leaves the mic idle —
             # a stuck "STOP" button would strand the user.
+            self._capture_pending = False
             self._set_mic_state(recording=False, transcribing=False)
+
+        if not self._voice_is_current(generation):
+            return
 
         # The cap drops the tail of a long dictation, which is the part a
         # user scanning a small input box is least likely to notice.
@@ -2355,7 +2508,7 @@ class ChatPanel(Widget):
             self._update_stats()
             return
         mic_btn.label = self._mic_label()
-        mic_btn.disabled = transcribing or self._starting
+        mic_btn.disabled = transcribing or self._starting or self._capture_pending
         if recording:
             mic_btn.add_class("recording")
         else:
@@ -2495,6 +2648,8 @@ class ChatPanel(Widget):
             loop uses this to decide whether the reply owns a SPEAKING
             phase or listening should resume immediately.
         """
+        if self._collapsed or self._turn_muted:
+            return False
         voice_config = self._voice_config()
         spoken = resolve_spoken_reply(
             text,
@@ -2525,7 +2680,7 @@ class ChatPanel(Widget):
         epoch_fn = getattr(service, "current_epoch", None)
         epoch = epoch_fn() if callable(epoch_fn) else None
         self.run_worker(
-            self._do_speak(service, spoken, epoch=epoch),
+            self._do_speak(service, spoken, epoch=epoch, generation=self._voice_generation),
             exclusive=True,
             name="voice_speak",
             group="voice_speak",
@@ -2533,7 +2688,8 @@ class ChatPanel(Widget):
         return True
 
     async def _do_speak(
-        self, service: Any, text: str, epoch: Optional[int] = None
+        self, service: Any, text: str, epoch: Optional[int] = None,
+        *, generation: int | None = None,
     ) -> None:
         """Worker: synthesise and play one reply off the event loop.
 
@@ -2542,6 +2698,9 @@ class ChatPanel(Widget):
         story lives in Settings > Voice Input, and repeating it on every
         reply would nag. Actual synthesis/playback failures do notify.
         """
+        generation = self._voice_generation if generation is None else generation
+        if not self._voice_is_current(generation):
+            return
         self._speak_seq += 1
         seq = self._speak_seq
         try:
@@ -2551,6 +2710,8 @@ class ChatPanel(Widget):
             # The conversation loop was promised a SPEAKING phase; with
             # nothing to play it must resume listening, not hang THINKING.
             self._notify_convo_reply_done(False)
+            return
+        if not self._voice_is_current(generation):
             return
         if not available:
             logger.debug(
@@ -2572,6 +2733,8 @@ class ChatPanel(Widget):
             except Exception:  # noqa: BLE001 — a state hiccup must not silence the reply
                 logger.debug("conversation speaking_started failed", exc_info=True)
 
+        if not self._voice_is_current(generation):
+            return
         self._set_speaking(True)
         try:
             if epoch is None:
@@ -2644,7 +2807,8 @@ class ChatPanel(Widget):
         self._turn_speech_session = None
         self._turn_speech_suppressed = False
         voice_config = self._voice_config()
-        if not bool(getattr(voice_config, "tts_enabled", False)):
+        if (self._collapsed or self._turn_muted
+                or not bool(getattr(voice_config, "tts_enabled", False))):
             return
         if self._voice_output_service() is None:
             return
@@ -2666,7 +2830,7 @@ class ChatPanel(Widget):
 
     async def _stream_speech_emit(self, sentence: str) -> None:
         """Gate one sentence and hand it to the utterance session."""
-        if self._turn_speech_suppressed:
+        if self._collapsed or self._turn_muted or self._turn_speech_suppressed:
             return
         spoken = resolve_spoken_sentence(
             sentence,
@@ -2698,6 +2862,9 @@ class ChatPanel(Widget):
         stop so an interrupt landing mid-turn retires every sentence
         still to come.
         """
+        generation = self._voice_generation
+        if self._collapsed or self._turn_muted:
+            return False
         service = self._voice_output_service()
         if service is None:
             self._turn_speech_suppressed = True
@@ -2707,6 +2874,8 @@ class ChatPanel(Widget):
         except Exception:  # noqa: BLE001 — a broken probe must not break the stream
             logger.debug("voice output availability probe failed", exc_info=True)
             available = False
+        if not self._voice_is_current(generation):
+            return False
         if not available:
             # Quiet skip, same as _do_speak: the readiness story lives in
             # Settings, and a toast per streamed turn would nag.
@@ -2882,6 +3051,8 @@ class ChatPanel(Widget):
         probe blocks). Speaking: cut the reply short and listen again.
         Any other active state: end the session cleanly.
         """
+        if self._collapsed or self._conversation_starting:
+            return
         service = self._conversation_service()
         if service is None:
             self.app.notify(
@@ -2910,7 +3081,7 @@ class ChatPanel(Widget):
 
         # A push-to-talk capture in flight owns the input service; the
         # loop must not steal the stream from under it.
-        if self._recording or self._transcribing or self._starting:
+        if self._capture_pending or self._recording or self._transcribing or self._starting:
             self.app.notify(
                 "Finish the current dictation before starting a conversation.",
                 severity="warning",
@@ -2918,8 +3089,9 @@ class ChatPanel(Widget):
             )
             return
 
+        self._conversation_starting = True
         self.run_worker(
-            self._do_start_conversation(service),
+            self._do_start_conversation(service, generation=self._voice_generation),
             exclusive=False,
             name="voice_convo_start",
             # Own group: stop/reply_started can block briefly on stream
@@ -2937,16 +3109,19 @@ class ChatPanel(Widget):
         unconfigured install must not greet every panel open with a toast
         about a feature it never asked for.
         """
+        if self._collapsed:
+            return
         voice_config = self._voice_config()
         if voice_config is None or not getattr(voice_config, "enabled", False):
             return
         if not getattr(voice_config, "conversation_mode", False):
             return
         service = self._conversation_service()
-        if service is None or self._conversation_active:
+        if service is None or self._conversation_active or self._conversation_starting:
             return
+        self._conversation_starting = True
         self.run_worker(
-            self._do_start_conversation(service),
+            self._do_start_conversation(service, generation=self._voice_generation),
             exclusive=False,
             name="voice_convo_autostart",
             group="voice_convo",
@@ -2971,7 +3146,9 @@ class ChatPanel(Widget):
             logger.debug("voice-activity model probe failed", exc_info=True)
             return False
 
-    async def _do_start_conversation(self, service: Any) -> None:
+    async def _do_start_conversation(
+        self, service: Any, *, generation: int | None = None,
+    ) -> None:
         """Worker: probe readiness, then start the loop.
 
         Every probe here blocks (device enumeration, model stat), so the
@@ -2979,6 +3156,16 @@ class ChatPanel(Widget):
         the pure :func:`resolve_conversation_start`, which either clears
         the start or names the FIRST missing piece and where to fix it.
         """
+        generation = self._voice_generation if generation is None else generation
+        self._conversation_starting = True
+        try:
+            if self._voice_is_current(generation):
+                await self._start_conversation_for_generation(service, generation)
+        finally:
+            self._conversation_starting = False
+
+    async def _start_conversation_for_generation(self, service: Any, generation: int) -> None:
+        """Finish readiness/start before a retired attempt may be replaced."""
         voice_config = self._voice_config()
         input_service = getattr(self.app, "voice_input_service", None)
         input_available = False
@@ -3031,16 +3218,18 @@ class ChatPanel(Widget):
             output_reason=output_reason,
             tts_enabled=tts_enabled,
         )
+        if not self._voice_is_current(generation):
+            return
         if message:
             self.app.notify(message, severity="warning", markup=False)
             return
 
         # Callbacks before start(): the first state transition fires from
         # inside start(), and it must not be lost.
-        service.set_state_callback(self._post_convo_state)
-        service.set_transcript_callback(self._post_convo_transcript)
-        service.set_error_callback(self._post_convo_error)
-        service.set_stopped_callback(self._post_convo_stopped)
+        service.set_state_callback(self._voice_callback(self._post_convo_state, generation))
+        service.set_transcript_callback(self._voice_callback(self._post_convo_transcript, generation))
+        service.set_error_callback(self._voice_callback(self._post_convo_error, generation))
+        service.set_stopped_callback(self._voice_callback(self._post_convo_stopped, generation))
         try:
             await asyncio.to_thread(service.start)
         except asyncio.CancelledError:
@@ -3066,6 +3255,9 @@ class ChatPanel(Widget):
             )
             return
 
+        if not self._voice_is_current(generation):
+            self._teardown_conversation()
+            return
         self._conversation_active = True
         if self._conversation_state == "idle":
             self._conversation_state = "listening"
@@ -3096,7 +3288,7 @@ class ChatPanel(Widget):
             return
         try:
             self.run_worker(
-                self._do_convo_call(method, method_name),
+                self._do_convo_call(method, method_name, generation=self._voice_generation),
                 exclusive=False,
                 name=f"voice_convo_{method_name}",
                 group="voice_convo",
@@ -3104,14 +3296,30 @@ class ChatPanel(Widget):
         except Exception:  # noqa: BLE001 — a teardown-time dispatch may find no app
             logger.debug("could not dispatch %s", method_name, exc_info=True)
 
-    async def _do_convo_call(self, method: Any, method_name: str) -> None:
+    async def _do_convo_call(
+        self, method: Any, method_name: str, *, generation: int | None = None,
+    ) -> None:
         """Worker: run one (possibly blocking) loop-control call."""
+        generation = self._voice_generation if generation is None else generation
+
+        def call_if_current() -> None:
+            if self._voice_is_current(generation):
+                method()
+
         try:
-            await asyncio.to_thread(method)
+            await asyncio.to_thread(call_if_current)
         except Exception:  # noqa: BLE001 — control calls are documented never to raise
             logger.debug("conversation %s failed", method_name, exc_info=True)
 
     # -- callback marshalling (service threads -> UI thread) -----------
+
+    def _voice_callback(self, handler: Any, generation: int) -> Any:
+        """Retire callbacks queued by audio sessions before a collapse."""
+        def deliver_if_current(*args: Any) -> None:
+            if self._voice_is_current(generation):
+                handler(*args)
+
+        return lambda *args: self._convo_marshal(deliver_if_current, *args)
 
     def _convo_marshal(self, handler: Any, *args: Any) -> None:
         """Run *handler* on the UI thread, wherever we were called from.
@@ -3177,6 +3385,8 @@ class ChatPanel(Widget):
 
     def _apply_convo_state(self, state_value: str) -> None:
         """Mirror a loop state change into the panel's indicators."""
+        if self._collapsed:
+            return
         self._conversation_state = state_value
         if state_value != "idle":
             # A live transition proves the session is on, whatever the
@@ -3203,6 +3413,8 @@ class ChatPanel(Widget):
           machine, and resuming listening early would reopen the mic
           under that turn's spoken reply.
         """
+        if self._collapsed:
+            return
         action = resolve_transcript_action(
             text,
             modal_blocking=self._modal_blocking(),
@@ -3330,7 +3542,7 @@ class ChatPanel(Widget):
         belongs to :meth:`_do_speak`; calling ``reply_finished`` here too
         would reopen the microphone under the reply being read aloud.
         """
-        if not self._conversation_active or spoke:
+        if self._collapsed or not self._conversation_active or spoke:
             return
         self._convo_call("reply_finished")
 
@@ -3364,7 +3576,7 @@ class ChatPanel(Widget):
 
     def _send(self) -> None:
         """Read the input field and dispatch the message as a worker."""
-        if self._thinking:
+        if self._collapsed or self._thinking:
             return
         try:
             inp = self.query_one("#chat-input", TextArea)
@@ -3374,11 +3586,15 @@ class ChatPanel(Widget):
         text = inp.text.strip()
         if not text:
             return
-        ambiguous = self._ambiguous_reference(text)
-        if ambiguous is not None:
+        try:
+            instance, effective_text = self._resolve_active_instance(text)
+        except AmbiguousInstanceError as ambiguous:
             # Nothing is sent; the text stays in the box to name one server.
             self.app.notify(str(ambiguous), severity="warning", markup=False)
             return
+
+        self._turn_target = (deepcopy(instance), effective_text)
+        self._turn_muted = False
 
         # The user has moved on: a reply still being read aloud from the
         # previous turn must stop before the next one dispatches.
@@ -3428,7 +3644,7 @@ class ChatPanel(Widget):
                 self._session = chat_service.create_session()
 
             # Resolve active instance and strip any @prefix from the text.
-            inst, effective_text = self._resolve_active_instance(text)
+            inst, effective_text = self._turn_target or self._resolve_active_instance(text)
             instance_id = inst.get("id") if inst else None
             instance_name = inst.get("name") if inst else None
             memory_provider = instance_provider(inst) if inst else "custom"
@@ -3546,7 +3762,7 @@ class ChatPanel(Widget):
         if self._session is None:
             self._session = chat_service.create_session()
 
-        inst, effective_text = self._resolve_active_instance(text)
+        inst, effective_text = self._turn_target or self._resolve_active_instance(text)
 
         self._session.messages.append(  # type: ignore[union-attr]
             ChatMessage(role="user", content=effective_text, provider="servonaut")

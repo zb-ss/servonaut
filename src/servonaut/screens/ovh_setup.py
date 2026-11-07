@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Select, Static
 
@@ -35,7 +34,7 @@ from servonaut.services.object_storage_regions import (
 )
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.secret_input import SecretInput
 
 if TYPE_CHECKING:
@@ -44,7 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHSetupScreen(Screen):
+class OVHSetupScreen(WorkspaceScreen):
     """Guided setup wizard for OVHcloud API credentials.
 
     Supports both classic 3-key auth (Application Key + Secret + Consumer Key)
@@ -53,6 +52,12 @@ class OVHSetupScreen(Screen):
     ``add_extra`` adds another account and ``extra`` edits extra account
     number *extra*; ``show_label`` also offers the primary account's label.
     """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the labelled credential inputs
+    # beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -73,6 +78,30 @@ class OVHSetupScreen(Screen):
     }
     OVHSetupScreen #btn_ovh_add_account {
         margin: 0 1 0 0;
+    }
+
+    OVHSetupScreen .provider_setup_context {
+        height: auto;
+        padding: 0 1 1 1;
+    }
+    OVHSetupScreen #ovh_setup_header {
+        height: auto;
+        margin-bottom: 1;
+    }
+    OVHSetupScreen .provider_setup_grid {
+        height: auto;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: auto;
+        grid-gutter: 1 2;
+    }
+    OVHSetupScreen.-content-narrow .provider_setup_context {
+        padding: 0 0 1 0;
+    }
+    OVHSetupScreen.-content-narrow .provider_setup_grid {
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-gutter: 1 0;
     }
     """
 
@@ -111,18 +140,38 @@ class OVHSetupScreen(Screen):
             self._account_mode or self._show_label or bool(ovh.accounts) or bool(ovh.label)
         )
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("OVH setup")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                *self._intro_rows(),
-                *self._credential_rows(),
-                *self._option_rows(),
-                # Test + Save
-                Static("", id="ovh_test_result"),
-                Horizontal(*self._action_buttons(), classes="ovh_action_row"),
+                Container(*self._intro_rows(), classes="provider_setup_context"),
+                Container(
+                    *self._credential_rows(),
+                    classes="provider_form_section provider_credentials_section",
+                ),
+                Grid(*self._option_sections(), classes="provider_setup_grid"),
+                Vertical(
+                    Static("", id="ovh_test_result"),
+                    Horizontal(*self._action_buttons(), classes="ovh_action_row"),
+                    classes="provider_setup_actions",
+                ),
                 id="ovh_setup_container",
+                classes="workspace-content",
             )
         yield Footer()
+
+    def _option_sections(self) -> List[Widget]:
+        """Group existing option rows without changing their labels or order."""
+        sections: List[Widget] = []
+        rows: List[Widget] = []
+        for widget in self._option_rows():
+            if widget.has_class("section_header") and rows:
+                sections.append(Container(*rows, classes="provider_form_section"))
+                rows = []
+            rows.append(widget)
+        if rows:
+            sections.append(Container(*rows, classes="provider_form_section"))
+        return sections
 
     def _intro_rows(self) -> List[Widget]:
         if self._account_mode:

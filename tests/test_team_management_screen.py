@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from textual.app import App
+from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.screens.team_management import TeamManagementScreen
 from servonaut.services.api_client import APIError
+from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +94,8 @@ _SAMPLE_TEAMS = [
 class _WrapperApp(App):
     """Minimal host app to mount TeamManagementScreen for testing."""
 
+    CSS_PATH = CSS_FILES
+
     def __init__(
         self,
         *,
@@ -108,6 +113,36 @@ class _WrapperApp(App):
 
     def on_mount(self) -> None:
         self.push_screen(TeamManagementScreen())
+
+
+def _assert_team_action_visible_and_painted(app: _WrapperApp, button: Button) -> None:
+    assert button.display and not button.disabled
+    assert button.region.width > 0 and button.region.height > 0
+    viewport = app.screen.query_one("#team_management_container").scrollable_content_region
+    assert viewport.contains_region(button.region)
+    assert app.screen.region.contains_region(button.region)
+    assert all(app.get_widget_at(x, y)[0] is button
+               for y in range(button.region.y, button.region.bottom)
+               for x in range(button.region.x, button.region.right))
+    lines = app.screen._compositor.render_strips()
+    text = "".join(lines[y].crop(button.content_region.x, button.content_region.right).text
+                   for y in range(button.content_region.y, button.content_region.bottom))
+    assert button.label.plain in text
+
+
+async def _open_create_team_form(app: _WrapperApp, pilot: Pilot) -> None:
+    await wait_until(lambda: isinstance(app.screen, TeamManagementScreen)
+                     and app.team_service.list_teams.await_count == 1
+                     and not app.screen.query_one("#team_list_busy").is_active)
+    create = app.screen.query_one("#btn_create_team", Button)
+    # Scroll the actual action into view before dispatching its mouse events.
+    create.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    _assert_team_action_visible_and_painted(app, create)
+    assert await pilot.click(create)
+    form = app.screen.query_one("#create_team_form")
+    name = app.screen.query_one("#input_team_name", Input)
+    await wait_until(lambda: form.display and app.focused is name)
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +301,7 @@ class TestTeamManagementCreateTeam:
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
             await pilot.pause()
-            await pilot.click("#btn_create_team")
-            await pilot.pause()
+            await _open_create_team_form(app, pilot)
             form = app.screen.query_one("#create_team_form")
             assert form.display is True
 
@@ -280,17 +314,29 @@ class TestTeamManagementCreateTeam:
             await pilot.pause()
             await pilot.pause()
             # Show the form
-            await pilot.click("#btn_create_team")
-            await pilot.pause()
+            await _open_create_team_form(app, pilot)
             # Fill in team name
             inp = app.screen.query_one("#input_team_name")
             inp.value = "My New Team"
             await pilot.pause()
             # Submit
-            await pilot.click("#btn_save_team")
+            save = app.screen.query_one("#btn_save_team", Button)
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is save
+            viewport = app.screen.query_one("#team_management_container").scrollable_content_region
+            assert viewport.contains_region(save.region)
+            assert all(app.get_widget_at(x, y)[0] is save
+                       for y in range(save.region.y, save.region.bottom)
+                       for x in range(save.region.x, save.region.right))
+            lines = app.screen._compositor.render_strips()
+            text = "".join(lines[y].crop(save.content_region.x, save.content_region.right).text
+                           for y in range(save.content_region.y, save.content_region.bottom))
+            assert save.label.plain in text
+            assert await pilot.click(save)
             for _ in range(5):
                 await pilot.pause()
-            team_svc.create_team.assert_called_once_with("My New Team")
+            team_svc.create_team.assert_awaited_once_with("My New Team")
 
     @pytest.mark.asyncio
     async def test_empty_team_name_does_not_call_service(self):
@@ -300,11 +346,21 @@ class TestTeamManagementCreateTeam:
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
             await pilot.pause()
-            await pilot.click("#btn_create_team")
+            await _open_create_team_form(app, pilot)
+            # Reach and activate Save before checking required-name rejection.
+            inp = app.screen.query_one("#input_team_name", Input)
+            assert inp.value == "" and app.focused is inp
+            save = app.screen.query_one("#btn_save_team", Button)
+            await pilot.press("tab")
             await pilot.pause()
-            # Leave name blank
-            await pilot.click("#btn_save_team")
-            await pilot.pause()
+            assert app.focused is save
+            _assert_team_action_visible_and_painted(app, save)
+            with patch.object(app.screen, "notify", wraps=app.screen.notify) as notify:
+                assert await pilot.click(save)
+                await wait_until(lambda: app.focused is inp)
+                notify.assert_any_call("Team name is required.", severity="error")
+            assert app.screen.query_one("#create_team_form").display is True
+            assert inp.value == ""
             team_svc.create_team.assert_not_called()
 
 

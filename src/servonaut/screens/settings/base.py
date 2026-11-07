@@ -17,6 +17,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Button, Input, Static
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class SettingsPanel(Vertical):
 
     PANEL_ID: str = ""
     TITLE: str = ""
+    DESCRIPTION: str = ""
 
     # Fields holding an identifier of the user's infrastructure (key paths,
     # project ids …), mapped to the ``RedactionService`` method that hides
@@ -86,13 +88,16 @@ class SettingsPanel(Vertical):
         visible area — tall panels scroll their body internally instead of
         pushing Save off-screen.
         """
-        yield Static(escape(self.TITLE), classes="panel-title")
+        with Vertical(classes="panel-context"):
+            yield Static(escape(self.TITLE), classes="panel-title")
+            if self.DESCRIPTION:
+                yield Static(self.DESCRIPTION, classes="panel-description", markup=False)
         with VerticalScroll(classes="panel-body"):
             yield from self.form_rows()
         yield Static("", id=f"status_{self.PANEL_ID}", classes="panel-status")
         yield Horizontal(
-            Button("Save", id=f"save_{self.PANEL_ID}", variant="primary"),
             Static("", id=f"dirty_{self.PANEL_ID}", classes="dirty-marker"),
+            Button("Save changes", id=f"save_{self.PANEL_ID}", variant="primary"),
             id=f"panel_save_dock_{self.PANEL_ID}",
             classes="panel-save-dock",
         )
@@ -391,6 +396,10 @@ class SettingsPanel(Vertical):
         self._snapshot = settled
         self._refresh_dirty_marker()
         self._schedule_rebaseline(frames_left - 1)
+
+    def on_string_list_editor_changed(self, _event: Message) -> None:
+        """Refresh dirty state after an editor's row mutation has settled."""
+        self._dirty_watch()
 
     def _dirty_watch(self) -> None:
         """Refresh the dirty marker. Call from Input/Select/Switch Changed."""

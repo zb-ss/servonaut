@@ -1,0 +1,139 @@
+/* Keep navigation compact without restyling contextual Settings sections. */
+Sidebar {
+    width: 25;
+    height: 100%;
+    padding: 0;
+    background: transparent;
+    border: round $primary;
+    border-title-color: $text;
+}
+
+Sidebar > #sidebar-scroll {
+    height: 1fr;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+Sidebar > #sidebar-bottom {
+    height: auto;
+    dock: bottom;
+    padding: 1 0 0 0;
+    margin: 0;
+    background: transparent;
+}
+
+Sidebar #relay_indicator {
+    height: 1;
+    width: 100%;
+    padding: 0 1;
+    margin: 0;
+}
+
+Sidebar SidebarSection {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+Sidebar SidebarSection > Button.section-header {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    padding: 0 1;
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: $text-muted;
+    text-style: none;
+    text-align: left;
+    content-align: left middle;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+Sidebar SidebarSection > Button.section-header:hover,
+Sidebar SidebarSection > Button.section-header:focus,
+WorkspaceScreen Sidebar.--navigation-mode Button.section-header:focus {
+    border: none;
+    background: $boost;
+    color: $text-muted;
+    text-style: underline;
+}
+
+Sidebar .nav-button {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-left: blank $background;
+    background: transparent;
+    color: $text;
+    text-style: none;
+    text-align: left;
+    content-align: left middle;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+Sidebar .nav-button:hover,
+Sidebar .nav-button:focus,
+WorkspaceScreen Sidebar.--navigation-mode .nav-button:focus {
+    border: none;
+    border-left: blank $background;
+    background: $boost;
+    color: $text-accent;
+    text-style: bold underline;
+}
+
+Sidebar .nav-button.--active {
+    border-left: thick $accent;
+    background: $primary 15%;
+    color: $text;
+    text-style: bold;
+}
+
+Sidebar .nav-button.--active:focus,
+WorkspaceScreen Sidebar.--navigation-mode .nav-button.--active:focus {
+    border-left: thick $accent;
+    background: $primary 15%;
+    color: $text;
+    text-style: bold underline;
+}
+
+Sidebar .nav-button:focus:ansi {
+    background: $background;
+    color: $text;
+}
+
+Sidebar .nav-button.--active:ansi {
+    background: $background;
+    color: $text;
+    text-style: bold reverse;
+}
+
+Sidebar .nav-button.--active:focus:ansi,
+WorkspaceScreen Sidebar.--navigation-mode .nav-button.--active:focus:ansi {
+    background: $background;
+    color: $text;
+    text-style: bold underline reverse;
+}
+
+Sidebar .error-button {
+    color: $error;
+    margin: 0;
+}
+
+Sidebar #nav_update {
+    color: $text-accent;
+    text-style: underline;
+}
+
+Sidebar #nav_update:focus {
+    text-style: bold underline;
+}
+
+Sidebar #nav_update:ansi {
+    color: $text;
+}

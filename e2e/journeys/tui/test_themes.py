@@ -70,7 +70,8 @@ async def test_theme_chosen_in_settings_applies_and_survives_a_restart(tui, seed
     async with tui() as t:
         select = await _open_general(t)
         assert select.value == "servonaut"
-        for _ in range(12):
+        assert select in t.screen.focus_chain, "Theme picker must remain keyboard reachable"
+        for _ in range(len(t.screen.focus_chain) + 1):
             if select.has_focus:
                 break
             await t.press("tab")

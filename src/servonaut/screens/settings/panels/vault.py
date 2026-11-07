@@ -5,10 +5,11 @@ import dataclasses
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import VerticalGroup
 from textual.widgets import Input, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 
 class VaultPanel(SettingsPanel):
@@ -31,28 +32,33 @@ class VaultPanel(SettingsPanel):
     """
 
     def form_rows(self) -> ComposeResult:
-        yield Static(
-            "These settings control this device only. Team membership, grants, and server policy remain verified by the service.",
-            classes="settings-help",
-        )
-        for label, field_id in (
-            ("Require strict verification", "vault_strict_verification"),
-            ("Process eligible grants automatically", "vault_auto_grant"),
-            ("Allow encrypted file key storage", "vault_allow_file_key_store"),
-        ):
-            yield Horizontal(Static(label, classes="label"), Switch(id=field_id), classes="setting_row")
-        yield Static(
-            "File key storage is off by default. Enable it only where the local filesystem is an approved custody mechanism.",
-            classes="settings-help",
-        )
-        for label, field_id, placeholder in (
-            ("Private SSH agent key lifetime (seconds)", "vault_agent_key_ttl_seconds", "3600"),
-            ("Background vault poll interval (seconds)", "vault_poll_after_seconds", "300"),
-            ("Approval poll initial delay (seconds)", "vault_approval_poll_initial_seconds", "2"),
-            ("Approval poll maximum delay (seconds)", "vault_approval_poll_max_seconds", "10"),
-            ("Vault request timeout (seconds)", "vault_request_timeout_seconds", "30"),
-        ):
-            yield Horizontal(Static(label, classes="label"), Input(placeholder=placeholder, id=field_id), classes="setting_row")
+        with VerticalGroup(classes="settings-access-context"):
+            yield Static(
+                "These settings control this device only. Team membership, grants, and server policy remain verified by the service.",
+                classes="settings-help",
+            )
+        with VerticalGroup(classes="settings-access-section"):
+            yield Static("Verification and custody", classes="settings-access-heading")
+            for label, field_id in (
+                ("Require strict verification", "vault_strict_verification"),
+                ("Process eligible grants automatically", "vault_auto_grant"),
+                ("Allow encrypted file key storage", "vault_allow_file_key_store"),
+            ):
+                yield setting_row(label, Switch(id=field_id))
+            yield Static(
+                "File key storage is off by default. Enable it only where the local filesystem is an approved custody mechanism.",
+                classes="settings-help",
+            )
+        with VerticalGroup(classes="settings-access-section"):
+            yield Static("Lifetime and polling", classes="settings-access-heading")
+            for label, field_id, placeholder in (
+                ("Private SSH agent key lifetime (seconds)", "vault_agent_key_ttl_seconds", "3600"),
+                ("Background vault poll interval (seconds)", "vault_poll_after_seconds", "300"),
+                ("Approval poll initial delay (seconds)", "vault_approval_poll_initial_seconds", "2"),
+                ("Approval poll maximum delay (seconds)", "vault_approval_poll_max_seconds", "10"),
+                ("Vault request timeout (seconds)", "vault_request_timeout_seconds", "30"),
+            ):
+                yield setting_row(label, Input(placeholder=placeholder, id=field_id))
 
     def load(self) -> None:
         vault = self.app.config_manager.get().vault
@@ -73,7 +79,18 @@ class VaultPanel(SettingsPanel):
         self._snapshot_now()
 
     def current_values(self) -> Dict[str, Any]:
-        return self.collect()
+        """Track edited widgets even when numeric validation would reject them."""
+        values: Dict[str, Any] = {
+            key: self.query_one(f"#vault_{key}", Switch).value
+            for key in ("strict_verification", "auto_grant", "allow_file_key_store")
+        }
+        for key in (
+            "agent_key_ttl_seconds", "poll_after_seconds",
+            "approval_poll_initial_seconds", "approval_poll_max_seconds",
+            "request_timeout_seconds",
+        ):
+            values[key] = self.query_one(f"#vault_{key}", Input).value.strip()
+        return values
 
     def collect(self) -> Dict[str, Any]:
         values: Dict[str, Any] = {}

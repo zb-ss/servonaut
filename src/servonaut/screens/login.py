@@ -5,18 +5,22 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from rich.markup import escape
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.plan_labels import FEATURE_LABELS, plan_label
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.widgets.secret_input import SecretInput
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,7 @@ class PassphraseModal(ModalScreen[Optional[str]]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
     def __init__(self, confirm: bool = False, title: str = "Enter Sync Passphrase") -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._confirm = confirm
         self._title = title
 
@@ -77,7 +81,6 @@ class PassphraseModal(ModalScreen[Optional[str]]):
             "Warning: if you forget this passphrase, synced data cannot be recovered."
         )
         widgets: list = [
-            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="passphrase_title"),
             Static(hint, id="passphrase_hint"),
             SecretInput(placeholder="passphrase", id="input_passphrase"),
         ]
@@ -85,15 +88,19 @@ class PassphraseModal(ModalScreen[Optional[str]]):
             widgets.append(
                 SecretInput(placeholder="confirm passphrase", id="input_passphrase_confirm")
             )
-        widgets.append(Static("", id="passphrase_error"))
-        widgets.append(
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(f"[bold $text-accent]{escape(self._title)}[/bold $text-accent]", id="passphrase_title"),
+            body=DialogBody(*widgets),
+            status=Static("", id="passphrase_error"),
+            actions=DialogActions(
                 Button("OK", variant="primary", id="btn_passphrase_ok"),
                 Button("Cancel", id="btn_passphrase_cancel"),
                 id="passphrase_buttons",
-            )
+            ),
+            id="passphrase_container",
+            size="standard",
         )
-        yield Container(*widgets, id="passphrase_container")
 
     def on_mount(self) -> None:
         self.query_one("#input_passphrase", Input).focus()
@@ -133,14 +140,21 @@ class PassphraseModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class LoginScreen(Screen):
+class LoginScreen(WorkspaceScreen):
     """OAuth2 device flow login screen for servonaut.dev."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
 
+    CHAT_REFLOW = True
+    # Source estimates; native field/action fit must qualify these boundaries.
+    CHAT_MIN_CONTENT_WIDTH = 76
+    CONTENT_NARROW_WIDTH = 100
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, return_to: Optional[str] = None) -> None:
@@ -160,11 +174,17 @@ class LoginScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls('Servonaut Account')
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
                 Container(
-                    Static("[bold $text-accent]👤 Servonaut Account[/bold $text-accent]", id="login_title"),
+                    Horizontal(
+                        Static("[bold]Servonaut Account[/bold]", id="login_title"),
+                        Static("Checking sign-in status…", id="account_state_summary"),
+                        id="account_heading",
+                    ),
+                    Static("Manage browser sign-in, your plan and the features available to this account.", id="account_overview"),
 
                     # No httpx / service unavailable
                     Static(
@@ -176,24 +196,53 @@ class LoginScreen(Screen):
 
                     # Logged-out state
                     Container(
-                        Static(
-                            "Log in to unlock cloud features:\n\n"
-                            "  [$text-success]✓[/$text-success] Config sync across machines\n"
-                            "  [$text-success]✓[/$text-success] MCP relay — let AI agents "
-                            "dispatch commands to this machine",
-                            id="login_description",
+                        Container(
+                            Static("[bold]Account features[/bold]", classes="account_section_heading"),
+                            Static(
+                                "Log in to unlock cloud features:\n\n"
+                                "  [$text-success]✓[/$text-success] Config sync across machines\n"
+                                "  [$text-success]✓[/$text-success] MCP relay — let AI agents "
+                                "dispatch commands to this machine",
+                                id="login_description",
+                            ),
+                            classes="account_panel",
                         ),
-                        Button("Login with servonaut.dev", variant="primary", id="btn_login"),
+                        Container(
+                            Static("[bold]Browser sign-in[/bold]", classes="account_section_heading"),
+                            Static(
+                                "Start sign-in to get a browser URL and a one-time code. "
+                                "You can cancel while waiting for authorization.",
+                                id="browser_sign_in_hint",
+                            ),
+                            Button("Login with servonaut.dev", variant="primary", id="btn_login"),
+                            id="browser_sign_in_panel", classes="account_panel",
+                        ),
                         id="logged_out_container",
                         classes="auth_state_container"
                     ),
 
-                    # Device flow in progress (hidden by default)
+                    # Browser authorization keeps the URL and code in one document.
                     Container(
-                        Static("Open this URL and enter the code:", id="device_code_info"),
-                        Static("", id="device_url"),
-                        Static("", id="device_code"),
-                        Static("[dim]Waiting for authorization...[/dim]", id="device_status"),
+                        Static("[bold]Continue in your browser[/bold]", classes="account_section_heading"),
+                        Horizontal(
+                            Container(
+                                Static("Open this URL and enter the code:", id="device_code_info"),
+                                Static("", id="device_url"),
+                                Static("", id="device_code"),
+                                id="device_credentials",
+                            ),
+                            Container(
+                                BusyIndicator(id="account_authorization_busy"),
+                                Static("[dim]Waiting for authorization...[/dim]", id="device_status"),
+                                Static(
+                                    "Keep this terminal open until authorization completes. "
+                                    "Cancel stops waiting for browser approval.",
+                                    id="device_flow_hint",
+                                ),
+                                id="device_progress",
+                            ),
+                            id="device_flow_steps",
+                        ),
                         Button("Cancel", id="btn_cancel_login"),
                         id="device_flow_container",
                         classes="auth_state_container"
@@ -202,11 +251,15 @@ class LoginScreen(Screen):
                     # Logged-in state (hidden by default)
                     Container(
                         Container(
+                            Static("[bold]Signed-in account[/bold]", classes="account_section_heading"),
                             Static("", id="account_info"),
                             Static("", id="plan_info"),
-                            id="account_info_header"
+                            id="account_info_header", classes="account_panel",
                         ),
-                        Static("", id="entitlements_info"),
+                        Container(
+                            Static("", id="entitlements_info"),
+                            classes="account_panel",
+                        ),
                         id="logged_in_container",
                         classes="auth_state_container"
                     ),
@@ -228,6 +281,7 @@ class LoginScreen(Screen):
                     id="login_box"
                 ),
                 id="login_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -278,6 +332,7 @@ class LoginScreen(Screen):
 
         Each show_* method re-shows what its state needs.
         """
+        self.query_one("#account_authorization_busy", BusyIndicator).stop()
         for widget_id in (
             "no_httpx_notice",
             "logged_out_container",
@@ -291,6 +346,7 @@ class LoginScreen(Screen):
             self.query_one(f"#{widget_id}").display = False
 
     def _show_logged_out_state(self) -> None:
+        self.query_one("#account_state_summary", Static).update("[bold]Signed out[/bold]  [dim]Start browser sign-in to connect your account.[/dim]")
         self.query_one("#logged_out_container").display = True
         # Logged-out: only Back is relevant (Login button lives inside the
         # state container above, Logout is hidden).
@@ -298,11 +354,14 @@ class LoginScreen(Screen):
         self.query_one("#btn_back").display = True
 
     def _show_device_flow_state(self) -> None:
+        self.query_one("#account_state_summary", Static).update("[bold]Authorization in progress[/bold]  [dim]Complete the browser step below.[/dim]")
         self.query_one("#device_flow_container").display = True
+        self.query_one("#account_authorization_busy", BusyIndicator).start("Browser authorization")
         # Device flow has its own Cancel button — don't show login_actions
         # so the user doesn't see a parallel Back/Logout pair.
 
     def _show_no_httpx_state(self) -> None:
+        self.query_one("#account_state_summary", Static).update("[bold]Authentication unavailable[/bold]")
         self.query_one("#no_httpx_notice").display = True
         self.query_one("#login_actions").display = True
         self.query_one("#btn_back").display = True
@@ -311,6 +370,7 @@ class LoginScreen(Screen):
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
             return
+        self.query_one("#account_state_summary", Static).update("[bold]Signed in[/bold]  [dim]Your account and current plan are shown below.[/dim]")
 
         email = ""
         # Try token-level email first, then entitlements
@@ -342,7 +402,7 @@ class LoginScreen(Screen):
 
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
             email = self.app.redaction_service.scrub_stream(email)
-        self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {email}")
+        self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {escape(str(email))}")
         shown_plan = plan_label(plan)
         self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {shown_plan}")
         self.query_one("#entitlements_info", Static).update(
@@ -386,7 +446,7 @@ class LoginScreen(Screen):
                 if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
                     email = self.app.redaction_service.scrub_stream(email)
                 self.query_one("#account_info", Static).update(
-                    f"[bold]Logged in as:[/bold] {email}"
+                    f"[bold]Logged in as:[/bold] {escape(str(email))}"
                 )
         except Exception:
             pass

@@ -1,10 +1,9 @@
 """Journey: viewing a team on the Teams screen.
 
-Each card on the Teams screen is as tall as its contents, so View Team shows
-the team's members right below the team list: every member row and the
-member buttons are in view without scrolling, in a wide and a narrow
-terminal. In a narrow terminal the five member buttons wrap onto a second
-row instead of running off the edge.
+Native Tab reveals the complete member table and then the member-action
+grid within the scrolling workspace, in wide and narrow terminals. Every
+member and action must be fully painted and reachable without activating
+an action or changing the selected member.
 """
 
 from __future__ import annotations
@@ -34,6 +33,16 @@ def _seed(seed, fake_cloud) -> None:
     seed_session(seed.home, fake_cloud)
 
 
+async def _tab_to(t, target) -> None:
+    assert target in t.screen.focus_chain, f"{target!r} must remain keyboard reachable"
+    for _ in range(len(t.screen.focus_chain) + 1):
+        if target.has_focus:
+            break
+        await t.press("tab")
+    assert target.has_focus, t.focused_id()
+    await t.settle()
+
+
 @pytest.mark.parametrize("size", [DEFAULT_SIZE, NARROW], ids=["160x50", "100x30"])
 async def test_view_team_shows_every_member_in_view(tui, seed, fake_cloud, size):
     _seed(seed, fake_cloud)
@@ -46,12 +55,36 @@ async def test_view_team_shows_every_member_in_view(tui, seed, fake_cloud, size)
         await t.wait_until(lambda: members.row_count == len(MEMBERS), desc="members listed")
         await t.settle()
 
-        viewport = t.on_screen("#team_management_container").region
-        # The header and every member row are drawn, and all of it is in view.
-        assert members.region.height == len(MEMBERS) + 1, members.region
-        assert members.region.bottom <= viewport.bottom, (members.region, viewport)
+        initial_rows = t.table_rows("#members_table")
+        initial_cursor = members.cursor_coordinate
+        assert [row[0] for row in initial_rows] == [member["invitation_email"] for member in MEMBERS]
+
+        # The table has a reserved viewport; native focus must expose its
+        # header and every seeded member, including the final two rows.
+        await _tab_to(t, members)
+        workspace = t.on_screen("#team_management_container")
+        body_view = workspace.scrollable_content_region
+        assert members.region.height >= len(MEMBERS) + 1, members.region
+        assert body_view.contains_region(members.region), (members.region, body_view)
+        painted = t.rendered_text()
+        assert all(member["invitation_email"] in painted for member in MEMBERS)
+
+        # The narrow layout may scroll between the table and its actions;
+        # the entire action grid must still fit in its native focus pose.
+        await _tab_to(t, t.on_screen("#btn_remove"))
+        body_view = workspace.scrollable_content_region
+        painted = t.rendered_text()
         row = t.on_screen("#member_actions_row").region
         for selector in MEMBER_BUTTONS:
-            button = t.on_screen(selector).region
+            target = t.on_screen(selector)
+            button = target.region
             assert button.width and row.x <= button.x and button.right <= row.right, (selector, button, row)
-            assert button.bottom <= viewport.bottom, (selector, button, viewport)
+            assert button.height == 3 and body_view.contains_region(button), (selector, button, body_view)
+            assert all(
+                t.app.get_widget_at(x, y)[0] is target
+                for y in range(button.y, button.bottom)
+                for x in range(button.x, button.right)
+            ), selector
+            assert target.label.plain in painted, selector
+        assert t.table_rows("#members_table") == initial_rows
+        assert members.cursor_coordinate == initial_cursor

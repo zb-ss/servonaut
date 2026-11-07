@@ -472,9 +472,13 @@ async def test_pilot_scan_populates_selection_list_centered(tmp_path):
             assert sel_list.get_option_at_index(2).disabled is True
             assert sel_list.get_option_at_index(3).disabled is True
 
-            region = app.screen.query_one("#bw_import_container").region
-            assert abs(region.x - (120 - region.width) // 2) <= 1
-            assert abs(region.y - (40 - region.height) // 2) <= 1
+            frame = app.screen.query_one("#bw_import_container")
+            region = frame.region
+            # Center within the native layout area left by docked notifications.
+            available = app.screen.scrollable_content_region.shrink(frame.dock_gutter)
+            assert available.contains_region(region)
+            assert abs(region.x - available.x - (available.width - region.width) // 2) <= 1
+            assert abs(region.y - available.y - (available.height - region.height) // 2) <= 1
 
     # Vault fingerprints came from the whole vault, not the Servonaut folder.
     svc.list_items.assert_awaited_once_with(folder_id=None, ssh_only=True)

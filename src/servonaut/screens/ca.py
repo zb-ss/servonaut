@@ -10,8 +10,8 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen, Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
@@ -20,8 +20,9 @@ from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, 
 from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, is_feature_disabled, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
+from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 _CHOOSE_TEAM_STATUS = "Choose a team to inspect its CA status."
 _NO_TEAMS_HINT = "You are not in a team yet: create or join one from Team Management."
@@ -60,7 +61,7 @@ class CaEnrollmentConfirmModal(ModalScreen[str]):
     """Show verified enrollment consequences before accepting a host name."""
 
     def __init__(self, summary: Mapping[str, Any]) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._summary = summary
 
     def compose(self) -> ComposeResult:
@@ -91,12 +92,14 @@ class CaEnrollmentConfirmModal(ModalScreen[str]):
             f"Login {terminal_safe(login)}: {', '.join(map(terminal_safe, values))}" for login, values in principals.items()
         )
         yield SafeHeader()
-        yield Vertical(
-            Static(f"[bold]Confirm SSH CA {escape(kind)}[/bold]"),
-            *(Static(escape(detail)) for detail in details),
-            Input(placeholder=f"Type {hostname}", id="ca_confirm_host"),
-            Horizontal(Button("Cancel", id="ca_cancel"), Button("Enroll", id="ca_confirm")),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(f"[bold]Confirm SSH CA {escape(kind)}[/bold]"),
+            body=DialogBody(*(Static(escape(detail)) for detail in details)),
+            status=Input(placeholder=f"Type {hostname}", id="ca_confirm_host"),
+            actions=DialogActions(Button("Cancel", id="ca_cancel"), Button("Enroll", id="ca_confirm")),
             id="ca_confirm_modal",
+            size="standard",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -112,22 +115,24 @@ class CaEnableConfirmModal(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
     def __init__(self, team_label: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._team_label = team_label
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static(f"[bold]Switch on SSH certificates for {escape(self._team_label)}?[/bold]", id="ca_enable_title"),
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(f"[bold]Switch on SSH certificates for {escape(self._team_label)}?[/bold]", id="ca_enable_title"),
+            body=DialogBody(Static(
                 "Servonaut creates this team's user and host certificate authorities. "
                 "No server changes until you enroll it."
-            ),
-            Horizontal(
+            )),
+            actions=DialogActions(
                 Button("Cancel", id="ca_enable_cancel"),
                 Button("Switch on", id="ca_enable_confirm", variant="warning"),
             ),
             id="ca_enable_modal",
+            size="standard",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -137,7 +142,7 @@ class CaEnableConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class CaScreen(Screen):
+class CaScreen(WorkspaceScreen):
     """A team's SSH certificate state, with the actions that change it.
 
     Switching certificates on asks first; enrollment needs the host name
@@ -160,6 +165,11 @@ class CaScreen(Screen):
     # The team picker focuses itself once its teams load. Auto focus would land on
     # the first enabled button instead and scroll the pickers away on short terminals.
     AUTO_FOCUS = ""
+
+    CHAT_REFLOW = True
+    # Source estimates; native picker/action fit must qualify these boundaries.
+    CHAT_MIN_CONTENT_WIDTH = 60
+    CONTENT_NARROW_WIDTH = 88
 
     # Actions that need the team's CA; Refresh stays usable to re-check it.
     _CA_ACTION_IDS = ("ca_audit", "ca_enroll", "ca_krl", "ca_break_glass_scan")
@@ -196,22 +206,43 @@ class CaScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="ca_layout"):
-            yield Sidebar()
-            with Vertical(id="ca_content"):
-                yield Static("SSH Certificate Authority", id="ca_title")
-                yield Select[str]([], prompt="Loading teams…", id="ca_team", disabled=True)
-                yield Select[str]([], prompt="Choose a team first", id="ca_server", disabled=True)
-                yield Select[str]([], prompt="Choose a team first", id="ca_break_glass", disabled=True)
-                yield Static("", id="ca_hint")
-                yield Static(_CHOOSE_TEAM_STATUS, id="ca_status")
-                yield Button("Switch on SSH certificates", id="ca_enable", variant="primary")
-                yield Button("Refresh status", id="ca_refresh")
-                yield Button("Audit issuance chain", id="ca_audit")
-                yield Button("Enroll server", id="ca_enroll")
-                yield Button("Deliver KRL", id="ca_krl")
-                yield Button("Scan break-glass use", id="ca_break_glass_scan")
-                yield BusyIndicator(id="ca_busy")
+        yield WorkspaceControls('SSH Certificate Authority')
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Horizontal(id="ca_layout", classes="workspace-content"):
+                with Vertical(id="ca_content"):
+                    with Vertical(id="ca_overview"):
+                        yield Static("SSH Certificate Authority", id="ca_title")
+                        yield Static(
+                            "Review a team's certificate authorities, then choose the server and recovery key for an operation.",
+                            id="ca_description",
+                        )
+                    with Horizontal(id="ca_workspace"):
+                        with Vertical(id="ca_setup", classes="access_section"):
+                            yield Static("[bold]Team and target[/bold]", classes="access_heading")
+                            yield Static("Team", classes="access_field_label")
+                            yield Select[str]([], prompt="Loading teams…", id="ca_team", disabled=True)
+                            yield Static("Shared server", classes="access_field_label")
+                            yield Select[str]([], prompt="Choose a team first", id="ca_server", disabled=True)
+                            yield Static("Break-glass key", classes="access_field_label")
+                            yield Select[str]([], prompt="Choose a team first", id="ca_break_glass", disabled=True)
+                            yield Static("", id="ca_hint")
+                        with Vertical(id="ca_report", classes="access_section"):
+                            yield Static("[bold]Certificate authority status[/bold]", classes="access_heading")
+                            with VerticalScroll(id="ca_status_reader"):
+                                yield Static(_CHOOSE_TEAM_STATUS, id="ca_status")
+                            with Vertical(id="ca_actions"):
+                                yield Static("Inspect", classes="credential_action_heading")
+                                with Horizontal(id="ca_inspect_actions"):
+                                    yield Button("Switch on SSH certificates", id="ca_enable", variant="primary")
+                                    yield Button("Refresh status", id="ca_refresh")
+                                    yield Button("Audit issuance chain", id="ca_audit")
+                                yield Static("Server operations", classes="credential_action_heading")
+                                with Horizontal(id="ca_server_actions"):
+                                    yield Button("Enroll server", id="ca_enroll")
+                                    yield Button("Deliver KRL", id="ca_krl")
+                                    yield Button("Scan break-glass use", id="ca_break_glass_scan")
+                    yield BusyIndicator(id="ca_busy")
         yield Footer()
 
     def on_mount(self) -> None:

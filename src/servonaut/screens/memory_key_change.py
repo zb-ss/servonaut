@@ -17,7 +17,6 @@ from typing import Any, List, Literal, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, Checkbox, Footer, Static
 
 from servonaut.services.memory.crypto import short_fingerprint
@@ -27,7 +26,7 @@ from textual.content import Content
 
 from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 Mode = Literal["share", "catch_up"]
 
@@ -45,7 +44,7 @@ def _changed_on(raw: Optional[str]) -> Optional[str]:
     return stamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
+class MemberKeyChangeScreen(WorkspaceScreen):
     """Lists changed member keys and asks the user to confirm each one.
 
     Args:
@@ -54,6 +53,10 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
             member out); ``"catch_up"`` needs at least one.
         again: In ``share`` mode, label the button for Share again.
     """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
@@ -99,34 +102,39 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
             else "Tick the keys that match. The others keep waiting."
         )
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Container(id="keychange-outer"):
+        yield WorkspaceControls("Confirm Memory Keys")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="keychange-outer", classes="workspace-content"):
                 with Container(id="keychange-container"):
-                    yield Static(
-                        "[bold $text-accent]Confirm changed memory keys[/bold $text-accent]"
-                        if many
-                        else "[bold $text-accent]Confirm changed memory key[/bold $text-accent]",
-                        id="keychange-title",
-                    )
-                    with VerticalScroll(id="keychange-scroll"):
+                    with Container(id="keychange-context"):
                         yield Static(
-                            "A memory key changes when a member sets up Memory Sync "
-                            "again or uses a new computer. Someone who took over their "
-                            "account could also replace it to read what the team "
-                            "shares. Ask the member to open Memory Sync and read out "
-                            "their Key fingerprint, then compare it with the new key "
-                            f"below. {need}",
-                            id="keychange-body",
+                            "[bold $text-accent]Confirm changed memory keys[/bold $text-accent]"
+                            if many
+                            else "[bold $text-accent]Confirm changed memory key[/bold $text-accent]",
+                            id="keychange-title",
                         )
-                        with Vertical(id="keychange-list"):
-                            for index, change in enumerate(self._changes):
-                                with Vertical(classes="keychange-item"):
-                                    yield Static(self._describe(change), classes="keychange-details")
-                                    yield Checkbox(
-                                        self._check_label(change),
-                                        id=f"keychange-check-{index}",
-                                    )
+                    with VerticalScroll(id="keychange-scroll"):
+                        with Horizontal(id="keychange-review"):
+                            with Container(id="keychange-guide"):
+                                yield Static("Verify with the member", classes="keychange-section-heading")
+                                yield Static(
+                                    "A memory key changes when a member sets up Memory Sync "
+                                    "again or uses a new computer. Someone who took over their "
+                                    "account could also replace it to read what the team "
+                                    "shares. Ask the member to open Memory Sync and read out "
+                                    "their Key fingerprint, then compare it with the new key "
+                                    f"below. {need}",
+                                    id="keychange-body",
+                                )
+                            with Vertical(id="keychange-list"):
+                                for index, change in enumerate(self._changes):
+                                    with Vertical(classes="keychange-item"):
+                                        yield Static(self._describe(change), classes="keychange-details")
+                                        yield Checkbox(
+                                            self._check_label(change),
+                                            id=f"keychange-check-{index}",
+                                        )
                     with Horizontal(id="keychange-btn-row"):
                         yield Button("Cancel", id="keychange-btn-cancel")
                         yield Button(

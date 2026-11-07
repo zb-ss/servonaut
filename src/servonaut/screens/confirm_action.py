@@ -6,10 +6,17 @@ from typing import List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Vertical
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 
 
@@ -30,60 +37,6 @@ class ConfirmActionScreen(ModalScreen[bool]):
         Binding("escape", "action_cancel", "Cancel", show=True),
     ]
 
-    DEFAULT_CSS = """
-    ConfirmActionScreen {
-        align: center middle;
-    }
-
-    ConfirmActionScreen #modal_container {
-        width: 70;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    ConfirmActionScreen #modal_title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    ConfirmActionScreen #modal_description {
-        margin-bottom: 1;
-    }
-
-    ConfirmActionScreen #consequences_label {
-        margin-bottom: 0;
-    }
-
-    ConfirmActionScreen .consequence_item {
-        padding-left: 2;
-    }
-
-    ConfirmActionScreen #severity_message {
-        text-style: bold;
-        margin-top: 1;
-        margin-bottom: 1;
-    }
-
-    ConfirmActionScreen #confirm_prompt {
-        margin-bottom: 0;
-    }
-
-    ConfirmActionScreen #confirm_input {
-        margin-bottom: 1;
-    }
-
-    ConfirmActionScreen #btn_row {
-        height: auto;
-        align: right middle;
-    }
-
-    ConfirmActionScreen #btn_cancel {
-        margin-right: 1;
-    }
-    """
-
     def __init__(
         self,
         title: str,
@@ -103,7 +56,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
             action_label: Label for the confirm button.
             severity: "danger" (red) or "warning" (amber).
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._title = title
         self._description = description
         self._consequences = consequences
@@ -113,8 +66,6 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         """Compose the confirmation modal UI."""
-        title_color = "$text-error" if self._severity == "danger" else "$text-warning"
-        consequence_color = "$text-error" if self._severity == "danger" else "$text-warning"
         button_variant = "error" if self._severity == "danger" else "warning"
 
         severity_text = (
@@ -125,31 +76,41 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
         consequence_widgets: List[Static] = [
             Static(
-                f"[{consequence_color}]  • {c}[/{consequence_color}]",
-                classes="consequence_item",
+                f"  • {c}",
+                classes="consequence_item dialog-consequence",
             )
             for c in self._consequences
         ]
 
         yield SafeHeader()
-        yield Container(
-            Static(
-                f"[bold {title_color}]{self._title}[/bold {title_color}]",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                f"[bold]{self._title}[/bold]",
                 id="modal_title",
             ),
-            Static(self._description, id="modal_description"),
-            Static("This will:", id="consequences_label"),
-            *consequence_widgets,
-            Static(
-                f"[bold {title_color}]{severity_text}[/bold {title_color}]",
-                id="severity_message",
+            body=DialogBody(
+                Static(
+                    self._description,
+                    id="modal_description",
+                    classes="dialog-description",
+                ),
+                Static("This will:", id="consequences_label"),
+                *consequence_widgets,
             ),
-            Static(
-                f'Type "[bold]{self._confirm_text}[/bold]" to confirm:',
-                id="confirm_prompt",
+            status=Vertical(
+                Static(
+                    f"[bold]{severity_text}[/bold]",
+                    id="severity_message",
+                    classes="dialog-emphasis",
+                ),
+                Static(
+                    Content.assemble('Type "', (self._confirm_text, "bold"), '" to confirm:'),
+                    id="confirm_prompt",
+                ),
+                Input(placeholder=self._confirm_text, id="confirm_input"),
             ),
-            Input(placeholder=self._confirm_text, id="confirm_input"),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="btn_cancel"),
                 Button(
                     self._action_label,
@@ -160,6 +121,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
                 id="btn_row",
             ),
             id="modal_container",
+            severity="danger" if self._severity == "danger" else "warning",
         )
         yield Footer()
 

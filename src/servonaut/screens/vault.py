@@ -22,9 +22,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
+from textual.widgets import Button, Collapsible, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
@@ -38,10 +38,15 @@ from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, member_approval_lines, ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import VaultKeyInUse, vault_failure_reason
+from servonaut.services.vault.errors import (
+    VaultKeyInUse, VaultRecoveryNotConfirmed, vault_failure_reason,
+)
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
@@ -87,6 +92,8 @@ def _approval_poll_delay(service: Any, attempt: int) -> float:
 class VaultRevealModal(ModalScreen[None]):
     """Show one explicitly requested plaintext value without Rich interpolation."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     BINDINGS = [Binding("escape", "dismiss_modal", "Close", show=True)]
 
     def __init__(self, item: Mapping[str, Any]) -> None:
@@ -98,11 +105,12 @@ class VaultRevealModal(ModalScreen[None]):
         plaintext = plaintext if isinstance(plaintext, Mapping) else self._item
         value = plaintext.get("value") or plaintext.get("private_key_openssh") or ""
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]Revealed vault item[/bold]"),
-            Static(markup_literal(str(value)), id="vault_revealed_value"),
-            Button("Close", id="vault_reveal_close"),
-            id="vault_reveal_modal",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Revealed vault item[/bold]"),
+            body=DialogBody(Static(markup_literal(str(value)), id="vault_revealed_value")),
+            actions=DialogActions(Button("Close", id="vault_reveal_close")),
+            size="large", id="vault_reveal_modal",
         )
 
     def on_button_pressed(self, _event: Button.Pressed) -> None:
@@ -115,6 +123,8 @@ class VaultRevealModal(ModalScreen[None]):
 class VaultSecretPromptModal(ModalScreen[Optional[str]]):
     """Collect one secret through a masked Textual input without displaying it."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, title: str, prompt: str) -> None:
         super().__init__()
         self._title = title
@@ -122,12 +132,16 @@ class VaultSecretPromptModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static(markup_literal(self._title)),
-            Static(markup_literal(self._prompt)),
-            SecretInput(id="vault_secret_input"),
-            Horizontal(Button("Cancel", id="vault_secret_cancel"), Button("Continue", id="vault_secret_continue")),
-            id="vault_secret_modal",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(markup_literal(self._title)),
+            body=DialogBody(Static(markup_literal(self._prompt))),
+            status=SecretInput(id="vault_secret_input"),
+            actions=DialogActions(
+                Button("Cancel", id="vault_secret_cancel"),
+                Button("Continue", id="vault_secret_continue"),
+            ),
+            size="standard", id="vault_secret_modal",
         )
 
     def on_mount(self) -> None:
@@ -150,9 +164,12 @@ def _grouped_key(key: str, per_line: int = 6) -> str:
 class VaultRecoveryConfirmModal(ModalScreen[bool]):
     """Show a recovery key once and require two randomly selected groups."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, recovery_key: str) -> None:
         super().__init__()
         self._recovery_key = recovery_key
+        self.was_cancelled = False
         self._groups = [part for part in recovery_key.replace(" ", "-").split("-") if part]
         # The leading format marker is public; proving it does not prove that
         # the user recorded any recovery-key material. Retain original indexes
@@ -164,17 +181,28 @@ class VaultRecoveryConfirmModal(ModalScreen[bool]):
         self._checks = sorted(secrets.SystemRandom().sample(secret_indices, 2)) if len(secret_indices) >= 2 else []
 
     def compose(self) -> ComposeResult:
-        yield SafeHeader()
         fields = [
-            Static("[bold]Record this recovery key offline. It will not be shown again.[/bold]"),
-            Static(markup_literal(_grouped_key(self._recovery_key)), id="vault_recovery_key"),
-            Static("Groups are counted from the left; the first group is group 1.", id="vault_recovery_hint"),
+            SecretInput(placeholder=f"Re-enter group {index + 1}", id=f"vault_recovery_group_{index}")
+            for index in self._checks
         ]
-        for index in self._checks:
-            fields.append(SecretInput(placeholder=f"Re-enter group {index + 1}", id=f"vault_recovery_group_{index}"))
-        yield Vertical(*fields, Horizontal(Button("Cancel", id="vault_recovery_cancel"), Button("Confirm", id="vault_recovery_confirm")), id="vault_recovery_confirm_modal")
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Record this recovery key offline. It will not be shown again.[/bold]"),
+            body=DialogBody(
+                Static(markup_literal(_grouped_key(self._recovery_key)), id="vault_recovery_key"),
+                Static("Groups are counted from the left; the first group is group 1.", id="vault_recovery_hint"),
+            ),
+            status=Vertical(*fields),
+            actions=DialogActions(
+                Button("Cancel", id="vault_recovery_cancel"),
+                Button("Confirm", id="vault_recovery_confirm"),
+            ),
+            size="large", id="vault_recovery_confirm_modal",
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.was_cancelled = event.button.id == "vault_recovery_cancel"
         if event.button.id != "vault_recovery_confirm" or len(self._checks) != 2:
             self.dismiss(False)
             return
@@ -188,16 +216,22 @@ class VaultRecoveryConfirmModal(ModalScreen[bool]):
 class VaultSasConfirmModal(ModalScreen[bool]):
     """Hold the one approval comparison at the UI boundary."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, sas: str) -> None:
         super().__init__()
         self._sas = sas
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]Compare this safety number on both devices[/bold]"),
-            Static(markup_literal(self._sas), id="vault_sas"),
-            Horizontal(Button("Mismatch", id="vault_sas_no"), Button("Matches", id="vault_sas_yes")),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Compare this safety number on both devices[/bold]"),
+            body=DialogBody(Static(markup_literal(self._sas), id="vault_sas")),
+            actions=DialogActions(
+                Button("Mismatch", id="vault_sas_no"),
+                Button("Matches", id="vault_sas_yes"),
+            ),
             id="vault_sas_modal",
         )
 
@@ -207,6 +241,8 @@ class VaultSasConfirmModal(ModalScreen[bool]):
 
 class VaultMemberApprovalModal(ModalScreen[bool]):
     """Approve or skip one team member waiting for vault access; Skip is the default."""
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "skip", "Skip", show=False)]
 
@@ -218,23 +254,21 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
+        yield DialogNotificationSpace()
         title = "Changed identity: approve vault access?" if self._changed else "Approve vault access?"
-        # Names and e-mail addresses come from other users: inert text,
-        # hidden in demo mode.
         body = [
             Static(Text(scrub_for_demo(self.app, line)))
             for line in self._lines if not line.startswith("Safety number:")
         ]
-        yield Vertical(
-            Static(f"[bold]{title}[/bold]"),
-            *body[:-1],
-            Static(Text(self._safety_number), id="vault_member_sas"),
-            body[-1],
-            Horizontal(
+        yield DialogFrame(
+            heading=Static(f"[bold]{title}[/bold]"),
+            body=DialogBody(*body[:-1]),
+            status=Vertical(Static(Text(self._safety_number), id="vault_member_sas"), body[-1]),
+            actions=DialogActions(
                 Button("Skip", id="vault_member_skip"),
                 Button("Approve", id="vault_member_approve", variant="warning" if self._changed else "primary"),
             ),
-            id="vault_member_modal",
+            size="large", id="vault_member_modal",
         )
 
     def on_mount(self) -> None:
@@ -250,6 +284,8 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
 class VaultPendingDeviceModal(ModalScreen[bool]):
     """Offer an approver the verified pending-device review path."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, device: Mapping[str, Any]) -> None:
         super().__init__()
         self._device = device
@@ -258,11 +294,17 @@ class VaultPendingDeviceModal(ModalScreen[bool]):
         name = str(self._device.get("device_name") or self._device.get("name") or "New device")
         platform = str(self._device.get("platform") or "unknown platform")
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]A device is waiting for vault approval[/bold]"),
-            Static(markup_literal(f"{name} · {platform}")),
-            Static("Review the device and compare its safety number before approving."),
-            Horizontal(Button("Later", id="vault_pending_device_later"), Button("Review devices", id="vault_pending_device_review")),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]A device is waiting for vault approval[/bold]"),
+            body=DialogBody(
+                Static(markup_literal(f"{name} · {platform}")),
+                Static("Review the device and compare its safety number before approving."),
+            ),
+            actions=DialogActions(
+                Button("Later", id="vault_pending_device_later"),
+                Button("Review devices", id="vault_pending_device_review"),
+            ),
             id="vault_pending_device_modal",
         )
 
@@ -557,6 +599,8 @@ class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
     by commas; ``None`` when cancelled.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     AUTO_FOCUS = ""  # the pickers focus themselves once their options load
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
     DEFAULT_CSS = """
@@ -574,7 +618,7 @@ class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
         self._service = service
 
     def compose(self) -> ComposeResult:
-        fields: list[Any] = [Static("[bold]Rotate exposed SSH key[/bold]" if self._rotation else "[bold]Resolve exposure[/bold]")]
+        fields: list[Any] = []
         if self._rotation:
             fields.append(VaultSharedServerPicker(
                 self._service, team_id="vault_exposure_team", server_id="vault_exposure_servers",
@@ -585,9 +629,17 @@ class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
                 Select(_EXPOSURE_RESOLUTIONS, prompt="Choose how it was resolved", id="vault_exposure_resolution"),
                 Input(placeholder="Note (optional)", id="vault_exposure_note"),
             ))
-        fields.append(Horizontal(Button("Cancel", id="vault_exposure_cancel"), Button("Continue", id="vault_exposure_confirm", disabled=True)))
         yield SafeHeader()
-        yield Vertical(*fields, id="vault_exposure_modal")
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Rotate exposed SSH key[/bold]" if self._rotation else "[bold]Resolve exposure[/bold]"),
+            body=DialogBody(*fields),
+            actions=DialogActions(
+                Button("Cancel", id="vault_exposure_cancel"),
+                Button("Continue", id="vault_exposure_confirm", disabled=True),
+            ),
+            size="large" if self._rotation else "standard", id="vault_exposure_modal",
+        )
 
     def on_mount(self) -> None:
         if not self._rotation:
@@ -626,6 +678,8 @@ class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
 class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
     """Choose one imported Bitwarden reference for an explicit migration."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, references: list[dict[str, str]]) -> None:
         super().__init__()
         self._references = references
@@ -657,19 +711,22 @@ class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]Bind an imported Bitwarden SSH key[/bold]"),
-            Static(
-                "Select one imported key to connect to a matching team server. "
-                "Personal servers stay manual: open the server and choose Use vault key. "
-                "No server binding or Bitwarden reference will change until you confirm later steps."
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Bind an imported Bitwarden SSH key[/bold]"),
+            body=DialogContent(
+                Static(
+                    "Select one imported key to connect to a matching team server. "
+                    "Personal servers stay manual: open the server and choose Use vault key. "
+                    "No server binding or Bitwarden reference will change until you confirm later steps."
+                ),
+                SelectionList(*self._options({0}), id="vault_import_bind_list"),
             ),
-            SelectionList(*self._options({0}), id="vault_import_bind_list"),
-            Horizontal(
+            actions=DialogActions(
                 Button("Keep references", id="vault_import_bind_cancel"),
                 Button("Choose server", id="vault_import_bind_continue"),
             ),
-            id="vault_import_bind_reference_modal",
+            size="large", id="vault_import_bind_reference_modal",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -689,6 +746,8 @@ class VaultImportedTeamBindingModal(ModalScreen[Optional[dict[str, str]]]):
     Dismisses with ``{"team", "server_id", "login"}``, or ``None`` when cancelled.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     AUTO_FOCUS = ""  # the pickers focus themselves once their options load
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
     DEFAULT_CSS = """
@@ -703,19 +762,22 @@ class VaultImportedTeamBindingModal(ModalScreen[Optional[dict[str, str]]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]Connect imported key to team server[/bold]"),
-            Static("Choose the team server that still uses this Bitwarden key."),
-            VaultSharedServerPicker(
-                self._service, team_id="vault_import_bind_team", server_id="vault_import_bind_server",
-                message_id="vault_import_bind_message", multiple=False,
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Connect imported key to team server[/bold]"),
+            body=DialogBody(
+                Static("Choose the team server that still uses this Bitwarden key."),
+                VaultSharedServerPicker(
+                    self._service, team_id="vault_import_bind_team", server_id="vault_import_bind_server",
+                    message_id="vault_import_bind_message", multiple=False,
+                ),
             ),
-            Input(placeholder="SSH login (optional)", id="vault_import_bind_login"),
-            Horizontal(
+            status=Input(placeholder="SSH login (optional)", id="vault_import_bind_login"),
+            actions=DialogActions(
                 Button("Cancel", id="vault_import_bind_target_cancel"),
                 Button("Review binding", id="vault_import_bind_target_continue", disabled=True),
             ),
-            id="vault_import_bind_target_modal",
+            size="large", id="vault_import_bind_target_modal",
         )
 
     def _values(self) -> Optional[dict[str, str]]:
@@ -761,24 +823,30 @@ def _rotation_summary(exposures: Any) -> str:
 class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
     """Pick which vault to create: a personal one, or one for a team you run."""
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, options: list[Mapping[str, Any]]) -> None:
         super().__init__()
         self._options = list(options)
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Vertical(
-            Static("[bold]Create a vault[/bold]", id="vault_create_title"),
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Create a vault[/bold]", id="vault_create_title"),
+            body=DialogBody(Static(
                 "Your Servonaut creates the vault key on this device and encrypts everything with it; "
                 "the service only stores what it cannot read.",
                 id="vault_create_text",
-            ),
-            Select(
+            )),
+            status=Select(
                 [(markup_literal(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
                 value=0, allow_blank=False, id="vault_create_target",
             ),
-            Horizontal(Button("Cancel", id="vault_create_cancel"), Button("Create", id="vault_create_confirm")),
+            actions=DialogActions(
+                Button("Cancel", id="vault_create_cancel"),
+                Button("Create", id="vault_create_confirm"),
+            ),
             id="vault_create_modal",
         )
 
@@ -799,12 +867,9 @@ class VaultAddDeviceModal(ModalScreen[Optional[str]]):
     Dismisses with ``"start"``, ``"recover"`` or ``None``.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    VaultAddDeviceModal { align: center middle; }
-    #vault_add_device_modal {
-        width: 78; max-width: 94%; height: auto; max-height: 90%;
-        border: round $primary; background: $surface; padding: 1 2; overflow-y: auto;
-    }
     #vault_add_device_title { text-style: bold; }
     #vault_add_device_steps { margin-top: 1; }
     #vault_add_device_other { margin-top: 1; color: $text-muted; }
@@ -820,16 +885,19 @@ class VaultAddDeviceModal(ModalScreen[Optional[str]]):
         self._key_file_missing = key_file_missing
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("Add this computer as a vault device", id="vault_add_device_title"),
-            Static(self._steps(self._shown_name()), id="vault_add_device_steps"),
-            Static(self._other_way(), id="vault_add_device_other"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("Add this computer as a vault device", id="vault_add_device_title"),
+            body=DialogBody(
+                Static(self._steps(self._shown_name()), id="vault_add_device_steps"),
+                Static(self._other_way(), id="vault_add_device_other"),
+            ),
+            actions=DialogActions(
                 Button("Cancel", id="vault_add_device_cancel"),
                 Button("Use Recover instead", id="vault_add_device_recover"),
                 Button("Start", variant="primary", id="vault_add_device_start"),
             ),
-            id="vault_add_device_modal",
+            size="large", id="vault_add_device_modal",
         )
 
     def on_mount(self) -> None:
@@ -925,8 +993,14 @@ async def _cancel_pending_device(service: Any) -> None:
 _NEEDS_THIS_DEVICE = ("remote_identity", "custody_missing")
 
 
-class VaultScreen(Screen):
+class VaultScreen(WorkspaceScreen):
     """Full-screen vault metadata, device state, and exposure entry point."""
+
+    CHAT_REFLOW = True
+    # Leave room for two action columns and content padding.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # Wider content can show action groups side by side.
+    CONTENT_NARROW_WIDTH = 110
 
     DEFAULT_CSS = """
     VaultScreen #vault_busy_row { height: auto; }
@@ -977,43 +1051,72 @@ class VaultScreen(Screen):
         self._focus_before_busy: Optional[Widget] = None
         # The action the status line names, focused (and so scrolled into view) once work ends.
         self._next_action: Optional[str] = None
+        self._last_summary_action: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
+        yield WorkspaceControls("Vault")
         with Horizontal(id="vault_layout"):
-            yield Sidebar()
-            with Vertical(id="vault_content"):
-                yield Static("Vault", id="vault_title")
-                yield Static("Loading encrypted vault metadata…", id="vault_status")
-                with Horizontal(id="vault_busy_row"):
-                    yield BusyIndicator(id="vault_busy")
-                    yield Button("Stop waiting", id="vault_cancel_wait", disabled=True)
-                yield DataTable(id="vault_table", cursor_type="row")
-                with VerticalScroll(id="vault_action_scroll"):
-                    with Horizontal(id="vault_actions"):
-                        yield Button("Refresh", id="vault_refresh")
-                        yield Button("Setup", id="vault_setup")
-                        yield Button("Confirm identity", id="vault_confirm_identity")
-                        yield Button("Create vault", id="vault_create")
-                        yield Button("Items", id="vault_items")
-                        yield Button("Reveal", id="vault_reveal")
-                        yield Button("Rename key", id="vault_rename_key")
-                        yield Button("Delete key", id="vault_delete_key")
-                        yield Button("Delete multiple", id="vault_delete_keys")
-                        yield Button("Exposures", id="vault_exposures")
-                        yield Button("Resolve exposure", id="vault_resolve_exposure")
-                        yield Button("Rotate exposed SSH key", id="vault_rotate_exposure")
-                        yield Button("Devices", id="vault_devices")
-                        yield Button("Add device", id="vault_add_device")
-                        yield Button("Recover", id="vault_recover")
-                        yield Button("Approve device", id="vault_approve")
-                        yield Button("Rotate recovery key", id="vault_recovery_rotate")
-                        yield Button("Reset identity", id="vault_reset")
-                        yield Button("Import SSH", id="vault_import")
-                        yield Button("Auto-bind keys", id="vault_auto_bind")
-                        yield Button("Roster", id="vault_roster")
-                        yield Button("Grants", id="vault_grants")
-                        yield Button("Rotate vault key", id="vault_rotate")
+            with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+                yield self.workspace_sidebar()
+                with Vertical(id="vault_content", classes="workspace-content"):
+                    with Vertical(id="vault_identity_panel"):
+                        with Horizontal(id="vault_identity_heading"):
+                            yield Static("Vault", id="vault_title")
+                            yield Static("Checking identity", id="vault_identity_state")
+                        yield Static("Loading encrypted vault metadata…", id="vault_status")
+                        yield Static("", id="vault_next_step", markup=False)
+                        with Horizontal(id="vault_busy_row"):
+                            yield BusyIndicator(id="vault_busy")
+                            yield Button("Stop waiting", id="vault_cancel_wait", disabled=True)
+                    with Horizontal(id="vault_workspace"):
+                        with Vertical(id="vault_records_panel"):
+                            with Horizontal(id="vault_records_header"):
+                                yield Static("Vaults", id="vault_records_heading", markup=False)
+                                yield Static("", id="vault_records_context", markup=False)
+                            yield Static(
+                                "Metadata only · values require Reveal confirmation.",
+                                id="vault_records_hint",
+                            )
+                            yield Static("", id="vault_records_empty", markup=False)
+                            yield DataTable(id="vault_table", cursor_type="row", zebra_stripes=True)
+                        with VerticalScroll(id="vault_action_scroll"):
+                            with Vertical(id="vault_actions"):
+                                with Horizontal(id="vault_action_header"):
+                                    yield Static("Actions", classes="vault_group_heading")
+                                    yield Button("Refresh", id="vault_refresh")
+                                with Vertical(id="vault_keys_group", classes="vault_action_group"):
+                                    yield Static("Keys and items", classes="vault_group_heading")
+                                    with Horizontal(classes="vault_group_buttons"):
+                                        yield Button("Create vault", id="vault_create")
+                                        yield Button("Items", id="vault_items")
+                                        yield Button("Reveal", id="vault_reveal")
+                                        yield Button("Import SSH", id="vault_import")
+                                        yield Button("Auto-bind keys", id="vault_auto_bind")
+                                with Vertical(id="vault_onboarding_group", classes="vault_action_group"):
+                                    yield Static("Identity and devices", classes="vault_group_heading")
+                                    with Horizontal(classes="vault_group_buttons"):
+                                        yield Button("Setup", id="vault_setup")
+                                        yield Button("Add device", id="vault_add_device")
+                                        yield Button("Recover", id="vault_recover")
+                                with Collapsible(title="Identity and devices", collapsed=True, id="vault_identity_group", classes="vault_action_group"):
+                                    with Horizontal(classes="vault_group_buttons"):
+                                        yield Button("Confirm identity", id="vault_confirm_identity")
+                                        yield Button("Devices", id="vault_devices")
+                                        yield Button("Approve device", id="vault_approve")
+                                        yield Button("Roster", id="vault_roster")
+                                        yield Button("Grants", id="vault_grants")
+                                with Collapsible(title="Exposure and key maintenance", collapsed=True, id="vault_maintenance_group", classes="vault_action_group"):
+                                    with Horizontal(classes="vault_group_buttons"):
+                                        yield Button("Exposures", id="vault_exposures")
+                                        yield Button("Resolve exposure", id="vault_resolve_exposure")
+                                        yield Button("Rotate exposed SSH key", id="vault_rotate_exposure")
+                                        yield Button("Rotate recovery key", id="vault_recovery_rotate")
+                                        yield Button("Reset identity", id="vault_reset")
+                                        yield Button("Rotate vault key", id="vault_rotate")
+                                        yield Button("Rename key", id="vault_rename_key")
+                                        yield Button("Delete key", id="vault_delete_key")
+                                        yield Button("Delete multiple", id="vault_delete_keys")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1027,12 +1130,30 @@ class VaultScreen(Screen):
         self.run_worker(self._load(), group="vault", exclusive=True)
 
     def on_resize(self) -> None:
-        """Use the compact action layout once the terminal cannot fit four labels."""
+        """Update the short-terminal action area."""
         self._sync_compact_layout()
 
     def _sync_compact_layout(self) -> None:
-        self.set_class(self.size.width <= 110, "-narrow")
         self.set_class(self.size.height <= 32, "-short")
+
+    def _sync_chat_layout(self) -> None:
+        was_narrow = self.has_class("-content-narrow")
+        super()._sync_chat_layout()
+        if self.has_class("-content-narrow") != was_narrow:
+            self.call_after_refresh(self._reveal_focused_action)
+
+    def _reveal_focused_action(self) -> None:
+        """Keep the same action visible after its responsive grid has reflowed."""
+        focused = self.focused
+        if (
+            self.app.screen is self and isinstance(focused, Button)
+            and focused.is_attached and focused.focusable
+            and self.query_one("#vault_actions") in focused.ancestors
+        ):
+            focused.scroll_visible(animate=False)
+        elif self.app.screen is self and (focused is None or isinstance(focused, DataTable)):
+            for button in self.query("#vault_actions Button.-next-action"):
+                self._reveal_summary_action(button)
 
     def _service(self) -> Any:
         return getattr(self.app, "vault_command_service", None)
@@ -1093,9 +1214,11 @@ class VaultScreen(Screen):
                 button = self.query_one(f"#{button_id}", Button)
                 if button.focusable:
                     button.focus()
+                    self.call_after_refresh(self._reveal_focused_action)
                     return
         if self.focused is None and widget is not None and widget.is_attached and widget.focusable:
             widget.focus()
+            self.call_after_refresh(self._reveal_focused_action)
 
     def _show_busy(self) -> None:
         try:
@@ -1123,6 +1246,7 @@ class VaultScreen(Screen):
         return True
 
     def _render_vaults(self) -> None:
+        self._records_heading("Vaults", len(self._vaults))
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Name", "Kind", "Items", "Open exposures", "Vault ID")
@@ -1155,6 +1279,7 @@ class VaultScreen(Screen):
         return self.scrub_for_display(label)
 
     def _render_items(self) -> None:
+        self._records_heading("Items", len(self._items), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Type", "Revision", "Fingerprint", "Item ID")
         for row in self._items:
@@ -1167,6 +1292,7 @@ class VaultScreen(Screen):
             )
 
     def _render_exposures(self) -> None:
+        self._records_heading("Exposures", len(self._exposures), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
@@ -1174,27 +1300,126 @@ class VaultScreen(Screen):
             table.add_row(markup_literal(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self.scrub_for_display(row.get("reason") or "")), note, markup_literal(self.scrub_for_display(row.get("item_id") or "")), markup_literal(self.scrub_for_display(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
+        self._records_heading("Key rotation", len(self._rotation_hosts), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Server", "Status", "Detail")
         for host in self._rotation_hosts:
             table.add_row(markup_literal(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), markup_literal(self.scrub_for_display(host.get("status") or "unknown")), markup_literal(self.scrub_for_display(host.get("error") or "")))
 
     def _render_devices(self) -> None:
+        self._records_heading("Devices", len(self._devices))
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Platform", "Status", "Device ID")
         for row in self._devices:
             table.add_row(markup_literal(self.scrub_for_display(row.get("name") or "")), markup_literal(self.scrub_for_display(row.get("platform") or "")), markup_literal(self.scrub_for_display(row.get("status") or "")), markup_literal(self.scrub_for_display(row.get("device_id") or "")))
 
     def _render_roster(self) -> None:
+        self._records_heading("Members", len(self._roster), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Member", "Role", "Status", "Fingerprint")
         for member in self._roster:
             identity = member.get("identity") if isinstance(member.get("identity"), Mapping) else {}
             table.add_row(markup_literal(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), markup_literal(self.scrub_for_display(member.get("role") or "")), markup_literal(self.scrub_for_display(member.get("status") or "")), markup_literal(self.scrub_for_display(identity.get("fingerprint") or "")))
 
+    def _records_heading(self, label: str, count: int, *, scoped: bool = False) -> None:
+        """Frame the current native table without changing its rows or selection."""
+        context = f"{count} record" if count == 1 else f"{count} records"
+        if scoped:
+            vault = next((row for row in self._vaults if row.get("vault_id") == self._selected_vault_id), None)
+            if vault is not None:
+                context += f" · {self._display_record_name(vault.get('name') or 'Unnamed vault')}"
+        self.query_one("#vault_records_heading", Static).update(label)
+        self.query_one("#vault_records_context", Static).update(context)
+        empty = self.query_one("#vault_records_empty", Static)
+        empty.update({
+            "Vaults": "No vaults available. Use Create vault to review the vaults your account can create.",
+            "Items": "No items in this vault. Use Import SSH to add an existing key.",
+            "Exposures": "No exposures returned for this vault.",
+            "Key rotation": "No server rotation results to display.",
+            "Devices": "No devices returned.",
+            "Members": "No members returned for this vault.",
+        }.get(label, "No records to display."))
+        empty.set_class(count == 0, "-shown")
+        self.query_one("#vault_records_panel").set_class(count == 0, "-empty")
+        self.set_class(count == 0, "-records-empty")
+        self.query_one("#vault_table", DataTable).display = count != 0
+
+    def _identity_summary(self, label: str, action: Optional[str] = None) -> None:
+        """Surface the existing next step while keeping its original action widget."""
+        try:
+            self.query_one("#vault_identity_state", Static).update(label)
+            next_step = self.query_one("#vault_next_step", Static)
+        except NoMatches:
+            return  # the screen is closing
+        next_step.set_class(action is not None, "-shown")
+        for button in self.query("#vault_actions Button"):
+            is_next = button.id == action
+            button.set_class(is_next, "-next-action")
+            if is_next:
+                next_step.update(f"Next: {button.label}")
+                if action != self._last_summary_action:
+                    self.call_after_refresh(self._reveal_summary_action, button)
+                self._last_summary_action = action
+
+    def _reveal_summary_action(self, button: Button, outer_scroll: Optional[float] = None) -> None:
+        """Reveal next controls, including their outer viewport when focused."""
+        if not button.is_attached or button.parent is None or button.parent.parent is None:
+            return
+        actions = self.query_one("#vault_action_scroll", VerticalScroll)
+        content = self.query_one("#vault_content")
+        section = next((owner for owner in button.ancestors if isinstance(owner, Collapsible)), None)
+        if section is not None and section.collapsed:
+            # Native Collapsible queues scroll_visible, which then defers its
+            # scroll writes. Run the local reveal after both native callbacks.
+            before = content.scroll_y if outer_scroll is None else outer_scroll
+            section.collapsed = False
+            self.call_after_refresh(
+                self.call_after_refresh, self._reveal_summary_action, button, before,
+            )
+            return
+        if outer_scroll is not None:
+            content.scroll_to(y=outer_scroll, animate=False, immediate=True)
+        group = section or button.parent.parent
+        heading = group.query_one("CollapsibleTitle" if section else ".vault_group_heading")
+        if not actions.display or not group.display or not button.display:
+            return
+        reflow_pending = (
+            self.has_class("-content-narrow")
+            and group.region.width < actions.scrollable_content_region.width
+        )
+        if not heading.region.height or not actions.region.height or reflow_pending:
+            if not self.has_class("-chat-replace"):
+                self.call_after_refresh(self._reveal_summary_action, button, outer_scroll)
+            return
+        # Parent-relative positions remain stable between deferred paints.
+        target_y = heading.virtual_region.y
+        for owner in heading.ancestors:
+            if owner is actions:
+                break
+            target_y += owner.virtual_region.y
+        button_y = button.virtual_region.y
+        for owner in button.ancestors:
+            if owner is actions:
+                break
+            button_y += owner.virtual_region.y
+        target_y = max(target_y, button_y + button.region.height - actions.scrollable_content_region.height)
+        actions.scroll_to(y=target_y, animate=False, immediate=True)
+        if self.focused is button:
+            content.scroll_to_widget(actions, animate=False, immediate=True)
+
     def _set_identity_state(self, state: str) -> None:
         """Make only the safe next identity action available for this state."""
         self._identity_state = state
+        label, action = {
+            "loading": ("Checking identity", None),
+            "first_user": ("Setup needed", "vault_setup"),
+            "remote_identity": ("Add this device", "vault_add_device"),
+            "custody_missing": ("Recovery needed", "vault_recover"),
+            "custody_unavailable": ("Identity locked", None),
+            "unverified": ("Identity not verified", None),
+            "ready": ("Identity available", None),
+        }.get(state, ("Identity not verified", None))
+        self._identity_summary(label, action)
         self._apply_action_state()
 
     def _apply_action_state(self) -> None:
@@ -1211,6 +1436,18 @@ class VaultScreen(Screen):
             self.query_one("#vault_refresh", Button).disabled = not idle
         except NoMatches:
             return  # the screen is closing
+        self._sync_presentation_state()
+
+    def _sync_presentation_state(self) -> None:
+        """Show the existing allowed controls without changing their guards."""
+        self.set_class(self._identity_state != "ready", "-identity-pending")
+        self.set_class(bool(self._busy_work), "-vault-busy")
+        self.set_class(
+            self._identity_state in {"unverified", "custody_unavailable"},
+            "-identity-error",
+        )
+        for button in self.query("#vault_actions Button"):
+            button.set_class(not button.disabled, "-state-action")
 
     def _allows_identity_action(self, *states: str) -> bool:
         """Keep keyboard actions from bypassing the disabled-button state."""
@@ -1275,6 +1512,7 @@ class VaultScreen(Screen):
     async def _load_now(self) -> None:
         service = self._service()
         if service is None:
+            self._identity_summary("Vault unavailable")
             self._status("Vault services are unavailable in this session.")
             return
         try:
@@ -1327,6 +1565,11 @@ class VaultScreen(Screen):
             )
             if step.code != "ready":
                 line += f" · {step.message}"
+            label = {
+                "confirm_identity": "Confirmation needed",
+                "reset_identity": "Recovery needed",
+            }.get(step.code, "Identity available")
+            self._identity_summary(label, step.action)
         self._status(line)
         self._table_mode = "vaults"
         self._render_vaults()
@@ -1400,17 +1643,29 @@ class VaultScreen(Screen):
         if self._setup_running:
             return
         self._setup_running = True
+        cancelled = False
         async def confirm(recovery_key: str) -> bool:
-            return bool(await self.app.push_screen_wait(VaultRecoveryConfirmModal(recovery_key)))
-        self.run_worker(self._setup(confirm), group="vault", exclusive=True)
+            nonlocal cancelled
+            modal = VaultRecoveryConfirmModal(recovery_key)
+            confirmed = bool(await self.app.push_screen_wait(modal))
+            cancelled = modal.was_cancelled
+            return confirmed
+        self.run_worker(
+            self._setup(confirm, was_cancelled=lambda: cancelled),
+            group="vault", exclusive=True,
+        )
 
-    async def _setup(self, confirmation: Any) -> None:
+    async def _setup(
+        self, confirmation: Any, *, was_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         try:
-            await self._run_setup(confirmation)
+            await self._run_setup(confirmation, was_cancelled=was_cancelled)
         finally:
             self._setup_running = False
 
-    async def _run_setup(self, confirmation: Any) -> None:
+    async def _run_setup(
+        self, confirmation: Any, *, was_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         service = self._service()
         if service is None:
             return
@@ -1418,6 +1673,12 @@ class VaultScreen(Screen):
             async with self._busy('Creating your vault identity…', holds_screen=True):
                 await _invoke(service, "setup", device_name=None, platform=None, recovery_confirmation=confirmation)
         except Exception as exc:
+            if (
+                isinstance(exc, VaultRecoveryNotConfirmed)
+                and was_cancelled is not None
+                and was_cancelled()
+            ):
+                return
             _log_identity_failure("setup", exc)
             self.app.notify(f"Vault setup failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -2123,7 +2384,9 @@ class VaultScreen(Screen):
         if pending is not None:
             # Select the waiting device and bring Approve device into view.
             self.query_one("#vault_table", DataTable).move_cursor(row=pending)
-            self.query_one("#vault_approve", Button).focus()
+            approve = self.query_one("#vault_approve", Button)
+            approve.focus()
+            self.call_after_refresh(self._reveal_summary_action, approve)
 
     def action_approve(self) -> None:
         if not self._allows_identity_action("ready"):

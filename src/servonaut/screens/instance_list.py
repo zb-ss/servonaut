@@ -3,12 +3,12 @@
 from __future__ import annotations
 from typing import Optional, List
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
-from textual.screen import Screen
 from textual.timer import Timer
-from textual.widgets import Footer, Input, Label, Static, TextArea
+from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -17,7 +17,7 @@ from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import (
@@ -60,7 +60,35 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
-class InstanceListScreen(Screen):
+class InstanceDetail(TextArea):
+    """Selectable server details whose painted rows follow native rewrapping."""
+
+    def on_resize(self) -> None:
+        # TextArea rewraps on Resize, but unchanged wrapped height can leave
+        # the outer paint cache showing rows from the previous width.
+        self.refresh()
+
+
+def instance_detail_text(instance: dict) -> str:
+    """Full labelled metadata for the fleet's native selectable document."""
+    groups = [
+        [("name", "Name"), ("state", "State"), ("provider", "Provider")],
+        [("public_ip", "Public IP"), ("private_ip", "Private IP")],
+        [("username", "Username"), ("login_user", "Team login"), ("port", "Port")],
+        [("region", "Region"), ("type", "Type"), ("group", "Group")],
+        [("id", "ID"), ("key_name", "Key")],
+    ]
+    if instance.get("account_qualified") and instance.get("account"):
+        groups[0].append(("account", "Account"))
+        groups.append([("account_id", "Account ID")])
+    lines = [
+        "   ".join(f"{label}: {instance[key]}" for key, label in fields if instance.get(key))
+        for fields in groups
+    ]
+    return "\n".join(line for line in lines if line)
+
+
+class InstanceListScreen(WorkspaceScreen):
     """Screen displaying list of EC2 instances with search/filter."""
 
     @property
@@ -109,6 +137,10 @@ class InstanceListScreen(Screen):
     # The screen opens on the fleet table, so the arrow keys and every
     # shortcut above work straight away; "/" moves to the search box.
     AUTO_FOCUS = "InstanceTable"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 105
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (130, "-wide")]
 
     # The footer lists as many shortcuts as fit on one line, in this order
     # of usefulness; the rest stay bound, and the help screen lists them all.
@@ -133,6 +165,8 @@ class InstanceListScreen(Screen):
     _SEARCH_DEBOUNCE = 0.15
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     @property
@@ -163,9 +197,10 @@ class InstanceListScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Vertical(id="instance_list_container"):
+        yield WorkspaceControls("Servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Vertical(id="instance_list_container", classes="workspace-content"):
                 yield FleetSearchInput(
                     self._shortcut_characters(),
                     placeholder="Search instances and keywords...",
@@ -189,12 +224,53 @@ class InstanceListScreen(Screen):
                 )
                 yield banner
                 yield ProgressIndicator()
-                yield InstanceTable()
-                yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
+                with Horizontal(id="fleet_workspace_row", classes="fleet-workspace-row"):
+                    yield InstanceTable()
+                    with Vertical(id="fleet_inspector", classes="fleet-inspector"):
+                        yield Static(
+                            "[bold]Selected Server[/bold]\n[dim]No server selected[/dim]",
+                            id="fleet_inspector_header",
+                            classes="fleet-inspector-header",
+                        )
+                        yield self._inspector_button(
+                            "SSH Connect (s)", "fleet_btn_ssh", variant="primary",
+                        )
+                        with Container(id="fleet_inspector_grid", classes="fleet-inspector-grid"):
+                            yield self._inspector_button("Browse (b)", "fleet_btn_browse")
+                            yield self._inspector_button("Transfer (t)", "fleet_btn_scp")
+                            yield self._inspector_button("Command (c)", "fleet_btn_command")
+                            yield self._inspector_button("Logs (l)", "fleet_btn_logs")
+                            yield self._inspector_button("Memory (m)", "fleet_btn_memory")
+                            yield self._inspector_button("AI (a)", "fleet_btn_ai")
+                        yield self._inspector_button(
+                            "All Actions (Enter)", "fleet_btn_actions",
+                        )
                 yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
+        with Vertical(id="fleet-bottom"):
+            with Horizontal(id="fleet-detail-toolbar"):
+                yield Static(
+                    "Selected server · Full values · highlight text to copy",
+                    id="fleet-detail-heading", markup=False,
+                )
+                copy_row = Button("Copy row (y)", id="fleet_copy_row", disabled=True)
+                copy_row.can_focus = False
+                yield copy_row
+            yield InstanceDetail(
+                "No server selected", id="instance_detail",
+                read_only=True, soft_wrap=True,
+            )
             yield StatusBar()
-        yield Footer()
+            yield Footer()
+
+    @staticmethod
+    def _inspector_button(
+        label: str, button_id: str, variant: str = "default",
+    ) -> Button:
+        """Create a mouse-accessible quick-action button that preserves keyboard Tab order."""
+        btn = Button(label, id=button_id, variant=variant)
+        btn.can_focus = False
+        return btn
 
     @classmethod
     def _shortcut_characters(cls) -> frozenset[str]:
@@ -736,6 +812,7 @@ class InstanceListScreen(Screen):
         if current_query:
             table.filter(current_query)
         self._sync_memory_banner()
+        self._update_detail_panel()
 
     def _sync_memory_banner(self) -> None:
         """Show the memory-discoverability banner only when no server has memory.
@@ -792,40 +869,47 @@ class InstanceListScreen(Screen):
         self.action_select_instance()
 
     def _update_detail_panel(self) -> None:
-        """Show selected instance metadata in the detail panel."""
+        """Show selected instance metadata in the detail panel and inspector."""
         table = self.query_one(InstanceTable)
         instance = table.get_selected_instance()
         detail = self.query_one("#instance_detail", TextArea)
+        detail.set_class(not instance, "--empty")
+        self.query_one("#fleet_copy_row", Button).disabled = not instance
+        self._update_inspector_panel(instance)
 
         if not instance:
-            detail.load_text("")
+            if detail.text != "No server selected":
+                detail.load_text("No server selected")
             return
 
-        parts = []
-        if instance.get("account_qualified") and instance.get("account"):
-            # Several accounts of this provider: say which one the server is in.
-            parts.append(f"Account: {instance['account']}")
-            if instance.get("account_id"):
-                parts.append(f"Account ID: {instance['account_id']}")
-        for key, label in [
-            ("name", "Name"),
-            ("id", "ID"),
-            ("type", "Type"),
-            ("state", "State"),
-            ("public_ip", "Public IP"),
-            ("private_ip", "Private IP"),
-            ("region", "Region"),
-            ("provider", "Provider"),
-            ("group", "Group"),
-            ("key_name", "Key"),
-            ("username", "Username"),
-            ("port", "Port"),
-        ]:
-            val = instance.get(key)
-            if val:
-                parts.append(f"{label}: {val}")
+        text = instance_detail_text(instance)
+        if detail.text != text:
+            detail.load_text(text)
 
-        detail.load_text("  |  ".join(parts))
+    def _update_inspector_panel(self, instance: Optional[dict]) -> None:
+        """Update the right-hand Selected Server quick-action inspector."""
+        try:
+            header = self.query_one("#fleet_inspector_header", Static)
+        except Exception:
+            return
+        for btn in self.query("#fleet_inspector Button"):
+            btn.disabled = not instance
+        if not instance:
+            header.update("[bold]Selected Server[/bold]\n[dim]No server selected[/dim]")
+            return
+        name = escape(display_name(instance) or str(instance.get("id") or "Unnamed"))
+        state_raw = str(instance.get("state") or "running")
+        provider = escape(str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS")))
+        ip = escape(str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—"))
+        state_badge = (
+            f"[$text-success]● {escape(state_raw)}[/$text-success]"
+            if state_raw == "running"
+            else f"[dim]○ {escape(state_raw)}[/dim]"
+        )
+        header.update(
+            f"[bold $text-accent]{name}[/bold $text-accent]  {state_badge}\n"
+            f"[dim]{provider} · {ip}[/dim]"
+        )
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
@@ -843,6 +927,7 @@ class InstanceListScreen(Screen):
         table = self.query_one(InstanceTable)
         table.filter(value)
         self._update_status_bar()
+        self._update_detail_panel()
 
         query = value.strip()
         if len(query) >= 2:
@@ -1314,6 +1399,36 @@ class InstanceListScreen(Screen):
             return
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(instance))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id
+        if btn_id == "fleet_copy_row":
+            event.stop()
+            self.action_copy_row()
+        elif btn_id == "fleet_btn_ssh":
+            event.stop()
+            self.action_ssh_connect()
+        elif btn_id == "fleet_btn_browse":
+            event.stop()
+            self.action_browse_files()
+        elif btn_id == "fleet_btn_scp":
+            event.stop()
+            self.action_scp_transfer()
+        elif btn_id == "fleet_btn_command":
+            event.stop()
+            self.action_run_command()
+        elif btn_id == "fleet_btn_logs":
+            event.stop()
+            self.action_view_logs()
+        elif btn_id == "fleet_btn_memory":
+            event.stop()
+            self.action_open_memory()
+        elif btn_id == "fleet_btn_ai":
+            event.stop()
+            self.action_ai_analysis()
+        elif btn_id == "fleet_btn_actions":
+            event.stop()
+            self.action_select_instance()
 
     def action_copy_row(self) -> None:
         """Copy full selected instance row data to clipboard."""

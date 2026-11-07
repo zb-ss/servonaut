@@ -8,15 +8,14 @@ from typing import List, Optional, TYPE_CHECKING
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -24,8 +23,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
+class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
     """Firewall management for an OVH VPS or dedicated server IP."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -36,6 +39,8 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -68,67 +73,100 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         )
 
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with ScrollableContainer(id="firewall_container"):
-                yield Static(
-                    f"[bold $text-accent]Firewall: {instance_name}[/bold $text-accent]",
-                    id="firewall_title",
-                )
-                yield Static(
-                    "[dim]Loading firewall state...[/dim]",
-                    id="firewall_status",
-                )
-                yield Button(
-                    "Toggle Firewall", variant="default", id="btn_toggle"
-                )
-                yield DataTable(id="rules_table")
-                with Horizontal(id="firewall_actions"):
-                    yield Button(
-                        "Add Rule", variant="primary", id="btn_add_rule"
-                    )
-                    yield Button(
-                        "Delete Rule", variant="error", id="btn_delete_rule"
-                    )
-                    yield Button("Back", variant="default", id="btn_back")
-
-                # Add Rule inline form (hidden until "Add Rule" pressed)
-                yield Static(
-                    "[bold]Add Firewall Rule[/bold]",
-                    id="add_rule_title",
-                    classes="form_section hidden",
-                )
-                yield Input(
-                    placeholder="action (permit / deny)",
-                    id="input_action",
-                    classes="hidden",
-                )
-                yield Input(
-                    placeholder="protocol (tcp / udp / icmp)",
-                    id="input_protocol",
-                    classes="hidden",
-                )
-                yield Input(
-                    placeholder="port (e.g. 80, or leave blank for ICMP)",
-                    id="input_port",
-                    classes="hidden",
-                )
-                yield Input(
-                    placeholder="source IP (e.g. 1.2.3.4/32 or empty for any)",
-                    id="input_source",
-                    classes="hidden",
-                )
-                yield Input(
-                    placeholder="sequence (0–19)",
-                    id="input_sequence",
-                    classes="hidden",
-                )
-                yield Button(
-                    "Save Rule",
-                    variant="primary",
-                    id="btn_save_rule",
-                    classes="hidden",
-                )
+        yield WorkspaceControls("Firewall")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield ScrollableContainer(
+                Vertical(
+                    Static(
+                        f"[bold $text-accent]Firewall: {escape(str(instance_name))}[/bold $text-accent]",
+                        id="firewall_title",
+                    ),
+                    Static(
+                        "OVH edge firewall: review its state and the rules for this server's IP.",
+                        classes="resource-context",
+                    ),
+                    classes="provider-account-heading",
+                ),
+                Horizontal(
+                    Vertical(
+                        Static("Firewall state", classes="resource-section-title"),
+                        Static(
+                            "[dim]Loading firewall state...[/dim]",
+                            id="firewall_status",
+                        ),
+                        classes="provider-firewall-status",
+                    ),
+                    Button(
+                        "Toggle Firewall", variant="default", id="btn_toggle"
+                    ),
+                    classes="resource-panel provider-firewall-state",
+                ),
+                Horizontal(
+                    Vertical(
+                        Static("Rules", classes="resource-section-title"),
+                        DataTable(id="rules_table"),
+                        classes="resource-panel provider-account-inventory",
+                    ),
+                    Vertical(
+                        Static("Rule operations", classes="resource-section-title"),
+                        Static(
+                            "Select a rule to delete it, or add a rule below.",
+                            classes="resource-context",
+                        ),
+                        Horizontal(
+                            Button(
+                                "Add Rule", variant="primary", id="btn_add_rule"
+                            ),
+                            Button(
+                                "Delete Rule", variant="error", id="btn_delete_rule"
+                            ),
+                            Button("Back", variant="default", id="btn_back"),
+                            id="firewall_actions",
+                        ),
+                        Static(
+                            "[bold]Add Firewall Rule[/bold]",
+                            id="add_rule_title",
+                            classes="form_section hidden",
+                        ),
+                        Input(
+                            placeholder="action (permit / deny)",
+                            id="input_action",
+                            classes="hidden",
+                        ),
+                        Input(
+                            placeholder="protocol (tcp / udp / icmp)",
+                            id="input_protocol",
+                            classes="hidden",
+                        ),
+                        Input(
+                            placeholder="port (e.g. 80, or leave blank for ICMP)",
+                            id="input_port",
+                            classes="hidden",
+                        ),
+                        Input(
+                            placeholder="source IP (e.g. 1.2.3.4/32 or empty for any)",
+                            id="input_source",
+                            classes="hidden",
+                        ),
+                        Input(
+                            placeholder="sequence (0–19)",
+                            id="input_sequence",
+                            classes="hidden",
+                        ),
+                        Button(
+                            "Save Rule",
+                            variant="primary",
+                            id="btn_save_rule",
+                            classes="hidden",
+                        ),
+                        classes="provider-account-operations",
+                    ),
+                    classes="provider-account-body",
+                ),
+                id="firewall_container",
+                classes="workspace-content resource-workspace-content provider-account-workspace",
+            )
         yield Footer()
 
     # ------------------------------------------------------------------

@@ -27,6 +27,12 @@ class RemoteTree(Tree):
     Caches expanded directories to avoid redundant SSH calls.
     """
 
+    DEFAULT_CSS = """
+    RemoteTree:ansi:focus > .tree--cursor {
+        text-style: underline not bold;
+    }
+    """
+
     def __init__(
         self,
         instance: dict,

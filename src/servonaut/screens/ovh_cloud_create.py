@@ -15,12 +15,12 @@ from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import (
     Button, DataTable, Footer, Input, Select, Static,
 )
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -35,8 +35,9 @@ from servonaut.screens._provider_accounts import (
     with_account,
 )
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -44,12 +45,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHCloudCreateScreen(Screen):
+class OVHCloudCreateScreen(WorkspaceScreen):
     """Wizard for creating a new OVH Public Cloud instance.
 
     Lets the user choose a flavor, OS image, and optional SSH key, then
     confirms before billing begins.
     """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the name, region and docked
+    # Create / Back controls beside the chat column (as the Hetzner wizard).
+    CHAT_MIN_CONTENT_WIDTH = 56
+    # Stack identity and catalogs when their native controls need the width.
+    CONTENT_NARROW_WIDTH = 88
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -63,6 +71,8 @@ class OVHCloudCreateScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -71,6 +81,7 @@ class OVHCloudCreateScreen(Screen):
 
     def __init__(self, account: Optional[str] = None) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._account = account or ""
         self._project_id: str = ""
         self._flavors: List[dict] = []
@@ -83,61 +94,88 @@ class OVHCloudCreateScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Create OVH server")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]Create Cloud Instance[/bold $text-accent]",
-                    id="cloud_create_title",
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Vertical(
+                    Static(
+                        "[bold $text-accent]Create Cloud Instance[/bold $text-accent]",
+                        id="cloud_create_title",
+                    ),
+                    Static(
+                        "OVHcloud Public Cloud: select a region to load its flavors "
+                        "and images.",
+                        classes="compute-form-context",
+                    ),
+                    classes="compute-workflow-heading",
                 ),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh",
-                    value=self._account or None, id="cloud_create_account",
-                ),
-
-                Static("[bold]Instance Name[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Display name for the new instance — appears in the "
-                    "OVH console and Servonaut's instance list.[/dim]",
-                    classes="note",
-                ),
-                Input(placeholder="e.g. web-prod-1", id="input_name"),
-
-                Static("[bold]Region[/bold]", classes="section_header"),
-                Static(
-                    "[dim]OVH datacenter code that hosts the instance. "
-                    "Pick a region first — flavors and images load "
-                    "filtered to it. Full datacenter list at "
-                    "ovhcloud.com/en/about-us/data-centers/.[/dim]",
-                    classes="note",
-                ),
-                Select(
-                    options=[],
-                    id="input_region",
-                    prompt="Loading regions…",
-                    allow_blank=True,
-                ),
-
-                Static("[bold]Select Flavor[/bold]", classes="section_header"),
-                DataTable(id="flavors_table"),
-
-                Static("[bold]Select Image[/bold]", classes="section_header"),
-                DataTable(id="images_table"),
-
-                Static("[bold]SSH Key (optional)[/bold]", classes="section_header"),
-                # Empty-state hint shown by ``_load_keys`` when the
-                # project has zero registered keys — otherwise hidden.
-                Static("", id="keys_hint", classes="note hidden"),
-                DataTable(id="keys_table"),
-
                 Horizontal(
-                    Button("Create Instance", variant="primary", id="btn_create"),
-                    Button("Back", variant="default", id="btn_back"),
-                    id="cloud_create_actions",
+                    Vertical(
+                        Static("Account and location", classes="compute-section-title"),
+                        AccountPicker.for_provider(
+                            registry_for(self.app, "ovh"), "ovh",
+                            value=self._account or None, id="cloud_create_account",
+                        ),
+                        Static("[bold]Instance Name[/bold]", classes="section_header"),
+                        Static(
+                            "[dim]Display name for the new instance — appears in the "
+                            "OVH console and Servonaut's instance list.[/dim]",
+                            classes="note",
+                        ),
+                        Input(placeholder="e.g. web-prod-1", id="input_name"),
+                        Static("[bold]Region[/bold]", classes="section_header"),
+                        Static(
+                            "[dim]OVH datacenter code that hosts the instance. "
+                            "Pick a region first — flavors and images load "
+                            "filtered to it. Full datacenter list at "
+                            "ovhcloud.com/en/about-us/data-centers/.[/dim]",
+                            classes="note",
+                        ),
+                        Select(
+                            options=[],
+                            id="input_region",
+                            prompt="Loading regions…",
+                            allow_blank=True,
+                        ),
+                        classes="compute-form-section compute-identity-section",
+                    ),
+                    Vertical(
+                        Vertical(
+                            Static("Compute and image", classes="compute-section-title"),
+                            Static("[bold]Select Flavor[/bold]", classes="section_header"),
+                            DataTable(id="flavors_table"),
+                            Static("[bold]Select Image[/bold]", classes="section_header"),
+                            DataTable(id="images_table"),
+                            classes="compute-form-section",
+                        ),
+                        Vertical(
+                            Static("Server access", classes="compute-section-title"),
+                            Static("[bold]SSH Key (optional)[/bold]", classes="section_header"),
+                            Static("", id="keys_hint", classes="note hidden"),
+                            DataTable(id="keys_table"),
+                            classes="compute-form-section",
+                        ),
+                        classes="compute-catalog-column",
+                    ),
+                    classes="compute-decision-workspace",
                 ),
-
+                Vertical(
+                    Static(
+                        "Review the selected configuration and available pricing "
+                        "before confirming.",
+                        classes="compute-review-note",
+                    ),
+                    Horizontal(
+                        Button("Create Instance", variant="primary", id="btn_create"),
+                        Button("Back", variant="default", id="btn_back"),
+                        id="cloud_create_actions",
+                    ),
+                    classes="compute-submit-region",
+                ),
                 id="cloud_create_container",
+                classes="workspace-content compute-form-content compute-workflow",
             )
         yield Footer()
 
@@ -247,11 +285,12 @@ class OVHCloudCreateScreen(Screen):
         # deployable flavors so the user doesn't pick a dead zone and
         # see an empty table.
         try:
-            regions, all_flavors = await asyncio.gather(
-                svc.list_regions(self._project_id),
-                svc.list_flavors(self._project_id),
-                return_exceptions=False,
-            )
+            with self._read_loading.running('Loading regions…'):
+                regions, all_flavors = await asyncio.gather(
+                    svc.list_regions(self._project_id),
+                    svc.list_flavors(self._project_id),
+                    return_exceptions=False,
+                )
         except Exception as exc:
             logger.error("Failed to load regions: %s", exc)
             self.notify(
@@ -312,9 +351,10 @@ class OVHCloudCreateScreen(Screen):
         if svc is None or not region:
             return
         try:
-            raw_flavors = await svc.list_flavors(
-                self._project_id, region=region,
-            )
+            with self._read_loading.running('Loading flavors…'):
+                raw_flavors = await svc.list_flavors(
+                    self._project_id, region=region,
+                )
             # Hide ``available=false`` flavors — they're catalogue
             # placeholders the user can't deploy. ``True`` is the
             # default so older API responses without the flag aren't
@@ -372,10 +412,11 @@ class OVHCloudCreateScreen(Screen):
         try:
             # Pull region-bound images AND any region-less ("shared")
             # ones — those are usable regardless of the picked region.
-            region_images = await svc.list_images(
-                self._project_id, region=region,
-            )
-            all_images = await svc.list_images(self._project_id)
+            with self._read_loading.running('Loading images…'):
+                region_images = await svc.list_images(
+                    self._project_id, region=region,
+                )
+                all_images = await svc.list_images(self._project_id)
             shared_images = [
                 img for img in all_images
                 if not (img.get("region") or "")
@@ -401,7 +442,8 @@ class OVHCloudCreateScreen(Screen):
         if svc is None:
             return
         try:
-            self._keys = await svc.list_ssh_keys(self._project_id)
+            with self._read_loading.running('Loading SSH keys…'):
+                self._keys = await svc.list_ssh_keys(self._project_id)
 
             def _s(x: str) -> str:
                 if self.app.demo_mode:

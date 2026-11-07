@@ -1,0 +1,115 @@
+/* Workspace chrome is opt-in; ordinary screens and dialogs keep their layout. */
+WorkspaceScreen {
+    layers: default overlay workspace;
+}
+
+/* ANSI surfaces are transparent; full screens must cover the previous view. */
+WorkspaceScreen:ansi {
+    background: $background;
+}
+
+/* Match the stable native notification lane used by dialogs. Reserve it
+   even while empty, and leave the two-row Footer clear. */
+WorkspaceScreen > WorkspaceNotificationSpace {
+    dock: bottom;
+    height: 4;
+    margin-bottom: 2;
+    visibility: hidden;
+}
+
+WorkspaceScreen > ToastRack {
+    max-height: 4;
+    overflow-y: auto;
+    margin-bottom: 2;
+    visibility: visible;
+}
+
+WorkspaceScreen > ToastRack Toast {
+    padding: 0 1;
+    margin-top: 0;
+}
+
+WorkspaceScreen > SafeHeader,
+WorkspaceControls {
+    layer: workspace;
+}
+
+WorkspaceControls {
+    height: 1;
+    width: 100%;
+    background: $panel;
+    padding: 0 1;
+    align: left middle;
+}
+
+WorkspaceControls Button {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: $boost;
+    color: $text;
+    text-style: underline;
+}
+
+WorkspaceControls Button:hover,
+WorkspaceControls Button.--pane-open {
+    border: none;
+    background: $boost;
+    color: $text;
+}
+
+WorkspaceControls #workspace_navigation {
+    width: 19;
+}
+
+WorkspaceControls #workspace_chat {
+    width: 16;
+}
+
+WorkspaceControls #workspace_chat_end {
+    width: 10;
+    color: $text-error;
+}
+
+WorkspaceControls #workspace_context {
+    width: 1fr;
+    height: 1;
+    padding: 0 2;
+    color: $text-muted;
+}
+
+WorkspaceScreen Sidebar.--navigation-mode Button:focus,
+WorkspaceScreen Sidebar.--navigation-mode .nav-button:focus {
+    border: none;
+    background: $boost;
+    color: $text-accent;
+    text-style: bold underline;
+}
+
+WorkspaceScreen Sidebar.--navigation-mode .nav-button.--active {
+    border-left: thick $accent;
+}
+
+WorkspaceScreen Sidebar.--navigation-mode Button:focus:ansi,
+WorkspaceScreen Sidebar.--navigation-mode .nav-button:focus:ansi {
+    background: $background;
+    color: $text;
+}
+
+WorkspaceScreen Sidebar.--navigation-mode .nav-button.--active:focus:ansi {
+    text-style: bold underline reverse;
+}
+
+WorkspaceScreen #main-layout {
+    height: 1fr;
+    margin-top: 2;
+}
+
+/* The existing chat overlay docks in its own layer. Leave chrome exposed. */
+WorkspaceScreen > #chat-panel {
+    /* This separate overlay layer also clears four notification + two footer rows. */
+    margin: 2 0 6 0;
+}

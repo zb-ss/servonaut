@@ -77,15 +77,28 @@ def test_key_table_masks_fingerprint_and_public_key(is_demo: bool) -> None:
            "public_key": "ssh-ed25519 example-public-key"}
     app = SimpleNamespace(demo_mode=is_demo, redaction_service=RedactionService(),
                           ovh_cloud_service=SimpleNamespace(list_ssh_keys=AsyncMock(return_value=[key])))
-    table = MagicMock()
+    # One loaded key keeps the native table cursor at its numeric first row.
+    table = MagicMock(cursor_row=0, row_count=1)
+    selected = MagicMock()
+    widgets = {"#ssh_keys_table": table, "#provider_key_selection": selected}
     with (
         patch.object(OVHSSHKeysScreen, "app", new_callable=PropertyMock, return_value=app),
-        patch.object(screen, "query_one", return_value=table),
+        patch.object(screen, "query_one", side_effect=lambda selector, *_: widgets[selector]),
         patch.object(screen, "_set_status"), patch.object(screen, "_sync_action_buttons"),
     ):
         asyncio.run(screen._load_keys())
+        assert screen._selected_key() is key
         assert ("private-project" != screen._display_project_id()) is is_demo
     row = table.add_row.call_args.args
     assert (row[1] == "Hidden") is is_demo
     assert (row[2] == "Hidden") is is_demo
     assert screen._keys[0] == key
+    assert (row[0] != key["name"]) is is_demo
+    assert row[1:] == (("Hidden", "Hidden") if is_demo else (
+        "private-fingerprint", "ssh-ed25519 example-public-key",
+    ))
+    assert table.add_row.call_args.kwargs == {"key": "key-id"}
+    app.ovh_cloud_service.list_ssh_keys.assert_awaited_once_with("private-project")
+    selected.update.assert_called_once_with(
+        f"{row[0]}\nID: {'Hidden' if is_demo else 'key-id'}"
+    )

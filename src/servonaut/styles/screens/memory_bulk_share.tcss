@@ -1,0 +1,157 @@
+/* Bulk memory sharing: full identities, explicit access, per-server results. */
+BulkShareScreen #bulk_outer {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+
+BulkShareScreen #bulk-container {
+    width: 1fr;
+    height: 1fr;
+}
+
+BulkShareScreen #bulk-title {
+    height: auto;
+    text-style: bold;
+    color: $text-accent;
+}
+
+/* Errors and live progress remain visible without consuming the whole form. */
+BulkShareScreen #bulk-state {
+    height: auto;
+    min-height: 1;
+    max-height: 5;
+    overflow-y: auto;
+}
+
+BulkShareScreen #bulk-status {
+    height: auto;
+    min-height: 1;
+}
+
+BulkShareScreen #bulk-progress {
+    height: auto;
+    display: none;
+}
+
+BulkShareScreen #bulk-progress.-shown {
+    display: block;
+}
+
+BulkShareScreen #bulk-form-scroll {
+    height: 1fr;
+    min-height: 3;
+    overflow-y: auto;
+}
+
+BulkShareScreen #bulk-form,
+BulkShareScreen #bulk-settings {
+    height: auto;
+}
+
+BulkShareScreen #bulk-form.-done {
+    display: none;
+}
+
+BulkShareScreen #bulk-selection-panel,
+BulkShareScreen #bulk-access-panel,
+BulkShareScreen #bulk-modules-panel {
+    height: auto;
+    border: round $panel;
+    background: transparent;
+    margin-bottom: 1;
+}
+
+BulkShareScreen #bulk-servers {
+    height: auto;
+    padding: 0 1;
+}
+
+BulkShareScreen #bulk-access-panel {
+    width: 2fr;
+    margin-right: 1;
+}
+
+BulkShareScreen #bulk-modules-panel {
+    width: 3fr;
+}
+
+BulkShareScreen .bulk-section-heading {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    text-style: bold;
+    color: $text;
+}
+
+BulkShareScreen .bulk-field-row {
+    height: auto;
+    margin: 0 1 1 1;
+}
+
+BulkShareScreen #bulk-readers {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+BulkShareScreen #bulk-update-existing {
+    width: 1fr;
+    height: auto;
+    margin: 0 1 1 1;
+    text-wrap: wrap;
+    text-overflow: fold;
+}
+
+BulkShareScreen #bulk-modules-list {
+    height: 12;
+    min-height: 6;
+    margin: 0 1 1 1;
+}
+
+BulkShareScreen #bulk-access-panel:focus-within,
+BulkShareScreen #bulk-modules-panel:focus-within {
+    border: round $accent;
+}
+
+BulkShareScreen #bulk-summary {
+    height: auto;
+    padding: 0 1;
+}
+
+BulkShareScreen #bulk-btn-row {
+    height: auto;
+    align: left middle;
+}
+
+BulkShareScreen #bulk-btn-row Button {
+    width: 1fr;
+    min-width: 8;
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    margin: 0;
+}
+
+BulkShareScreen #bulk-btn-cancel,
+BulkShareScreen #bulk-btn-stop {
+    margin-right: 1;
+}
+
+BulkShareScreen #bulk-btn-stop {
+    display: none;
+}
+
+BulkShareScreen #bulk-btn-stop.-shown {
+    display: block;
+}
+
+BulkShareScreen.-content-narrow #bulk-settings {
+    layout: vertical;
+}
+
+BulkShareScreen.-content-narrow #bulk-access-panel,
+BulkShareScreen.-content-narrow #bulk-modules-panel {
+    width: 100%;
+    margin-right: 0;
+}

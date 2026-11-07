@@ -16,6 +16,7 @@ away, and it skips the refresh once the title child has been removed.
 
 from __future__ import annotations
 
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.dom import NoScreen
 from textual.events import Mount
@@ -37,6 +38,10 @@ class SafeHeader(Header):
         for owner in (self.app, self.screen):
             self.watch(owner, "title", self._refresh_title)
             self.watch(owner, "sub_title", self._refresh_title)
+
+    def format_title(self) -> Content:
+        # Keep title and version readable on the header's themed background.
+        return super().format_title().stylize("not dim")
 
     def _refresh_title(self) -> None:
         """Show the current title unless the header is being taken apart."""

@@ -10,11 +10,12 @@ from typing import List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
+from servonaut.screens._busy_work import BusyWork
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -38,8 +39,19 @@ class AmbiguousAddress(ValueError):
     """A shown stand-in address that stands for more than one real address."""
 
 
-class IPBanScreen(Screen):
+class IPBanScreen(WorkspaceScreen):
     """IP Ban Manager: ban/unban IPs via WAF, Security Groups, or NACLs."""
+
+    DEFAULT_CSS = """
+    IPBanScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 76
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -49,6 +61,8 @@ class IPBanScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, prefill_ip: str = "", prefill_real_ip: str = "") -> None:
@@ -61,6 +75,7 @@ class IPBanScreen(Screen):
                 two differ; a ban of the untouched pre-fill targets it.
         """
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._prefill_ip = prefill_ip
         self._prefill_real_ip = prefill_real_ip or prefill_ip
         self._selected_config: Optional[str] = None
@@ -77,59 +92,62 @@ class IPBanScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("[bold $text-accent]IP Ban Manager[/bold $text-accent]", id="ip_ban_title"),
-            Static("[dim]Ban IP addresses via WAF, Security Groups, or NACLs[/dim]", id="ip_ban_subtitle"),
-            Static(
-                "No IP ban method is set up yet. Add a WAF IP set, security "
-                "group or network ACL in Settings → IP Ban, then choose it here.",
-                id="ip_ban_empty_hint",
-            ),
-            Horizontal(
-                Vertical(
-                    Static("Select Ban Configuration:", classes="field_label"),
-                    Select(
-                        options=self._get_config_options(),
-                        prompt="Select a ban configuration",
-                        id="ban_config_selector",
-                    ),
-                    id="ip_ban_config_col",
-                ),
-                Vertical(
-                    Static("IP Address to Ban/Unban:", classes="field_label"),
-                    Input(
-                        placeholder="e.g. 1.2.3.4",
-                        id="ip_input",
-                        value=self._prefill_ip,
-                    ),
-                    id="ip_ban_input_col",
-                ),
-                id="ip_ban_top_row",
-            ),
-            Horizontal(
-                Button("Ban IP", id="btn_ban", variant="error"),
-                Button("Unban IP", id="btn_unban", variant="warning"),
-                Button("Refresh List", id="btn_refresh"),
-                Button("Back", id="btn_back", variant="default"),
-                id="ip_ban_actions",
-            ),
-            Horizontal(
-                Vertical(
-                    Static("[bold]Banned IPs[/bold]", classes="field_label"),
-                    DataTable(id="banned_table"),
-                    id="ip_ban_table_col",
-                ),
-                Vertical(
-                    Static("[bold]Audit Log[/bold]", classes="field_label"),
-                    RichLog(id="audit_log", highlight=True, markup=True),
-                    id="ip_ban_audit_col",
-                ),
-                id="ip_ban_main_content",
-            ),
-            id="ip_ban_container",
-        )
+        yield WorkspaceControls("IP Ban Manager")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="ip_ban_container", classes="workspace-content"):
+                yield BusyIndicator(id="read_loading", classes="read-loading")
+                yield Static("IP access control", id="ip_ban_title")
+                yield Static(
+                    "Choose a configuration and address before changing access.",
+                    id="ip_ban_subtitle",
+                )
+                yield Static(
+                    "No IP ban method is set up yet. Add a WAF IP set, security "
+                    "group or network ACL in Settings → IP Ban, then choose it here.",
+                    id="ip_ban_empty_hint",
+                )
+                with VerticalScroll(id="ip_ban_workflow"):
+                    with Horizontal(id="ip_ban_main_content"):
+                        with Vertical(id="ip_ban_target"):
+                            yield Static("Change access", classes="ip-ban-section-title")
+                            with Horizontal(id="ip_ban_top_row"):
+                                with Vertical(id="ip_ban_config_col"):
+                                    yield Static("Ban configuration", classes="field_label")
+                                    yield Select(
+                                        options=self._get_config_options(),
+                                        prompt="Select a ban configuration",
+                                        id="ban_config_selector",
+                                    )
+                                with Vertical(id="ip_ban_input_col"):
+                                    yield Static("IP address to ban or unban", classes="field_label")
+                                    yield Input(
+                                        placeholder="e.g. 1.2.3.4", id="ip_input",
+                                        value=self._prefill_ip,
+                                    )
+                            yield Static(
+                                "Ban and unban apply to this configuration and its AWS account. "
+                                "Check both before changing access.",
+                                id="ip_ban_scope_hint",
+                            )
+                        with Vertical(id="ip_ban_table_col"):
+                            yield Static("Banned addresses", classes="ip-ban-section-title")
+                            yield Static(
+                                "Enter uses the selected IP; y copies it.",
+                                classes="ip-ban-help",
+                            )
+                            yield DataTable(id="banned_table")
+                            with Horizontal(id="ip_ban_selection_actions"):
+                                yield Button("Use selected IP", id="ip_ban_use_selected")
+                                yield Button("Copy selected IP", id="ip_ban_copy_selected")
+                    with Vertical(id="ip_ban_audit_col"):
+                        yield Static("Recent audit log", classes="ip-ban-section-title")
+                        yield RichLog(id="audit_log", highlight=True, markup=True)
+                with Horizontal(id="ip_ban_actions"):
+                    yield Button("Ban IP", id="btn_ban", variant="error")
+                    yield Button("Unban IP", id="btn_unban", variant="warning")
+                    yield Button("Refresh List", id="btn_refresh")
+                    yield Button("Back", id="btn_back", variant="default")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -289,27 +307,28 @@ class IPBanScreen(Screen):
         self._banned_real = []
         if self._refuse_unknown_account(config_name):
             return
-        try:
-            banned = await self.app.ip_ban_service.list_banned(config_name)
-            # Rows are read back by position: stand-ins may repeat.
-            self._banned_real = [str(ip) for ip in banned]
-            for ip in banned:
-                # Look up count by CIDR or bare IP (use raw ip for lookup)
-                bare_ip = ip.split("/")[0] if "/" in ip else ip
-                count = ban_counts.get(bare_ip, 0) or ban_counts.get(ip, 0)
-                # display_ip is redacted; ip (raw) used for ban_counts lookup above.
-                display_ip = self.redact_display_ip(ip)
-                table.add_row(
-                    display_ip, str(count) if count else "-",
-                    self._demo_config_name(config_name), method,
-                )
-            if not banned:
-                self.app.notify(
-                    f"No IPs currently banned in '{self._demo_config_name(config_name)}'",
-                    markup=False,
-                )
-        except Exception as e:
-            self.app.notify(f"Error loading banned IPs: {e}", severity="error", markup=False)
+        with self._read_loading.running('Loading banned IPs…'):
+            try:
+                banned = await self.app.ip_ban_service.list_banned(config_name)
+                # Rows are read back by position: stand-ins may repeat.
+                self._banned_real = [str(ip) for ip in banned]
+                for ip in banned:
+                    # Look up count by CIDR or bare IP (use raw ip for lookup)
+                    bare_ip = ip.split("/")[0] if "/" in ip else ip
+                    count = ban_counts.get(bare_ip, 0) or ban_counts.get(ip, 0)
+                    # display_ip is redacted; ip (raw) used for ban_counts lookup above.
+                    display_ip = self.redact_display_ip(ip)
+                    table.add_row(
+                        display_ip, str(count) if count else "-",
+                        self._demo_config_name(config_name), method,
+                    )
+                if not banned:
+                    self.app.notify(
+                        f"No IPs currently banned in '{self._demo_config_name(config_name)}'",
+                        markup=False,
+                    )
+            except Exception as e:
+                self.app.notify(f"Error loading banned IPs: {e}", severity="error", markup=False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -321,6 +340,10 @@ class IPBanScreen(Screen):
             self.action_refresh_banned()
         elif button_id == "btn_back":
             self.action_back()
+        elif button_id == "ip_ban_use_selected":
+            self.action_use_selected_ip()
+        elif button_id == "ip_ban_copy_selected":
+            self.action_copy_output()
 
     def _input_ip(self) -> str:
         """The address to act on: the real one behind a shown stand-in.

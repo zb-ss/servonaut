@@ -15,11 +15,13 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
 from servonaut.services.vault.display import markup_literal, terminal_safe
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.secret_input import SecretInput
 
 
@@ -33,29 +35,33 @@ class BwPassphraseModal(ModalScreen[Optional[str]]):
         Binding("escape", "skip", "Skip"),
     ]
 
-    DEFAULT_CSS = ""  # styling lives in the styles bundle (secrets.tcss)
+    DEFAULT_CSS = ""  # Presentation comes from the shared DialogFrame rules.
 
     def __init__(self, filename: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._filename = filename
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "[bold $text-accent]Encrypted SSH key[/bold $text-accent]",
                 id="bw_passphrase_title",
             ),
-            Static(
-                f"Enter the passphrase for [bold]{markup_literal(terminal_safe(self._filename))} [/bold]"
-                "to decrypt it for import. Skip to leave this key out.",
-                id="bw_passphrase_prompt",
+            body=DialogBody(
+                Static(
+                    f"Enter the passphrase for [bold]{markup_literal(terminal_safe(self._filename))} [/bold]"
+                    "to decrypt it for import. Skip to leave this key out.",
+                    id="bw_passphrase_prompt",
+                ),
             ),
-            SecretInput(placeholder="Passphrase", id="bw_passphrase_input"),
-            Horizontal(
+            status=SecretInput(placeholder="Passphrase", id="bw_passphrase_input"),
+            actions=DialogActions(
                 Button("Skip", variant="default", id="bw_passphrase_skip_btn"),
                 Button("Unlock", variant="primary", id="bw_passphrase_unlock_btn"),
                 classes="bw_passphrase_actions",
             ),
+            size="compact",
             id="bw_passphrase_container",
         )
 

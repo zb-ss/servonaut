@@ -69,6 +69,7 @@ def test_every_single_key_the_help_mentions_is_bound(help_text: str) -> None:
         ("escape", "Esc"),
         ("enter", "Enter"),
         ("f2", "F2"),
+        ("shift+f6", "Shift+F6"),
         ("ctrl+r", "Ctrl+R"),
         ("ctrl+shift+d", "Ctrl+Shift+D"),
     ],

@@ -21,7 +21,7 @@ import logging
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static
 
 from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS
@@ -53,6 +53,7 @@ class BackupsPanel(SettingsPanel):
 
     PANEL_ID = "backups"
     TITLE = "Backups"
+    DESCRIPTION = 'Manage encrypted cloud snapshots or recover a local configuration backup.'
 
     DEFAULT_CSS = """
     BackupsPanel .backups-section-label {
@@ -78,27 +79,28 @@ class BackupsPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the snapshot and local-backup launcher rows."""
-        yield Static("Config Sync", classes="backups-section-label")
-        yield Static(_SNAPSHOT_INFO, classes="backups-note")
-        yield Horizontal(
-            Button(
-                "Manage Snapshots",
-                id="backups_open_snapshots",
-                variant="primary",
-            ),
-            classes="setting_row",
-        )
-
-        yield Static("Local Backups", classes="backups-section-label")
-        yield Static(_BACKUP_INFO, classes="backups-note")
-        yield Horizontal(
-            Button(
-                "Restore Local Backup",
-                id="backups_open_restore",
-                variant="default",
-            ),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static("Config Sync", classes="backups-section-label settings-group-title")
+            yield Static(_SNAPSHOT_INFO, classes="backups-note")
+            yield Horizontal(
+                Button(
+                    "Manage Snapshots",
+                    id="backups_open_snapshots",
+                    variant="primary",
+                ),
+                classes="setting_row",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static("Local Backups", classes="backups-section-label settings-group-title")
+            yield Static(_BACKUP_INFO, classes="backups-note")
+            yield Horizontal(
+                Button(
+                    "Restore Local Backup",
+                    id="backups_open_restore",
+                    variant="default",
+                ),
+                classes="setting_row",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle — nothing to load; snapshot baseline is the empty dict

@@ -1,0 +1,310 @@
+/* Native analysis editors and conversation workspaces. */
+
+AIAnalysisScreen #ai_container {
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+AIAnalysisScreen #ai_header {
+    height: 2;
+    padding: 0;
+    text-align: left;
+    border-bottom: solid $border-blurred;
+    color: $text-accent;
+}
+
+AIAnalysisScreen #ai_provider_info {
+    height: auto;
+    padding: 0 1;
+    border-left: heavy $accent;
+    background: $panel;
+    margin: 1 0;
+}
+
+AIAnalysisScreen #ai_workbench {
+    height: 1fr;
+    min-height: 14;
+    margin-bottom: 1;
+}
+
+AIAnalysisScreen #ai_source_panel,
+AIAnalysisScreen #ai_result_panel {
+    width: 1fr;
+    height: 100%;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+AIAnalysisScreen #ai_source_panel {
+    margin-right: 1;
+}
+
+AIAnalysisScreen #ai_source_panel:focus-within,
+AIAnalysisScreen #ai_result_panel:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+AIAnalysisScreen #ai_text_input,
+AIAnalysisScreen #ai_output {
+    height: 1fr;
+    min-height: 7;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: $surface;
+}
+
+AIAnalysisScreen #ai_text_input:focus,
+AIAnalysisScreen #ai_output:focus {
+    border: none;
+}
+
+AIAnalysisScreen #ai_filter_row {
+    height: 3;
+    padding: 0;
+}
+
+AIAnalysisScreen #ai_filter_input {
+    min-width: 8;
+}
+
+AIAnalysisScreen #ai_filter_row Button {
+    min-width: 7;
+    margin-left: 1;
+}
+
+AIAnalysisScreen #ai_token_estimate {
+    height: auto;
+    padding: 0;
+    margin: 0;
+}
+
+AIAnalysisScreen ProgressIndicator,
+AIAnalysisScreen #ai_status,
+AIAnalysisScreen #ai_cost_info {
+    height: auto;
+    padding: 0;
+}
+
+AIAnalysisScreen #ai_run_controls {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 46;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 0 1;
+    background: $panel;
+}
+
+AIAnalysisScreen #ai_prompt_control {
+    height: auto;
+}
+
+AIAnalysisScreen .analysis_field_label {
+    height: 1;
+    color: $text-muted;
+}
+
+AIAnalysisScreen #ai_user_prompt {
+    margin: 0;
+}
+
+AIAnalysisScreen #ai_action_row {
+    height: 3;
+    padding: 0;
+    margin: 1 0 0 0;
+}
+
+AIAnalysisScreen #ai_action_row Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1 0 0;
+}
+
+AIAnalysisScreen #ai_action_row Button:last-child {
+    margin-right: 0;
+}
+
+AIAnalysisScreen #btn_back {
+    margin-top: 0;
+}
+
+AIAnalysisScreen.-content-narrow #ai_provider_info {
+    margin: 0 0 1 0;
+}
+
+AIAnalysisScreen.-content-narrow #ai_run_controls {
+    grid-size: 1;
+    grid-columns: 1fr;
+}
+
+AIAnalysisScreen.-content-narrow #ai_action_row {
+    margin: 0;
+}
+
+AIConversationsScreen #convs_container {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+AIConversationsScreen #convs_title {
+    height: 2;
+    border-bottom: solid $border-blurred;
+    color: $text-accent;
+    text-style: bold;
+}
+
+AIConversationsScreen #convs_subtitle {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+AIConversationsScreen #convs_tabs {
+    height: 1fr;
+    min-height: 16;
+}
+
+AIConversationsScreen TabPane {
+    height: 1fr;
+    padding: 1 0 0 0;
+    overflow-y: auto;
+}
+
+AIConversationsScreen #convs_search,
+AIConversationsScreen #local_search {
+    height: 3;
+    margin-bottom: 1;
+}
+
+AIConversationsScreen #convs_filter,
+AIConversationsScreen #local_filter {
+    width: 1fr;
+    background: $surface;
+}
+
+AIConversationsScreen #convs_search Button,
+AIConversationsScreen #local_search Button {
+    margin-left: 1;
+}
+
+AIConversationsScreen #convs_workspace,
+AIConversationsScreen #local_workspace {
+    height: 1fr;
+    min-height: 12;
+}
+
+AIConversationsScreen #convs_listing,
+AIConversationsScreen #local_listing {
+    width: 1fr;
+    height: 100%;
+}
+
+AIConversationsScreen #convs_scroll,
+AIConversationsScreen #local_scroll {
+    height: 1fr;
+    min-height: 5;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+    padding: 0 1;
+}
+
+AIConversationsScreen #convs_scroll:focus-within,
+AIConversationsScreen #local_scroll:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+AIConversationsScreen #convs_empty,
+AIConversationsScreen #local_empty {
+    height: auto;
+    color: $text-muted;
+    margin: 0 1;
+}
+
+AIConversationsScreen #convs_pager,
+AIConversationsScreen #local_pager {
+    height: auto;
+    min-height: 3;
+    align: left middle;
+}
+
+AIConversationsScreen #convs_status,
+AIConversationsScreen #local_status {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
+}
+
+AIConversationsScreen #convs_actions,
+AIConversationsScreen #local_actions {
+    layout: vertical;
+    width: 24;
+    height: auto;
+    padding-left: 1;
+    margin: 0;
+}
+
+AIConversationsScreen #convs_actions Button,
+AIConversationsScreen #local_actions Button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+AIConversationsScreen.-content-narrow #convs_title {
+    height: 1;
+    border-bottom: none;
+}
+
+AIConversationsScreen.-content-narrow #convs_subtitle {
+    margin-bottom: 0;
+}
+
+AIConversationsScreen.-content-narrow TabPane {
+    padding: 0;
+}
+
+AIConversationsScreen.-content-narrow #convs_search,
+AIConversationsScreen.-content-narrow #local_search {
+    margin-bottom: 0;
+}
+
+AIConversationsScreen.-content-narrow #convs_workspace,
+AIConversationsScreen.-content-narrow #local_workspace {
+    layout: vertical;
+    min-height: 14;
+}
+
+AIConversationsScreen.-content-narrow #convs_listing,
+AIConversationsScreen.-content-narrow #local_listing {
+    width: 100%;
+    height: 1fr;
+    min-height: 8;
+}
+
+AIConversationsScreen.-content-narrow #convs_actions,
+AIConversationsScreen.-content-narrow #local_actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+}
+
+AIConversationsScreen.-content-narrow #convs_actions Button,
+AIConversationsScreen.-content-narrow #local_actions Button {
+    margin: 0;
+}

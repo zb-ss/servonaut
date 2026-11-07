@@ -1,55 +1,75 @@
 
 /* ===================================================================
    Findings screens — proactive-monitoring inbox + finding detail.
-   Visual language mirrors the secrets screen: rounded $primary
-   borders for context cards, $accent for the primary CTA card,
-   $warning for attention states, $surface backgrounds.
+   Compact triage controls and bounded evidence readers.
    =================================================================== */
 
 #findings_container {
     width: 1fr;
     height: 100%;
-    padding: 1 2;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+#findings_heading {
+    height: auto;
+    border-bottom: solid $border-blurred;
+    margin-bottom: 1;
 }
 
 #findings_title {
-    text-align: center;
-    color: $accent;
+    width: 1fr;
+    height: auto;
+    text-align: left;
+    color: $text-accent;
 }
 
 #findings_subtitle {
-    text-align: center;
+    height: auto;
+    text-align: left;
     margin-bottom: 1;
     color: $text-muted;
 }
 
 #findings_status_pill {
-    text-align: center;
-    height: 1;
+    width: auto;
+    max-width: 70%;
+    height: auto;
+    text-align: right;
 }
 
 #findings_filter_line {
-    text-align: center;
-    margin-bottom: 1;
-    height: 1;
+    text-align: left;
+    padding: 0 1;
+    height: auto;
+    color: $text-muted;
+    background: $panel;
 }
 
 #findings_progress {
-    text-align: center;
-    height: 1;
+    text-align: left;
+    height: auto;
     margin-bottom: 1;
 }
 
 #findings_state_body {
     height: 1fr;
+    min-height: 6;
     padding: 0 1;
 }
 
 #findings_table_card {
-    height: 1fr;
-    border: round $primary;
-    background: $surface;
-    padding: 0 1;
+    width: 1fr;
+    height: 100%;
+    min-height: 6;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+    padding: 0;
+}
+
+#findings_table_card:focus-within {
+    border: round $accent;
 }
 
 #findings_table {
@@ -57,21 +77,33 @@
 }
 
 #findings_actions {
-    height: 3;
-    align: center middle;
+    layout: vertical;
+    width: 24;
+    height: 100%;
+    margin-right: 1;
 }
 
 #findings_actions Button {
-    margin: 0 1;
+    width: 100%;
+    min-width: 0;
+    margin: 0 0 1 0;
 }
 
 .findings_card {
-    border: round $primary;
-    background: $surface;
+    border: round $border-blurred;
+    background: transparent;
     padding: 1 2;
     margin: 0 0 1 0;
     height: auto;
     width: 1fr;
+}
+
+#finding_detail_context {
+    height: auto;
+    padding: 0 1;
+    border-left: heavy $accent;
+    background: $panel;
+    margin-bottom: 1;
 }
 
 .findings_card_primary {
@@ -83,7 +115,7 @@
 }
 
 .findings_card_title {
-    color: $accent;
+    color: $text-accent;
     text-style: bold;
     padding: 0 0 1 0;
     /* auto, not 1: Textual heights include padding, so height 1 with a
@@ -107,7 +139,7 @@
 }
 
 .findings_kv_row {
-    height: 1;
+    height: auto;
     layout: horizontal;
 }
 
@@ -119,7 +151,7 @@
 
 .findings_kv_value {
     width: 1fr;
-    height: 1;
+    height: auto;
     color: $text;
 }
 
@@ -137,7 +169,7 @@
 .findings_action_key {
     width: 6;
     height: 1;
-    color: $accent;
+    color: $text-accent;
     text-style: bold;
 }
 
@@ -152,32 +184,47 @@
 #finding_detail_container {
     width: 1fr;
     height: 100%;
-    padding: 1 2;
+    padding: 0 1;
+    overflow-y: auto;
 }
 
 #finding_detail_title {
-    text-align: center;
-    color: $accent;
+    height: auto;
+    text-align: left;
+    color: $text-accent;
 }
 
 #finding_detail_pill {
-    text-align: center;
-    margin-bottom: 1;
-    height: 1;
+    text-align: left;
+    height: auto;
 }
 
 #finding_detail_body {
-    height: 1fr;
+    width: 1fr;
+    height: 100%;
+    min-height: 6;
     padding: 0 1;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+#finding_detail_body:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
 }
 
 #finding_detail_actions {
-    height: 3;
-    align: center middle;
+    layout: vertical;
+    width: 24;
+    height: 100%;
+    margin-right: 1;
 }
 
 #finding_detail_actions Button {
-    margin: 0 1;
+    width: 100%;
+    min-width: 0;
+    margin: 0 0 1 0;
 }
 
 .finding_evidence_line {
@@ -204,7 +251,7 @@
     color: $text-muted;
 }
 
-/* ---- Remediation run buttons + confirm modal (Phase 3) ---- */
+/* ---- Remediation run buttons ---- */
 
 .finding_remediation_run {
     margin: 0 0 0 2;
@@ -212,52 +259,91 @@
     height: 3;
 }
 
-RemediationConfirmModal {
-    align: center middle;
+/* Keep validation visible above the application's default Static text role. */
+DangerousToolConfirmModal #dangerous_confirm_error {
+    color: $error;
 }
 
-#remediation_confirm_container {
-    width: 70%;
-    max-width: 90;
-    height: auto;
-    max-height: 80%;
-    background: $surface;
-    border: round $error;
-    padding: 1 2;
+/* Five complete actions use two rows when the workspace is narrow. */
+FindingsScreen.-content-narrow #findings_actions {
+    layout: grid;
+    grid-size: 3 2;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: 6;
+    width: 100%;
+    margin: 0 0 1 0;
 }
 
-#remediation_confirm_header {
-    height: auto;
-    padding: 0 0 1 0;
+FindingsScreen.-content-narrow #findings_actions Button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
 }
 
-#remediation_confirm_scroll {
-    height: auto;
-    max-height: 12;
-    border: round $accent;
-    padding: 0 1;
+FindingsScreen.-content-narrow #findings_heading {
+    layout: vertical;
 }
 
-#remediation_confirm_command {
-    height: auto;
+FindingsScreen.-content-narrow #findings_status_pill {
+    width: 100%;
+    max-width: 100%;
+    text-align: left;
 }
 
-#remediation_confirm_revert {
-    height: auto;
-    padding: 1 0 0 0;
+FindingDetailScreen.-content-narrow #finding_detail_actions {
+    layout: grid;
+    grid-size: 2 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: 6;
+    width: 100%;
+    margin: 0 0 1 0;
 }
 
-#remediation_confirm_input {
-    margin: 1 0;
+FindingDetailScreen.-content-narrow #finding_detail_actions Button {
+    width: 100%;
+    margin: 0;
 }
 
-#remediation_confirm_buttons {
-    layout: horizontal;
-    height: auto;
-    align: right middle;
+/* Child margins preserve card spacing in native descendant scrolling. */
+FindingDetailScreen #finding_detail_body > .findings_card {
+    padding: 0;
 }
 
-#remediation_confirm_buttons Button {
-    margin-left: 1;
-    min-width: 12;
+FindingDetailScreen #finding_detail_body > .findings_card > .findings_card_title {
+    margin: 1 2 0 2;
+}
+
+FindingDetailScreen #finding_detail_body > .findings_card > .findings_card_body {
+    margin: 0 2 1 2;
+}
+
+/* Wide views keep triage actions beside the reading surface. */
+#findings_triage_workspace {
+    height: 1fr;
+    min-height: 20;
+}
+
+#finding_detail_workspace {
+    height: 1fr;
+    min-height: 16;
+}
+
+FindingsScreen.-content-narrow #findings_triage_workspace,
+FindingDetailScreen.-content-narrow #finding_detail_workspace {
+    layout: vertical;
+    min-height: 14;
+}
+
+FindingsScreen.-content-narrow #findings_table_card,
+FindingDetailScreen.-content-narrow #finding_detail_body {
+    width: 100%;
+    height: 1fr;
+}
+
+FindingDetailScreen #finding_detail_body > .findings_card {
+    background: $panel;
 }

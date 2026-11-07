@@ -7,13 +7,14 @@ from typing import Optional, Sequence
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import ModalScreen, Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Markdown, Select, Static
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 
 
 _PROVIDER_LABELS = {
@@ -31,42 +32,83 @@ def provider_label(provider_name: str) -> str:
     return _PROVIDER_LABELS.get(normalised, normalised.replace("_", " ").title())
 
 
-class MemorySummaryScreen(Screen):
+class MemorySummaryScreen(WorkspaceScreen):
     """Full-screen Markdown reader for local and AI-enhanced summaries."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
 
     CSS_PATH = [*_APP_CSS_FILES]
 
     DEFAULT_CSS = """
     MemorySummaryScreen #memory-summary-container {
         width: 1fr;
+        height: 1fr;
+        padding: 0 1;
+        overflow-y: auto;
+    }
+
+    MemorySummaryScreen #memory-summary-context {
+        height: auto;
+        margin-bottom: 1;
         padding: 0 1;
     }
 
     MemorySummaryScreen #memory-summary-title {
         height: auto;
         text-style: bold;
-        margin-bottom: 1;
+        margin: 0;
+    }
+
+    MemorySummaryScreen #memory-summary-workspace {
+        height: 1fr;
+        min-height: 14;
+    }
+
+    MemorySummaryScreen #memory-summary-provenance {
+        width: 30;
+        height: 1fr;
+        border: round $panel;
+        background: $surface;
+    }
+
+    MemorySummaryScreen #memory-summary-provenance-scroll {
+        height: 1fr;
+        min-height: 2;
+        padding: 0 1;
     }
 
     MemorySummaryScreen #memory-summary-source {
         height: auto;
         color: $text-muted;
-        margin-bottom: 1;
+        margin: 0;
+    }
+
+    MemorySummaryScreen #memory-summary-reader {
+        width: 1fr;
+        height: 1fr;
+        min-height: 10;
+        margin-left: 1;
+        border: round $panel;
+        background: $surface;
+    }
+
+    MemorySummaryScreen .memory-summary-heading {
+        height: 1;
         padding: 0 1;
-        border-left: thick $primary;
+        text-style: bold;
+        color: $text;
     }
 
     MemorySummaryScreen #memory-summary-scroll {
         height: 1fr;
-        border: round $primary;
-        background: $surface;
         padding: 1 2;
     }
 
     MemorySummaryScreen #memory-summary-actions {
         height: auto;
-        align: right middle;
-        padding-top: 1;
+        padding: 0 1;
     }
 
     MemorySummaryScreen #memory-summary-markdown {
@@ -75,7 +117,29 @@ class MemorySummaryScreen(Screen):
     }
 
     MemorySummaryScreen #memory-summary-back {
-        min-width: 12;
+        width: 1fr;
+        min-width: 0;
+        margin: 0;
+    }
+
+    MemorySummaryScreen.-content-narrow #memory-summary-workspace {
+        layout: vertical;
+        min-height: 19;
+    }
+
+    MemorySummaryScreen.-content-narrow #memory-summary-provenance {
+        width: 100%;
+        height: 7;
+        margin-bottom: 1;
+    }
+
+    MemorySummaryScreen.-content-narrow #memory-summary-reader {
+        width: 100%;
+        margin-left: 0;
+    }
+
+    MemorySummaryScreen.-content-narrow #memory-summary-scroll {
+        padding: 0 1;
     }
     """
 
@@ -98,26 +162,42 @@ class MemorySummaryScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose a focused, scrollable Markdown reading surface."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Memory Summary")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(
-                    f"[bold $text-accent]{escape(self._title)}[/bold $text-accent]",
-                    id="memory-summary-title",
-                ),
-                Static(
-                    escape(self._source_label),
-                    id="memory-summary-source",
-                ),
-                ScrollableContainer(
-                    Markdown(self._summary, id="memory-summary-markdown"),
-                    id="memory-summary-scroll",
+                Container(
+                    Static(
+                        f"[bold $text-accent]{escape(self._title)}[/bold $text-accent]",
+                        id="memory-summary-title",
+                    ),
+                    id="memory-summary-context",
                 ),
                 Horizontal(
-                    Button("Back", variant="primary", id="memory-summary-back"),
-                    id="memory-summary-actions",
+                    Container(
+                        Static("Source and provenance", classes="memory-summary-heading"),
+                        ScrollableContainer(
+                            Static(escape(self._source_label), id="memory-summary-source"),
+                            id="memory-summary-provenance-scroll",
+                        ),
+                        Horizontal(
+                            Button("Back", variant="primary", id="memory-summary-back"),
+                            id="memory-summary-actions",
+                        ),
+                        id="memory-summary-provenance",
+                    ),
+                    Container(
+                        Static("Summary", id="memory-summary-reader-heading", classes="memory-summary-heading"),
+                        ScrollableContainer(
+                            Markdown(self._summary, id="memory-summary-markdown"),
+                            id="memory-summary-scroll",
+                        ),
+                        id="memory-summary-reader",
+                    ),
+                    id="memory-summary-workspace",
                 ),
                 id="memory-summary-container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -184,7 +264,7 @@ class AIEnhanceConsentModal(ModalScreen[Optional[str]]):
     ]
 
     def __init__(self, provider_names: Sequence[str]) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         clean_names = list(
             dict.fromkeys(
                 name.strip().lower() for name in provider_names if name.strip()
@@ -201,29 +281,34 @@ class AIEnhanceConsentModal(ModalScreen[Optional[str]]):
             for provider_name in self._provider_names
         ]
         selected = self._provider_names[0]
-        yield Container(
-            Static("Enhance local summary with AI", id="ai-enhance-consent-title"),
-            Static(
-                "Choose the exact provider for this one request. Your configured "
-                "default is not changed.",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static("Enhance local summary with AI", id="ai-enhance-consent-title"),
+                Static(
+                    "Choose the exact provider for this one request. Your configured "
+                    "default is not changed.",
+                ),
+                Select(
+                    options,
+                    value=selected,
+                    allow_blank=False,
+                    id="ai-enhance-provider",
+                ),
             ),
-            Select(
-                options,
-                value=selected,
-                allow_blank=False,
-                id="ai-enhance-provider",
+            body=DialogBody(
+                Static(
+                    self._disclosure_text(selected),
+                    id="ai-enhance-disclosure",
+                ),
+                Static(
+                    "[bold]Guardrails:[/bold] AI tools are disabled and no fallback "
+                    "provider will be used. Only the local Markdown summary is sent; "
+                    "review View Summary first if it contains sensitive annotations.",
+                    id="ai-enhance-guardrails",
+                ),
             ),
-            Static(
-                self._disclosure_text(selected),
-                id="ai-enhance-disclosure",
-            ),
-            Static(
-                "[bold]Guardrails:[/bold] AI tools are disabled and no fallback "
-                "provider will be used. Only the local Markdown summary is sent; "
-                "review View Summary first if it contains sensitive annotations.",
-                id="ai-enhance-guardrails",
-            ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", id="ai-enhance-cancel"),
                 Button(
                     "Consent and enhance",
@@ -233,6 +318,7 @@ class AIEnhanceConsentModal(ModalScreen[Optional[str]]):
                 id="ai-enhance-actions",
             ),
             id="ai-enhance-consent-container",
+            size="standard", severity="warning",
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:

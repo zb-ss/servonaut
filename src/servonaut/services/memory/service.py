@@ -451,7 +451,6 @@ class MemoryService(MemoryServiceInterface):
                         ),
                     )
 
-        tasks = [run_one(p) for p in selected_probers]
         try:
             # Connection preparation (vault lookup, Retry-After, bastion slot,
             # shared connection) has a budget of its own; the probers' command
@@ -459,6 +458,7 @@ class MemoryService(MemoryServiceInterface):
             prepare = getattr(ssh_runner, "prepare", None)
             if prepare is not None:
                 await prepare()
+            tasks = [run_one(p) for p in selected_probers]
             raw_results = await asyncio.gather(*tasks)
         finally:
             # Success, failure or cancellation: the shared connection ends with the build.

@@ -128,7 +128,7 @@ def offline_services(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(UpdateService, "check_for_update", no_update)
     monkeypatch.setattr(AWSService, "fetch_instances_cached", seeded_instances)
     monkeypatch.setattr(
-        "servonaut.widgets.sidebar.get_version", lambda: _harness.PINNED_VERSION
+        "servonaut.get_version", lambda: _harness.PINNED_VERSION
     )
 
 

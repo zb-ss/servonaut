@@ -1,101 +1,213 @@
-/* ===================================================================
-   LOGIN & ACCOUNT SCREEN
-   =================================================================== */
-
-#login_container {
+/* Account status is the masthead; each authentication state owns one workspace. */
+LoginScreen #login_container {
     width: 1fr;
     height: 100%;
-    align: center middle;
-    background: $surface;
-}
-
-#login_box {
-    width: 80%;
-    max-width: 90;
-    height: auto;
-    background: $panel;
-    border: round $primary;
-    padding: 2 4;
-}
-
-#login_title {
-    width: 100%;
-    text-align: center;
-    margin-bottom: 2;
-    color: $accent;
-    text-style: bold;
-}
-
-.login_notice {
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#login_description {
-    width: 100%;
-    margin-bottom: 2;
-    color: $text-muted;
-}
-
-.auth_state_container {
-    width: 100%;
-    height: auto;
     align: center top;
-}
-
-#device_flow_container {
-    border: round $accent;
-    background: $boost;
     padding: 1 2;
-    margin-bottom: 2;
+    background: $surface;
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
-#device_code_info, #device_url, #device_code, #device_status {
+LoginScreen #login_box {
     width: 100%;
-    text-align: center;
+    max-width: 112;
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+LoginScreen #account_heading {
+    width: 100%;
+    height: auto;
     margin-bottom: 1;
 }
 
-#device_code {
-    color: $warning;
+LoginScreen #login_title {
+    width: 1fr;
+    height: auto;
+    color: $text;
     text-style: bold;
 }
 
-#account_info_header {
-    width: 100%;
+LoginScreen #account_state_summary {
+    width: 1fr;
     height: auto;
-    border-bottom: wide $primary;
-    padding-bottom: 1;
+    padding-left: 1;
+    border-left: thick $accent;
+    color: $text;
+}
+
+LoginScreen #account_overview {
+    height: auto;
+    color: $text-muted;
     margin-bottom: 1;
 }
 
-#entitlements_info {
+LoginScreen .auth_state_container {
     width: 100%;
-    margin-bottom: 2;
+    height: auto;
+}
+
+LoginScreen #logged_out_container,
+LoginScreen #logged_in_container {
+    layout: horizontal;
+}
+
+LoginScreen .account_panel {
+    width: 1fr;
+    height: auto;
+    padding: 1;
+    margin: 0 1 1 0;
+    background: transparent;
+}
+
+LoginScreen #browser_sign_in_panel,
+LoginScreen #account_info_header {
+    border: round $border-blurred;
+    background: transparent;
+}
+
+LoginScreen .account_section_heading {
+    margin-bottom: 1;
+    height: auto;
+    color: $text;
+}
+
+LoginScreen #login_description,
+LoginScreen #browser_sign_in_hint,
+LoginScreen #account_info,
+LoginScreen #plan_info,
+LoginScreen #entitlements_info {
+    height: auto;
+    margin-bottom: 1;
+}
+
+LoginScreen #plan_info {
+    padding-top: 1;
+    border-top: solid $border-blurred;
+}
+
+LoginScreen .login_notice {
+    height: auto;
+    border: round $border-blurred;
+    background: transparent;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+LoginScreen #device_flow_container {
+    border: round $border-blurred;
+    background: transparent;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+LoginScreen #device_flow_steps {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+LoginScreen #device_credentials,
+LoginScreen #device_progress {
+    width: 1fr;
+    height: auto;
+}
+
+LoginScreen #device_progress {
+    padding: 0 1;
+    margin-left: 1;
+    border-left: solid $border-blurred;
+}
+
+LoginScreen #device_code_info,
+LoginScreen #device_url,
+LoginScreen #device_code,
+LoginScreen #device_status,
+LoginScreen #device_flow_hint,
+LoginScreen #account_authorization_busy {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+LoginScreen #device_flow_hint {
     color: $text-muted;
 }
 
-#login_actions {
+LoginScreen #device_code {
+    padding: 1;
+    color: $text;
+    background: $boost;
+    text-style: bold;
+}
+
+LoginScreen #account_authorization_busy {
+    color: $text-accent;
+}
+
+LoginScreen #login_actions {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 2fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
     width: 100%;
     height: auto;
-    align: center middle;
-    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $border-blurred;
 }
 
-#btn_login, #btn_cancel_login {
+LoginScreen #login_actions Button,
+LoginScreen #btn_login,
+LoginScreen #btn_cancel_login {
     width: 100%;
+    min-width: 0;
+    height: 3;
+    margin: 0;
+}
+
+LoginScreen #btn_login {
     margin-top: 1;
 }
 
-/* Secondary navigation buttons on the login modal — kept compact + uniform
-   so Logout (logged-in view) and Back (both views) line up. The horizontal
-   margin separates them; row-level vertical spacing is owned by the parent
-   Horizontal (#login_actions) so we don't push #btn_back down on OVH /
-   other screens that put Back inline with other action buttons. */
-#btn_back, #btn_logout, #btn_logout_local {
-    width: auto;
-    min-width: 16;
-    margin: 0 1;
+LoginScreen #btn_cancel_login {
+    width: 20;
+    max-width: 100%;
 }
 
+LoginScreen.-content-narrow #login_container {
+    padding: 1;
+}
+
+LoginScreen.-content-narrow #account_heading,
+LoginScreen.-content-narrow #logged_out_container,
+LoginScreen.-content-narrow #logged_in_container,
+LoginScreen.-content-narrow #device_flow_steps,
+LoginScreen.-content-narrow #login_actions {
+    layout: vertical;
+}
+
+LoginScreen.-content-narrow #login_title,
+LoginScreen.-content-narrow #account_state_summary,
+LoginScreen.-content-narrow .account_panel,
+LoginScreen.-content-narrow #device_credentials,
+LoginScreen.-content-narrow #device_progress {
+    width: 100%;
+    margin-right: 0;
+}
+
+LoginScreen.-content-narrow #login_title {
+    margin-bottom: 1;
+}
+
+LoginScreen.-content-narrow #device_progress {
+    border-left: none;
+    border-top: solid $border-blurred;
+    padding: 1 0 0 0;
+    margin-left: 0;
+}
+
+LoginScreen.-content-narrow #login_actions Button {
+    margin-bottom: 1;
+}

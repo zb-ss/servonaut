@@ -7,18 +7,17 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
-from textual.widgets import Footer, Static, Button, DataTable
+from textual.widgets import Footer, Static, Button, DataTable, TextArea
 from textual.worker import Worker
 
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
 from servonaut.utils.instance_resolver import display_name
 
 
-class ScanResultsScreen(Screen):
+class ScanResultsScreen(WorkspaceScreen):
     """Screen for displaying keyword scan results.
 
     Shows cached scan results or allows triggering a new scan.
@@ -28,6 +27,11 @@ class ScanResultsScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("s", "scan_now", "Scan Now", show=True),
     ]
+
+    AUTO_FOCUS = "#scan_button"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
 
     def __init__(self, instance: dict) -> None:
         """Initialize scan results screen.
@@ -40,28 +44,40 @@ class ScanResultsScreen(Screen):
         self._results: List[dict] = []
 
     def compose(self) -> ComposeResult:
-        """Compose the scan results UI."""
+        """Compose the scan results and complete selected-match reader."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(
+        yield WorkspaceControls("Keyword scan")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="scan_container", classes="workspace-content"):
+                yield Static(
                     f"[bold $text-accent]Scan Results[/bold $text-accent]\n"
                     f"Instance: {escape(str(display_name(self._instance) or self._instance.get('id')))}",
                     id="scan_banner"
-                ),
-                Vertical(
-                    Button("Trigger New Scan", variant="primary", id="scan_button"),
-                    Static("", id="scan_status"),
-                    DataTable(id="results_table"),
-                    id="results_container"
-                ),
-                id="scan_container"
-            )
+                )
+                with Vertical(id="results_container"):
+                    yield Horizontal(
+                        Button("Trigger New Scan", variant="primary", id="scan_button"),
+                        Static("", id="scan_status"),
+                        id="scan_controls",
+                    )
+                    with Horizontal(id="scan_match_workspace"):
+                        yield Container(
+                            DataTable(id="results_table"),
+                            id="scan_results_panel",
+                        )
+                        yield TextArea(
+                            "Select a keyword match to read its complete content.",
+                            read_only=True,
+                            soft_wrap=True,
+                            id="scan_match_detail",
+                        )
         yield Footer()
 
     def on_mount(self) -> None:
         """Load cached scan results when mounted."""
+        self.query_one("#scan_results_panel").border_title = "Keyword matches"
+        self.query_one("#scan_match_detail", TextArea).border_title = "Selected match · complete text"
         self._setup_table()
         self._load_cached_results()
 
@@ -113,6 +129,26 @@ class ScanResultsScreen(Screen):
             content_display = _s(content_display.replace('\n', ' '))
 
             table.add_row(source, content_display, timestamp)
+        self._show_match(table.cursor_row)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "results_table":
+            self._show_match(event.cursor_row)
+
+    def _show_match(self, index: int) -> None:
+        """Keep the complete selected result selectable without table truncation."""
+        detail = self.query_one("#scan_match_detail", TextArea)
+        if not 0 <= index < len(self._results):
+            detail.load_text("Select a keyword match to read its complete content.")
+            return
+        match = self._results[index]
+        source = str(match.get("source", "Unknown"))
+        timestamp = str(match.get("timestamp", ""))
+        content = str(match.get("content", ""))
+        document = f"Source: {source}\nTimestamp: {timestamp}\n\n{content}"
+        if self.app.demo_mode and self.app.redaction_service:
+            document = self.app.redaction_service.scrub_stream(document)
+        detail.load_text(document)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
@@ -196,9 +232,9 @@ class ScanResultsScreen(Screen):
                     if instance_id:
                         self.app.keyword_store.save_results(instance_id, results)
 
-                    # Update display
+                    # Refresh both reading surfaces even when the scan is empty.
+                    self._populate_table()
                     if results:
-                        self._populate_table()
                         status.update(f"[$text-success]Scan completed: {len(results)} results found[/$text-success]")
                         self.app.notify(f"Scan completed: {len(results)} results", severity="information")
                     else:

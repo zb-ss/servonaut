@@ -12,9 +12,15 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
+
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 # Entitlement-key → human-readable copy.
@@ -66,62 +72,33 @@ class UpsellModal(ModalScreen[None]):
         entitlement_key: The feature slug that is required (e.g. ``"memory_sync"``).
     """
 
-    DEFAULT_CSS = """
-    UpsellModal {
-        align: center middle;
-    }
-
-    #upsell-container {
-        width: 64;
-        height: auto;
-        border: round $warning;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #upsell-title {
-        text-style: bold;
-        color: $warning;
-        margin-bottom: 1;
-    }
-
-    #upsell-body {
-        margin-bottom: 1;
-    }
-
-    #upsell-btn-row {
-        height: auto;
-        align: right middle;
-        margin-top: 1;
-    }
-
-    #upsell-btn-close {
-        margin-right: 1;
-    }
-    """
+    AUTO_FOCUS = "#upsell-btn-close"
 
     BINDINGS = [
         Binding("escape", "close", "Close", show=True),
     ]
 
     def __init__(self, entitlement_key: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._key = entitlement_key
 
     def compose(self) -> ComposeResult:
         feature_name, description = _UPSELL_COPY.get(self._key, _DEFAULT_UPSELL)
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 f"[bold $text-warning]Upgrade Required: {feature_name}[/bold $text-warning]",
                 id="upsell-title",
             ),
-            Static(description, id="upsell-body"),
-            Horizontal(
+            body=DialogBody(Static(description, id="upsell-body")),
+            actions=DialogActions(
                 Button("Close", variant="default", id="upsell-btn-close"),
                 Button("View Plans", variant="warning", id="upsell-btn-upgrade"),
                 id="upsell-btn-row",
             ),
             id="upsell-container",
+            size="compact",
+            severity="warning",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -136,55 +113,33 @@ class UpsellModal(ModalScreen[None]):
 class BetaWaitlistModal(ModalScreen[None]):
     """Modal shown when the user's account is on the beta waitlist for memory sync."""
 
-    DEFAULT_CSS = """
-    BetaWaitlistModal {
-        align: center middle;
-    }
-
-    #waitlist-container {
-        width: 60;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #waitlist-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    #waitlist-body {
-        margin-bottom: 1;
-    }
-
-    #waitlist-btn-row {
-        height: auto;
-        align: center middle;
-        margin-top: 1;
-    }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#waitlist-btn-ok"
 
     BINDINGS = [
         Binding("escape", "close", "Close", show=True),
     ]
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "[bold $text-accent]You're on the Waitlist[/bold $text-accent]",
                 id="waitlist-title",
             ),
-            Static(
-                "Memory sync is in private beta. You're on the waitlist and will "
-                "be notified by email when access is granted.",
-                id="waitlist-body",
+            body=DialogBody(
+                Static(
+                    "Memory sync is in private beta. You're on the waitlist and will "
+                    "be notified by email when access is granted.",
+                    id="waitlist-body",
+                ),
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("OK", variant="primary", id="waitlist-btn-ok"),
                 id="waitlist-btn-row",
             ),
             id="waitlist-container",
+            size="compact",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -197,57 +152,35 @@ class BetaWaitlistModal(ModalScreen[None]):
 class BackendMaintenanceModal(ModalScreen[None]):
     """Modal shown when the memory sync backend is undergoing maintenance."""
 
-    DEFAULT_CSS = """
-    BackendMaintenanceModal {
-        align: center middle;
-    }
-
-    #maintenance-container {
-        width: 60;
-        height: auto;
-        border: round $error;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #maintenance-title {
-        text-style: bold;
-        color: $error;
-        margin-bottom: 1;
-    }
-
-    #maintenance-body {
-        margin-bottom: 1;
-    }
-
-    #maintenance-btn-row {
-        height: auto;
-        align: center middle;
-        margin-top: 1;
-    }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#maintenance-btn-ok"
 
     BINDINGS = [
         Binding("escape", "close", "Close", show=True),
     ]
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "[bold $text-error]Memory Sync Unavailable[/bold $text-error]",
                 id="maintenance-title",
             ),
-            Static(
-                "The memory sync backend is currently undergoing maintenance. "
-                "Local memory features continue to work. "
-                "Cloud sync will resume automatically once maintenance is complete.",
-                id="maintenance-body",
+            body=DialogBody(
+                Static(
+                    "The memory sync backend is currently undergoing maintenance. "
+                    "Local memory features continue to work. "
+                    "Cloud sync will resume automatically once maintenance is complete.",
+                    id="maintenance-body",
+                ),
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("OK", variant="default", id="maintenance-btn-ok"),
                 id="maintenance-btn-row",
             ),
             id="maintenance-container",
+            size="compact",
+            severity="danger",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

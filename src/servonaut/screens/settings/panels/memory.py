@@ -28,10 +28,11 @@ from typing import Any, Dict
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class MemoryPanel(SettingsPanel):
 
     PANEL_ID = "memory"
     TITLE = "Memory & Sync"
+    DESCRIPTION = 'Local memory collection, privacy, freshness and agent findings.'
 
     DEFAULT_CSS = """
     MemoryPanel .memory-section-label {
@@ -85,116 +87,109 @@ class MemoryPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield all Memory & Sync form rows."""
-        # ---- Master switches ----------------------------------------
-        yield Static("Master switches", classes="memory-section-label")
-        yield Horizontal(
-            Static("Memory enabled", classes="label"),
-            Switch(id="memory_enabled"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Sync encryption enabled", classes="label"),
-            Switch(id="memory_sync_encryption"),
-            classes="setting_row",
-        )
-        yield Static("Device auto-unlock", classes="memory-section-label")
-        yield Horizontal(
-            Static("Remembered unlock", classes="label"),
-            Static("", id="memory_device_auto_unlock_status"),
-            Button("Manage…", id="memory_manage_device_auto_unlock"),
-            classes="setting_row",
-        )
-
-        # ---- Redaction -----------------------------------------------
-        yield Static("Privacy", classes="memory-section-label")
-        yield Horizontal(
-            Static("Redaction enabled", classes="label"),
-            Switch(id="memory_redaction_enabled"),
-            classes="setting_row",
-        )
-
-        # ---- Module control ------------------------------------------
-        yield Static("Module control", classes="memory-section-label")
-        yield Horizontal(
-            Static("Disabled modules", classes="label"),
-            classes="setting_row",
-        )
-        yield StringListEditor(
-            placeholder="module name (e.g. containers)",
-            id="memory_disabled_modules",
-        )
-
-        # ---- TTL overrides -------------------------------------------
-        yield Static("TTL overrides (seconds)", classes="memory-section-label")
-        yield Horizontal(
-            Static("Default TTL overrides", classes="label"),
-            classes="setting_row",
-        )
-        yield KeyValueEditor(
-            key_placeholder="module name",
-            value_placeholder="seconds",
-            value_is_int=True,
-            id="memory_ttl_overrides",
-        )
-
-        # ---- Staleness thresholds ------------------------------------
-        yield Static("Staleness thresholds", classes="memory-section-label")
-        yield Horizontal(
-            Static("Snapshot stale (seconds)", classes="label"),
-            Input(placeholder="604800", id="memory_snapshot_stale"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("First-connect reprompt (seconds)", classes="label"),
-            Input(placeholder="1209600", id="memory_first_connect_reprompt"),
-            classes="setting_row",
-        )
-
-        # ---- Background automation -----------------------------------
-        yield Static("Background automation", classes="memory-section-label")
-        yield Horizontal(
-            Static("Background fleet auto-scan", classes="label"),
-            Switch(id="memory_auto_scan_enabled"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Auto-scan interval (seconds)", classes="label"),
-            Input(placeholder="86400", id="memory_auto_scan_interval"),
-            classes="setting_row",
-        )
-        # ---- Agent findings ------------------------------------------
-        yield Static("Agent findings", classes="memory-section-label")
-        yield Horizontal(
-            Static("Findings sync enabled", classes="label"),
-            Switch(id="memory_findings_sync"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Confidence threshold (0–1)", classes="label"),
-            Input(placeholder="0.6", id="memory_findings_confidence"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Findings with a score below this are omitted from injected context.",
-            classes="memory-confidence-hint",
-        )
-        yield Horizontal(
-            Static("Findings index char cap", classes="label"),
-            Input(placeholder="1200", id="memory_findings_index_char_cap"),
-            classes="setting_row",
-        )
-
-        # ---- Per-server overrides (read-only summary) ----------------
-        yield Static("Per-server overrides", classes="memory-section-label")
-        yield Static(
-            "", id="memory_per_server_summary", classes="memory-per-server-note"
-        )
-        yield Static(
-            "Per-server overrides (memory_disabled, module exclusions) are "
-            "managed via the instance context menu or by editing config.json "
-            "directly.",
-            classes="memory-per-server-note",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Master switches ----------------------------------------
+            yield Static("Master switches", classes="memory-section-label settings-group-title")
+            yield setting_row(
+                "Memory enabled",
+                Switch(id="memory_enabled"),
+            )
+            yield setting_row(
+                "Sync encryption enabled",
+                Switch(id="memory_sync_encryption"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static("Device auto-unlock", classes="memory-section-label settings-group-title")
+            yield Horizontal(
+                Static("Remembered unlock", classes="label"),
+                Static("", id="memory_device_auto_unlock_status"),
+                Button("Manage…", id="memory_manage_device_auto_unlock"),
+                classes="setting_row",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Redaction -----------------------------------------------
+            yield Static("Privacy", classes="memory-section-label settings-group-title")
+            yield setting_row(
+                "Redaction enabled",
+                Switch(id="memory_redaction_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Module control ------------------------------------------
+            yield Static("Module control", classes="memory-section-label settings-group-title")
+            yield Horizontal(
+                Static("Disabled modules", classes="label"),
+                classes="setting_row",
+            )
+            yield StringListEditor(
+                placeholder="module name (e.g. containers)",
+                id="memory_disabled_modules",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- TTL overrides -------------------------------------------
+            yield Static("TTL overrides (seconds)", classes="memory-section-label settings-group-title")
+            yield Horizontal(
+                Static("Default TTL overrides", classes="label"),
+                classes="setting_row",
+            )
+            yield KeyValueEditor(
+                key_placeholder="module name",
+                value_placeholder="seconds",
+                value_is_int=True,
+                id="memory_ttl_overrides",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Staleness thresholds ------------------------------------
+            yield Static("Staleness thresholds", classes="memory-section-label settings-group-title")
+            yield setting_row(
+                "Snapshot stale (seconds)",
+                Input(placeholder="604800", id="memory_snapshot_stale"),
+            )
+            yield setting_row(
+                "First-connect reprompt (seconds)",
+                Input(placeholder="1209600", id="memory_first_connect_reprompt"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Background automation -----------------------------------
+            yield Static("Background automation", classes="memory-section-label settings-group-title")
+            yield setting_row(
+                "Background fleet auto-scan",
+                Switch(id="memory_auto_scan_enabled"),
+            )
+            yield setting_row(
+                "Auto-scan interval (seconds)",
+                Input(placeholder="86400", id="memory_auto_scan_interval"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Agent findings ------------------------------------------
+            yield Static("Agent findings", classes="memory-section-label settings-group-title")
+            yield setting_row(
+                "Findings sync enabled",
+                Switch(id="memory_findings_sync"),
+            )
+            yield setting_row(
+                "Confidence threshold (0–1)",
+                Input(placeholder="0.6", id="memory_findings_confidence"),
+            )
+            yield Static(
+                "Findings with a score below this are omitted from injected context.",
+                classes="memory-confidence-hint",
+            )
+            yield setting_row(
+                "Findings index char cap",
+                Input(placeholder="1200", id="memory_findings_index_char_cap"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # ---- Per-server overrides (read-only summary) ----------------
+            yield Static("Per-server overrides", classes="memory-section-label settings-group-title")
+            yield Static(
+                "", id="memory_per_server_summary", classes="memory-per-server-note"
+            )
+            yield Static(
+                "Per-server overrides (memory_disabled, module exclusions) are "
+                "managed via the instance context menu or by editing config.json "
+                "directly.",
+                classes="memory-per-server-note",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

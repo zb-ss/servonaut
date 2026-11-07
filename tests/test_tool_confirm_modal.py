@@ -135,6 +135,18 @@ async def test_standard_modal_denies_on_n_and_escape():
         assert app.dismissed == [False], f"key {key!r} should deny"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_standard_modal_initial_enter_denies(size: tuple[int, int]) -> None:
+    """An accidental Enter must not approve an AI-originated operation."""
+    app = _WrapperApp(ToolConfirmModal("run_command", {"command": "uptime"}))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.dismissed == [False]
+
+
 # ---------------------------------------------------------------------------
 # build_modal_confirm: a prompt past its deadline closes itself
 # ---------------------------------------------------------------------------
@@ -205,3 +217,34 @@ async def test_modal_confirm_returns_the_answer():
         await worker.wait()
 
     assert outcome == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_confirmation_never_pops_another_modal() -> None:
+    """Expiry cleanup leaves a newer topmost prompt in place."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from textual.screen import ModalScreen
+
+    from servonaut.screens.tool_confirm_modal import build_modal_confirm
+
+    app = App()
+    async with app.run_test() as pilot:
+        call = SimpleNamespace(tool="run_command", args={}, guard_level="standard")
+        worker = app.run_worker(build_modal_confirm(app)(call), exit_on_error=False)
+        await wait_until(lambda: _prompt_is_open(app))
+        original = app.screen
+        overlay = ModalScreen()
+        app.push_screen(overlay)
+        await pilot.pause()
+        worker.cancel()
+        await wait_until(lambda: worker.is_finished)
+        await pilot.pause()
+        assert app.screen is overlay and original in app.screen_stack
+        overlay.dismiss()
+        await pilot.pause()
+        assert app.screen is original
+        await pilot.press("escape")
+        await pilot.pause()
+        assert original not in app.screen_stack

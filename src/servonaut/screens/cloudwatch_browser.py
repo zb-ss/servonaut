@@ -17,8 +17,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -101,8 +100,12 @@ def _reset_columns(table: DataTable, columns: Sequence[Tuple[str, int]]) -> None
         table.add_column(label, width=width)
 
 
-class CloudWatchBrowserScreen(Screen):
+class CloudWatchBrowserScreen(WorkspaceScreen):
     """Screen for browsing AWS CloudWatch log groups and events."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 80
+    CONTENT_NARROW_WIDTH = 125
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -117,9 +120,8 @@ class CloudWatchBrowserScreen(Screen):
 
     _IP_FILTERS = ["All", "Allowed", "Blocked"]
 
-    # The screen gets -narrow / -wide and -short / -tall classes by terminal
-    # size; the stylesheet lays the filters out on one row only when they fit
-    # and trims vertical padding on a short terminal.
+    # Filter columns follow the available workspace content width. Terminal
+    # height still supplies -short / -tall for compact vertical spacing.
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
@@ -132,10 +134,13 @@ class CloudWatchBrowserScreen(Screen):
         self._top_ips: List[Dict[str, Any]] = []
         self._selected_event_row: Optional[int] = None
         self._selected_ip_row: Optional[int] = None
+        self._fetch_error: Optional[str] = None
         self._current_page: int = 0
         self._ip_filter_index: int = 0  # Index into _IP_FILTERS
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     @property
@@ -151,94 +156,101 @@ class CloudWatchBrowserScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Label(
-                    "[bold]CloudWatch Logs Browser[/bold]",
-                    id="cloudwatch_title",
-                ),
-            # A grid, so a narrow terminal can wrap the filters onto two rows
-            # (see HORIZONTAL_BREAKPOINTS and the stylesheet).
-            Container(
-                # Shown only when there are several AWS accounts; the
-                # stylesheet then gives the grid a column for it.
-                AccountPicker(provider_accounts(self.app, "aws"), id="cw_filter_account"),
-                Vertical(
-                    Label("Region"),
-                    Select(
-                        # The code first: a narrow control cuts the end off.
-                        [(f"{value} — {label}", value) for label, value in _AWS_REGIONS],
-                        prompt="Select region",
-                        id="cw_select_region",
-                        allow_blank=True,
+        yield WorkspaceControls("CloudWatch Logs")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="cloudwatch_outer", classes="workspace-content"):
+                yield Horizontal(
+                    Label("[bold]CloudWatch Logs[/bold]", id="cloudwatch_title"),
+                    Static("No events loaded", id="cloudwatch_context"),
+                    id="cloudwatch_heading",
+                )
+                yield Container(
+                    # Shown only when there are several AWS accounts; the
+                    # stylesheet then gives the grid a column for it.
+                    AccountPicker(provider_accounts(self.app, "aws"), id="cw_filter_account"),
+                    Vertical(
+                        Label("Region"),
+                        Select(
+                            # The code first: a narrow control cuts the end off.
+                            [(f"{value} — {label}", value) for label, value in _AWS_REGIONS],
+                            prompt="Select region",
+                            id="cw_select_region",
+                            allow_blank=True,
+                        ),
+                        id="cw_filter_region",
                     ),
-                    id="cw_filter_region",
-                ),
-                Vertical(
-                    Label("Log Group"),
-                    Select(
-                        [],
-                        prompt="Select region first",
-                        id="cw_select_log_group",
-                        allow_blank=True,
+                    Vertical(
+                        Label("Log Group"),
+                        Select(
+                            [],
+                            prompt="Select region first",
+                            id="cw_select_log_group",
+                            allow_blank=True,
+                        ),
+                        id="cw_filter_log_group",
                     ),
-                    id="cw_filter_log_group",
-                ),
-                Vertical(
-                    Label("Time Range"),
-                    Select(
-                        _TIME_RANGE_OPTIONS,
-                        value=60,
-                        id="cw_select_time_range",
-                        allow_blank=False,
+                    Vertical(
+                        Label("Time Range"),
+                        Select(
+                            _TIME_RANGE_OPTIONS,
+                            value=60,
+                            id="cw_select_time_range",
+                            allow_blank=False,
+                        ),
+                        id="cw_filter_time_range",
                     ),
-                    id="cw_filter_time_range",
-                ),
-                Vertical(
-                    Label("Filter Pattern"),
-                    Input(
-                        placeholder="e.g. ERROR",
-                        id="cw_input_filter_pattern",
+                    Vertical(
+                        Label("Filter Pattern"),
+                        Input(
+                            placeholder="e.g. ERROR",
+                            id="cw_input_filter_pattern",
+                        ),
+                        id="cw_filter_pattern",
                     ),
-                    id="cw_filter_pattern",
-                ),
-                Button("Fetch", id="cw_btn_fetch", variant="primary"),
-                Button("Back", id="cw_btn_back", variant="default"),
-                id="cloudwatch_filter_bar",
-            ),
-            Horizontal(
-                DataTable(id="cloudwatch_events_table"),
-                Vertical(
-                    Horizontal(
-                        Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
-                        Static("[dim]\\[All][/dim]", id="cw_btn_ip_filter"),
-                        id="cw_top_ips_header",
-                    ),
-                    DataTable(id="cloudwatch_ips_table"),
-                    Button("Ban Selected IP", id="cw_btn_ban_ip", variant="error"),
-                    id="cloudwatch_ips_panel",
-                ),
-                id="cloudwatch_main_content",
-            ),
-            Horizontal(
-                Button("◀ Prev", id="cw_btn_prev", variant="default"),
-                Static("", id="cw_page_info"),
-                Button("Next ▶", id="cw_btn_next", variant="default"),
-                id="cloudwatch_pager",
-            ),
-            VerticalScroll(
-                Static(
-                    "Select a log event to view the full message.",
-                    id="cloudwatch_detail_text",
-                ),
-                id="cloudwatch_detail",
-            ),
-            id="cloudwatch_outer",
-        )
+                    Button("Fetch", id="cw_btn_fetch", variant="primary"),
+                    Button("Back", id="cw_btn_back", variant="default"),
+                    id="cloudwatch_filter_bar",
+                )
+                with Horizontal(id="cloudwatch_main_content"):
+                    yield Vertical(
+                        DataTable(id="cloudwatch_events_table"),
+                        Vertical(
+                            Static("", id="cw_page_info"),
+                            Horizontal(
+                                Button("◀ Prev", id="cw_btn_prev", variant="default"),
+                                Button("Next ▶", id="cw_btn_next", variant="default"),
+                                id="cw_page_controls",
+                            ),
+                            id="cloudwatch_pager",
+                        ),
+                        id="cloudwatch_events_panel",
+                    )
+                    with Vertical(id="cloudwatch_inspector"):
+                        yield Vertical(
+                            Horizontal(
+                                Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
+                                Static("[dim]\\[All][/dim]", id="cw_btn_ip_filter"),
+                                id="cw_top_ips_header",
+                            ),
+                            DataTable(id="cloudwatch_ips_table"),
+                            Button("Ban Selected IP", id="cw_btn_ban_ip", variant="error"),
+                            id="cloudwatch_ips_panel",
+                        )
+                        yield VerticalScroll(
+                            Static(
+                                "Select a log event to view the full message.",
+                                id="cloudwatch_detail_text",
+                            ),
+                            id="cloudwatch_detail",
+                        )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#cloudwatch_filter_bar").border_title = "Search logs"
+        self.query_one("#cloudwatch_events_panel").border_title = "Log events"
+        self.query_one("#cloudwatch_ips_panel").border_title = "Source IPs"
+        self.query_one("#cloudwatch_detail").border_title = "Selected event / IP details"
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
         _reset_columns(events_table, [(label, len(label)) for label in _EVENT_COLUMNS])
         events_table.cursor_type = "row"
@@ -268,6 +280,9 @@ class CloudWatchBrowserScreen(Screen):
         page_info = self.query_one("#cw_page_info", Static)
         prev_btn = self.query_one("#cw_btn_prev", Button)
         next_btn = self.query_one("#cw_btn_next", Button)
+        self.query_one("#cloudwatch_context", Static).update(
+            f"{len(self._events):,} events loaded" if self._events else "No events loaded"
+        )
 
         if total <= 1:
             page_info.update(
@@ -283,12 +298,33 @@ class CloudWatchBrowserScreen(Screen):
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1
 
+    def _render_fetch_error(self) -> bool:
+        """Render literally; withhold diagnostics if demo redaction is unavailable."""
+        if self._fetch_error is None:
+            return False
+        message = self._fetch_error
+        can_notify = True
+        if self.app.demo_mode:
+            try:
+                message = (
+                    self.app.redact_display_text(message)
+                    if self.app.redaction_service is not None else None
+                )
+            except Exception:  # noqa: BLE001 - never fall back to raw private text
+                message = None
+            if not isinstance(message, str):
+                message = "CloudWatch fetch failed: details unavailable in demo mode."
+                can_notify = False
+        self.query_one("#cloudwatch_detail_text", Static).update(Text(message))
+        return can_notify
+
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched events and their top IPs for the new mode."""
         show_account_labels(self.query_one("#cw_filter_account", AccountPicker))
         self._populate_events_table()
         if self._events:
             self._refresh_ips_table()
+        self._render_fetch_error()
 
     def _populate_events_table(self) -> None:
         """Fill the events table with the current page."""
@@ -362,6 +398,7 @@ class CloudWatchBrowserScreen(Screen):
         self._top_ips = []
         self._selected_event_row = None
         self._selected_ip_row = None
+        self._fetch_error = None
         self._current_page = 0
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
         _reset_columns(events_table, [(label, len(label)) for label in _EVENT_COLUMNS])
@@ -468,12 +505,15 @@ class CloudWatchBrowserScreen(Screen):
             self.query_one("#cw_input_filter_pattern", Input).value.strip()
         )
 
+        self._fetch_error = None
         self.query_one("#cw_btn_fetch", Button).disabled = True
         self.query_one("#cloudwatch_detail_text", Static).update("Loading...")
         self.query_one("#cloudwatch_events_table", DataTable).clear()
         self.query_one("#cloudwatch_ips_table", DataTable).clear()
         self._events = []
         self._top_ips = []
+        self._selected_event_row = None
+        self._selected_ip_row = None
         self._current_page = 0
         self._update_pager()
 
@@ -501,10 +541,14 @@ class CloudWatchBrowserScreen(Screen):
                 max_events=0,  # Fetch all
             )
         except Exception as exc:
-            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error", markup=False)
+            message = f"CloudWatch fetch failed: {exc}"
+            self._fetch_error = message
+            if self._render_fetch_error():
+                self.app.notify(message, severity="error", markup=False)
             self.query_one("#cw_btn_fetch", Button).disabled = False
             return
 
+        self._fetch_error = None
         self._events = events
 
         # Extract and display Top IPs
@@ -626,6 +670,7 @@ class CloudWatchBrowserScreen(Screen):
     def _show_event_detail(self, index: int) -> None:
         if index < 0 or index >= len(self._events):
             return
+        self._fetch_error = None
         event = self._events[index]
         ts = event.get("timestamp", "")
         if hasattr(ts, "strftime"):
@@ -714,6 +759,7 @@ class CloudWatchBrowserScreen(Screen):
                 "Select an IP from the Top IPs table first.", severity="warning"
             )
             return
+        self._fetch_error = None
         # display_ip is redacted for the UI; ip (raw) goes to the network call.
         display_ip = ip
         if self.app.demo_mode and self.app.redaction_service:
@@ -778,7 +824,9 @@ class CloudWatchBrowserScreen(Screen):
         # Demo-mode: AbuseIPDB response fields (isp, org, domain, usageType) can
         # reveal real-world infrastructure. Blanket-redact the entire block —
         # symmetric with the geo block above.
-        if demo and abuse is not None:
+        if abuse is False:
+            pass  # No API key, skip silently
+        elif demo and abuse is not None:
             detail.append("\nAbuseIPDB: ", style="bold cyan")
             detail.append("[redacted in demo mode]\n", style="dim")
         elif abuse is not None:
@@ -796,8 +844,6 @@ class CloudWatchBrowserScreen(Screen):
             if abuse.get("isTor"):
                 detail.append("  Tor Exit:       ", style="bold")
                 detail.append("Yes\n", style="red")
-        elif abuse is False:
-            pass  # No API key, skip silently
         else:
             detail.append("\nAbuseIPDB: ", style="bold cyan")
             detail.append("lookup failed\n", style="red")

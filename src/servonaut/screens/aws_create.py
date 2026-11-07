@@ -36,10 +36,10 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -53,8 +53,9 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -75,8 +76,19 @@ _DEPENDENT_GROUPS = (
 )
 
 
-class AWSCreateScreen(Screen):
+class AWSCreateScreen(WorkspaceScreen):
     """Wizard for launching a new AWS EC2 instance."""
+
+    DEFAULT_CSS = """
+    AWSCreateScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 88
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -90,6 +102,8 @@ class AWSCreateScreen(Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -98,6 +112,7 @@ class AWSCreateScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._regions: List[str] = []
         self._amis: List[dict] = []
         self._instance_types: List[dict] = []
@@ -118,95 +133,119 @@ class AWSCreateScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Create AWS server")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]Launch EC2 Instance[/bold $text-accent]",
-                    id="aws_create_title",
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Vertical(
+                    Static(
+                        "[bold $text-accent]Launch EC2 Instance[/bold $text-accent]",
+                        id="aws_create_title",
+                    ),
+                    Static(
+                        "AWS EC2: choose a region before selecting regional resources.",
+                        classes="compute-form-context",
+                    ),
+                    classes="compute-workflow-heading",
                 ),
-
-                Static("[bold]Instance Name[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Display name for the new instance — stored as the "
-                    "[b]Name[/b] tag and visible in the EC2 console and "
-                    "Servonaut's instance list.[/dim]",
-                    classes="note",
-                ),
-                Input(placeholder="e.g. web-prod-01", id="aws_input_name"),
-
-                # Shown only when there are several AWS accounts.
-                AccountPicker(
-                    provider_accounts(self.app, "aws"),
-                    label="Select Account",
-                    id="aws_create_account",
-                ),
-
-                Static("[bold]Select Region[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Pick a region first — AMI / instance-type / "
-                    "key-pair / subnet / SG tables reload automatically "
-                    "when the region row changes.[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="aws_regions_table"),
-
-                Static("[bold]Search AMI[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Filter by name substring (e.g. \"al2023\" or "
-                    "\"ubuntu-22\"). Only public Amazon-owned AMIs are "
-                    "shown by default. Leave blank to list the 50 most "
-                    "recent.[/dim]",
-                    classes="note",
-                ),
-                Input(placeholder="Filter by name…", id="aws_input_ami_search"),
-
-                Static("[bold]Select AMI[/bold]", classes="section_header"),
-                DataTable(id="aws_amis_table"),
-
-                Static("[bold]Select Instance Type[/bold]",
-                       classes="section_header"),
-                DataTable(id="aws_types_table"),
-
-                Static("[bold]Select Key Pair[/bold]", classes="section_header"),
-                Static(
-                    "[dim]EC2 key pair whose public key will be injected "
-                    "into the instance. The private key must be on your "
-                    "local machine (~/.ssh/).[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="aws_keys_table"),
-
-                Static("[bold]Select Subnet[/bold]", classes="section_header"),
-                Static(
-                    "[dim]VPC subnet for network placement. Choose one in "
-                    "the availability zone you want. A public subnet gives "
-                    "the instance a public IP automatically (depending on "
-                    "the subnet's auto-assign setting).[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="aws_subnets_table"),
-
-                Static("[bold]Select Security Group[/bold]",
-                       classes="section_header"),
-                Static(
-                    "[dim]The security group controls inbound/outbound "
-                    "firewall rules. Only one group is supported here; "
-                    "you can attach additional groups from the console "
-                    "after launch.[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="aws_sg_table"),
-
                 Horizontal(
-                    Button("Launch Instance", variant="primary",
-                           id="btn_aws_create_submit"),
-                    Button("Back", variant="default",
-                           id="btn_aws_create_back"),
-                    id="aws_create_actions",
+                    Vertical(
+                        Static("Identity and location", classes="compute-section-title"),
+                        Static("[bold]Instance Name[/bold]", classes="section_header"),
+                        Static(
+                            "[dim]Display name for the new instance — stored as the "
+                            "[b]Name[/b] tag and visible in the EC2 console and "
+                            "Servonaut's instance list.[/dim]",
+                            classes="note",
+                        ),
+                        Input(placeholder="e.g. web-prod-01", id="aws_input_name"),
+                        AccountPicker(
+                            provider_accounts(self.app, "aws"),
+                            label="Select Account",
+                            id="aws_create_account",
+                        ),
+                        Static("[bold]Select Region[/bold]", classes="section_header"),
+                        Static(
+                            "[dim]Pick a region first — AMI / instance-type / "
+                            "key-pair / subnet / SG tables reload automatically "
+                            "when the region row changes.[/dim]",
+                            classes="note",
+                        ),
+                        DataTable(id="aws_regions_table"),
+                        classes="compute-form-section compute-identity-section",
+                    ),
+                    Vertical(
+                        Vertical(
+                            Static("Image and compute", classes="compute-section-title"),
+                            Static("[bold]Search AMI[/bold]", classes="section_header"),
+                            Static(
+                                "[dim]Filter by name substring (e.g. \"al2023\" or "
+                                "\"ubuntu-22\"). Only public Amazon-owned AMIs are "
+                                "shown by default. Leave blank to list the 50 most "
+                                "recent.[/dim]",
+                                classes="note",
+                            ),
+                            Input(placeholder="Filter by name…", id="aws_input_ami_search"),
+                            Static("[bold]Select AMI[/bold]", classes="section_header"),
+                            DataTable(id="aws_amis_table"),
+                            Static("[bold]Select Instance Type[/bold]",
+                                   classes="section_header"),
+                            DataTable(id="aws_types_table"),
+                            classes="compute-form-section",
+                        ),
+                        Vertical(
+                            Static("Access and network", classes="compute-section-title"),
+                            Static("[bold]Select Key Pair[/bold]", classes="section_header"),
+                            Static(
+                                "[dim]EC2 key pair whose public key will be injected "
+                                "into the instance. The private key must be on your "
+                                "local machine (~/.ssh/).[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="aws_keys_table"),
+                            Static("[bold]Select Subnet[/bold]", classes="section_header"),
+                            Static(
+                                "[dim]VPC subnet for network placement. Choose one in "
+                                "the availability zone you want. A public subnet gives "
+                                "the instance a public IP automatically (depending on "
+                                "the subnet's auto-assign setting).[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="aws_subnets_table"),
+                            Static("[bold]Select Security Group[/bold]",
+                                   classes="section_header"),
+                            Static(
+                                "[dim]The security group controls inbound/outbound "
+                                "firewall rules. Only one group is supported here; "
+                                "you can attach additional groups from the console "
+                                "after launch.[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="aws_sg_table"),
+                            classes="compute-form-section",
+                        ),
+                        classes="compute-catalog-column",
+                    ),
+                    classes="compute-decision-workspace",
                 ),
-
+                Vertical(
+                    Static(
+                        "Review the selected configuration in the confirmation "
+                        "dialog before launch.",
+                        classes="compute-review-note",
+                    ),
+                    Horizontal(
+                        Button("Launch Instance", variant="primary",
+                               id="btn_aws_create_submit"),
+                        Button("Back", variant="default",
+                               id="btn_aws_create_back"),
+                        id="aws_create_actions",
+                    ),
+                    classes="compute-submit-region",
+                ),
                 id="aws_create_container",
+                classes="workspace-content compute-form-content compute-workflow",
             )
         yield Footer()
 
@@ -308,9 +347,10 @@ class AWSCreateScreen(Screen):
             pass
         try:
             svc = self._service()
-            self._regions = await svc.list_regions(
-                bootstrap_region=default_region or "us-east-1"
-            )
+            with self._read_loading.running('Loading regions…'):
+                self._regions = await svc.list_regions(
+                    bootstrap_region=default_region or "us-east-1"
+                )
             for region in self._regions:
                 tbl.add_row(region, key=region)
             # Pre-select default region from config
@@ -383,7 +423,8 @@ class AWSCreateScreen(Screen):
             return
         try:
             svc = self._service()
-            self._amis = await svc.list_amis(region, name_filter=name_filter)
+            with self._read_loading.running('Loading images…'):
+                self._amis = await svc.list_amis(region, name_filter=name_filter)
             for ami in self._amis:
                 tbl.add_row(
                     escape_cell(ami.get("image_id", "")),
@@ -413,7 +454,8 @@ class AWSCreateScreen(Screen):
             return
         try:
             svc = self._service()
-            self._instance_types = await svc.list_instance_types(region)
+            with self._read_loading.running('Loading server types…'):
+                self._instance_types = await svc.list_instance_types(region)
             for it in self._instance_types:
                 tbl.add_row(
                     escape_cell(it.get("instance_type", "")),
@@ -443,7 +485,8 @@ class AWSCreateScreen(Screen):
             return
         try:
             svc = self._service()
-            self._key_pairs = await svc.list_key_pairs(region)
+            with self._read_loading.running('Loading SSH keys…'):
+                self._key_pairs = await svc.list_key_pairs(region)
             for kp in self._key_pairs:
                 tbl.add_row(
                     escape_cell(self._demo_key_name(kp.get("key_name", ""))),
@@ -473,7 +516,8 @@ class AWSCreateScreen(Screen):
             return
         try:
             svc = self._service()
-            self._subnets = await svc.list_subnets(region)
+            with self._read_loading.running('Loading subnets…'):
+                self._subnets = await svc.list_subnets(region)
             for sn in self._subnets:
                 tbl.add_row(
                     escape_cell(sn.get("subnet_id", "")),
@@ -503,7 +547,8 @@ class AWSCreateScreen(Screen):
             return
         try:
             svc = self._service()
-            self._security_groups = await svc.list_security_groups(region)
+            with self._read_loading.running('Loading security groups…'):
+                self._security_groups = await svc.list_security_groups(region)
             for sg in self._security_groups:
                 tbl.add_row(
                     escape_cell(sg.get("group_id", "")),

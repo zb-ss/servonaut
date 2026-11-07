@@ -1,0 +1,200 @@
+/* Project registries lead with their keys; registry scope and the complete
+   explanation remain distinct from local SSH key management. */
+.provider-key-workspace .provider-key-scope {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+    align: left top;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_header {
+    height: auto;
+    width: 1fr;
+    margin: 0;
+}
+
+.provider-key-workspace .provider-key-scope AccountPicker {
+    width: 26;
+    height: auto;
+    margin: 0 0 0 1;
+}
+
+.provider-key-workspace .provider-key-inventory {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace .provider_key_catalog,
+OVHSSHKeysScreen .provider-key-workspace .provider_key_catalog {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_table,
+OVHSSHKeysScreen .provider-key-workspace #ssh_keys_table {
+    height: auto;
+    min-height: 4;
+    max-height: 18;
+    border: none;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_status,
+OVHSSHKeysScreen .provider-key-workspace #ovh_ssh_keys_status {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.provider-key-workspace .provider-key-context {
+    width: 38;
+    height: auto;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.provider-key-workspace .provider-key-context .note,
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_hint {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+.provider-key-workspace .provider-key-selection-heading {
+    height: auto;
+    margin-top: 1;
+    color: $text-accent;
+    text-style: bold;
+}
+
+.provider-key-workspace .provider-key-selection {
+    height: auto;
+    margin-bottom: 1;
+    color: $text;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace .provider_key_editor,
+OVHSSHKeysScreen .provider-key-workspace .provider_key_editor {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    margin: 1 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.provider-key-workspace .provider_key_editor Label,
+.provider-key-workspace .provider_key_editor .section_header {
+    height: auto;
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
+.provider-key-workspace .provider_key_editor Input {
+    width: 1fr;
+    margin: 0 0 1 0;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_actions,
+OVHSSHKeysScreen .provider-key-workspace #ovh_ssh_keys_actions {
+    dock: bottom;
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 1 0 0 0;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_add_form_actions,
+OVHSSHKeysScreen .provider-key-workspace #add_key_form_actions {
+    dock: none;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 1 0 0 0;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_actions Button,
+OVHSSHKeysScreen .provider-key-workspace #ovh_ssh_keys_actions Button,
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_add_form_actions Button,
+OVHSSHKeysScreen .provider-key-workspace #add_key_form_actions Button {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    margin: 0;
+}
+
+HetznerSSHKeysScreen.-content-narrow .provider-key-scope,
+HetznerSSHKeysScreen.-content-narrow .provider-key-inventory,
+OVHSSHKeysScreen.-content-narrow .provider-key-inventory {
+    layout: vertical;
+}
+
+HetznerSSHKeysScreen.-content-narrow .provider-key-scope AccountPicker {
+    width: 1fr;
+    margin: 1 0 0 0;
+}
+
+HetznerSSHKeysScreen.-content-narrow .provider-key-context,
+OVHSSHKeysScreen.-content-narrow .provider-key-context {
+    width: 1fr;
+    margin-left: 0;
+}
+
+HetznerSSHKeysScreen.-content-narrow .provider-key-workspace #hetzner_ssh_keys_table {
+    max-height: 8;
+}
+
+OVHSSHKeysScreen.-content-narrow .provider-key-workspace #ssh_keys_table {
+    max-height: 6;
+}
+
+HetznerSSHKeysScreen.-content-narrow .provider-key-workspace #hetzner_ssh_keys_actions,
+OVHSSHKeysScreen.-content-narrow .provider-key-workspace #ovh_ssh_keys_actions {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+/* The key document scrolls independently of both anchored action rows. */
+HetznerSSHKeysScreen #hetzner_ssh_keys_workspace {
+    width: 1fr;
+    height: 1fr;
+    padding: 0;
+    overflow: hidden hidden;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace #hetzner_ssh_keys_container {
+    width: 1fr;
+    height: 1fr;
+    min-height: 0;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace .provider-key-footer {
+    width: 1fr;
+    height: auto;
+    padding: 0 2;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen .provider-key-workspace .provider-key-footer #hetzner_ssh_keys_actions,
+HetznerSSHKeysScreen .provider-key-workspace .provider-key-footer #hetzner_ssh_add_form_actions {
+    dock: none;
+    height: auto;
+}

@@ -58,7 +58,7 @@ def _build_panel():
     return panel
 
 
-def _attach_app(panel) -> MagicMock:
+def _attach_app(panel, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Wire a :class:`MagicMock` ``app`` onto *panel* and return it."""
     app = MagicMock()
     # Explicitly disable demo_mode so the redaction guard (which is now truthy-
@@ -66,7 +66,7 @@ def _attach_app(panel) -> MagicMock:
     # from scrub_stream instead of the actual content string.
     app.demo_mode = False
     app.redaction_service = None
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
     return app
 
 
@@ -94,7 +94,7 @@ def test_notify_carrying_apierror_message_passes_markup_false(
     payload renders literally.
     """
     panel = _build_panel()
-    app = _attach_app(panel)
+    app = _attach_app(panel, monkeypatch)
 
     exc = APIError(
         code="upstream_unavailable",
@@ -121,10 +121,12 @@ def test_notify_carrying_apierror_message_passes_markup_false(
         )
 
 
-def test_notify_for_unhandled_exception_uses_markup_false():
+def test_notify_for_unhandled_exception_uses_markup_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A1 — the catch-all branch in ``_handle_stream_error`` must also scrub."""
     panel = _build_panel()
-    app = _attach_app(panel)
+    app = _attach_app(panel, monkeypatch)
 
     panel._handle_stream_error(
         RuntimeError("[link=evil]boom[/link]"), accumulated="",
@@ -146,7 +148,7 @@ def test_handle_streamed_tool_call_bridge_failure_passes_markup_false(
     import asyncio
 
     panel = _build_panel()
-    app = _attach_app(panel)
+    app = _attach_app(panel, monkeypatch)
 
     bridge = MagicMock()
 
@@ -224,7 +226,7 @@ def test_refresh_messages_escapes_assistant_content(monkeypatch):
     a real Link span on the assistant widget.
     """
     panel = _build_panel()
-    _attach_app(panel)
+    _attach_app(panel, monkeypatch)
 
     payload = "[link=evil]X[/link]"
     panel._session = ChatSession(
@@ -249,10 +251,12 @@ def test_refresh_messages_escapes_assistant_content(monkeypatch):
     ), f"Expected literal markup in plain text: {captured!r}"
 
 
-def test_refresh_messages_escapes_user_content():
+def test_refresh_messages_escapes_user_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A2 — user-role rows are escaped too (server-imported user rows untrusted)."""
     panel = _build_panel()
-    _attach_app(panel)
+    _attach_app(panel, monkeypatch)
 
     payload = "[bold red]injected[/bold red]"
     panel._session = ChatSession(
@@ -282,7 +286,9 @@ def test_refresh_messages_escapes_user_content():
     )
 
 
-def test_update_thinking_status_escapes_streamed_text():
+def test_update_thinking_status_escapes_streamed_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A2 — token-stream accumulator escapes its content.
 
     This is the most security-critical site: every token delta passes
@@ -290,7 +296,7 @@ def test_update_thinking_status_escapes_streamed_text():
     a real Link widget if escaping were missing.
     """
     panel = _build_panel()
-    _attach_app(panel)
+    _attach_app(panel, monkeypatch)
 
     captured: list = []
 

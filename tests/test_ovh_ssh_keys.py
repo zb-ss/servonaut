@@ -17,6 +17,8 @@ from textual.widgets import Button, DataTable, Input
 
 from servonaut.config.schema import AppConfig, OVHConfig
 from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +71,8 @@ class _WrapperApp(App):
     that exposes ``ovh.cloud_project_ids`` and an ``ovh_cloud_service``
     that backs list/add/delete.
     """
+
+    CSS_PATH = CSS_FILES
 
     def __init__(self, cloud_service, project_ids=None) -> None:
         super().__init__()
@@ -302,6 +306,12 @@ class TestScreenRendering:
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
+            button = app.screen.query_one("#btn_add_key", Button)
+            button.scroll_visible(animate=False)
+            await wait_until(
+                lambda: app.screen.region.contains_region(button.region)
+                and app.get_widget_at(*button.region.center)[0] is button,
+            )
             await pilot.click("#btn_add_key")
             await pilot.pause(0.1)
             form = app.screen.query_one("#add_key_form")

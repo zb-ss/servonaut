@@ -120,8 +120,8 @@ class SidebarSection(Widget):
 
     def compose(self) -> ComposeResult:
         header = Button(self._header_label(False), classes="section-header")
-        # Headers should never steal keyboard focus from the table /
-        # inputs in the main pane.
+        # Content keeps initial focus; Sidebar enables headers temporarily
+        # when the user explicitly enters keyboard navigation.
         header.can_focus = False
         yield header
         yield Vertical(*self._children_to_compose, classes="section-content")

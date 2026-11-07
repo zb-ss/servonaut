@@ -116,6 +116,8 @@ class _PickerService:
 
 
 class _Host(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, service: Any) -> None:
         super().__init__()
         self.vault_command_service = service
@@ -171,7 +173,14 @@ async def _click(pilot: Pilot, selector: str) -> None:
     """Click a button once its last press has finished: a button ignores clicks while it animates one."""
     button = pilot.app.screen.query_one(selector, Button)
     await wait_until(lambda: not button.has_class("-active"))
-    await pilot.click(selector)
+    button.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    assert button.region.width > 0 and button.region.height > 0
+    assert pilot.app.screen.region.contains_region(button.region)
+    assert pilot.app.get_widget_at(*button.region.center)[0] is button
+    assert await pilot.click(
+        button, offset=(button.region.width // 2, button.region.height // 2),
+    )
 
 
 async def _press(pilot: Pilot, service: _PickerService, button: str, call: str) -> dict[str, Any]:

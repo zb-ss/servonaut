@@ -13,18 +13,21 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 from servonaut.widgets.secret_input import SecretInput
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 logger = logging.getLogger(__name__)
 
-# Strength labels and their CSS colours.  Index == score (0–4).
+# Strength labels. Index == score (0–4).
 _STRENGTH_LABEL = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
-_STRENGTH_COLOR = [
-    "$text-error", "$text-error", "$text-warning", "$text-success", "$text-success",
-]
 
 
 @dataclass
@@ -60,25 +63,9 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         cancellation.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    PassphraseEnrolModal {
-        align: center middle;
-    }
-
-    #enrol-container {
-        width: 60%;
-        max-width: 64;
-        height: auto;
-        background: $surface;
-        border: round $accent;
-        padding: 1 2;
-    }
-
-    #enrol-title {
-        text-style: bold;
-        padding: 0 0 1 0;
-    }
-
     #enrol-blurb {
         padding: 0 0 1 0;
         color: $text-muted;
@@ -91,13 +78,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     }
 
     #enrol-strength {
-        padding: 0 0 1 0;
+        padding: 0;
         height: 1;
         color: $text-muted;
     }
 
     #enrol-mismatch {
-        padding: 0 0 1 0;
+        padding: 0;
         height: 1;
         color: $error;
     }
@@ -122,16 +109,6 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         height: 0;
     }
 
-    #enrol-btn-row {
-        layout: horizontal;
-        height: auto;
-        align: right middle;
-    }
-
-    #enrol-btn-row Button {
-        margin-left: 1;
-        min-width: 12;
-    }
     """
 
     BINDINGS = [
@@ -164,39 +141,43 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             else "[bold $text-accent]Unlock Memory Encryption Keypair[/bold $text-accent]"
         )
         blurb = (
-            "[$text-warning]Warning: this passphrase cannot be recovered. "
-            "If lost, your synced memory data will be permanently inaccessible.[/$text-warning]"
+            "[bold]Warning: this passphrase cannot be recovered. "
+            "If lost, your synced memory data will be permanently inaccessible.[/bold]"
             if is_enrol
-            else "[dim]Enter your passphrase to decrypt the stored keypair.[/dim]"
+            else "Enter your passphrase to decrypt the stored keypair."
         )
         btn_label = "Enrol" if is_enrol else "Unlock"
         remember_classes = "" if self._remember_available else "hidden"
-        yield Container(
-            Static(title, id="enrol-title"),
-            Static(blurb, id="enrol-blurb"),
-            SecretInput(placeholder="Passphrase", id="enrol-pass1"),
-            SecretInput(
-                placeholder="Confirm passphrase",
-                id="enrol-pass2",
-                classes="" if is_enrol else "hidden",
-            ),
-            Static("Strength: —", id="enrol-strength", classes="" if is_enrol else "hidden"),
-            Static("", id="enrol-mismatch", classes="" if is_enrol else "hidden"),
-            Horizontal(
-                Static(
-                    "Keep unlocked for 30 days (secure OS keychain)",
-                    id="enrol-remember-label",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(title, id="enrol-title"),
+            body=DialogBody(
+                Static(blurb, id="enrol-blurb"),
+                SecretInput(placeholder="Passphrase", id="enrol-pass1"),
+                SecretInput(
+                    placeholder="Confirm passphrase",
+                    id="enrol-pass2",
+                    classes="" if is_enrol else "hidden",
                 ),
-                Switch(value=self._remember_default, id="enrol-remember"),
-                id="enrol-remember-row",
-                classes=remember_classes,
+                Static("Strength: —", id="enrol-strength", classes="" if is_enrol else "hidden"),
+                Static("", id="enrol-mismatch", classes="" if is_enrol else "hidden"),
+                Horizontal(
+                    Static(
+                        "Keep unlocked for 30 days (secure OS keychain)",
+                        id="enrol-remember-label",
+                    ),
+                    Switch(value=self._remember_default, id="enrol-remember"),
+                    id="enrol-remember-row",
+                    classes=remember_classes,
+                ),
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="enrol-btn-cancel"),
                 Button(btn_label, variant="primary", id="enrol-btn-confirm", disabled=True),
                 id="enrol-btn-row",
             ),
             id="enrol-container",
+            size="standard",
         )
 
     def on_mount(self) -> None:
@@ -220,9 +201,8 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             score = min(len(passphrase) // 4, 4)
         score = max(0, min(score, 4))
         label = _STRENGTH_LABEL[score]
-        color = _STRENGTH_COLOR[score]
         static = self.query_one("#enrol-strength", Static)
-        static.update(f"Strength: [{color}]{label}[/{color}]")
+        static.update(f"Strength: [bold]{label}[/bold]")
         self._last_score = score
 
     def _update_confirm_state(self, pass1: str, pass2: str) -> None:
@@ -235,7 +215,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             mismatch = False
             ok = bool(pass1)
         self.query_one("#enrol-mismatch", Static).update(
-            "[$text-error]Passphrases do not match.[/$text-error]" if mismatch else ""
+            "Passphrases do not match." if mismatch else ""
         )
         btn = self.query_one("#enrol-btn-confirm", Button)
         btn.disabled = not ok

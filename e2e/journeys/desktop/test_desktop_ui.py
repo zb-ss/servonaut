@@ -99,7 +99,7 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
         page = await open_session(browser, app)
         tour = [
             ("nav_custom_servers", "CustomServersScreen", "Custom Servers"),
-            ("nav_keys", "KeyManagementScreen", "SSH Key Management"),
+            ("nav_keys", "KeyManagementScreen", "Connection keys"),
             # Settings sits in a section that starts collapsed.
             ("nav_settings", "SettingsScreen", "Settings"),
             ("nav_list", "InstanceListScreen", FLEET_NAMES[0]),
@@ -183,7 +183,7 @@ async def test_keyboard_search_help_and_command_palette(desktop, seed):
         mark = page.output_mark()
         await page.press("Enter")
         await tui.wait_for_screen("KeyManagementScreen")
-        await page.wait_for_text("SSH Key Management", since=mark)
+        await page.wait_for_text("Connection keys", since=mark)
         await page.press("Escape")
         await tui.wait_for_screen("InstanceListScreen")
         assert page.errors() == []

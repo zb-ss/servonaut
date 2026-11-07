@@ -108,15 +108,20 @@ async def test_the_page_around_the_terminal_follows_the_theme(desktop, seed):
         await page.type("theme")
         await _palette_highlights(app, "Theme")
         await page.press("Enter")
-        await app.tui.wait_until(
-            lambda: "theme" in app.app.screen.query_one("Input").placeholder.lower(),
+        await wait_until(
+            lambda: any(
+                "theme" in field.placeholder.lower()
+                for field in app.app.screen.query("Input")
+            ),
             desc="theme search open",
         )
         await page.type("servonaut-light")
         await _palette_highlights(app, "servonaut-light")
         await page.press("Enter")
-        await app.tui.wait_until(lambda: app.app.theme == "servonaut-light", desc="theme switched")
 
         # Servonaut Light paints its screens #EEF2F7.
+        # Wait through the browser: Enter closes the palette, whose pending
+        # layout callbacks may never run after it leaves the screen stack.
         await _wait_for_page_colour(page, "rgb(238, 242, 247)")
+        assert app.app.theme == "servonaut-light"
         assert page.errors() == []

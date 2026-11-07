@@ -10,17 +10,23 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
+
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 class ConfirmClearCacheModal(ModalScreen[bool]):
     """Asks "really clear the cached team secrets-config?"
 
     Cheap modal — single question, two buttons + keyboard shortcuts.
-    Returns ``True`` on confirm, ``False`` (or ``None`` via Esc) on
-    cancel. The receiving SecretsScreen reads the result and only
+    Returns ``True`` on confirm and ``False`` on cancel, including Escape.
+    The receiving SecretsScreen reads the result and only
     mutates state on True.
 
     Only the TEAM cache is cleared; the personal (user-scope) cache is
@@ -37,8 +43,10 @@ class ConfirmClearCacheModal(ModalScreen[bool]):
         Binding("n", "cancel", "No", show=True),
     ]
 
+    AUTO_FOCUS = "#confirm_clear_no"
+
     def __init__(self, personal_config_cached: bool = False) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._personal_config_cached = personal_config_cached
 
     def _fallback_text(self) -> str:
@@ -53,22 +61,31 @@ class ConfirmClearCacheModal(ModalScreen[bool]):
         )
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-warning]Clear the cached team secrets-config?[/bold $text-warning]\n\n"
-                + self._fallback_text()
-                + "  No on-disk secrets are deleted — only the cached "
-                "team-config metadata.\n\n"
-                "  [bold $text-accent]y[/bold $text-accent] confirm   "
-                "[bold $text-accent]n[/bold $text-accent] / [bold $text-accent]esc[/bold $text-accent] cancel",
-                id="confirm_clear_text",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                "[bold $text-warning]Clear the cached team secrets-config?"
+                "[/bold $text-warning]",
             ),
-            Horizontal(
+            body=DialogBody(
+                Static(
+                    self._fallback_text()
+                    + "  No on-disk secrets are deleted — only the cached "
+                    "team-config metadata.\n\n"
+                    "  [bold $text-accent]y[/bold $text-accent] confirm   "
+                    "[bold $text-accent]n[/bold $text-accent] / "
+                    "[bold $text-accent]esc[/bold $text-accent] cancel",
+                    id="confirm_clear_text",
+                ),
+            ),
+            actions=DialogActions(
                 Button("Confirm", id="confirm_clear_yes", variant="warning"),
                 Button("Cancel", id="confirm_clear_no", variant="default"),
                 id="confirm_clear_buttons",
             ),
             id="confirm_clear_container",
+            size="compact",
+            severity="warning",
         )
 
     def action_confirm(self) -> None:

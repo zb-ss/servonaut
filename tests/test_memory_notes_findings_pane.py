@@ -5,13 +5,14 @@ editor alone, and findings agents saved had no view in the app at all.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Footer, Static, TextArea
 
 from servonaut.config.schema import MemoryConfig
 from servonaut.services.memory.notes import notes_template
@@ -352,3 +353,83 @@ async def test_a_read_only_row_with_only_notes_offers_no_probe(tmp_path):
     async with app.run_test(headless=True) as pilot:
         await _until(pilot, lambda: "Owned by payments." in _notes(app), "the shared note")
         assert app.screen.query_one("#memory-empty-state").has_class("hidden")
+
+
+@pytest.mark.parametrize("authored", [False, True], ids=["empty-authored", "with-authored"])
+async def test_narrow_records_open_in_view_and_authored_content_stays_reachable(
+    tmp_path, monkeypatch, authored: bool,
+):
+    service = _service(tmp_path)
+    service._store.save_module(ROW["id"], "os", {
+        "module": "os", "instance_id": ROW["id"],
+        "observed": {"id": "sample-linux", "pretty_name": "Sample Linux"},
+        "declared": {"id": {"value": "pinned-linux"}},
+        "probed_at": datetime.now(timezone.utc).isoformat(), "ttl_seconds": 86400,
+    }, provider=ROW["provider"])
+    notes = "## Runbook\n\nKeep [literal] notes accessible."
+    title = "Check [literal] restart order"
+    finding_body = "Read the complete stored runbook before changing anything."
+    if authored:
+        service.write_annotations(ROW["id"], notes, ROW["provider"])
+        _remember(service, title, body=finding_body)
+    probe = AsyncMock(side_effect=AssertionError("Browsing stored memory must not probe"))
+    monkeypatch.setattr(service, "refresh", probe)
+    monkeypatch.setattr(service, "refresh_report", probe)
+    app = _host(service)
+    async with app.run_test(size=(100, 30), headless=True) as pilot:
+        await _until(pilot, lambda: app.screen.query_one("#memory-table", DataTable).row_count == 2
+                     and app.focused is app.screen.query_one("#memory-table")
+                     and app.screen.has_class("-content-narrow"), "stored records")
+        await pilot.pause()
+        screen = app.screen
+        page = screen.query_one("#memory-container")
+        records = screen.query_one("#memory-table", DataTable)
+        reader = screen.query_one("#memory-record-detail", TextArea)
+
+        def painted(widget) -> str:
+            region = widget.region.intersection(page.content_region).intersection(screen.region)
+            strips = screen._compositor.render_strips()
+            return "\n".join(strips[y].crop(region.x, region.right).text
+                             for y in range(region.y, region.bottom))
+
+        # Check final native paint before any focus/reveal can repair the opening view.
+        assert page.scroll_y == 0
+        assert "sample-linux" in painted(records)
+        selected = records.coordinate_to_cell_key(records.cursor_coordinate).row_key
+        document = reader.document
+        text = reader.text
+        assert "Observed\nsample-linux" in text and "Declared\npinned-linux" in text
+        await pilot.press("tab")
+        await _until(pilot, lambda: app.focused is reader, "the full-value reader")
+        reader.scroll_visible(animate=False, immediate=True)
+        await pilot.pause()
+        assert "sample-linux" in painted(reader) and "pinned-linux" in painted(reader)
+
+        if authored:
+            notes_widget = screen.query_one("#memory-notes", Static)
+            notes_widget.scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+            assert _notes(app) == notes and "Keep [literal] notes accessible." in painted(notes_widget)
+            findings = screen.query_one("#memory-findings-table", DataTable)
+            findings.focus()
+            await _until(pilot, lambda: app.focused is findings, "the findings table")
+            findings.scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+            assert title in painted(findings)
+            await pilot.press("enter")
+            await _until(pilot, lambda: type(app.screen).__name__ == "MemoryFindingScreen"
+                         and str(app.screen.query_one("#memory-finding-body", Static).render()) == finding_body,
+                         "the complete finding")
+            assert str(app.screen.query_one("#memory-finding-title", Static).render()) == title
+            await pilot.press("escape")
+            await _until(pilot, lambda: app.screen is screen, "the memory page again")
+        else:
+            screen.query_one("#memory-authored").scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+            assert "No notes yet." in painted(screen.query_one("#memory-notes"))
+            assert "No findings recorded yet" in painted(screen.query_one("#memory-findings-empty"))
+        assert records.coordinate_to_cell_key(records.cursor_coordinate).row_key == selected
+        assert reader.document is document
+        assert reader.text == text
+        probe.assert_not_awaited()
+        assert app._exception is None

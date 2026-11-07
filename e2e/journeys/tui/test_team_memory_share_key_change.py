@@ -65,6 +65,15 @@ async def _tick_and_trust(t) -> None:
     await t.click("#keychange-check-0")
     button = t.on_screen("#keychange-btn-confirm")
     await t.wait_until(lambda: not button.disabled, desc="the confirm button enabled")
+    # A sync notification can cover this corner while the button is enabled.
+    # Keep the mouse journey, but wait until its actual click target is clear.
+    await t.wait_until(
+        lambda: t.app.get_widget_at(
+            button.region.x + button.region.width // 2,
+            button.region.y + button.region.height // 2,
+        )[0] is button,
+        desc="the key confirmation button unobscured",
+    )
     await t.click(button)
 
 

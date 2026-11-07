@@ -1,4 +1,4 @@
-"""Confirmation modals for AI-originated tool calls (T6).
+"""Confirmation modals for AI-originated tool calls.
 
 Two ModalScreen flavours, sized by the tool's ``guard_level``:
 
@@ -7,9 +7,8 @@ Two ModalScreen flavours, sized by the tool's ``guard_level``:
 - :class:`DangerousToolConfirmModal` — typed-confirm "RUN" for
   ``dangerous`` tools (``deploy``, ``provision``, ``security_scan``).
 
-Per the "ModalScreen vs Screen" convention: both fit the
-"brief blocking choice" pattern (small surface, single decision, dim
-background returns to chat). All user-influenced strings (tool names,
+Both present a brief blocking choice over the current conversation;
+dismissing the prompt returns to chat. All user-influenced strings (tool names,
 arg values from the model) are passed through ``rich.markup.escape``
 before interpolation — the model output can contain rich-markup
 metacharacters and we don't want a malformed brace to corrupt the row.
@@ -24,10 +23,16 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 
 logger = logging.getLogger(__name__)
@@ -39,7 +44,7 @@ logger = logging.getLogger(__name__)
 _MAX_ARG_VALUE_LEN = 200
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
-# anything else returns False.
+# wrong values leave the modal open and show a correction hint.
 _DANGEROUS_CONFIRM_WORD = "RUN"
 
 
@@ -85,67 +90,31 @@ class ToolConfirmModal(ModalScreen[bool]):
         Binding("n", "deny", "No", show=True),
     ]
 
-    DEFAULT_CSS = """
-    ToolConfirmModal {
-        align: center middle;
-    }
-
-    ToolConfirmModal #tool_confirm_container {
-        width: 80;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    ToolConfirmModal #tool_confirm_title {
-        text-style: bold;
-        color: $accent;
-        margin-bottom: 1;
-    }
-
-    ToolConfirmModal #tool_confirm_body {
-        margin-bottom: 1;
-    }
-
-    ToolConfirmModal #tool_confirm_args {
-        margin-bottom: 1;
-        max-height: 12;
-        overflow-y: auto;
-    }
-
-    ToolConfirmModal #tool_confirm_buttons {
-        height: auto;
-        align: center middle;
-    }
-
-    ToolConfirmModal #tool_confirm_buttons Button {
-        margin: 0 1;
-    }
-    """
+    AUTO_FOCUS = "#btn_tool_cancel"
 
     def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Container(
-            Static(
-                f"[bold]{escape(self._tool)}[/bold]",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                f"[bold $text-accent]{escape(self._tool)}[/bold $text-accent]",
                 id="tool_confirm_title",
             ),
-            Static(
-                "Servonaut AI wants to run this tool. "
-                "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
-                id="tool_confirm_body",
+            body=DialogBody(
+                Static(
+                    "Servonaut AI wants to run this tool. "
+                    "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
+                    id="tool_confirm_body",
+                    classes="dialog-description",
+                ),
+                Static(_format_args(self._args), id="tool_confirm_args"),
             ),
-            Static(
-                _format_args(self._args),
-                id="tool_confirm_args",
-            ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Confirm", id="btn_tool_confirm", variant="primary"),
                 Button("Cancel", id="btn_tool_cancel", variant="default"),
                 id="tool_confirm_buttons",
@@ -175,53 +144,22 @@ class ToolConfirmModal(ModalScreen[bool]):
 class DangerousToolConfirmModal(ModalScreen[bool]):
     """Typed-confirm "RUN" modal for ``dangerous`` guard-level tools.
 
-    The user must type the literal string ``RUN`` (case-sensitive) into
-    the Input field for ``True``; anything else (including pressing
-    Confirm with the wrong word) returns ``False``. Per architect plan
-    Risk §9: this is defense-in-depth, the server already enforces the
-    ``allow_dangerous_ai_tools`` entitlement.
+    The user must type case-sensitive ``RUN``, with optional surrounding
+    whitespace, for ``True``. Wrong or empty input shows a hint and keeps
+    the modal open; Cancel and Escape return ``False``. This is additional
+    confirmation; the server enforces the ``allow_dangerous_ai_tools``
+    entitlement separately.
     """
 
     BINDINGS = [
         Binding("escape", "deny", "Cancel", show=True),
     ]
 
+    AUTO_FOCUS = "#dangerous_confirm_input"
+
     DEFAULT_CSS = """
-    DangerousToolConfirmModal {
-        align: center middle;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_container {
-        width: 84;
-        height: auto;
-        border: round $error;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_title {
-        text-style: bold;
-        color: $error;
-        margin-bottom: 1;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_body {
-        margin-bottom: 1;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_args {
-        margin-bottom: 1;
-        max-height: 10;
-        overflow-y: auto;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_input {
-        margin-bottom: 1;
-    }
-
     DangerousToolConfirmModal #dangerous_confirm_error {
         color: $error;
-        margin-bottom: 1;
         display: none;
     }
 
@@ -229,48 +167,44 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         display: block;
     }
 
-    DangerousToolConfirmModal #dangerous_confirm_buttons {
-        height: auto;
-        align: center middle;
-    }
-
-    DangerousToolConfirmModal #dangerous_confirm_buttons Button {
-        margin: 0 1;
-    }
     """
 
     def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Container(
-            Static(
-                f"[bold]Dangerous tool:[/bold] [bold]{escape(self._tool)}[/bold]",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                "[bold $text-error]Dangerous tool: "
+                f"{escape(self._tool)}[/bold $text-error]",
                 id="dangerous_confirm_title",
             ),
-            Static(
-                "Servonaut AI wants to run a [bold]potentially destructive[/bold] tool. "
-                f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
-                id="dangerous_confirm_body",
+            body=DialogBody(
+                Static(_format_args(self._args), id="dangerous_confirm_args"),
             ),
-            Static(
-                _format_args(self._args),
-                id="dangerous_confirm_args",
+            status=Vertical(
+                Static(
+                    "Servonaut AI wants to run a [bold]potentially destructive[/bold] tool. "
+                    f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
+                    id="dangerous_confirm_body",
+                ),
+                Input(
+                    placeholder=f"Type {_DANGEROUS_CONFIRM_WORD} to confirm",
+                    id="dangerous_confirm_input",
+                ),
+                Static("", id="dangerous_confirm_error"),
             ),
-            Input(
-                placeholder=f"Type {_DANGEROUS_CONFIRM_WORD} to confirm",
-                id="dangerous_confirm_input",
-            ),
-            Static("", id="dangerous_confirm_error"),
-            Horizontal(
+            actions=DialogActions(
                 Button("Confirm", id="btn_dangerous_confirm", variant="error"),
                 Button("Cancel", id="btn_dangerous_cancel", variant="default"),
                 id="dangerous_confirm_buttons",
             ),
             id="dangerous_confirm_container",
+            severity="danger",
         )
         yield Footer()
 

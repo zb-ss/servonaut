@@ -1,53 +1,104 @@
-/* Confirm changed memory keys (Share / catch-up). The scroll holds the text
-   and the checkboxes; the button row sits below it, so it stays visible on a
-   short terminal. */
-#keychange-outer {
+/* Compare the member's key beside the trust record; decisions stay visible. */
+MemberKeyChangeScreen #keychange-outer {
     width: 1fr;
-    height: 100%;
-    padding: 1 2;
-    align: center top;
-    background: $surface;
+    height: 1fr;
+    padding: 0 1;
 }
 
-#keychange-container {
-    width: 80%;
-    max-width: 90;
-    height: 100%;
-    border: round $primary;
-    background: $surface;
-    padding: 1 2;
-}
-
-#keychange-title {
-    margin-bottom: 1;
-}
-
-#keychange-scroll {
+MemberKeyChangeScreen #keychange-container {
+    width: 1fr;
     height: 1fr;
 }
 
-#keychange-body,
-#keychange-list {
+MemberKeyChangeScreen #keychange-context {
     height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+MemberKeyChangeScreen #keychange-title {
+    height: auto;
+    margin: 0;
+}
+
+MemberKeyChangeScreen #keychange-scroll {
+    height: 1fr;
+}
+
+MemberKeyChangeScreen #keychange-review {
+    height: auto;
+}
+
+MemberKeyChangeScreen #keychange-guide {
+    width: 2fr;
+    height: auto;
+    margin-right: 1;
+    border: round $warning;
+    background: transparent;
+    padding: 0 1;
+}
+
+MemberKeyChangeScreen .keychange-section-heading {
+    height: auto;
+    text-style: bold;
+    color: $text-warning;
     margin-bottom: 1;
 }
 
-.keychange-item {
+MemberKeyChangeScreen #keychange-body {
     height: auto;
-    margin-bottom: 1;
 }
 
-#keychange-btn-row {
+MemberKeyChangeScreen #keychange-list {
+    width: 3fr;
     height: auto;
-    align: right middle;
+}
+
+MemberKeyChangeScreen .keychange-item {
+    height: auto;
+    margin-bottom: 1;
+    border: round $panel;
+    background: transparent;
+    padding: 0 1;
+}
+
+MemberKeyChangeScreen .keychange-details {
+    height: auto;
+}
+
+MemberKeyChangeScreen .keychange-item Checkbox {
+    width: 1fr;
+    height: auto;
+}
+
+MemberKeyChangeScreen #keychange-btn-row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
     margin-top: 1;
 }
 
-#keychange-btn-row Button {
-    margin-left: 1;
+MemberKeyChangeScreen #keychange-btn-row Button {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
 }
 
-#keychange-btn-cancel,
-#keychange-btn-confirm {
-    min-width: 16;
+MemberKeyChangeScreen.-content-narrow #keychange-review {
+    layout: vertical;
+}
+
+MemberKeyChangeScreen.-content-narrow #keychange-guide,
+MemberKeyChangeScreen.-content-narrow #keychange-list {
+    width: 100%;
+    margin-right: 0;
+}
+
+MemberKeyChangeScreen.-content-narrow #keychange-guide {
+    margin-bottom: 1;
 }

@@ -22,10 +22,11 @@ from typing import Any, Dict, List
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Select, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import StringListEditor
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class McpPanel(SettingsPanel):
 
     PANEL_ID = "mcp"
     TITLE = "MCP Server"
+    DESCRIPTION = 'Tool permissions, audit output and command policies.'
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -88,79 +90,81 @@ class McpPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:  # noqa: D102
         """Yield the MCP form rows."""
-        # Guard level
-        yield Horizontal(
-            Static("Guard level", classes="label"),
-            Select(
-                _GUARD_LEVEL_OPTIONS,
-                value="standard",
-                allow_blank=False,
-                id="mcp_guard_level",
-            ),
-            classes="setting_row",
-        )
-        yield Static(
-            "",
-            id="mcp_guard_warn",
-            classes="mcp-warn",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Tool guard policy', classes="settings-group-title", markup=False)
+            # Guard level
+            yield setting_row(
+                "Guard level",
+                Select(
+                    _GUARD_LEVEL_OPTIONS,
+                    value="standard",
+                    allow_blank=False,
+                    id="mcp_guard_level",
+                ),
+            )
+            yield Static(
+                "",
+                id="mcp_guard_warn",
+                classes="mcp-warn",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Audit and output', classes="settings-group-title", markup=False)
 
-        # Audit path
-        yield Horizontal(
-            Static("Audit log path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/mcp_audit.jsonl",
-                id="mcp_audit_path",
-            ),
-            classes="setting_row",
-        )
+            # Audit path
+            yield setting_row(
+                "Audit log path",
+                Input(
+                    placeholder="~/.servonaut/mcp_audit.jsonl",
+                    id="mcp_audit_path",
+                ),
+            )
 
-        # Max output lines
-        yield Horizontal(
-            Static("Max output lines", classes="label"),
-            Input(placeholder="500", id="mcp_max_output_lines"),
-            classes="setting_row",
-        )
+            # Max output lines
+            yield setting_row(
+                "Max output lines",
+                Input(placeholder="500", id="mcp_max_output_lines"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Destructive AWS access', classes="settings-group-title", markup=False)
 
-        # allow_destructive_aws_call switch
-        yield Horizontal(
-            Static("Allow destructive AWS calls", classes="label"),
-            Switch(id="mcp_allow_destructive"),
-            classes="setting_row",
-        )
-        yield Static(
-            "",
-            id="mcp_destructive_warn",
-            classes="mcp-warn",
-        )
-
-        # Command blocklist
-        yield Static("Command blocklist (regex patterns)", classes="mcp-section-label")
-        yield Static(
-            "Patterns that are ALWAYS refused, regardless of guard level. "
-            "Leave empty at your own risk.",
-            classes="list-editor-label",
-        )
-        yield Static(
-            "",
-            id="mcp_blocklist_warn",
-            classes="mcp-warn",
-        )
-        yield StringListEditor(
-            placeholder="regex pattern, e.g. rm\\s+-rf",
-            id="mcp_blocklist",
-        )
-
-        # Command allowlist
-        yield Static("Command allowlist (standard tier stems)", classes="mcp-section-label")
-        yield Static(
-            "Commands permitted under the 'standard' guard level.",
-            classes="list-editor-label",
-        )
-        yield StringListEditor(
-            placeholder="command stem, e.g. ls",
-            id="mcp_allowlist",
-        )
+            # allow_destructive_aws_call switch
+            yield setting_row(
+                "Allow destructive AWS calls",
+                Switch(id="mcp_allow_destructive"),
+            )
+            yield Static(
+                "",
+                id="mcp_destructive_warn",
+                classes="mcp-warn",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # Command blocklist
+            yield Static("Command blocklist (regex patterns)", classes="mcp-section-label settings-group-title")
+            yield Static(
+                "Patterns that are ALWAYS refused, regardless of guard level. "
+                "Leave empty at your own risk.",
+                classes="list-editor-label",
+            )
+            yield Static(
+                "",
+                id="mcp_blocklist_warn",
+                classes="mcp-warn",
+            )
+            yield StringListEditor(
+                placeholder="regex pattern, e.g. rm\\s+-rf",
+                id="mcp_blocklist",
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            # Command allowlist
+            yield Static("Command allowlist (standard tier stems)", classes="mcp-section-label settings-group-title")
+            yield Static(
+                "Commands permitted under the 'standard' guard level.",
+                classes="list-editor-label",
+            )
+            yield StringListEditor(
+                placeholder="command stem, e.g. ls",
+                id="mcp_allowlist",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -280,18 +284,14 @@ class McpPanel(SettingsPanel):
             self._update_destructive_warn(bool(event.value))
 
     def on_button_pressed(self, event) -> None:
-        """Delegate list-editor buttons then refresh dirty marker."""
-        # Let the StringListEditor buttons propagate first; the base class
-        # save button is handled by SettingsPanel.on_button_pressed, so we
-        # call super() for that case only and update dirty on everything else.
+        """Delegate Save; list editors report their settled row changes."""
         super().on_button_pressed(event)
         self._dirty_watch()
-        # Update blocklist warning when a row is added/removed.
-        try:
-            blocklist = self.query_one("#mcp_blocklist", StringListEditor).get_values()
-            self._update_blocklist_warn(blocklist)
-        except Exception:
-            pass
+
+    def on_string_list_editor_changed(self, event: StringListEditor.Changed) -> None:
+        """Keep the security warning synchronized with the actual blocklist."""
+        if event.editor.id == "mcp_blocklist":
+            self._update_blocklist_warn(event.editor.get_values())
 
     # ------------------------------------------------------------------
     # Inline security warnings

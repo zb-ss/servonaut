@@ -14,10 +14,11 @@ import logging
 from typing import Any, Dict, List
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import PreviewBanner, StringListEditor
 
 logger = logging.getLogger(__name__)
@@ -58,32 +59,32 @@ class AzurePanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the Azure form rows."""
-        yield PreviewBanner("Azure integration")
-        yield Horizontal(
-            Static("Azure enabled", classes="label"),
-            Switch(id="azure_enabled"),
-            classes="setting_row",
-        )
-
-        yield Static("Subscription IDs", classes="section-label")
-        yield Static(
-            "One subscription ID per entry (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)",
-            classes="panel-status",
-        )
-        yield StringListEditor(
-            placeholder="subscription-id",
-            id="azure_subscription_ids",
-        )
-
-        yield Static("Resource Groups", classes="section-label")
-        yield Static(
-            "Limit discovery to these resource groups (leave empty for all)",
-            classes="panel-status",
-        )
-        yield StringListEditor(
-            placeholder="resource-group-name",
-            id="azure_resource_groups",
-        )
+        with Vertical(classes="settings-form-section"):
+            yield PreviewBanner("Azure integration")
+            yield setting_row(
+                "Azure enabled",
+                Switch(id="azure_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            yield Static("Subscription IDs", classes="section-label settings-group-title")
+            yield Static(
+                "One subscription ID per entry (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)",
+                classes="panel-status",
+            )
+            yield StringListEditor(
+                placeholder="subscription-id",
+                id="azure_subscription_ids",
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            yield Static("Resource Groups", classes="section-label settings-group-title")
+            yield Static(
+                "Limit discovery to these resource groups (leave empty for all)",
+                classes="panel-status",
+            )
+            yield StringListEditor(
+                placeholder="resource-group-name",
+                id="azure_resource_groups",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

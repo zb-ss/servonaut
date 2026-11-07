@@ -3,8 +3,8 @@
 The fleet screen opens on the table, so the arrow keys and the fleet
 shortcuts work at once. When the search box has focus, the footer still
 lists the fleet shortcuts, greyed out, while every letter typed goes into
-the box. Nothing in the sidebar ever takes focus, so no screen can open on
-it by accident.
+the box. The sidebar only takes focus during explicit keyboard navigation,
+so no screen can open on it by accident.
 """
 
 from __future__ import annotations

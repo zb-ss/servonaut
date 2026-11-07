@@ -59,6 +59,66 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/aws_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/hetzner_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/ovh_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/cloudtrail_browser.py", "_apply_filters", "update",
+                   "Only resets the detail pane to a fixed selection hint when the selected "
+                   "event no longer matches; no event/filter value is interpolated."),
+    AllowlistEntry("screens/memory.py", "_update_record_detail", "load_text",
+                   "Reads the display cache rebuilt by _render_modules on every redraw/toggle; "
+                   "observed and declared values are scrubbed before caching, while taxonomy and "
+                   "probe metadata stay literal."),
+    AllowlistEntry("screens/ovh_snapshots.py", "_update_selected_context", "update",
+                   "Both selected name and ID pass _display_snapshot_name before display; the "
+                   "empty-selection hint is fixed text."),
+    AllowlistEntry("screens/ovh_storage.py", "_update_selected_resource", "update",
+                   "Selected names and IDs pass _display_name and every attachment ID passes "
+                   "_display_instance_id; the empty-selection hint is fixed text."),
+    AllowlistEntry("screens/bug_report.py", "_render_consent_summary", "update",
+                   "Only fixed consent labels, included/excluded choices and one of two fixed "
+                   "destination labels."),
+    AllowlistEntry("screens/log_picker.py", "_render_path_context", "update",
+                   "Selected path passes display_text (known identifiers and stream scrubbing), "
+                   "then terminal_safe before the literal update."),
+    AllowlistEntry("screens/log_picker.py", "refresh_after_demo_toggle", "update",
+                   "_header_text applies display_text and terminal_safe; the path redraw uses "
+                   "the same protected display pipeline."),
+    AllowlistEntry("screens/login.py", "_show_logged_out_state", "update",
+                   "Writes only fixed signed-out guidance, without account or authorization "
+                   "data."),
+    AllowlistEntry("screens/login.py", "_show_device_flow_state", "update",
+                   "Writes only fixed authorization-progress guidance, never a device code or "
+                   "browser URL."),
+    AllowlistEntry("screens/login.py", "_show_no_httpx_state", "update",
+                   "Writes only the fixed authentication-unavailable label."),
+    AllowlistEntry("screens/scp_transfer.py", "on_radio_set_changed", "update",
+                   "Both role labels select fixed Source/Destination and This computer/Remote "
+                   "server phrases; no paths or identifiers."),
+    AllowlistEntry("screens/team_management.py", "_show_no_auth_state", "update",
+                   "Writes only fixed sign-in guidance, without team names or account data."),
+    AllowlistEntry("screens/team_management.py", "_load_teams", "update",
+                   "Both summary updates are fixed unavailable/failure guidance; no provider "
+                   "exception is interpolated."),
+    AllowlistEntry("screens/vault.py", "_records_heading", "update",
+                   "Heading labels are fixed call-site strings; context contains counts and "
+                   "scoped names protected by _display_record_name and scrub_for_display."),
+    AllowlistEntry("screens/vault.py", "_identity_summary", "update",
+                   "All caller state labels and selected action button labels are fixed product "
+                   "copy, without identity metadata."),
+    AllowlistEntry("widgets/relay_indicator.py", "update", "update",
+                   "Backend publisher receives fixed copy or literal Content built from "
+                   "display_text-protected errors/heartbeat and existing demo-redacted client "
+                   "IDs."),
     AllowlistEntry("screens/bulk_action.py", "refresh_after_demo_toggle", "update",
                    "Descriptions are fixed copy or supplied by domain builders that "
                    "redact names and server labels individually before returning plain Text."),
@@ -69,6 +129,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Only fixed required-name and length-validation messages; "
                    "no key name, secret or server data is interpolated."),
     # Demo-toggle redraw helpers (refresh_after_demo_toggle hooks).
+    AllowlistEntry("screens/scp_transfer.py", "refresh_after_demo_toggle", "update",
+                   "_banner_text passes displayed identity through _display_identity "
+                   "(display_text and demo scrub_stream), then escapes its markup."),
     AllowlistEntry("screens/key_management.py", "refresh_after_demo_toggle", "update",
                    "Clears the ssh-add listing with an empty string constant."),
     AllowlistEntry("screens/ovh_firewall.py", "_render_title", "update",
@@ -811,12 +874,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("widgets/progress_indicator.py", "stop", "update",
                    "Writes empty string to hide the indicator — no user data."),
 
-    # relay_indicator.py — _refresh_local writes relay state label and lock owner
-    # PID (integer + mode). _refresh_backend also writes client_ids, which embed
-    # the OS user and machine model, so it carries its own demo-mode guard.
+    # Local state/PID are product metadata; error reasons use the same
+    # known-identifier and stream display redaction as backend diagnostics.
     AllowlistEntry("widgets/relay_indicator.py", "_refresh_local", "update",
-                   "Writes relay lock state label and owner PID/mode (integers) "
-                   "— internal relay metadata, not user PII."),
+                   "Writes state and owner PID/mode plus a reason protected by "
+                   "display_text before literal Content assembly."),
 
     # server_actions.py — _run_ssh_probe writes a private key to a tmpfile
     # (tempfile.NamedTemporaryFile). `tf.write(private_key_body)` is a filesystem
@@ -1170,7 +1232,6 @@ _TOGGLE_HOOK_ALLOWLIST = {
     ("screens/findings.py", "FindingDetailScreen"): _REOPEN,
     ("screens/fleet_memory.py", "FleetScanSummaryModal"): _REOPEN,
     ("screens/hetzner_create.py", "HetznerCreateScreen"): _REOPEN,
-    ("screens/log_picker.py", "BrowseRemoteScreen"): _REOPEN,
     ("screens/login.py", "LoginScreen"): _REOPEN,
     ("screens/main_menu.py", "MainMenuScreen"): _REOPEN,
     ("screens/memory_drift.py", "DriftDiffScreen"): _REOPEN,
@@ -1183,7 +1244,6 @@ _TOGGLE_HOOK_ALLOWLIST = {
     ("screens/ovh_snapshots.py", "OVHSnapshotsScreen"): _REOPEN,
     ("screens/ovh_storage.py", "OVHStorageScreen"): _REOPEN,
     ("screens/scan_results.py", "ScanResultsScreen"): _REOPEN,
-    ("screens/scp_transfer.py", "SCPTransferScreen"): _REOPEN,
     ("screens/secrets_setup.py", "SecretsSetupScreen"): _REOPEN,
     ("screens/snapshot_manager.py", "SnapshotManagerScreen"): _REOPEN,
     ("screens/ssh_ref_editor.py", "SshRefEditorModal"): _REOPEN,

@@ -18,6 +18,8 @@ from textual.widgets import Button, Input, Select, Static, Switch
 
 from servonaut.styles import CSS_FILES
 
+from tests._native_actions import click_action
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -601,7 +603,7 @@ class TestSettingsScreenMemorySync:
             auto_sync_sw = app.screen.query_one("#settings_msync_auto_sync", Switch)
             auto_sync_sw.value = True
             # Click Save.
-            await pilot.click("#btn_msync_save")
+            await click_action(pilot, "#btn_msync_save")
             await pilot.pause()
             await pilot.pause()
 
@@ -668,6 +670,8 @@ class TestSettingsScreenMemorySync:
 class _ShareApp(App):
     """Host that mounts ShareInstanceModal."""
 
+    CSS_PATH = CSS_FILES
+
     def __init__(self, has_share_feature: bool = True) -> None:
         super().__init__()
         self.auth_service = _auth_with_feature(
@@ -721,7 +725,7 @@ class TestShareInstanceScreen:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             stack_depth_before = len(app.screen_stack)
-            await pilot.click("#share-btn-cancel")
+            await click_action(pilot, "#share-btn-cancel")
             await pilot.pause()
             assert len(app.screen_stack) == stack_depth_before - 1
 

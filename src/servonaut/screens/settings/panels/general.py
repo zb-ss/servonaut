@@ -5,7 +5,7 @@ widgets, ``load`` populates them from config and snapshots, ``collect``
 validates + returns a field dict (raising :class:`ValidationError` on bad
 input), and ``persist`` writes through ``config_manager.update(...)`` then
 ``_finish_save``. Dirty tracking is driven by ``current_values`` +
-``_dirty_watch``. Other panel agents should copy this structure.
+``_dirty_watch``. The other panels follow the same lifecycle contract.
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.theme import Theme
 from textual.widgets import Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.styles.themes import resolve_theme_name, theme_options
 
 
@@ -26,6 +27,7 @@ class GeneralPanel(SettingsPanel):
 
     PANEL_ID = "general"
     TITLE = "General"
+    DESCRIPTION = "Defaults for new connections and this application."
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -34,37 +36,36 @@ class GeneralPanel(SettingsPanel):
     }
 
     def form_rows(self) -> ComposeResult:
-        """Yield the General form rows."""
-        yield Horizontal(
-            Static("Default username", classes="label"),
-            Input(placeholder="ec2-user", id="general_username"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default SSH key", classes="label"),
-            Input(placeholder="~/.ssh/id_rsa", id="general_default_key"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cache TTL (seconds)", classes="label"),
-            Input(placeholder="3600", id="general_cache_ttl"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Terminal emulator", classes="label"),
-            Input(placeholder="auto", id="general_terminal"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Theme", classes="label"),
-            Select(
-                theme_options(self.app.available_themes),
-                value=self.app.theme,
-                allow_blank=False,
-                id="general_theme",
-            ),
-            classes="setting_row",
-        )
+        """Group the existing defaults by their role in the application."""
+        with Vertical(classes="settings-form-section"):
+            yield Static("Connection defaults", classes="settings-group-title", markup=False)
+            yield setting_row(
+                "Default username",
+                Input(placeholder="ec2-user", id="general_username"),
+            )
+            yield setting_row(
+                "Default SSH key",
+                Input(placeholder="~/.ssh/id_rsa", id="general_default_key"),
+            )
+        with Vertical(classes="settings-form-section"):
+            yield Static("Application", classes="settings-group-title", markup=False)
+            yield setting_row(
+                "Cache TTL (seconds)",
+                Input(placeholder="3600", id="general_cache_ttl"),
+            )
+            yield setting_row(
+                "Terminal emulator",
+                Input(placeholder="auto", id="general_terminal"),
+            )
+            yield setting_row(
+                "Theme",
+                Select(
+                    theme_options(self.app.available_themes),
+                    value=self.app.theme,
+                    allow_blank=False,
+                    id="general_theme",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

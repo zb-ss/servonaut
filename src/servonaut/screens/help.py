@@ -12,13 +12,13 @@ from typing import Iterable, List, Sequence, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Container, Horizontal
 from textual.keys import format_key
 
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
-from textual.widgets import Footer, Static, Markdown
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from textual.widgets import Footer, Static, Markdown, MarkdownViewer
+from textual.widgets.markdown import MarkdownTableOfContents
 
 # How the help writes named keys; any other key is shown as Textual shows it.
 _KEY_NAMES = {
@@ -387,8 +387,22 @@ For scrollable views (log output, tables), use `v` to enter Copy Mode.
 """
 
 
-class HelpScreen(Screen):
+class _HelpViewer(MarkdownViewer, can_focus=True):
+    """Native topic navigation while retaining the manual's public widget ID."""
+
+    def compose(self) -> ComposeResult:
+        document = Markdown(id="help_content")
+        document.can_focus = True
+        yield document
+        yield MarkdownTableOfContents(document, id="help_topics")
+
+
+class HelpScreen(WorkspaceScreen):
     """Help screen displaying the user manual."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 40
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -397,12 +411,16 @@ class HelpScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Markdown(build_help_text(), id="help_content"),
-                id="help_container"
-            )
+        yield WorkspaceControls("Help")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="help_workspace", classes="workspace-content"):
+                yield Static(
+                    "Choose a topic or scroll the manual. Ctrl+P opens commands; Esc returns.",
+                    id="help_navigation_hint",
+                    markup=False,
+                )
+                yield _HelpViewer(build_help_text(), id="help_container")
         yield Footer()
 
     def action_back(self) -> None:

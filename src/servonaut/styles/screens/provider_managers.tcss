@@ -1,0 +1,225 @@
+/* Provider inventory stays beside the selected resource's working controls. */
+AWSManagerScreen #aws_mgr_container,
+HetznerManagerScreen #hetzner_mgr_container,
+OVHManagerScreen #ovh_mgr_container {
+    padding: 1;
+}
+
+.provider-manager-content .provider-manager-heading {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.provider-manager-content .provider-manager-heading-row {
+    height: auto;
+    align: left top;
+}
+
+AWSManagerScreen #aws_mgr_header,
+HetznerManagerScreen #hetzner_mgr_header,
+OVHManagerScreen #ovh_mgr_header {
+    width: 1fr;
+    height: auto;
+    text-align: left;
+    text-style: bold;
+    color: $text;
+    padding: 0;
+    margin: 0;
+}
+
+.provider-manager-content .provider-manager-overview {
+    width: auto;
+    max-width: 50%;
+    height: auto;
+    color: $text-muted;
+    text-align: right;
+}
+
+AWSManagerScreen #aws_mgr_hint,
+HetznerManagerScreen #hetzner_mgr_hint,
+OVHManagerScreen #ovh_mgr_hint {
+    height: auto;
+    padding: 0;
+    margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+.provider-manager-content .provider-manager-body {
+    height: auto;
+    width: 1fr;
+    align: left top;
+}
+
+.provider-manager-content .provider-manager-inventory {
+    width: 1fr;
+    min-width: 24;
+    height: auto;
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    border-title-color: $text-accent;
+    background: transparent;
+}
+
+AWSManagerScreen #aws_mgr_table,
+HetznerManagerScreen #hetzner_mgr_table,
+OVHManagerScreen #ovh_mgr_table {
+    height: auto;
+    min-height: 8;
+    max-height: 24;
+    border: none;
+    margin: 0;
+}
+
+AWSManagerScreen #aws_mgr_status,
+HetznerManagerScreen #hetzner_mgr_status,
+OVHManagerScreen #ovh_mgr_status {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+.provider-manager-content .provider-manager-rail {
+    width: 44;
+    height: auto;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    border-title-color: $text-accent;
+    background: transparent;
+}
+
+.provider-manager-content .provider-manager-selection {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.provider-manager-content .provider-manager-selection-label {
+    height: auto;
+    color: $text-muted;
+}
+
+.provider-manager-content .provider-manager-selection-name {
+    height: auto;
+    margin: 0 0 1 0;
+    color: $text;
+    text-style: bold;
+}
+
+.provider-manager-content .provider-manager-selection-identity {
+    height: auto;
+    color: $text;
+}
+
+/* Every original action remains in traversal order within one scroll target. */
+AWSManagerScreen .provider-manager-content #aws_mgr_actions,
+HetznerManagerScreen .provider-manager-content #hetzner_mgr_actions,
+OVHManagerScreen .provider-manager-content #ovh_mgr_actions {
+    layout: vertical;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    align: left top;
+}
+
+.provider-manager-content .provider-manager-action-group {
+    layout: vertical;
+    height: auto;
+    width: 1fr;
+    margin-bottom: 1;
+    align: left top;
+}
+
+.provider-manager-content .provider-manager-action-label {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
+}
+
+.provider-manager-content .provider-manager-buttons {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 1fr;
+}
+
+.provider-manager-content .provider-manager-remove-buttons {
+    grid-size: 1;
+    grid-columns: 1fr;
+}
+
+AWSManagerScreen .provider-manager-content #aws_mgr_actions Button,
+HetznerManagerScreen .provider-manager-content #hetzner_mgr_actions Button,
+OVHManagerScreen .provider-manager-content #ovh_mgr_actions Button {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-body,
+HetznerManagerScreen.-content-narrow .provider-manager-body,
+OVHManagerScreen.-content-narrow .provider-manager-body {
+    layout: vertical;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-inventory,
+HetznerManagerScreen.-content-narrow .provider-manager-inventory,
+OVHManagerScreen.-content-narrow .provider-manager-inventory {
+    width: 1fr;
+    min-width: 0;
+    padding: 0 1;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-rail,
+HetznerManagerScreen.-content-narrow .provider-manager-rail,
+OVHManagerScreen.-content-narrow .provider-manager-rail {
+    width: 1fr;
+    margin: 0;
+}
+
+AWSManagerScreen.-content-narrow #aws_mgr_table,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_table,
+OVHManagerScreen.-content-narrow #ovh_mgr_table {
+    min-height: 6;
+    max-height: 20vh;
+}
+
+/* Primary inventory actions precede the complete selected identity. A narrow
+   arrival keeps useful native rows and the primary controls in the viewport. */
+AWSManagerScreen.-content-narrow .provider-manager-heading,
+HetznerManagerScreen.-content-narrow .provider-manager-heading,
+OVHManagerScreen.-content-narrow .provider-manager-heading {
+    margin-bottom: 0;
+}
+
+AWSManagerScreen.-content-narrow #aws_mgr_hint,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_hint,
+OVHManagerScreen.-content-narrow #ovh_mgr_hint,
+AWSManagerScreen.-content-narrow #aws_mgr_status,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_status,
+OVHManagerScreen.-content-narrow #ovh_mgr_status {
+    margin: 0;
+}
+
+/* Narrow OVH actions keep their category beside the full native controls. */
+OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-group {
+    layout: horizontal;
+    margin-bottom: 0;
+}
+
+OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-label {
+    width: 16;
+}
+
+/* Two auto-row columns retain borders, line padding and a text cell each. */
+OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-buttons {
+    min-width: 11;
+}

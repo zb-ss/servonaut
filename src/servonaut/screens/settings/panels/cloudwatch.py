@@ -17,10 +17,11 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 
 class CloudwatchPanel(SettingsPanel):
@@ -33,6 +34,7 @@ class CloudwatchPanel(SettingsPanel):
 
     PANEL_ID = "cloudwatch"
     TITLE = "CloudWatch"
+    DESCRIPTION = "Defaults used when browsing CloudWatch logs."
 
     # ------------------------------------------------------------------
     # Composition
@@ -40,30 +42,31 @@ class CloudwatchPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the CloudWatch form rows."""
-        yield Horizontal(
-            Static("Default region", classes="label"),
-            Input(
-                placeholder="e.g. us-east-1 (leave blank to use AWS default)",
-                id="cloudwatch_default_region",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max events", classes="label"),
-            Input(
-                placeholder="500",
-                id="cloudwatch_max_events",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Log group prefix", classes="label"),
-            Input(
-                placeholder="e.g. /aws/lambda/ (leave blank to list all groups)",
-                id="cloudwatch_log_group_prefix",
-            ),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Query defaults", classes="settings-group-title")
+            yield setting_row(
+                "Default region",
+                Input(
+                    placeholder="e.g. us-east-1 (leave blank to use AWS default)",
+                    id="cloudwatch_default_region",
+                ),
+            )
+            yield setting_row(
+                "Max events",
+                Input(
+                    placeholder="500",
+                    id="cloudwatch_max_events",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Log group discovery", classes="settings-group-title")
+            yield setting_row(
+                "Log group prefix",
+                Input(
+                    placeholder="e.g. /aws/lambda/ (leave blank to list all groups)",
+                    id="cloudwatch_log_group_prefix",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

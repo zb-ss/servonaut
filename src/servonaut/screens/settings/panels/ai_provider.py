@@ -26,10 +26,11 @@ from typing import Any, Dict
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import EnvVarInput
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class AiProviderPanel(SettingsPanel):
 
     PANEL_ID = "ai_provider"
     TITLE = "AI Provider"
+    DESCRIPTION = "Provider access, analysis defaults and chat preference."
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -92,137 +94,126 @@ class AiProviderPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the AI provider form rows."""
-        yield Static(
-            "[dim]Configure the AI provider used for log analysis and chat.[/dim]",
-            classes="ai-note",
-        )
-        # Servonaut AI status row (read-only, refreshed on mount).
-        yield Horizontal(
-            Static(
-                "Servonaut AI: [dim]loading…[/dim]",
-                id="ai_provider_servonaut_status",
-                classes="label",
-            ),
-            Button(
-                "Upgrade",
-                id="ai_provider_upgrade",
-                variant="primary",
-            ),
-            classes="setting_row ai-status-row",
-        )
-
-        # Analysis provider selector (drives AI log analysis).
-        yield Static(
-            "[dim]Provider used for AI log analysis (the Analyze screen).[/dim]",
-            classes="ai-note",
-        )
-        yield Horizontal(
-            Static("Analysis provider", classes="label"),
-            Select(
-                _PROVIDER_OPTIONS,
-                value="openai",
-                allow_blank=False,
-                id="ai_provider_provider",
-            ),
-            classes="setting_row",
-        )
-
-        # Per-provider API keys.
-        yield Horizontal(
-            Static("OpenAI key", classes="label"),
-            EnvVarInput(
-                placeholder="sk-... or $OPENAI_API_KEY",
-                password=True,
-                id="ai_provider_openai_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Anthropic key", classes="label"),
-            EnvVarInput(
-                placeholder="sk-ant-... or $ANTHROPIC_API_KEY",
-                password=True,
-                id="ai_provider_anthropic_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Gemini key", classes="label"),
-            EnvVarInput(
-                placeholder="AIza... or $GEMINI_API_KEY",
-                password=True,
-                id="ai_provider_gemini_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Ollama key", classes="label"),
-            EnvVarInput(
-                placeholder="ollama.com key (blank = local) or $OLLAMA_API_KEY",
-                password=True,
-                id="ai_provider_ollama_key",
-            ),
-            classes="setting_row",
-        )
-
-        # Model + base URL.
-        yield Horizontal(
-            Static("Model", classes="label"),
-            Input(
-                placeholder="leave blank for provider default",
-                id="ai_provider_model",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Base URL", classes="label"),
-            Input(
-                placeholder="http://localhost:11434 (Ollama local) or https://ollama.com",
-                id="ai_provider_base_url",
-            ),
-            classes="setting_row",
-        )
-
-        # Numeric limits.
-        yield Horizontal(
-            Static("Max tokens", classes="label"),
-            Input(placeholder="4096", id="ai_provider_max_tokens"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Temperature", classes="label"),
-            Input(placeholder="0.3", id="ai_provider_temperature"),
-            classes="setting_row",
-        )
-
-        # Chat provider preference (editable) — drives the chat panel,
-        # independent of the analysis provider above.
-        yield Static(
-            "[dim]Which provider the chat panel uses. Independent of the "
-            "analysis provider above; only matters when more than one "
-            "provider is set up. “Ask on first chat” lets the chat prompt "
-            "you once.[/dim]",
-            classes="ai-note",
-        )
-        yield Horizontal(
-            Static("Chat provider", classes="label"),
-            Select(
-                _PREF_OPTIONS,
-                value="",
-                allow_blank=False,
-                id="ai_provider_pref_select",
-            ),
-            classes="setting_row",
-        )
-        yield Static(
-            "[dim]Reset re-enables the first-run prompt and any dismissed "
-            "banners.[/dim]",
-            classes="ai-note",
-        )
-        yield Horizontal(
-            Button("Reset", id="ai_provider_reset", variant="default"),
-            classes="setting_row pref-row",
-        )
+        with Vertical(classes="settings-form-section settings-analysis-section settings-analysis-context"):
+            yield Static(
+                "[dim]Configure the AI provider used for log analysis and chat.[/dim]",
+                classes="ai-note",
+            )
+            yield Horizontal(
+                Static(
+                    "Servonaut AI: [dim]loading…[/dim]",
+                    id="ai_provider_servonaut_status",
+                    classes="label",
+                ),
+                Button(
+                    "Upgrade",
+                    id="ai_provider_upgrade",
+                    variant="primary",
+                ),
+                classes="setting_row ai-status-row",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Analysis provider", classes="settings-group-title")
+            yield Static(
+                "[dim]Provider used for AI log analysis (the Analyze screen).[/dim]",
+                classes="ai-note",
+            )
+            yield setting_row(
+                "Analysis provider",
+                Select(
+                    _PROVIDER_OPTIONS,
+                    value="openai",
+                    allow_blank=False,
+                    id="ai_provider_provider",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Provider credentials", classes="settings-group-title")
+            yield setting_row(
+                "OpenAI key",
+                EnvVarInput(
+                    placeholder="sk-... or $OPENAI_API_KEY",
+                    password=True,
+                    id="ai_provider_openai_key",
+                ),
+            )
+            yield setting_row(
+                "Anthropic key",
+                EnvVarInput(
+                    placeholder="sk-ant-... or $ANTHROPIC_API_KEY",
+                    password=True,
+                    id="ai_provider_anthropic_key",
+                ),
+            )
+            yield setting_row(
+                "Gemini key",
+                EnvVarInput(
+                    placeholder="AIza... or $GEMINI_API_KEY",
+                    password=True,
+                    id="ai_provider_gemini_key",
+                ),
+            )
+            yield setting_row(
+                "Ollama key",
+                EnvVarInput(
+                    placeholder="ollama.com key (blank = local) or $OLLAMA_API_KEY",
+                    password=True,
+                    id="ai_provider_ollama_key",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Model and endpoint", classes="settings-group-title")
+            yield setting_row(
+                "Model",
+                Input(
+                    placeholder="leave blank for provider default",
+                    id="ai_provider_model",
+                ),
+            )
+            yield setting_row(
+                "Base URL",
+                Input(
+                    placeholder="http://localhost:11434 (Ollama local) or https://ollama.com",
+                    id="ai_provider_base_url",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Response limits", classes="settings-group-title")
+            yield setting_row(
+                "Max tokens",
+                Input(placeholder="4096", id="ai_provider_max_tokens"),
+            )
+            yield setting_row(
+                "Temperature",
+                Input(placeholder="0.3", id="ai_provider_temperature"),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Chat provider choice", classes="settings-group-title")
+            yield Static(
+                "[dim]Which provider the chat panel uses. Independent of the "
+                "analysis provider above; only matters when more than one "
+                "provider is set up. “Ask on first chat” lets the chat prompt "
+                "you once.[/dim]",
+                classes="ai-note",
+            )
+            yield setting_row(
+                "Chat provider",
+                Select(
+                    _PREF_OPTIONS,
+                    value="",
+                    allow_blank=False,
+                    id="ai_provider_pref_select",
+                ),
+            )
+            yield Static(
+                "[dim]Reset re-enables the first-run prompt and any dismissed "
+                "banners.[/dim]",
+                classes="ai-note",
+            )
+            yield Horizontal(
+                Button("Reset", id="ai_provider_reset", variant="default"),
+                classes="setting_row pref-row",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

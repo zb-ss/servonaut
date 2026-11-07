@@ -920,6 +920,10 @@ async def test_team_status_wording_when_none_can_get_key(count: int) -> None:
 
 @pytest.mark.asyncio
 async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
+    import re
+
+    from tests.test_workspace_reflow import _painted
+
     instances = [
         {"id": f"i-{i}", "name": f"srv-{i}", "public_ip": f"198.51.100.{i}"}
         for i in range(12)
@@ -930,7 +934,7 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
         screen = app.screen
         await wait_until(lambda: len(screen._rows) == 12)
         assert screen.has_class("-short")
-        assert screen.has_class("-narrow")
+        assert screen.has_class("-content-narrow")
 
         intro = screen.query_one("#auto_bind_intro", Static)
         assert intro.size.height == 0 or not intro.visible
@@ -939,7 +943,9 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
         assert select.visible and select.size.height == 1
 
         table = screen.query_one("#auto_bind_table", DataTable)
-        assert table.visible and table.size.height >= 8
+        # Five complete native action buttons take three rows in the narrow grid.
+        # All twelve server rows must remain readable through native table scrolling.
+        assert table.visible and table.row_count == 12
 
         status = screen.query_one("#auto_bind_status", Static)
         assert status.visible and status.size.height >= 1
@@ -948,6 +954,45 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
         assert actions.visible
         for btn in actions.query(Button):
             assert btn.visible and btn.size.height >= 1
+
+        baseline_rows = _rows(app)
+        baseline_selection = set(screen._selected)
+        baseline_disabled = [(button.id, button.disabled) for button in actions.query(Button)]
+        expected_labels = {
+            "auto_bind_apply": "Bind selected", "auto_bind_fetch_keys": "Fetch host keys",
+            "auto_bind_all": "Select all", "auto_bind_none": "Select none",
+            "auto_bind_back": "Back",
+        }
+        assert {button.id for button in actions.query(Button)} == set(expected_labels)
+        for _ in range(len(screen.focus_chain) + 1):
+            if app.focused is table:
+                break
+            await pilot.press("tab")
+        assert app.focused is table
+        await pilot.press("ctrl+home")
+        await pilot.wait_for_scheduled_animations()
+        assert table.cursor_row == 0 and table.scroll_y == 0 and table.max_scroll_y > 0
+        # All fixtures have the same status; the service orders names case-insensitively.
+        expected_names = sorted((instance["name"] for instance in instances), key=str.lower)
+        for index, expected_name in enumerate(expected_names):
+            if index:
+                await pilot.press("down")
+                await pilot.wait_for_scheduled_animations()
+            assert table.cursor_row == index
+            assert str(table.get_row_at(index)[1]) == expected_name
+            assert re.search(
+                rf"(?<![\w-]){re.escape(expected_name)}(?![\w-])", _painted(app, table),
+            )
+        assert table.scroll_y > 0
+        for button in actions.query(Button):
+            assert str(button.label) == expected_labels[button.id]
+            assert screen.can_view_entire(button)
+            assert app.get_widget_at(*button.content_region.center)[0] is button
+            assert str(button.label) in _painted(app, button)
+        assert _rows(app) == baseline_rows and set(screen._selected) == baseline_selection
+        assert [(button.id, button.disabled) for button in actions.query(Button)] == baseline_disabled
+        assert service.binds == [] and service.visits == []
+
 
 
 @pytest.mark.asyncio

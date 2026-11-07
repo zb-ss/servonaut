@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
@@ -26,7 +25,7 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -93,8 +92,12 @@ _PAGE_SIZE = 15
 _LOAD_GROUP = "ovh_billing_load"
 
 
-class OVHBillingScreen(Screen):
+class OVHBillingScreen(WorkspaceScreen):
     """OVH Billing Dashboard — shows usage, history, invoices, and services."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -110,6 +113,8 @@ class OVHBillingScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -118,35 +123,59 @@ class OVHBillingScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Billing")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static("[bold $text-accent]OVH Billing Dashboard[/bold $text-accent]", id="billing_title"),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh", id="billing_account",
-                ),
-
-                Static("[bold]Current Month[/bold]", classes="section_header"),
-                Static("[dim]Loading...[/dim]", id="current_usage"),
-
-                Static("[bold]Monthly History[/bold]", classes="section_header"),
-                Static("[dim]Loading...[/dim]", id="spend_history"),
-
-                Static("[bold]Invoices[/bold]", classes="section_header"),
-                DataTable(id="invoices_table"),
-                Static("", id="invoices_page_info"),
                 Horizontal(
-                    Button("Previous", id="btn_prev_page", variant="default"),
-                    Button("Next", id="btn_next_page", variant="default"),
-                    id="invoice_pagination",
+                    Vertical(
+                        Static("[bold $text-accent]OVH Billing Dashboard[/bold $text-accent]", id="billing_title"),
+                        Static("Account usage, invoice history and billed services.", classes="resource-context"),
+                        classes="provider-account-heading",
+                    ),
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh", id="billing_account",
+                    ),
+                    classes="provider-account-heading-row",
                 ),
-
-                Static("[bold]Services[/bold]", classes="section_header"),
-                DataTable(id="services_table"),
-
-                Button("Back", id="btn_back", variant="default"),
+                Horizontal(
+                    Vertical(
+                        Static("[bold]Current Month[/bold]", classes="section_header"),
+                        Static("[dim]Loading...[/dim]", id="current_usage"),
+                        classes="resource-panel provider-billing-current",
+                    ),
+                    Vertical(
+                        Static("[bold]Monthly History[/bold]", classes="section_header"),
+                        Static("[dim]Loading...[/dim]", id="spend_history"),
+                        classes="resource-panel provider-billing-history",
+                    ),
+                    classes="resource-billing-summary provider-billing-summary",
+                ),
+                Horizontal(
+                    Vertical(
+                        Static("[bold]Invoices[/bold]", classes="section_header"),
+                        DataTable(id="invoices_table"),
+                        Static("", id="invoices_page_info"),
+                        Horizontal(
+                            Button("Previous", id="btn_prev_page", variant="default"),
+                            Button("Next", id="btn_next_page", variant="default"),
+                            id="invoice_pagination",
+                        ),
+                        classes="resource-panel provider-billing-invoices",
+                    ),
+                    Vertical(
+                        Static("[bold]Services[/bold]", classes="section_header"),
+                        DataTable(id="services_table"),
+                        classes="resource-panel provider-billing-services",
+                    ),
+                    classes="provider-billing-ledgers",
+                ),
+                Horizontal(
+                    Button("Back", id="btn_back", variant="default"),
+                    classes="resource-back-actions",
+                ),
                 id="billing_container",
+                classes="workspace-content resource-workspace-content provider-account-workspace",
             )
         yield Footer()
 

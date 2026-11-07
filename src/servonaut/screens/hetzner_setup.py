@@ -30,8 +30,7 @@ from typing import List, Optional, TYPE_CHECKING, Tuple
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Select, Static
 
@@ -46,7 +45,7 @@ from servonaut.services.object_storage_regions import (
 )
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.secret_input import SecretInput
 
 if TYPE_CHECKING:
@@ -55,13 +54,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class HetznerSetupScreen(Screen):
+class HetznerSetupScreen(WorkspaceScreen):
     """Guided setup wizard for Hetzner Cloud — token + defaults.
 
     Opened with no arguments it sets up the primary project. ``add_extra``
     adds another project and ``extra`` edits extra project number *extra*;
     ``show_label`` also offers the primary project's label for editing.
     """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the labelled credential inputs
+    # beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -76,6 +81,30 @@ class HetznerSetupScreen(Screen):
     }
     HetznerSetupScreen #btn_hetzner_add_project {
         margin: 0 1 0 0;
+    }
+
+    HetznerSetupScreen .provider_setup_context {
+        height: auto;
+        padding: 0 1 1 1;
+    }
+    HetznerSetupScreen #hetzner_setup_header {
+        height: auto;
+        margin-bottom: 1;
+    }
+    HetznerSetupScreen .provider_setup_grid {
+        height: auto;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: auto;
+        grid-gutter: 1 2;
+    }
+    HetznerSetupScreen.-content-narrow .provider_setup_context {
+        padding: 0 0 1 0;
+    }
+    HetznerSetupScreen.-content-narrow .provider_setup_grid {
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-gutter: 1 0;
     }
     """
 
@@ -110,18 +139,29 @@ class HetznerSetupScreen(Screen):
             self._account_mode or self._show_label or bool(h.accounts) or bool(h.label)
         )
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Hetzner setup")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                *self._intro_rows(),
-                *self._token_rows(),
-                *self._ssh_rows(),
-                *([] if self._account_mode else self._create_default_rows()),
-                *self._object_storage_rows(),
-                # Test + Save row
-                Static("", id="hetzner_test_result"),
-                Horizontal(*self._action_buttons(), classes="hetzner_action_row"),
+                Container(*self._intro_rows(), classes="provider_setup_context"),
+                Grid(
+                    Container(*self._token_rows(), classes="provider_form_section"),
+                    Container(*self._ssh_rows(), classes="provider_form_section"),
+                    *(
+                        [] if self._account_mode else [
+                            Container(*self._create_default_rows(), classes="provider_form_section")
+                        ]
+                    ),
+                    Container(*self._object_storage_rows(), classes="provider_form_section"),
+                    classes="provider_setup_grid",
+                ),
+                Vertical(
+                    Static("", id="hetzner_test_result"),
+                    Horizontal(*self._action_buttons(), classes="hetzner_action_row"),
+                    classes="provider_setup_actions",
+                ),
                 id="hetzner_setup_container",
+                classes="workspace-content",
             )
         yield Footer()
 

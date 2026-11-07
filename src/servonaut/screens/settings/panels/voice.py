@@ -34,6 +34,7 @@ from servonaut.config.schema import (
 )
 from servonaut.runtime import DistributionKind
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.services.voice_engines import (
     DEFAULT_TTS_VOICE,
     ENGINES,
@@ -297,6 +298,7 @@ class VoicePanel(SettingsPanel):
 
     PANEL_ID = "voice"
     TITLE = "Voice Input"
+    DESCRIPTION = "Local dictation, spoken replies and hands-free conversation."
 
     DEFAULT_CSS = """
     VoicePanel .voice-section-header {
@@ -354,6 +356,8 @@ class VoicePanel(SettingsPanel):
         # Last resolved readiness, kept so button handlers do not re-probe
         # (which would re-enumerate audio devices on every click).
         self._readiness: Optional[Any] = None
+        # Keep a failed probe visible while edits reuse the last known state.
+        self._readiness_error: Optional[str] = None
         # True while an install or download worker is in flight, so the
         # action buttons cannot be double-fired.
         self._busy = False
@@ -371,185 +375,154 @@ class VoicePanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the opt-in switch, the readiness card, and the tunables."""
-        yield Static("", id="voice_status_banner")
-
-        yield Horizontal(
-            Static("Enable voice input", classes="label"),
-            Switch(value=False, id="voice_enabled"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Speech is transcribed on this machine — audio is never uploaded. "
-            "Turning this on adds a microphone button to the chat panel; it "
-            "downloads nothing by itself.",
-            classes="voice-help",
-        )
-
-        yield Static("Setup", classes="voice-section-header")
-        yield Static(
-            "These actions run immediately and are not part of Save.",
-            classes="voice-help",
-        )
-
-        yield Vertical(id="voice_requirements")
-
-        # Hidden until a download starts. A model is hundreds of megabytes,
-        # so a silent multi-minute wait is indistinguishable from a hang.
-        with Vertical(id="voice_download_row", classes="hidden"):
-            yield Static("", id="voice_download_label")
-            yield ProgressBar(
-                total=None, show_eta=True, id="voice_download_bar"
+        with Vertical(classes="settings-form-section settings-analysis-section settings-analysis-context"):
+            yield Static("", id="voice_status_banner")
+            yield setting_row(
+                "Enable voice input",
+                Switch(value=False, id="voice_enabled"),
             )
-
-        yield Horizontal(
-            Button("Re-check", id="voice_btn_recheck", variant="default"),
-            classes="voice-action-row",
-        )
-
-        yield Static("Transcription", classes="voice-section-header")
-        yield Horizontal(
-            Static("Engine", classes="label"),
-            Select(_ENGINE_OPTIONS, id="voice_engine", allow_blank=False),
-            classes="setting_row",
-        )
-        yield Static("", id="voice_engine_summary", classes="voice-help")
-        yield Horizontal(
-            Static("Model size (Whisper only)", classes="label"),
-            Select(_MODEL_OPTIONS, id="voice_model_size", allow_blank=False),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Latency (streaming only)", classes="label"),
-            Select(_LATENCY_OPTIONS, id="voice_latency", allow_blank=False),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Language (ISO code, or 'auto')", classes="label"),
-            Input(placeholder="en", id="voice_language"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Pin the language when you know it — 'auto' costs an extra "
-            "detection pass and misfires on short phrases.",
-            classes="voice-help",
-        )
-        yield Horizontal(
-            Static("Input device (blank = system default)", classes="label"),
-            Input(placeholder="default", id="voice_input_device"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max seconds per recording", classes="label"),
-            Input(placeholder="60", id="voice_max_recording_seconds"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Send dictation automatically", classes="label"),
-            Switch(value=False, id="voice_auto_submit"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Off by default: the assistant can run commands, and with this on "
-            "a misheard word reaches it unedited. Leave it off to review each "
-            "transcript in the input box before sending.",
-            classes="voice-help",
-        )
-
-        yield Static("Spoken replies", classes="voice-section-header")
-        yield Horizontal(
-            Static("Read replies aloud", classes="label"),
-            Switch(value=False, id="voice_tts_enabled"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Replies are synthesised on this machine — text is never sent to "
-            "a speech service. Needs the speech model below; while playing, "
-            "ctrl+o in the chat panel stops it.",
-            classes="voice-help",
-        )
-        # Readiness rows for the synthesis stack, rebuilt dynamically like
-        # the dictation card above. Download/remove buttons live here too.
-        yield Vertical(id="voice_tts_requirements")
-        yield Horizontal(
-            Static("Voice", classes="label"),
-            Select(_TTS_VOICE_OPTIONS, id="voice_tts_voice", allow_blank=False),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static(
+            yield Static(
+                "Speech is transcribed on this machine — audio is never uploaded. "
+                "Turning this on adds a microphone button to the chat panel; it "
+                "downloads nothing by itself.",
+                classes="voice-help",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Setup", classes="voice-section-header")
+            yield Static(
+                "These actions run immediately and are not part of Save.",
+                classes="voice-help",
+            )
+            yield Vertical(id="voice_requirements")
+            with Vertical(id="voice_download_row", classes="hidden"):
+                yield Static("", id="voice_download_label")
+                yield ProgressBar(
+                    total=None, show_eta=True, id="voice_download_bar"
+                )
+            yield Horizontal(
+                Button("Re-check", id="voice_btn_recheck", variant="default"),
+                classes="voice-action-row",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Transcription", classes="voice-section-header")
+            yield setting_row(
+                "Engine",
+                Select(_ENGINE_OPTIONS, id="voice_engine", allow_blank=False),
+            )
+            yield Static("", id="voice_engine_summary", classes="voice-help")
+            yield setting_row(
+                "Model size (Whisper only)",
+                Select(_MODEL_OPTIONS, id="voice_model_size", allow_blank=False),
+            )
+            yield setting_row(
+                "Latency (streaming only)",
+                Select(_LATENCY_OPTIONS, id="voice_latency", allow_blank=False),
+            )
+            yield setting_row(
+                "Language (ISO code, or 'auto')",
+                Input(placeholder="en", id="voice_language"),
+            )
+            yield Static(
+                "Pin the language when you know it — 'auto' costs an extra "
+                "detection pass and misfires on short phrases.",
+                classes="voice-help",
+            )
+            yield setting_row(
+                "Input device (blank = system default)",
+                Input(placeholder="default", id="voice_input_device"),
+            )
+            yield setting_row(
+                "Max seconds per recording",
+                Input(placeholder="60", id="voice_max_recording_seconds"),
+            )
+            yield setting_row(
+                "Send dictation automatically",
+                Switch(value=False, id="voice_auto_submit"),
+            )
+            yield Static(
+                "Off by default: the assistant can run commands, and with this on "
+                "a misheard word reaches it unedited. Leave it off to review each "
+                "transcript in the input box before sending.",
+                classes="voice-help",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Spoken replies", classes="voice-section-header")
+            yield setting_row(
+                "Read replies aloud",
+                Switch(value=False, id="voice_tts_enabled"),
+            )
+            yield Static(
+                "Replies are synthesised on this machine — text is never sent to "
+                "a speech service. Needs the speech model below; while playing, "
+                "ctrl+o in the chat panel stops it.",
+                classes="voice-help",
+            )
+            yield Vertical(id="voice_tts_requirements")
+            yield setting_row(
+                "Voice",
+                Select(_TTS_VOICE_OPTIONS, id="voice_tts_voice", allow_blank=False),
+            )
+            yield setting_row(
                 f"Speed ({_TTS_SPEED_MIN}-{_TTS_SPEED_MAX}, 1.0 = normal)",
-                classes="label",
-            ),
-            Input(placeholder="1.0", id="voice_tts_speed"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Output device (blank = system default)", classes="label"),
-            Input(placeholder="default", id="voice_output_device"),
-            classes="setting_row",
-        )
-
-        yield Static("Conversation", classes="voice-section-header")
-        yield Horizontal(
-            Static("Hands-free conversation on open", classes="label"),
-            Switch(value=False, id="voice_conversation_mode"),
-            classes="setting_row",
-        )
-        yield Static(
-            "When on, opening the chat panel starts the hands-free loop as "
-            "soon as everything is ready: the microphone stays open between "
-            "turns, what you said is sent automatically when you stop "
-            "talking, and — "
-            "when spoken replies are enabled above — the reply is read "
-            "aloud before listening resumes. The chat-panel toggle (ctrl+n) "
-            "starts or stops a session either way. Needs the small "
-            "voice-detection model below on top of the transcription model "
-            "above (plus the speech model when replies are spoken).",
-            classes="voice-help",
-        )
-        # Readiness row for the voice-activity model, rebuilt dynamically
-        # like the dictation and synthesis cards above.
-        yield Vertical(id="voice_vad_requirements")
-        yield Horizontal(
-            Static(
+                Input(placeholder="1.0", id="voice_tts_speed"),
+            )
+            yield setting_row(
+                "Output device (blank = system default)",
+                Input(placeholder="default", id="voice_output_device"),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Conversation", classes="voice-section-header")
+            yield setting_row(
+                "Hands-free conversation on open",
+                Switch(value=False, id="voice_conversation_mode"),
+            )
+            yield Static(
+                "When on, opening a new chat panel starts the hands-free loop if "
+                "voice setup is ready: the microphone stays open between "
+                "turns, what you said is sent automatically when you stop "
+                "talking, and — "
+                "when spoken replies are enabled above — the reply is read "
+                "aloud before listening resumes. F2 or Ctrl+G collapses chat and "
+                "stops listening and speech while keeping your draft and text "
+                "reply. Restoring chat does not restart listening or playback. "
+                "Ctrl+N in chat starts or stops hands-free mode; during a spoken "
+                "reply it interrupts the reply and resumes listening. Needs the small "
+                "voice-detection model below on top of the transcription model "
+                "above (plus the speech model when replies are spoken).",
+                classes="voice-help",
+            )
+            yield Vertical(id="voice_vad_requirements")
+            yield setting_row(
                 f"End a turn after silence (ms, "
                 f"{VAD_SILENCE_MS_MIN}-{VAD_SILENCE_MS_MAX})",
-                classes="label",
-            ),
-            Input(placeholder="800", id="voice_vad_silence_ms"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static(
+                Input(placeholder="800", id="voice_vad_silence_ms"),
+            )
+            yield setting_row(
                 f"Stop listening after quiet (seconds, "
                 f"{CONVERSATION_IDLE_SECONDS_MIN}-"
                 f"{CONVERSATION_IDLE_SECONDS_MAX})",
-                classes="label",
-            ),
-            Input(placeholder="60", id="voice_conversation_idle_seconds"),
-            classes="setting_row",
-        )
-        yield Static(
-            "The loop closes the microphone and drops back to idle after "
-            "this long with no speech, so walking away never leaves a hot "
-            "mic behind.",
-            classes="voice-help",
-        )
-        yield Horizontal(
-            Static("Interrupt by speaking (needs headphones)", classes="label"),
-            Switch(value=False, id="voice_barge_in"),
-            classes="setting_row",
-        )
-        yield Static(
-            "When on, speaking over a reply cuts it short and the loop "
-            "listens to you instead. While the reply plays the microphone "
-            "is open for voice detection only — nothing is transcribed. "
-            "Wear headphones: on speakers the microphone hears the "
-            "assistant's own voice, so it interrupts its own replies. "
-            "Leave it off to keep the microphone fully closed while the "
-            "assistant thinks and speaks.",
-            classes="voice-help",
-        )
+                Input(placeholder="60", id="voice_conversation_idle_seconds"),
+            )
+            yield Static(
+                "The loop closes the microphone and drops back to idle after "
+                "this long with no speech, so walking away never leaves a hot "
+                "mic behind.",
+                classes="voice-help",
+            )
+            yield setting_row(
+                "Interrupt by speaking (needs headphones)",
+                Switch(value=False, id="voice_barge_in"),
+            )
+            yield Static(
+                "When on, speaking over a reply cuts it short and the loop "
+                "listens to you instead. While the reply plays the microphone "
+                "is open for voice detection only — nothing is transcribed. "
+                "Wear headphones: on speakers the microphone hears the "
+                "assistant's own voice, so it interrupts its own replies. "
+                "Leave it off to keep the microphone fully closed while the "
+                "assistant thinks and speaks.",
+                classes="voice-help",
+            )
 
     # ------------------------------------------------------------------
     # Load / dirty / save
@@ -1152,6 +1125,7 @@ class VoicePanel(SettingsPanel):
         """Re-probe and repaint the banner and requirement rows."""
         service = self._setup_service()
         if service is None:
+            self._readiness_error = ""
             self._render_unavailable()
             return
 
@@ -1160,9 +1134,11 @@ class VoicePanel(SettingsPanel):
         except Exception as exc:  # noqa: BLE001 — a probe failure must not blank the panel
             reason = scrub_credentials(str(exc))
             logger.error("Voice readiness probe failed: %s", reason)
+            self._readiness_error = reason
             self._render_unavailable(reason)
             return
 
+        self._readiness_error = None
         self._render_banner()
         self._render_requirements()
         self._render_tts_requirements()
@@ -1185,6 +1161,9 @@ class VoicePanel(SettingsPanel):
 
     def _render_banner(self) -> None:
         """Summarise readiness in one line at the top of the panel."""
+        if self._readiness_error is not None:
+            self._render_unavailable(self._readiness_error)
+            return
         readiness = self._readiness
         try:
             banner = self.query_one("#voice_status_banner", Static)

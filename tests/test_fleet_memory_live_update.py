@@ -145,7 +145,7 @@ class TestSummaryLineFromRows:
     def test_single_fresh_row(self) -> None:
         rows = [_row("web-1", status=STATUS_FRESH)]
         line = FleetMemoryScreen._summary_line_from_rows(rows)
-        assert "1 instances" in line
+        assert "1 instance  ·" in line
         assert "1 fresh" in line
         assert "0 stale" in line
 

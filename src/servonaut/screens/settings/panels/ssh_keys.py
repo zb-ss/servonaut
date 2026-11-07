@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalGroup
 from textual.widgets import Button, Static
 
 from servonaut.screens.settings.base import SettingsPanel
@@ -59,16 +59,18 @@ class SshKeysPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the SSH keys summary and launcher button."""
-        yield Static(escape(_INFO_TEXT), classes="ssh-keys-info")
-        yield Static("", id="ssh_keys_count", classes="ssh-keys-count")
-        yield Horizontal(
-            Button(
-                "Open Key Management",
-                id="ssh_keys_open",
-                variant="primary",
-            ),
-            classes="setting_row",
-        )
+        with VerticalGroup(classes="settings-access-context"):
+            yield Static(escape(_INFO_TEXT), classes="ssh-keys-info")
+        with VerticalGroup(classes="settings-access-status settings-access-launcher"):
+            yield Static("", id="ssh_keys_count", classes="ssh-keys-count")
+            yield Horizontal(
+                Button(
+                    "Open Key Management",
+                    id="ssh_keys_open",
+                    variant="primary",
+                ),
+                classes="setting_row",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

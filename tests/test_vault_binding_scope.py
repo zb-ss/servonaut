@@ -359,6 +359,7 @@ async def test_replaced_shared_record_cannot_receive_a_stale_binding() -> None:
         await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.instances[1]["id"] = "replacement-server"
+        await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
         app.vault_command_service.bind.assert_not_awaited()
@@ -500,6 +501,7 @@ async def _bind_team_key(pilot: Any) -> None:
     await _choose_scope(pilot, 0)
     await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
     await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+    await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
     app.screen.query_one("#vault_bind_confirm", Button).press()
 
 

@@ -20,8 +20,7 @@ from typing import Optional
 from rich.markup import escape as _esc
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -34,22 +33,25 @@ from servonaut.services.bug_report_service import (
     BugReportSubmissionError,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class BugReportScreen(Screen):
+class BugReportScreen(WorkspaceScreen):
     """Multi-step screen for filing a bug report.
 
-    Compose layout (beside the Sidebar):
-      - Title header
-      - Short-summary Input
-      - Multi-line description TextArea
-      - Diagnostics status row
-      - Action buttons: Edit consent / Refresh preview / Submit
-      - Scrollable preview area populated after consent + collect
+    Report details and accepted sharing choices sit beside the payload preview.
+    Narrow workspaces stack these panes; status and submission actions remain
+    outside their scrolling region.
     """
+
+    CHAT_REFLOW = True
+    # Content padding (4) plus the Edit consent / Refresh preview / Submit
+    # row at the global button minimum with its right margins.
+    CHAT_MIN_CONTENT_WIDTH = 58
+    CONTENT_NARROW_WIDTH = 100
+    AUTO_FOCUS = "#title"
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -63,6 +65,7 @@ class BugReportScreen(Screen):
     BugReportScreen #bug-report-content {
         padding: 1 2;
         height: 1fr;
+        overflow-y: auto;
     }
 
     BugReportScreen #bug-title-header {
@@ -161,6 +164,8 @@ class BugReportScreen(Screen):
         self._receipt: Optional[BugReportReceipt] = None
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -169,48 +174,61 @@ class BugReportScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Container(id="bug-report-content"):
-                yield Static("[bold $text-accent]Report a bug[/bold $text-accent]", id="bug-title-header")
-                yield Label("Title", classes="field-label")
+        yield WorkspaceControls("Report a bug")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with VerticalScroll(id="bug-report-content", classes="workspace-content"):
+                yield Static("Report a bug", id="bug-title-header")
                 yield Static(
-                    "One sentence describing the problem (5-200 chars).",
-                    classes="field-help",
+                    "Describe the problem, check your sharing choices, then review the exact report.",
+                    id="bug-report-intro",
                 )
-                yield Input(
-                    placeholder="e.g. Crash when scanning EC2 instances in eu-west-3",
-                    id="title",
-                )
-                yield Label("Description", classes="field-label")
-                yield Static(
-                    "Steps to reproduce, what you expected, what actually happened. "
-                    "The command you ran helps. Logs and stack traces are auto-attached "
-                    "in the preview below — don't paste them here.",
-                    classes="field-help",
-                )
-                yield TextArea(
-                    "",
-                    id="description",
-                )
-                yield Static(
-                    "Diagnostics: not collected yet",
-                    id="diagnostics-status",
-                )
-                with Horizontal(id="btn-row"):
-                    yield Button("Edit consent", id="edit-consent", variant="default")
-                    yield Button("Refresh preview", id="refresh-preview", variant="default")
-                    yield Button(
-                        "Submit",
-                        id="submit",
-                        variant="primary",
-                        disabled=True,
-                    )
-                yield Static("", id="submission-error")
-                yield Static("", id="redact-warning")
-                yield Static("", id="receipt-row")
-                with VerticalScroll(id="preview-scroll"):
-                    yield Static("", id="preview", markup=False)
+                with VerticalScroll(id="bug-report-workflow"):
+                    with Horizontal(id="bug-report-panes"):
+                        with Vertical(id="bug-report-form"):
+                            yield Static("Your report", classes="bug-report-section-title")
+                            yield Label("Title", classes="field-label")
+                            yield Static(
+                                "One sentence describing the problem (5-200 chars).",
+                                classes="field-help",
+                            )
+                            yield Input(
+                                placeholder="e.g. Crash when opening a log",
+                                id="title",
+                            )
+                            yield Label("Description", classes="field-label")
+                            yield Static(
+                                "Include steps to reproduce, the expected result and what happened. "
+                                "Review attached diagnostics in the preview rather than pasting logs here.",
+                                classes="field-help",
+                            )
+                            yield TextArea("", id="description")
+                        with Vertical(id="bug-report-preview-panel"):
+                            with Horizontal(classes="bug-report-review-heading"):
+                                yield Static("Sharing choices", classes="bug-report-section-title")
+                                yield Button("Edit consent", id="edit-consent", variant="default")
+                            yield Static(
+                                "Choose what to include in the consent dialog.",
+                                id="consent-summary", markup=False,
+                            )
+                            with Horizontal(classes="bug-report-review-heading"):
+                                yield Static("Exact report preview", classes="bug-report-section-title")
+                                yield Button("Refresh preview", id="refresh-preview", variant="default")
+                            yield Static(
+                                "Refresh after editing your title or description.",
+                                classes="field-help",
+                            )
+                            with VerticalScroll(id="preview-scroll"):
+                                yield Static("", id="preview", markup=False)
+                with Vertical(id="bug-report-submit-bar"):
+                    with VerticalScroll(id="bug-report-feedback"):
+                        yield Static("Diagnostics: not collected yet", id="diagnostics-status")
+                        yield Static("", id="submission-error")
+                        yield Static("", id="redact-warning")
+                        yield Static("", id="receipt-row")
+                    with Horizontal(id="btn-row"):
+                        yield Static("Review this report before submitting.", id="bug-report-submit-note")
+                        yield Button("Submit", id="submit", variant="primary", disabled=True)
         yield Footer()
 
     # ------------------------------------------------------------------
@@ -233,7 +251,25 @@ class BugReportScreen(Screen):
             self.app.pop_screen()
             return
         self._consent = consent
+        self._render_consent_summary()
         self._start_collect()
+
+    def _render_consent_summary(self) -> None:
+        """Show the choices already accepted without changing their authority."""
+        consent = self._consent
+        if consent is None:
+            return
+        choices = (
+            ("Logs", consent.include_logs),
+            ("Configuration", consent.include_config),
+            ("Anonymous provider counts", consent.include_anonymous_telemetry),
+        )
+        summary = "\n".join(
+            f"{label}: {'included' if included else 'excluded'}"
+            for label, included in choices
+        )
+        destination = "GitHub issue draft" if consent.channel == "github" else "Servonaut support"
+        self.query_one("#consent-summary", Static).update(f"{summary}\nDestination: {destination}")
 
     # ------------------------------------------------------------------
     # Diagnostics collection
@@ -390,6 +426,7 @@ class BugReportScreen(Screen):
 
         btn_row = self.query_one("#btn-row", Horizontal)
         btn_row.remove()
+        self.query("#edit-consent, #refresh-preview").remove()
 
         receipt_row = self.query_one("#receipt-row", Static)
         receipt_row.add_class("visible")
@@ -415,7 +452,7 @@ class BugReportScreen(Screen):
             )
 
         # Mount a Back button below the receipt row
-        self.query_one("#bug-report-content", Container).mount(
+        self.query_one("#bug-report-content", VerticalScroll).mount(
             Button("Back", id="back", variant="default")
         )
 
@@ -446,6 +483,7 @@ class BugReportScreen(Screen):
             # User cancelled re-consent; keep existing consent.
             return
         self._consent = consent
+        self._render_consent_summary()
         self._payload = None
         # Disable submit until new diagnostics are collected.
         try:

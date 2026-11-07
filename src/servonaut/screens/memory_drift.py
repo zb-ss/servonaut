@@ -13,13 +13,16 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
 
+from servonaut.screens._busy_work import BusyWork
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import DialogActions, DialogFrame, DialogNotificationSpace
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +78,7 @@ class DriftDiffScreen(ModalScreen[None]):
     ]
 
     def __init__(self, drift_event: Any, retrieval_service: Any = None) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._event = drift_event
         self._retrieval_service = retrieval_service
 
@@ -88,17 +91,19 @@ class DriftDiffScreen(ModalScreen[None]):
             f"[bold $text-accent]Drift Diff: {instance_id} / {module}[/bold $text-accent]\n"
             f"[dim]old: {escape(old_hash)} → new: {escape(new_hash)}[/dim]"
         )
-        yield Container(
-            Static(header, id="drift-diff-title"),
-            VerticalScroll(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(header, id="drift-diff-title"),
+            body=VerticalScroll(
                 Static("[dim]Loading snapshot diff…[/dim]", id="drift-diff-content"),
                 id="drift-diff-body",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Close", variant="default", id="drift-diff-close"),
                 id="drift-diff-close-row",
             ),
             id="drift-diff-container",
+            size="fill",
         )
 
     def on_mount(self) -> None:
@@ -167,7 +172,7 @@ class DriftDiffScreen(ModalScreen[None]):
         self.dismiss()
 
 
-class MemoryDriftScreen(Screen):
+class MemoryDriftScreen(WorkspaceScreen):
     """Screen for viewing and managing memory drift events.
 
     Lists drift events from the ``DriftService`` with columns:
@@ -176,6 +181,19 @@ class MemoryDriftScreen(Screen):
     Tier-gated on ``memory_drift`` — pushes ``UpsellModal`` on mount if
     the entitlement is missing.
     """
+
+    DEFAULT_CSS = """
+    MemoryDriftScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    AUTO_FOCUS = "#drift-table"
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -186,10 +204,13 @@ class MemoryDriftScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._show_unack_only: bool = False
         self._events: List[Any] = []
 
@@ -199,25 +220,38 @@ class MemoryDriftScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Memory Drift")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(
-                    "[bold $text-accent]Memory Drift Events[/bold $text-accent]",
-                    id="drift-title",
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Container(
+                    Static(
+                        "[bold $text-accent]Memory Drift Events[/bold $text-accent]",
+                        id="drift-title",
+                    ),
+                    Static("", id="drift-filter-label"),
+                    id="drift-context",
                 ),
-                Static(
-                    "",
-                    id="drift-filter-label",
+                Container(
+                    Static("Event actions", classes="memory-secondary-heading"),
+                    Horizontal(
+                        Button("r. Refresh", id="btn-drift-refresh"),
+                        Button("enter. View diff", id="btn-drift-diff"),
+                        Button("a. Acknowledge", id="btn-drift-ack"),
+                        Button("u. Unack Only", id="btn-drift-unack"),
+                        id="drift-actions",
+                    ),
+                    id="drift-tools",
                 ),
-                DataTable(id="drift-table"),
-                Horizontal(
-                    Button("r. Refresh", id="btn-drift-refresh"),
-                    Button("a. Acknowledge", id="btn-drift-ack"),
-                    Button("u. Unack Only", id="btn-drift-unack"),
-                    id="drift-actions",
+                Container(
+                    Static("Configuration changes · Enter opens the diff", classes="memory-secondary-heading"),
+                    Static("", id="drift-empty-state", classes="hidden"),
+                    DataTable(id="drift-table", zebra_stripes=True),
+                    id="drift-records",
                 ),
                 id="drift-container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -256,14 +290,15 @@ class MemoryDriftScreen(Screen):
         if drift_service is None:
             self.app.notify("Drift service not available.", severity="warning")
             return
-        try:
-            events = await drift_service.list_drift()
-        except Exception as exc:
-            logger.error("Failed to load drift events: %s", exc)
-            self.app.notify(f"Drift load failed: {exc}", severity="error", markup=False)
-            return
-        self._events = events
-        self._render_table()
+        with self._read_loading.running('Loading drift events…'):
+            try:
+                events = await drift_service.list_drift()
+            except Exception as exc:
+                logger.error("Failed to load drift events: %s", exc)
+                self.app.notify(f"Drift load failed: {exc}", severity="error", markup=False)
+                return
+            self._events = events
+            self._render_table()
 
     def _render_table(self) -> None:
         table = self.query_one("#drift-table", DataTable)
@@ -301,6 +336,14 @@ class MemoryDriftScreen(Screen):
                 status,
                 key=str(idx),
             )
+
+        empty = self.query_one("#drift-empty-state", Static)
+        empty.update(
+            "No unacknowledged drift events."
+            if self._show_unack_only
+            else "No drift events captured yet. Refresh to check for changes."
+        )
+        empty.set_class(table.row_count > 0, "hidden")
 
     # ------------------------------------------------------------------
     # Actions
@@ -391,6 +434,7 @@ class MemoryDriftScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_map = {
             "btn-drift-refresh": self.action_refresh,
+            "btn-drift-diff": self.action_view_diff,
             "btn-drift-ack": self.action_ack_selected,
             "btn-drift-unack": self.action_toggle_unack,
         }

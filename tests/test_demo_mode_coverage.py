@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 
@@ -241,6 +242,7 @@ class TestIPBanDemoMode:
         from servonaut.screens.ip_ban import IPBanScreen
 
         screen = object.__new__(IPBanScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         mock_app = _make_mock_app(demo=True)
         screen._selected_config = "ufw"
 
@@ -355,8 +357,8 @@ class TestMemoryScreenDemoMode:
         """
         from servonaut.screens.memory import MemoryScreen
 
-        screen = object.__new__(MemoryScreen)
-        screen._instance = {"id": "i-abc123", "name": "test", "provider": "custom"}
+        # This table-only fixture has no reader child; keep its native DOM initialized.
+        screen = MemoryScreen({"id": "i-abc123", "name": "test", "provider": "custom"})
 
         mock_app = _make_mock_app(demo=True)
         mock_app.memory_service = MagicMock()
@@ -405,8 +407,8 @@ class TestMemoryScreenDemoMode:
     def test_render_table_no_scrub_without_demo(self, tmp_path) -> None:
         from servonaut.screens.memory import MemoryScreen
 
-        screen = object.__new__(MemoryScreen)
-        screen._instance = {"id": "i-abc123", "name": "test", "provider": "custom"}
+        # This table-only fixture has no reader child; keep its native DOM initialized.
+        screen = MemoryScreen({"id": "i-abc123", "name": "test", "provider": "custom"})
 
         mock_app = _make_mock_app(demo=False)
         mock_app.memory_service = MagicMock()
@@ -1914,6 +1916,8 @@ class TestMemoryDriftDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
+        # The unfiltered fixture has one rendered event, as a native table would.
+        mock_table.row_count = len(screen._events)
         mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
         mock_label = MagicMock()
 
@@ -3208,6 +3212,7 @@ class TestHetznerCreateWizardDemoMode:
         from servonaut.screens.hetzner_create import HetznerCreateScreen
 
         screen = object.__new__(HetznerCreateScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._ssh_keys = []
 
         async def _list_ssh_keys():
@@ -3372,6 +3377,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_dns import OVHDNSScreen
 
         screen = object.__new__(OVHDNSScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._domains = []
         mock_app = _make_mock_app(demo=True)
         svc = MagicMock()
@@ -3398,6 +3404,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_dns import OVHDNSScreen
 
         screen = object.__new__(OVHDNSScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._records = []
         mock_app = _make_mock_app(demo=True)
         svc = MagicMock()
@@ -3425,6 +3432,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
 
         screen = object.__new__(OVHIPManagementScreen)
+        screen._selected_ip = None  # Same unselected state as the screen constructor.
         screen._ips = [{
             "ip": "9.9.9.9/32", "type": "failover",
             "routedTo": {"serviceName": "ns1234.ip-9-9-9-9.eu"},
@@ -3618,6 +3626,7 @@ class TestSshKeyLabelsDemoMode:
         wire_service(mock_app, _list)
         rows: list = []
         table = MagicMock()
+        table.cursor_row = 0  # Native DataTable starts on its first row.
         table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
 
         async def _run():

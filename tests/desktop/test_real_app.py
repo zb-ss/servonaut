@@ -68,41 +68,49 @@ async def test_real_servonaut_app_boot_and_initial_screen(
         listener=host_listener,
         app_factory=real_app_factory,
     )
-    origin = await host.start()
-    port = host_listener.getsockname()[1]
-    headers = {"Host": f"127.0.0.1:{port}", "Origin": origin}
-    protocols = ["servonaut.desktop.v1", f"auth.{token.encoded_value()}"]
+    try:
+        origin = await host.start()
+        port = host_listener.getsockname()[1]
+        headers = {"Host": f"127.0.0.1:{port}", "Origin": origin}
+        protocols = ["servonaut.desktop.v1", f"auth.{token.encoded_value()}"]
 
-    async with ClientSession() as session:
-        ws = await session.ws_connect(
-            f"{origin}/ws?width=120&height=40",
-            headers=headers,
-            protocols=protocols,
-        )
+        async with ClientSession() as session:
+            ws = await session.ws_connect(
+                f"{origin}/ws?width=120&height=40",
+                headers=headers,
+                protocols=protocols,
+            )
 
-        # Receive rendered terminal escape sequences
-        chunks = []
-        for _ in range(20):
-            msg = await ws.receive(timeout=3.0)
-            if msg.type == WSMsgType.BINARY:
-                chunks.append(msg.data)
-                if len(b"".join(chunks)) > 200:
-                    break
+            async def receive_initial_frame() -> bytes:
+                chunks = []
+                for _ in range(20):
+                    msg = await ws.receive()
+                    if msg.type == WSMsgType.BINARY:
+                        chunks.append(msg.data)
+                        if len(b"".join(chunks)) > 200:
+                            break
+                return b"".join(chunks)
 
-        all_output = b"".join(chunks)
-        assert len(all_output) > 0
+            # The real app and client share a loop during initial layout.
+            # Bound the complete initial frame by the host startup budget.
+            all_output = await asyncio.wait_for(
+                receive_initial_frame(), timeout=host.shutdown_seconds
+            )
+            assert len(all_output) > 200
 
-        # Assert real app is running with InstanceListScreen
-        app = host._active_app
-        assert isinstance(app, ServonautApp)
-        assert app.is_running
-        assert app.screen.__class__.__name__ == "InstanceListScreen"
+            # Assert real app is running with InstanceListScreen
+            app = host._active_app
+            assert isinstance(app, ServonautApp)
+            assert app.is_running
+            assert app.screen.__class__.__name__ == "InstanceListScreen"
 
-        # Quit cleanly via action_quit
-        await app.action_quit()
-        await host.finished.wait()
-
-    await host.stop()
+            # Quit cleanly via action_quit
+            await app.action_quit()
+            # Complete the client close handshake before waiting for the host.
+            await ws.close()
+            await host.finished.wait()
+    finally:
+        await host.stop()
 
 
 @pytest.mark.asyncio

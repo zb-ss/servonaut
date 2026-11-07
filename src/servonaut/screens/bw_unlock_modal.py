@@ -17,12 +17,15 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Static
 
 from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
@@ -42,22 +45,31 @@ class BwUnlockModal(ModalScreen[bool]):
         Binding("enter", "unlock", "Unlock", show=False),
     ]
 
-    DEFAULT_CSS = ""  # styling lives in app.css
+    DEFAULT_CSS = ""  # Shared frame rules plus state-body rules in secrets.tcss.
 
     def __init__(self, session_service: Optional[BwSessionService] = None) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._svc = session_service
 
     def _service(self) -> Optional[BwSessionService]:
         return self._svc or getattr(self.app, "bw_session_service", None)
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold $text-accent]Unlock Bitwarden Vault[/bold $text-accent]", id="bw_unlock_title"),
-            Vertical(
-                Static("[dim]Checking Bitwarden status…[/dim]"),
-                id="bw_unlock_body",
+        yield DialogNotificationSpace()
+        actions = DialogActions()
+        actions.display = False
+        yield DialogFrame(
+            heading=Static(
+                "[bold $text-accent]Unlock Bitwarden Vault[/bold $text-accent]",
+                id="bw_unlock_title",
             ),
+            body=DialogBody(
+                Vertical(
+                    Static("[dim]Checking Bitwarden status…[/dim]"),
+                    id="bw_unlock_body",
+                ),
+            ),
+            actions=actions,
             id="bw_unlock_container",
         )
 
@@ -139,6 +151,11 @@ class BwUnlockModal(ModalScreen[bool]):
                 classes="bw_unlock_actions",
             ),
         )
+        self.call_after_refresh(self._focus_master_password)
+
+    def _focus_master_password(self) -> None:
+        if not self.is_mounted or not self.is_current:
+            return
         try:
             self.query_one("#bw_master_pw", Input).focus()
         except Exception:  # noqa: BLE001
@@ -147,6 +164,10 @@ class BwUnlockModal(ModalScreen[bool]):
     # ------------------------------------------------------------------
     # actions
     # ------------------------------------------------------------------
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "bw_master_pw":
+            self.action_unlock()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id

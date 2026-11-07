@@ -30,8 +30,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
-from textual.widgets import Footer, Static
+from textual.widgets import Button, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.secrets_status import (
@@ -40,7 +39,7 @@ from servonaut.services.secrets_status import (
     format_relative_age,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ _DOCS_URL = "https://servonaut.dev/docs/secrets-management"
 _TEAM_SETTINGS_URL_TEMPLATE = "https://servonaut.dev/account/teams/{slug}/secrets"
 
 
-class SecretsScreen(Screen):
+class SecretsScreen(WorkspaceScreen):
     """Secrets-management status + control panel.
 
     Same shape as :class:`MemorySyncSetupScreen`: persistent Sidebar +
@@ -62,6 +61,19 @@ class SecretsScreen(Screen):
     modal usage at the top level — sub-screens (list / confirm
     modal) get pushed on top when invoked.
     """
+
+    CHAT_REFLOW = True
+    # Body and card padding, border and scrollbar (14) plus the 22-column
+    # key/value label and a readable value beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 60
+    # Keep each selectable action description readable beside its native key.
+    CONTENT_NARROW_WIDTH = 96
+
+    _ACTION_NAMES = {
+        "r": "refresh", "l": "list_secrets", "c": "clear_cache",
+        "o": "open_team_settings", "u": "open_upgrade", "i": "install_bws",
+        "g": "guided_setup", "v": "db_coverage", "s": "open_login",
+    }
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -77,6 +89,8 @@ class SecretsScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -85,25 +99,27 @@ class SecretsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Secrets")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(
-                    "🔐 Secrets management",
-                    id="secrets_title",
+                Vertical(
+                    Horizontal(
+                        Static("Secrets management", id="secrets_title"),
+                        Static("", id="secrets_status_pill"),
+                        id="secrets_heading_row",
+                    ),
+                    Static(
+                        "Check your active provider, manage its cache, or browse secret names. "
+                        "Secret values stay hidden.",
+                        id="secrets_subtitle",
+                    ),
+                    classes="secrets_overview",
                 ),
-                Static(
-                    "Centralise SSH keys and named secrets behind a "
-                    "pluggable provider — Bitwarden / local store. The "
-                    "CLI checks the active provider first, falls back to "
-                    "~/.ssh.",
-                    id="secrets_subtitle",
-                ),
-                # Pill-style status indicator at the top of the body.
-                Static("", id="secrets_status_pill"),
                 # The body swaps content based on state.
                 VerticalScroll(id="secrets_body"),
                 id="secrets_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -120,6 +136,8 @@ class SecretsScreen(Screen):
     ) -> Container:
         """Build a rounded-border card with a title and stacked children."""
         classes = "secrets_card"
+        if any(child.has_class("secrets_actions") for child in children):
+            classes += " secrets_card_actions"
         if primary:
             classes += " secrets_card_primary"
         elif warning:
@@ -149,11 +167,15 @@ class SecretsScreen(Screen):
         )
 
     def _actions(self, *items: tuple[str, str]) -> Vertical:
-        """Build a stack of ``key  label`` action rows."""
+        """Pair the existing hotkeys with native mouse and keyboard controls."""
         return Vertical(
             *[
                 Horizontal(
-                    Static(key, classes="secrets_action_key"),
+                    Button(
+                        key, name=self._ACTION_NAMES[key], compact=True,
+                        id=f"secrets_action_{key}",
+                        classes="secrets_action_key", tooltip=label,
+                    ),
                     Static(label, classes="secrets_action_label"),
                     classes="secrets_action_row",
                 )
@@ -161,6 +183,13 @@ class SecretsScreen(Screen):
             ],
             classes="secrets_actions",
         )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if (
+            event.button.has_class("secrets_action_key")
+            and event.button.name in self._ACTION_NAMES.values()
+        ):
+            getattr(self, f"action_{event.button.name}")()
 
     # ------------------------------------------------------------------
     # Lifecycle

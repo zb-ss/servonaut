@@ -8,20 +8,67 @@
     width: 1fr;
     height: 100%;
     background: $surface;
+    padding: 1;
 }
 
 /* Left: the secondary side menu (search + grouped nav buttons). */
 #settings-nav {
-    width: 32;
+    width: 28;
     height: 100%;
-    padding: 1 1;
-    overflow-y: auto;
-    border-right: round $primary;
+    padding: 0 1;
+    margin-right: 1;
+    border: round $primary;
+    border-title-color: $text-muted;
+    background: transparent;
 }
 
 #settings-search {
     width: 100%;
     margin: 0 0 1 0;
+    border: round $primary;
+}
+
+#settings-search:focus {
+    border: round $text-accent;
+}
+
+#settings-back,
+#settings-search-clear {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 1 0;
+    background: transparent;
+    color: $text;
+    content-align: left middle;
+}
+
+#settings-back:hover,
+#settings-back:focus,
+#settings-search-clear:hover,
+#settings-search-clear:focus {
+    background: $boost;
+    color: $text-accent;
+    text-style: bold underline;
+}
+
+#settings-search-empty,
+#settings-nav-note {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#settings-search-empty,
+#settings-search-clear {
+    display: none;
+}
+
+#settings-nav-note {
+    margin-top: 1;
 }
 
 #settings-nav-list {
@@ -29,15 +76,57 @@
     height: 1fr;
 }
 
-.settings-nav-btn {
+#settings-nav-list .settings-nav-btn {
     width: 100%;
-    margin: 0 0 1 0;
+    min-width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0 0 0 1;
+    border: none;
+    border-left: blank $background;
+    background: transparent;
+    color: $text;
+    text-align: left;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    content-align: left middle;
 }
 
-.settings-nav-btn.--active {
-    background: $primary;
-    color: $text;
+#settings-nav-list .settings-nav-btn.--active {
+    background: $boost;
+    color: $text-accent;
+    border-left: thick $text-accent;
     text-style: bold;
+}
+
+#settings-nav-list .settings-nav-btn:hover,
+#settings-nav-list .settings-nav-btn:focus {
+    background: $boost;
+    color: $text-accent;
+    text-style: bold underline;
+}
+
+#settings-nav-list SidebarSection {
+    margin-bottom: 1;
+}
+
+#settings-nav-list SidebarSection > Button.section-header {
+    height: 1;
+    min-width: 0;
+    border: none;
+    padding: 0;
+    text-align: left;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    content-align: left middle;
+    color: $text-muted;
+    text-style: none;
+}
+
+#settings-nav-list SidebarSection > Button.section-header:focus {
+    background: $boost;
+    color: $text-accent;
+    text-style: bold underline;
 }
 
 /* Shade the open group's button tray so its sub-items read as nested under the
@@ -45,7 +134,7 @@
    only the currently-expanded group shows the shade. Scoped to the settings
    nav list so the main sidebar's sections are unaffected. */
 #settings-nav-list .section-content {
-    background: $boost;
+    background: transparent;
     padding: 0 0 0 1;
 }
 
@@ -53,8 +142,8 @@
 #settings-content {
     width: 1fr;
     height: 100%;
-    padding: 1 3;
-    overflow-y: auto;
+    padding: 0;
+    overflow-y: hidden;
 }
 
 /* The panel fills the content pane (height 100%) and lays its children out
@@ -67,7 +156,7 @@
     height: 100%;
     padding: 1 2;
     border: round $primary;
-    background: $boost;
+    background: transparent;
 }
 
 /* Placeholder for a panel that failed to build — short, no scrolling body. */
@@ -103,8 +192,14 @@
 .panel-title {
     height: auto;
     text-style: bold;
-    color: $accent;
-    margin: 0 0 1 0;
+    color: $text-accent;
+    margin: 0;
+}
+
+.panel-description {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
 }
 
 .panel-status {
@@ -115,18 +210,21 @@
 
 .panel-save-dock {
     height: auto;
-    align: left middle;
+    align: right middle;
     padding: 1 0 0 0;
+    border-top: solid $primary 30%;
 }
 
 .panel-save-dock Button {
-    margin: 0 2 0 0;
+    width: auto;
+    min-width: 16;
+    margin: 0;
 }
 
-.dirty-marker {
-    width: auto;
+.settings-panel .dirty-marker {
+    width: 1fr;
     height: auto;
-    color: $warning;
+    color: $text;
     content-align: left middle;
 }
 
@@ -145,7 +243,25 @@
    ------------------------------------------------------------------- */
 
 .settings-panel .setting_row .label {
-    width: 28;
+    width: 24;
+    text-align: left;
+    padding-right: 1;
+}
+
+.settings-panel .settings-scalar-row {
+    margin: 0 0 1 0;
+}
+
+.settings-panel .setting_row Input {
+    border: round $primary 50%;
+}
+
+.settings-panel .setting_row Input:focus {
+    border: round $text-accent;
+}
+
+.settings-panel .setting_row Input.field-error {
+    border: round $error;
 }
 
 .settings-panel .setting_row > Static {
@@ -185,41 +301,45 @@ KeyValueEditor .kv-add {
     min-width: 9;
 }
 
-/* Narrow terminals (see SettingsScreen.HORIZONTAL_BREAKPOINTS): a label
+/* Narrow content (see SettingsScreen.CONTENT_NARROW_WIDTH): a label
    column would leave no room for the field, so each label sits above its
    field, and the pane and panel give up most of their side padding. */
-SettingsScreen.-narrow #settings-content {
+SettingsScreen.-content-narrow #settings-content {
+    padding: 0;
+}
+
+SettingsScreen.-content-narrow #settings-nav {
+    width: 28;
+}
+
+SettingsScreen.-content-narrow .settings-panel {
     padding: 0 1;
 }
 
-SettingsScreen.-narrow .settings-panel {
-    padding: 0 1;
-}
-
-SettingsScreen.-narrow .settings-panel .setting_row {
+SettingsScreen.-content-narrow .settings-panel .setting_row {
     layout: vertical;
     margin: 0 0 1 0;
 }
 
-SettingsScreen.-narrow .settings-panel .setting_row .label {
+SettingsScreen.-content-narrow .settings-panel .setting_row .label {
     width: 100%;
     padding: 0;
     text-align: left;
 }
 
-SettingsScreen.-narrow .settings-panel .setting_row > Static {
+SettingsScreen.-content-narrow .settings-panel .setting_row > Static {
     min-height: 1;
 }
 
 /* A row of action buttons (Add / Edit / Remove …) overflows the pane at the
    global 16-cell button minimum; sized to their labels they fit. The list
    editors' add/remove buttons keep their own, smaller minimum. */
-SettingsScreen.-narrow .settings-panel .panel-body Horizontal > Button {
+SettingsScreen.-content-narrow .settings-panel .panel-body Horizontal > Button {
     min-width: 8;
 }
 
-SettingsScreen.-narrow .settings-panel .panel-body StringListEditor Horizontal > Button,
-SettingsScreen.-narrow .settings-panel .panel-body KeyValueEditor Horizontal > Button {
+SettingsScreen.-content-narrow .settings-panel .panel-body StringListEditor Horizontal > Button,
+SettingsScreen.-content-narrow .settings-panel .panel-body KeyValueEditor Horizontal > Button {
     min-width: 5;
 }
 
@@ -230,6 +350,14 @@ SettingsScreen.-short #settings-content {
     padding-bottom: 0;
 }
 
+SettingsScreen.-short #settings-body {
+    padding: 0 1;
+}
+
+SettingsScreen.-short #settings-back {
+    margin: 0 0 1 0;
+}
+
 SettingsScreen.-short .settings-panel {
     padding-top: 0;
     padding-bottom: 0;
@@ -237,4 +365,258 @@ SettingsScreen.-short .settings-panel {
 
 SettingsScreen.-short .panel-save-dock {
     padding: 0;
+}
+
+/* Keep setup action labels and their download sizes visible in narrow panels. */
+VoicePanel .voice-action-row Button {
+    max-width: 100%;
+    height: auto;
+}
+
+/* Account actions keep complete labels within the editable pane. */
+SettingsScreen AccountsSection .accounts-actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+}
+
+SettingsScreen AccountsSection .accounts-action {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+/* Category directory, active context, and one bounded form surface. */
+SettingsScreen #settings-body {
+    padding: 1;
+    background: $surface;
+}
+
+SettingsScreen #settings-nav {
+    width: 26;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+SettingsScreen #settings-back {
+    color: $text-muted;
+}
+
+SettingsScreen #settings-search {
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SettingsScreen #settings-search:focus {
+    border: round $accent;
+}
+
+SettingsScreen #settings-nav-list .settings-nav-btn {
+    height: auto;
+    min-height: 1;
+    text-wrap: wrap;
+    text-overflow: fold;
+}
+
+SettingsScreen #settings-nav-list .settings-nav-btn.--active {
+    background: $boost;
+    color: $text;
+    border-left: thick $accent;
+}
+
+SettingsScreen #settings-nav-list SidebarSection > Button.section-header {
+    height: auto;
+    min-height: 1;
+    text-wrap: wrap;
+    text-overflow: fold;
+}
+
+SettingsScreen #settings-nav-note {
+    padding: 1 0;
+    color: $text-muted;
+}
+
+SettingsScreen .settings-panel {
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+SettingsScreen .settings-panel > .panel-context {
+    height: auto;
+    padding: 0 1 1 1;
+    background: transparent;
+}
+
+SettingsScreen .panel-context .panel-title {
+    color: $text;
+    text-style: bold;
+}
+
+SettingsScreen .panel-context .panel-description {
+    color: $text-muted;
+    margin: 0;
+}
+
+SettingsScreen .settings-panel > .panel-body {
+    height: 1fr;
+    min-height: 1;
+    padding: 1 2;
+    border: round $border-blurred;
+    background: transparent;
+    scrollbar-gutter: stable;
+}
+
+SettingsScreen .settings-form-section {
+    height: auto;
+    margin-bottom: 1;
+    background: transparent;
+}
+
+SettingsScreen .settings-group-title {
+    height: auto;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+SettingsScreen .settings-panel > .panel-status {
+    margin: 0;
+    padding: 0 1;
+}
+
+SettingsScreen .settings-panel > .panel-save-dock {
+    height: auto;
+    padding: 1 1 0 1;
+    border-top: none;
+    background: transparent;
+}
+
+SettingsScreen .panel-save-dock Button {
+    border: round $accent;
+    background: transparent;
+    color: $text;
+}
+
+SettingsScreen .panel-save-dock Button:focus,
+SettingsScreen .panel-save-dock Button:hover {
+    border: round $accent;
+    background: transparent;
+    text-style: bold underline;
+}
+
+SettingsScreen.-content-narrow #settings-nav {
+    width: 26;
+}
+
+SettingsScreen.-content-narrow .settings-panel {
+    padding: 0;
+}
+
+SettingsScreen.-content-narrow .settings-panel > .panel-body {
+    padding: 0 1;
+}
+
+SettingsScreen.-short #settings-body {
+    padding: 0 1;
+}
+
+SettingsScreen.-short .settings-panel > .panel-context {
+    padding: 0 1;
+}
+
+SettingsScreen.-short .settings-panel > .panel-save-dock {
+    padding: 0 1;
+}
+
+/* Provider form sections share the single Settings reading surface. */
+SettingsScreen .settings-provider-section {
+    border-top: solid $border-blurred;
+    padding-top: 1;
+}
+
+SettingsScreen .settings-group-title {
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+SettingsScreen AccountsSection .accounts-heading {
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text;
+    text-style: bold;
+}
+
+SettingsScreen AccountsSection .accounts-help {
+    padding: 0 0 1 0;
+}
+
+SettingsScreen AccountsSection .accounts-records {
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SettingsScreen AccountsSection .accounts-table {
+    border: none;
+    background: $surface;
+}
+
+SettingsScreen AwsAccountsSection #aws_account_form {
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SettingsScreen AwsAccountsSection #aws_account_form_title {
+    padding: 0 0 1 0;
+    color: $text;
+}
+
+SettingsScreen AwsAccountsSection #aws_account_form_actions {
+    padding-top: 0;
+    margin: 0;
+    border-top: solid $border-blurred;
+}
+
+/* Setup grids place complete labels above each field, including on wide views. */
+HetznerSetupScreen .provider_setup_context .note,
+OVHSetupScreen .provider_setup_context .note {
+    padding: 0 0 1 0;
+}
+
+HetznerSetupScreen .provider_setup_grid .provider_form_section,
+OVHSetupScreen .provider_setup_grid .provider_form_section {
+    margin-bottom: 0;
+}
+
+HetznerSetupScreen .provider_setup_grid .setting_row,
+OVHSetupScreen .provider_setup_grid .setting_row {
+    layout: vertical;
+    height: auto;
+    margin-bottom: 1;
+}
+
+HetznerSetupScreen .provider_setup_grid .setting_row .label,
+OVHSetupScreen .provider_setup_grid .setting_row .label {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    text-align: left;
+    color: $text-muted;
+}
+
+HetznerSetupScreen .provider_setup_grid .setting_row > Input,
+HetznerSetupScreen .provider_setup_grid .setting_row > Select,
+HetznerSetupScreen .provider_setup_grid .setting_row > SecretInput,
+OVHSetupScreen .provider_setup_grid .setting_row > Input,
+OVHSetupScreen .provider_setup_grid .setting_row > Select,
+OVHSetupScreen .provider_setup_grid .setting_row > SecretInput {
+    width: 100%;
+    margin: 0;
 }

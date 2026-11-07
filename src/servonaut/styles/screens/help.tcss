@@ -1,14 +1,66 @@
-/* ===================================================================
-   HELP SCREEN
-   =================================================================== */
-
-#help_container {
+/* A native topic index beside the complete generated reference. */
+HelpScreen #help_workspace {
     width: 1fr;
     height: 100%;
-    padding: 1 2;
+    padding: 0 2 1 2;
 }
-
-#help_content {
+HelpScreen #help_navigation_hint {
+    height: auto;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+HelpScreen #help_container {
     width: 100%;
+    height: 1fr;
+    border: round $border-blurred;
+    background: transparent;
 }
-
+HelpScreen #help_topics {
+    display: block;
+    dock: left;
+    width: 28;
+    height: 100%;
+    padding: 0;
+    border-right: solid $border-blurred;
+    background: $surface;
+}
+HelpScreen #help_topics > Tree {
+    width: 100%;
+    height: 100%;
+    padding: 1;
+    background: $surface;
+}
+HelpScreen #help_content {
+    width: 100%;
+    max-width: 110;
+    height: auto;
+    padding: 1 2;
+    border: none;
+    background: $surface;
+}
+HelpScreen MarkdownH1 {
+    margin: 0 0 1 0;
+    color: $text;
+    background: transparent;
+    content-align: left middle;
+    text-style: bold;
+}
+HelpScreen MarkdownH2 {
+    margin: 1 0;
+    padding-top: 1;
+    border-top: solid $border-blurred;
+    color: $text;
+    background: transparent;
+    text-style: bold;
+}
+HelpScreen MarkdownParagraph { margin: 0 0 1 0; }
+HelpScreen.-content-narrow #help_workspace { padding: 0 1 1 1; }
+HelpScreen.-content-narrow #help_topics {
+    dock: top;
+    width: 100%;
+    height: 6;
+    border-right: none;
+    border-bottom: solid $border-blurred;
+}
+HelpScreen.-content-narrow #help_topics > Tree { padding: 0 1; }
+HelpScreen.-content-narrow #help_content { padding: 1; }

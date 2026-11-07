@@ -69,3 +69,8 @@
     padding: 0 1;
     content-align: left middle;
 }
+
+/* Share the discovery row with its button instead of taking a second full width. */
+IpBanPanel #ipban_discover_hint {
+    width: 1fr;
+}

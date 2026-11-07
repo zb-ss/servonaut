@@ -395,10 +395,9 @@ class AccountsSection(Vertical):
     HELP: str = ""
     COLUMNS: Tuple[str, ...] = ("Label",)
 
-    # Unscoped: the narrow-terminal rule below starts from the Settings
-    # screen's -narrow class. Every rule names AccountsSection itself or
-    # the section's own classes. Button rules end in a class of their own,
-    # so Textual rejects every other button without walking its ancestors.
+    # Keep generic selectors unscoped for provider-specific account sections.
+    # Button rules use the section's own class; the application stylesheet
+    # supplies the Settings grid policy.
     SCOPED_CSS = False
 
     DEFAULT_CSS = """
@@ -431,17 +430,10 @@ class AccountsSection(Vertical):
         width: auto;
         margin: 0 1 0 0;
     }
-    /* A narrow panel cannot hold every action in one row: two per row,
-       each column as wide as its longest label so no label is cut. */
-    SettingsScreen.-narrow AccountsSection .accounts-actions {
-        layout: grid;
-        grid-size: 2;
-        grid-columns: auto 1fr;
-        grid-rows: auto;
-        grid-gutter: 0 1;
-    }
-    SettingsScreen.-narrow .accounts-action {
-        margin: 0;
+
+    AccountsSection .accounts-context,
+    AccountsSection .accounts-records {
+        height: auto;
     }
     """
 
@@ -456,11 +448,13 @@ class AccountsSection(Vertical):
 
     def compose(self) -> ComposeResult:
         p = self.PROVIDER
-        yield Static(self.HEADING, classes=f"accounts-heading {self._heading_classes}".strip())
-        yield Static(self.HELP, classes="accounts-help")
-        yield DataTable(id=f"{p}_accounts_table", classes="accounts-table")
-        yield Static("", id=f"{p}_accounts_problems", classes="accounts-problems")
-        yield Horizontal(*self.action_buttons(), classes="accounts-actions")
+        with Vertical(classes="accounts-context"):
+            yield Static(self.HEADING, classes=f"accounts-heading {self._heading_classes}".strip())
+            yield Static(self.HELP, classes="accounts-help")
+        with Vertical(classes="accounts-records"):
+            yield DataTable(id=f"{p}_accounts_table", classes="accounts-table")
+            yield Static("", id=f"{p}_accounts_problems", classes="accounts-problems")
+            yield Horizontal(*self.action_buttons(), classes="accounts-actions")
         yield from self.form_rows()
 
     def action_buttons(self) -> List[Button]:

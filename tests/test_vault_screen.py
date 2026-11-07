@@ -177,11 +177,15 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         await asyncio.wait_for(service.metadata_requested.wait(), timeout=2)
         service.release_metadata.set()
         table = app.screen.query_one("#vault_table", DataTable)
-        await wait_until(lambda: table.row_count == 1)
+        await wait_until(lambda: (
+            table.row_count == 1 and table.display
+            and table.region.width > 0 and table.region.height > 0
+            and not app.screen._busy_work
+        ))
 
         screen = app.screen
         assert isinstance(screen, VaultScreen)
-        assert screen.has_class("-narrow") and screen.has_class("-short")
+        assert screen.has_class("-content-narrow") and screen.has_class("-short")
         assert table.region.height >= 7
         await pilot.pause()
         screenshot = unescape(app.export_screenshot(simplify=True))
@@ -196,12 +200,22 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         first = screen.query_one("#vault_refresh", Button)
         last = screen.query_one("#vault_rotate", Button)
         first.focus()
-        for _ in range(20):
+        maintenance = screen.query_one("#vault_maintenance_group")
+        title = maintenance.query_one("CollapsibleTitle")
+        for _ in range(len(screen.focus_chain) + 1):
+            if title.has_focus:
+                break
+            await pilot.press("tab")
+        assert title.has_focus
+        await pilot.press("enter")
+        await wait_until(lambda: not maintenance.collapsed)
+        for _ in range(len(screen.focus_chain) + 1):
             if last.has_focus:
                 break
             await pilot.press("tab")
         assert last.has_focus
         assert action_scroll.scroll_y > 0
+        assert app.get_widget_at(*last.content_region.center)[0] is last
 
 
 @pytest.mark.asyncio
@@ -395,6 +409,8 @@ class _SwitchableCaService:
 
 
 class _CaHost(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, service: _SwitchableCaService) -> None:
         super().__init__()
         self.vault_command_service = service
@@ -425,6 +441,20 @@ async def _ca_team_options_loaded(pilot, screen: Screen) -> None:
     await pilot.pause()  # a guidance line may have moved the buttons
 
 
+async def _ca_click(pilot, selector: str) -> None:
+    """Reveal and hit the actual styled CA action before waiting for its result."""
+    button = pilot.app.screen.query_one(selector, Button)
+    await wait_until(lambda: not button.has_class("-active"))
+    button.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    assert button.region.width > 0 and button.region.height > 0
+    assert pilot.app.screen.region.contains_region(button.region)
+    assert pilot.app.get_widget_at(*button.region.center)[0] is button
+    assert await pilot.click(
+        button, offset=(button.region.width // 2, button.region.height // 2),
+    )
+
+
 @pytest.mark.asyncio
 async def test_switched_off_certificates_are_explained_and_hold_back_ca_actions() -> None:
     service = _SwitchableCaService()
@@ -444,12 +474,12 @@ async def test_switched_off_certificates_are_explained_and_hold_back_ca_actions(
         assert screen.query_one("#ca_refresh", Button).disabled is False
         assert app.notes == []
 
-        await pilot.click("#ca_audit")
+        await _ca_click(pilot, "#ca_audit")
         await pilot.pause()
         assert service.audits == 0
 
         service.switched_off.clear()
-        await pilot.click("#ca_refresh")
+        await _ca_click(pilot, "#ca_refresh")
         await wait_until(lambda: "SSH certificates are on" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         assert _ca_actions_disabled(screen) == [False, False, False, False]
@@ -484,7 +514,7 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
         await wait_until(lambda: "SHA256:platform-user-ca" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         service.switched_off.add("platform")  # switched off after the status was read
-        await pilot.click("#ca_audit")
+        await _ca_click(pilot, "#ca_audit")
         await wait_until(lambda: bool(app.notes))
 
         assert service.audits == 1

@@ -1,49 +1,138 @@
-
-/* ===================================================================
-   KEY MANAGEMENT SCREEN
-   =================================================================== */
-
-#keys_container {
+/* Connection policy on the left; local key tools on the right. */
+KeyManagementScreen #keys_container {
     width: 1fr;
     height: 100%;
-    padding: 1;
+    padding: 0 2 1 2;
+    background: transparent;
 }
-
-#keys_header {
-    text-align: center;
-    padding: 1;
-    margin-bottom: 1;
-    color: $accent;
+KeyManagementScreen #keys_header {
+    height: auto;
+    color: $text;
     text-style: bold;
 }
-
-#current_default_key {
-    padding: 0 1 1 1;
-    color: $text;
-}
-
-#agent_status {
-    padding: 0 1 1 1;
-    color: $text;
-}
-
-#agent_keys_output {
-    padding: 1;
-    margin: 1;
-    background: $panel;
-    border: round $primary;
-    min-height: 3;
-}
-
-#instance_keys_table,
-#available_keys_table {
+KeyManagementScreen #keys_intro {
     height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+KeyManagementScreen #keys_sections {
+    width: 100%;
+    height: auto;
+}
+KeyManagementScreen #key_connection_column {
+    width: 3fr;
+    height: auto;
+    margin-right: 2;
+}
+KeyManagementScreen #key_local_column {
+    width: 2fr;
+    height: auto;
+}
+KeyManagementScreen .key-column-title {
+    height: auto;
+    margin: 0 0 1 0;
+    color: $text;
+    text-style: bold;
+}
+KeyManagementScreen .key-section {
+    height: auto;
+    padding: 1;
+    margin-bottom: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+KeyManagementScreen #default_key_section {
+    border: round $primary;
+}
+KeyManagementScreen .key-section-title {
+    height: auto;
+    margin-bottom: 1;
+    text-style: bold;
+    color: $text;
+}
+KeyManagementScreen .key-section-note {
+    height: auto;
+    color: $text-muted;
+}
+KeyManagementScreen .key-section Label {
+    height: auto;
+    margin-top: 1;
+    color: $text;
+}
+KeyManagementScreen #current_default_key {
+    height: auto;
+    padding: 1 0;
+    color: $text;
+}
+KeyManagementScreen #agent_status {
+    height: auto;
+    padding: 0;
+    color: $text;
+}
+KeyManagementScreen #agent_keys_output {
+    height: auto;
+    padding: 1;
+    margin-top: 1;
+    background: $panel;
+    border: none;
+    min-height: 1;
+}
+KeyManagementScreen #instance_keys_table,
+KeyManagementScreen #available_keys_table {
+    width: 100%;
+    height: auto;
+    min-height: 5;
     max-height: 12;
     margin: 1 0;
+    background: $surface;
 }
-
-#btn_list_agent {
-    margin: 1 0;
+KeyManagementScreen #btn_list_agent {
+    margin: 1 0 0 0;
     width: auto;
 }
-
+KeyManagementScreen .setting_row {
+    height: auto;
+    margin: 0;
+    align: left bottom;
+}
+KeyManagementScreen .setting_row Input {
+    min-width: 0;
+}
+KeyManagementScreen .key-field {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+KeyManagementScreen .key-field Input {
+    width: 100%;
+    margin: 0;
+}
+KeyManagementScreen .setting_row Button {
+    margin: 0;
+}
+KeyManagementScreen.-content-narrow #keys_container {
+    padding: 0 1 1 1;
+}
+KeyManagementScreen.-content-narrow #keys_sections {
+    layout: vertical;
+}
+KeyManagementScreen.-content-narrow #key_connection_column,
+KeyManagementScreen.-content-narrow #key_local_column {
+    width: 100%;
+    margin: 0;
+}
+KeyManagementScreen.-content-narrow .setting_row {
+    layout: vertical;
+    align: left top;
+}
+KeyManagementScreen.-content-narrow .setting_row Input {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+KeyManagementScreen.-content-narrow .setting_row Button {
+    width: 100%;
+}
+KeyManagementScreen.-content-narrow .key-field {
+    width: 100%;
+    margin: 0;
+}

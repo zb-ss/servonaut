@@ -10,9 +10,9 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Label, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.ssh_host_keys import (
@@ -41,6 +41,8 @@ class CommandOverlay(ModalScreen):
     Commands are executed via SSH and output is displayed in real-time.
     Maintains command history for navigation with up/down arrows.
     """
+
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (128, "-wide")]
 
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
@@ -91,25 +93,35 @@ class CommandOverlay(ModalScreen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        """Compose the command overlay UI."""
-        yield Container(
-            Static(self._build_header_text(), id="command_header"),
-            CommandOutput(id="command_output"),
-            Static(
-                "[dim]Ctrl+R[/dim] Picker  "
-                "[dim]Ctrl+S[/dim] Save  "
-                "[dim]↑↓[/dim] History  "
-                "[dim]Ctrl+C[/dim] Stop  "
-                "[dim]Y[/dim] Copy  "
-                "[dim]Esc[/dim] Close",
-                id="command_hints",
-            ),
-            Input(
-                placeholder="Enter command to execute...",
-                id="command_input"
-            ),
-            id="command_overlay_container"
-        )
+        """Compose the native output reader and remote-command controls."""
+        with Container(id="command_overlay_container"):
+            yield VerticalScroll(
+                Static(self._build_header_text(), id="command_header"),
+                id="command_context",
+            )
+            with Container(id="command_tools"):
+                yield Button("Saved / recent", id="command_pick")
+                yield Button("Save command", id="command_save")
+                yield Button("Select output", id="command_select")
+                yield Button("Copy all", id="command_copy")
+                yield Button("Stop / close", id="command_stop", variant="warning")
+                yield Button("Close", id="command_close")
+            yield CommandOutput(id="command_output")
+            with Vertical(id="command_composer"):
+                yield Label("Remote command", id="command_input_label")
+                yield Input(
+                    placeholder="Enter command to execute...",
+                    id="command_input",
+                )
+                yield Static(
+                    "[dim]Ctrl+R[/dim] Picker  "
+                    "[dim]Ctrl+S[/dim] Save  "
+                    "[dim]↑↓[/dim] History  "
+                    "[dim]Ctrl+C[/dim] Stop  "
+                    "[dim]Y[/dim] Copy  "
+                    "[dim]Esc[/dim] Close",
+                    id="command_hints",
+                )
 
     def on_mount(self) -> None:
         """Initialize connection details and focus input on mount."""
@@ -183,6 +195,20 @@ class CommandOverlay(ModalScreen):
 
         # Focus input
         self.query_one("#command_input", Input).focus()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "command_pick": "show_command_picker",
+            "command_save": "save_command",
+            "command_select": "copy_mode",
+            "command_copy": "copy_output",
+            "command_stop": "stop_or_close",
+            "command_close": "close_overlay",
+        }
+        action = actions.get(event.button.id)
+        if action:
+            event.stop()
+            await self.run_action(action)
 
     def _detect_missing_profile(self) -> Optional[str]:
         """Check if a connection rule matched but its profile is missing.

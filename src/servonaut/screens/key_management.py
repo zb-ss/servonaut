@@ -9,16 +9,22 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
-from textual.widgets import Footer, Static, Input, Button, DataTable
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from textual.widgets import Footer, Static, Input, Button, DataTable, Label
 from textual.worker import Worker
 
 from servonaut.screens._binding_guard import check_action_passthrough
 
 
-class KeyManagementScreen(Screen):
+class KeyManagementScreen(WorkspaceScreen):
     """SSH key management screen."""
+
+    CHAT_REFLOW = True
+    # Body padding and scrollbar (4) plus the widest fixed row: two
+    # mapping inputs with their margins beside the Add Mapping button.
+    CHAT_MIN_CONTENT_WIDTH = 48
+    # Below this width, connection settings and local-agent tools stack.
+    CONTENT_NARROW_WIDTH = 104
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -26,54 +32,61 @@ class KeyManagementScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        """Compose the key management UI."""
+        """Separate connection policy from keys available on this computer."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static("[bold $text-accent]SSH Key Management[/bold $text-accent]", id="keys_header"),
-
-            # Section 1: Default Key
-            Static("[bold]Default SSH Key[/bold]", classes="section_header"),
-            Static("Not set", id="current_default_key"),
-            Horizontal(
-                Input(placeholder="Path to default SSH key...", id="input_default_key"),
-                Button("Set Default", id="btn_set_default", variant="primary"),
-                classes="setting_row"
-            ),
-
-            # Section 2: Instance Key Mappings
-            Static("[bold]Instance Key Mappings[/bold]", classes="section_header"),
-            Static("[dim]Instance-specific SSH key overrides (instance ID → key path)[/dim]", classes="note"),
-            Horizontal(
-                Input(placeholder="Instance ID (e.g. vps-abc123.ovh.net or i-0123456)", id="input_mapping_instance"),
-                Input(placeholder="Key path (e.g. ~/.ssh/my_key)", id="input_mapping_key"),
-                Button("Add Mapping", id="btn_add_mapping", variant="primary"),
-                classes="setting_row"
-            ),
-            DataTable(id="instance_keys_table"),
-
-            # Section 3: SSH Agent
-            Static("[bold]SSH Agent[/bold]", classes="section_header"),
-            Static("Status: Checking...", id="agent_status"),
-            Horizontal(
-                Input(placeholder="Path to key to add to agent...", id="input_agent_key"),
-                Button("Add to Agent", id="btn_add_agent", variant="primary"),
-                classes="setting_row"
-            ),
-            Button("List Agent Keys", id="btn_list_agent"),
-            Static("", id="agent_keys_output"),
-
-            # Section 4: Available Keys
-            Static("[bold]Available SSH Keys[/bold]", classes="section_header"),
-            Static("[dim]Keys found in ~/.ssh/[/dim]", classes="note"),
-            DataTable(id="available_keys_table"),
-
-            id="keys_container"
-        )
+        yield WorkspaceControls("SSH Keys")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with ScrollableContainer(id="keys_container", classes="workspace-content"):
+                yield Static("SSH keys", id="keys_header")
+                yield Static(
+                    "Set your connection default, then add exceptions for individual servers.",
+                    id="keys_intro",
+                )
+                with Horizontal(id="keys_sections"):
+                    with Vertical(id="key_connection_column"):
+                        yield Static("Connection keys", classes="key-column-title")
+                        with Vertical(id="default_key_section", classes="key-section"):
+                            yield Static("Default SSH key", classes="key-section-title")
+                            yield Static("Used when a server has no key override.", classes="key-section-note")
+                            yield Static("Not set", id="current_default_key")
+                            yield Label("Key path")
+                            with Horizontal(classes="setting_row"):
+                                yield Input(placeholder="~/.ssh/id_ed25519", id="input_default_key")
+                                yield Button("Set Default", id="btn_set_default", variant="primary")
+                        with Vertical(id="instance_key_section", classes="key-section"):
+                            yield Static("Per-server overrides", classes="key-section-title")
+                            yield Static("Use a different key for a specific instance ID.", classes="key-section-note")
+                            with Horizontal(classes="setting_row", id="key_mapping_fields"):
+                                with Vertical(classes="key-field"):
+                                    yield Label("Instance ID")
+                                    yield Input(placeholder="Instance ID", id="input_mapping_instance")
+                                with Vertical(classes="key-field"):
+                                    yield Label("Key path")
+                                    yield Input(placeholder="~/.ssh/server_key", id="input_mapping_key")
+                                yield Button("Add Mapping", id="btn_add_mapping", variant="primary")
+                            yield DataTable(id="instance_keys_table")
+                            yield Static("Select a mapping row to remove the override.", classes="key-section-note")
+                    with Vertical(id="key_local_column"):
+                        yield Static("On this computer", classes="key-column-title")
+                        with Vertical(id="agent_key_section", classes="key-section"):
+                            yield Static("SSH agent", classes="key-section-title")
+                            yield Static("Status: Checking...", id="agent_status")
+                            yield Label("Key to load into the agent")
+                            with Horizontal(classes="setting_row"):
+                                yield Input(placeholder="Path to SSH key", id="input_agent_key")
+                                yield Button("Add to Agent", id="btn_add_agent", variant="primary")
+                            yield Button("List Agent Keys", id="btn_list_agent")
+                            yield Static("", id="agent_keys_output")
+                        with Vertical(id="available_key_section", classes="key-section"):
+                            yield Static("Available key files", classes="key-section-title")
+                            yield Static("Discovered in ~/.ssh/", classes="key-section-note")
+                            yield DataTable(id="available_keys_table")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -458,4 +471,4 @@ class KeyManagementScreen(Screen):
 
     def action_back(self) -> None:
         """Navigate back to main menu."""
-        self.app.pop_screen()
+        self.dismiss(None)

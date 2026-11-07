@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from rich.markup import escape
+
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Button, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 
 _DEBOUNCE_SECONDS = 0.15
 
@@ -36,25 +42,34 @@ class CommandPickerModal(ModalScreen[str]):
             saved_commands: List of dicts with 'name' and 'command' keys.
             recent_commands: List of recent command strings (newest first).
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._saved_commands = saved_commands
         self._recent_commands = recent_commands
         self._option_map: Dict[str, str] = {}
         self._debounce_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Command Picker[/bold $text-accent]  "
-                "[dim]Type to filter, Enter to select, Escape to cancel[/dim]",
-                id="picker_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static("[bold $text-accent]Command Picker[/bold $text-accent]", id="picker_header"),
+                Static(
+                    "Type to filter, Enter to select, Escape to cancel",
+                    id="picker_hint",
+                ),
             ),
-            Input(
-                placeholder="Search commands...",
-                id="picker_search",
+            body=DialogContent(
+                Input(placeholder="Search commands...", id="picker_search"),
+                OptionList(id="picker_list"),
+                id="picker_body",
             ),
-            OptionList(id="picker_list"),
+            status=Static(
+                "Selecting a command fills the prompt. Press Enter there to execute it.",
+                id="picker_selection_hint",
+            ),
+            actions=DialogActions(Button("Cancel", id="picker_cancel")),
             id="picker_container",
+            size="large",
         )
 
     def on_mount(self) -> None:
@@ -106,7 +121,7 @@ class CommandPickerModal(ModalScreen[str]):
                 self._option_map[option_id] = entry['command']
                 all_options.append(
                     Option(
-                        f"  [bold]★[/bold] {entry['name']}  [dim]{entry['command']}[/dim]",
+                        f"  [bold]★[/bold] {escape(entry['name'])}  [dim]{escape(entry['command'])}[/dim]",
                         id=option_id,
                     )
                 )
@@ -121,7 +136,7 @@ class CommandPickerModal(ModalScreen[str]):
             for i, cmd in enumerate(filtered_recent):
                 option_id = f"recent:{i}"
                 self._option_map[option_id] = cmd
-                all_options.append(Option(f"  {cmd}", id=option_id))
+                all_options.append(Option(f"  {escape(cmd)}", id=option_id))
 
         if not filtered_saved and not filtered_recent:
             if query:
@@ -152,7 +167,12 @@ class CommandPickerModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without selecting."""
-        self.app.pop_screen()
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "picker_cancel":
+            event.stop()
+            self.action_cancel()
 
 
 class SaveCommandModal(ModalScreen[str]):
@@ -171,21 +191,35 @@ class SaveCommandModal(ModalScreen[str]):
         Args:
             command: The command being saved (shown for reference).
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._command = command
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "[bold $text-accent]Save Command[/bold $text-accent]",
                 id="save_header",
             ),
-            Static(f"[dim]Command:[/dim] {self._command}", id="save_command_preview"),
-            Input(
-                placeholder="Enter a name for this command...",
-                id="save_name_input",
+            body=DialogBody(
+                Static(
+                    f"[dim]Command:[/dim] {escape(self._command)}",
+                    id="save_command_preview",
+                ),
+            ),
+            status=Vertical(
+                Label("Saved command name", id="save_name_label"),
+                Input(
+                    placeholder="Enter a name for this command...",
+                    id="save_name_input",
+                ),
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="save_cancel"),
+                Button("Save", variant="primary", id="save_submit"),
             ),
             id="save_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -196,12 +230,23 @@ class SaveCommandModal(ModalScreen[str]):
         """Save on Enter."""
         if event.input.id != "save_name_input":
             return
-        name = event.value.strip()
+        self._submit_name(event.value)
+
+    def _submit_name(self, value: str) -> None:
+        name = value.strip()
         if name:
             self.dismiss(name)
         else:
             self.notify("Name cannot be empty", severity="warning")
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save_cancel":
+            event.stop()
+            self.action_cancel()
+        elif event.button.id == "save_submit":
+            event.stop()
+            self._submit_name(self.query_one("#save_name_input", Input).value)
+
     def action_cancel(self) -> None:
         """Close without saving."""
-        self.app.pop_screen()
+        self.dismiss(None)

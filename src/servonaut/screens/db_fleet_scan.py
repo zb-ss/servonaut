@@ -17,7 +17,6 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.services.db_fleet_scan_service import (
@@ -26,13 +25,19 @@ from servonaut.services.db_fleet_scan_service import (
     FleetDbScanRow,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class DbFleetScanScreen(Screen):
+class DbFleetScanScreen(WorkspaceScreen):
     """Bulk-scan the fleet for DB credentials and commit them to the vault."""
+
+    CHAT_REFLOW = True
+    # Body padding and scrollbar plus the candidate table and the
+    # commit button row at the global button minimum.
+    CHAT_MIN_CONTENT_WIDTH = 66
+    CONTENT_NARROW_WIDTH = 84
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -52,32 +57,50 @@ class DbFleetScanScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("🔐 Fleet DB-credential scan", id="fleet_db_title"),
-                Static(
-                    f"Read-only scan of {len(self._instances)} instance(s). "
-                    "Review the redacted candidates, then commit all (skips "
-                    "servers already in the vault) or the selected row.",
-                    id="fleet_db_subtitle",
-                ),
-                VerticalScroll(
-                    Static("Scanning…", id="fleet_db_status"),
-                    DataTable(id="fleet_db_table", cursor_type="row"),
-                    Horizontal(
-                        Button("Commit all", id="fleet_commit_all", variant="success"),
-                        Button("Commit selected", id="fleet_commit_selected"),
-                        Button("Rescan", id="fleet_rescan"),
-                        id="fleet_db_buttons",
+        yield WorkspaceControls("DB fleet scan")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield VerticalScroll(
+                Container(
+                    Static("Fleet database scan", id="fleet_db_title"),
+                    Static(
+                        f"Read-only discovery across {len(self._instances)} instance(s). "
+                        "Review masked credentials before storing them. "
+                        "Commit all skips servers already in the vault.",
+                        id="fleet_db_subtitle",
                     ),
-                    id="fleet_db_body",
+                    classes="db-view-heading",
+                ),
+                Horizontal(
+                    VerticalScroll(
+                        Static("Review and store", classes="db-section-title"),
+                        Static("Scanning…", id="fleet_db_status", classes="db-status-band"),
+                        Horizontal(
+                            Button("Commit selected", id="fleet_commit_selected"),
+                            Button("Commit all", id="fleet_commit_all", variant="success"),
+                            Button("Rescan", id="fleet_rescan"),
+                            id="fleet_db_buttons",
+                            classes="db-action-row",
+                        ),
+                        id="fleet_db_review",
+                        classes="db-review-tools",
+                    ),
+                    Container(
+                        Static("Scanning…", id="fleet_db_empty"),
+                        DataTable(id="fleet_db_table", cursor_type="row", zebra_stripes=True),
+                        id="fleet_db_body",
+                        classes="db-records",
+                    ),
+                    id="fleet_db_workspace",
+                    classes="db-review-workspace",
                 ),
                 id="fleet_db_container",
+                classes="workspace-content",
             )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#fleet_db_body", Container).border_title = "Scan results"
         table = self.query_one("#fleet_db_table", DataTable)
         table.add_columns("Server", "Engine", "User", "DB", "Password", "Vaulted", "Status")
         self._start_scan()
@@ -94,6 +117,10 @@ class DbFleetScanScreen(Screen):
         markup = f"[{colour}]{escape(message)}[/{colour}]" if colour else escape(message)
         try:
             self.query_one("#fleet_db_status", Static).update(markup)
+            self.query_one("#fleet_db_status").set_class(error, "-error")
+            empty = self.query_one("#fleet_db_empty", Static)
+            empty.update(markup)
+            empty.display = self._result is None or not self._result.rows
         except Exception:  # noqa: BLE001
             pass
 

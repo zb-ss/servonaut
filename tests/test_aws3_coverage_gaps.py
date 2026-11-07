@@ -323,7 +323,7 @@ class TestAWSManagerRenderTable:
              "state": "running", "public_ip": "1.2.3.4", "region": "us-east-1"},
         ]
         # An empty table: the redraw keeps the selected row (none here).
-        mock_table = MagicMock(row_count=0)
+        mock_table = MagicMock(row_count=0, cursor_row=0)
         with patch.object(screen, "query_one", return_value=mock_table), \
              patch.object(screen, "_sync_action_buttons"):
             screen._render_table()
@@ -338,7 +338,7 @@ class TestAWSManagerRenderTable:
         ]
         rows_added = []
         # An empty table: the redraw keeps the selected row (none here).
-        mock_table = MagicMock(row_count=0)
+        mock_table = MagicMock(row_count=0, cursor_row=0)
         mock_table.add_row = MagicMock(side_effect=lambda *a, **kw: rows_added.append(a))
         with patch.object(screen, "query_one", return_value=mock_table), \
              patch.object(screen, "_sync_action_buttons"):
@@ -2715,12 +2715,17 @@ class TestObjectStorageFormMethods:
                 return mock_form
             return MagicMock()
 
+        # A mocked worker must close work it does not schedule.
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", side_effect=query_side), \
-             patch.object(screen, "_hide_all_forms"):
+             patch.object(screen, "_hide_all_forms"), \
+             patch.object(
+                 screen, "run_worker", side_effect=lambda coro, **kw: coro.close(),
+             ) as worker:
             screen._show_new_bucket_form()
 
         assert mock_form.display is True
+        worker.assert_called_once()
 
     def test_show_upload_form_not_in_objects_view_notifies(self) -> None:
         svc = _s3_mock_storage_service()
@@ -4424,10 +4429,13 @@ class TestObjectStorageRegionPicker:
         screen = ObjectStorageScreen("aws")
         app = _s3_app(provider="aws")
 
+        # A mocked worker must close work it does not schedule.
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", return_value=MagicMock()), \
              patch.object(screen, "_hide_all_forms"), \
-             patch.object(screen, "run_worker") as worker, \
+             patch.object(
+                 screen, "run_worker", side_effect=lambda coro, **kw: coro.close(),
+             ) as worker, \
              patch.object(screen, "_load_regions") as loader:
             screen._show_new_bucket_form()
             screen._show_new_bucket_form()

@@ -1091,6 +1091,9 @@ def test_native_known_hosts_requires_private_real_directory_and_formats_port(tmp
 
     insecure = tmp_path / "insecure-known-hosts"
     insecure.mkdir(mode=0o755)
+    # mkdir's requested mode is filtered by a restrictive process umask.
+    insecure.chmod(0o755)
+    assert insecure.stat().st_mode & 0o777 == 0o755
     service._vault_known_hosts_directory = lambda: insecure  # type: ignore[method-assign]
     with pytest.raises(Exception, match="unsafe ownership or permissions"):
         service._write_known_hosts("server.example.test", ["ssh-ed25519 AAAA"])

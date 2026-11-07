@@ -25,15 +25,18 @@ from typing import Any, Dict, List, Optional
 from rich.markup import escape as _rich_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button, DataTable, Footer, Input, Static, TabbedContent, TabPane,
 )
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -55,43 +58,25 @@ class _ExportPathModal(ModalScreen[Optional[str]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
-    DEFAULT_CSS = """
-    _ExportPathModal {
-        align: center middle;
-    }
-    _ExportPathModal #export_modal {
-        width: 70;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-    /* Children must declare height: auto explicitly — a Horizontal with
-       the default 1fr would expand to fill the viewport even though the
-       container is height: auto, defeating the modal sizing. */
-    _ExportPathModal #export_modal Static { height: auto; }
-    _ExportPathModal #export_modal Input { height: 3; }
-    _ExportPathModal #export_modal Horizontal { height: auto; align: center middle; }
-    _ExportPathModal #export_modal Horizontal Button { margin: 0 1; }
-    """
-
     def __init__(self, default_name: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._default = default_name
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold $text-accent]Export Conversation to Markdown[/bold $text-accent]"),
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold $text-accent]Export Conversation to Markdown[/bold $text-accent]"),
+            body=DialogBody(Static(
                 "[dim]Path is resolved relative to the current directory. "
                 "Must stay inside CWD or ~/Downloads.[/dim]"
-            ),
-            Input(value=self._default, id="export_path_input"),
-            Horizontal(
+            )),
+            status=Vertical(Input(value=self._default, id="export_path_input")),
+            actions=DialogActions(
                 Button("Save", variant="primary", id="btn_export_save"),
                 Button("Cancel", id="btn_export_cancel"),
             ),
             id="export_modal",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -133,31 +118,18 @@ class _ConfirmModal(ModalScreen[bool]):
         Binding("n", "cancel", "No", show=False),
     ]
 
-    DEFAULT_CSS = """
-    _ConfirmModal { align: center middle; }
-    _ConfirmModal #confirm_box {
-        width: 60;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-    _ConfirmModal #confirm_box Static { height: auto; }
-    _ConfirmModal #confirm_box Horizontal { height: auto; align: center middle; }
-    _ConfirmModal #confirm_box Horizontal Button { margin: 0 1; }
-    """
-
     def __init__(self, title: str, message: str, danger: bool = False) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._title = title
         self._message = message
         self._danger = danger
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]"),
-            Static(self._message),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(f"[bold $text-accent]{self._title}[/bold $text-accent]"),
+            body=DialogBody(Static(self._message)),
+            actions=DialogActions(
                 Button(
                     "Confirm",
                     variant="error" if self._danger else "primary",
@@ -166,6 +138,8 @@ class _ConfirmModal(ModalScreen[bool]):
                 Button("Cancel", id="btn_no"),
             ),
             id="confirm_box",
+            size="compact",
+            severity="danger" if self._danger else "neutral",
         )
 
     def on_mount(self) -> None:
@@ -196,13 +170,17 @@ def _parse_iso(ts: str) -> Optional[datetime]:
         return None
 
 
-class AIConversationsScreen(Screen):
+class AIConversationsScreen(WorkspaceScreen):
     """Server-backed list of the user's hosted-AI conversations.
 
     Loads ``ConversationSummary`` rows from
     :class:`AIConversationsClient`, groups them by recency, and offers
     archive / delete / export actions on the selected row.
     """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 94
+    CONTENT_NARROW_WIDTH = 110
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -213,84 +191,6 @@ class AIConversationsScreen(Screen):
         Binding("slash", "focus_filter", "Filter", show=True),
         Binding("enter", "open_selected", "Open", show=True),
     ]
-
-    DEFAULT_CSS = """
-    /* Match the Memory Sync visual language: centred accent title +
-       muted subtitle, rounded $primary cards on $surface, consistent
-       button spacing. Two key constraints distinguish this screen from
-       memory_sync — TabbedContent + a DataTable that needs to fill
-       remaining height — so the same look comes from per-card
-       wrappers rather than a body VerticalScroll. */
-    AIConversationsScreen #convs_container {
-        width: 1fr;
-        height: 1fr;
-        padding: 1 2;
-    }
-    AIConversationsScreen #convs_title {
-        text-align: center;
-        color: $accent;
-        text-style: bold;
-        height: auto;
-    }
-    AIConversationsScreen #convs_subtitle {
-        text-align: center;
-        margin-bottom: 1;
-        color: $text-muted;
-        height: auto;
-    }
-    AIConversationsScreen #convs_status,
-    AIConversationsScreen #local_status {
-        margin: 0 1;
-        color: $text-muted;
-        height: auto;
-    }
-    AIConversationsScreen #convs_filter,
-    AIConversationsScreen #local_filter {
-        margin: 0 0 1 0;
-        background: $surface;
-    }
-    AIConversationsScreen #convs_progress {
-        margin: 1 1;
-    }
-    AIConversationsScreen .convs_group_header {
-        text-style: bold;
-        margin: 1 1 0 1;
-    }
-    /* The "card" treatment: round $primary border + $surface background
-       around the table area, mirrors .msync_card on the Memory Sync
-       screen. Wrapping VerticalScroll in this gives the rows a clear
-       visual frame without changing the data layout. */
-    AIConversationsScreen #convs_scroll,
-    AIConversationsScreen #local_scroll {
-        height: 1fr;
-        border: round $primary;
-        background: $surface;
-        padding: 0 1;
-    }
-    AIConversationsScreen #convs_actions,
-    AIConversationsScreen #local_actions {
-        height: auto;
-        margin: 1 0 0 0;
-        padding: 0;
-        align: left middle;
-    }
-    AIConversationsScreen #convs_actions Button,
-    AIConversationsScreen #local_actions Button {
-        margin-right: 1;
-        min-width: 14;
-    }
-    AIConversationsScreen #convs_empty,
-    AIConversationsScreen #local_empty {
-        margin: 2 1;
-        color: $text-muted;
-        height: auto;
-    }
-    /* Tab plumbing — must fill height so the action row at the bottom
-       of each pane stays in view (without these the VerticalScroll's
-       natural height pushes the buttons past the footer). */
-    AIConversationsScreen TabbedContent { height: 1fr; }
-    AIConversationsScreen TabPane { height: 1fr; padding: 1 0 0 0; }
-    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -337,77 +237,86 @@ class AIConversationsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Vertical(id="convs_container"):
+        yield WorkspaceControls("Previous Chats")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Vertical(id="convs_container", classes="workspace-content"):
                 yield Static(
                     "[bold $text-accent]Previous Chats[/bold $text-accent]",
                     id="convs_title",
                 )
                 yield Static(
-                    "[dim]Cloud chats live on the Servonaut server "
-                    "(uploaded by Servonaut AI turns). Local chats stay "
-                    "on this machine. Use [bold]/[/bold] to filter, "
-                    "[bold]d[/bold] to delete.[/dim]",
+                    "Cloud chats are uploaded by Servonaut AI turns. "
+                    "Local chats stay on this machine.",
                     id="convs_subtitle",
                 )
                 with TabbedContent(
                     initial=self._initial_tab(), id="convs_tabs",
                 ):
                     with TabPane("Cloud", id="tab_cloud"):
-                        yield Input(
-                            placeholder="Filter by title…",
-                            id="convs_filter",
-                        )
-                        yield Static("", id="convs_status")
-                        yield ProgressIndicator()
-                        with VerticalScroll(id="convs_scroll"):
-                            yield DataTable(
-                                id="convs_table",
-                                zebra_stripes=True,
-                                cursor_type="row",
+                        with Horizontal(id="convs_search"):
+                            yield Input(
+                                placeholder="Filter by title…",
+                                id="convs_filter",
                             )
-                            yield Static("", id="convs_empty")
-                        with Horizontal(id="convs_actions"):
-                            yield Button(
-                                "Open", variant="primary", id="btn_convs_open",
-                            )
-                            yield Button("Archive (a)", id="btn_convs_archive")
-                            yield Button(
-                                "Delete (d)", variant="error",
-                                id="btn_convs_delete",
-                            )
-                            yield Button(
-                                "Export to MD (e)", id="btn_convs_export",
-                            )
-                            yield Button("Load More", id="btn_convs_more")
                             yield Button("Refresh (r)", id="btn_convs_refresh")
+                        yield ProgressIndicator()
+                        with Horizontal(id="convs_workspace"):
+                            with Vertical(id="convs_listing"):
+                                with VerticalScroll(id="convs_scroll"):
+                                    yield DataTable(
+                                        id="convs_table",
+                                        zebra_stripes=True,
+                                        cursor_type="row",
+                                    )
+                                    yield Static("", id="convs_empty")
+                                with Horizontal(id="convs_pager"):
+                                    yield Static("", id="convs_status")
+                                    yield Button("Load More", id="btn_convs_more")
+                            with Horizontal(id="convs_actions"):
+                                yield Button(
+                                    "Open", variant="primary", id="btn_convs_open",
+                                )
+                                yield Button("Archive (a)", id="btn_convs_archive")
+                                yield Button(
+                                    "Delete (d)", variant="error",
+                                    id="btn_convs_delete",
+                                )
+                                yield Button(
+                                    "Export to MD (e)", id="btn_convs_export",
+                                )
                     with TabPane("Local", id="tab_local"):
-                        yield Input(
-                            placeholder="Filter by title…",
-                            id="local_filter",
-                        )
-                        yield Static("", id="local_status")
-                        with VerticalScroll(id="local_scroll"):
-                            yield DataTable(
-                                id="local_table",
-                                zebra_stripes=True,
-                                cursor_type="row",
+                        with Horizontal(id="local_search"):
+                            yield Input(
+                                placeholder="Filter by title…",
+                                id="local_filter",
                             )
-                            yield Static("", id="local_empty")
-                        with Horizontal(id="local_actions"):
-                            yield Button(
-                                "Open", variant="primary", id="btn_local_open",
-                            )
-                            yield Button(
-                                "Delete (d)", variant="error",
-                                id="btn_local_delete",
-                            )
-                            yield Button("Load More", id="btn_local_more")
                             yield Button("Refresh (r)", id="btn_local_refresh")
+                        with Horizontal(id="local_workspace"):
+                            with Vertical(id="local_listing"):
+                                with VerticalScroll(id="local_scroll"):
+                                    yield DataTable(
+                                        id="local_table",
+                                        zebra_stripes=True,
+                                        cursor_type="row",
+                                    )
+                                    yield Static("", id="local_empty")
+                                with Horizontal(id="local_pager"):
+                                    yield Static("", id="local_status")
+                                    yield Button("Load More", id="btn_local_more")
+                            with Horizontal(id="local_actions"):
+                                yield Button(
+                                    "Open", variant="primary", id="btn_local_open",
+                                )
+                                yield Button(
+                                    "Delete (d)", variant="error",
+                                    id="btn_local_delete",
+                                )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#convs_scroll").border_title = "Cloud conversations"
+        self.query_one("#local_scroll").border_title = "Local sessions"
         table = self.query_one("#convs_table", DataTable)
         table.add_columns("Title", "Last Activity", "Messages", "Model", "Status")
         self.query_one("#convs_empty", Static).update("")
@@ -857,7 +766,9 @@ class AIConversationsScreen(Screen):
             screens = list(getattr(self.app, "screen_stack", []) or [])
         except Exception:
             screens = []
-        for screen in screens:
+        for screen in reversed(screens):
+            if screen is self:
+                continue
             try:
                 return screen.query_one(ChatPanel)
             except Exception:

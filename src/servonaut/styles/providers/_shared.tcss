@@ -91,7 +91,7 @@
     margin: 1 0 0 0;
     padding: 1;
     border: round $primary;
-    background: $boost;
+    background: transparent;
 }
 
 .ip_form_panel Input {
@@ -170,7 +170,7 @@
     padding: 1;
     margin: 1 0 0 0;
     border: round $accent;
-    background: $boost;
+    background: transparent;
 }
 
 /* The push form's custom-server picker: as tall as its rows, then it scrolls,
@@ -224,16 +224,21 @@
     height: auto;
 }
 
-/* Narrow terminals (see TeamManagementScreen.HORIZONTAL_BREAKPOINTS): the
+/* Member labels determine their native width without the global floor. */
+TeamManagementScreen #member_actions_row Button {
+    min-width: 0;
+}
+
+/* Narrow content (see TeamManagementScreen.CONTENT_NARROW_WIDTH): the
    five member buttons do not fit on one row, so they wrap onto a grid. */
-TeamManagementScreen.-narrow #member_actions_row {
+TeamManagementScreen.-content-narrow #member_actions_row {
     layout: grid;
-    grid-size: 3;
+    grid-size: 2;
     grid-rows: 3;
     grid-gutter: 0 1;
 }
 
-TeamManagementScreen.-narrow #member_actions_row Button {
+TeamManagementScreen.-content-narrow #member_actions_row Button {
     width: 1fr;
     margin: 0;
 }
@@ -281,7 +286,7 @@ TeamManagementScreen.-narrow #member_actions_row Button {
     padding: 1;
     height: auto;
     border: round $warning;
-    background: $panel;
+    background: transparent;
 }
 
 /* Provider create-wizard — error banner shown when credentials are not configured.
@@ -292,7 +297,7 @@ TeamManagementScreen.-narrow #member_actions_row Button {
     padding: 1;
     height: auto;
     border: round $error;
-    background: $panel;
+    background: transparent;
     color: $error;
 }
 
@@ -315,7 +320,7 @@ TeamManagementScreen.-narrow #member_actions_row Button {
     margin: 1 0 0 0;
     padding: 1;
     border: round $primary;
-    background: $boost;
+    background: transparent;
 }
 
 #hetzner_ssh_add_form Input,
@@ -508,7 +513,7 @@ PassphraseModal {
     align: center middle;
 }
 
-#passphrase_container {
+PassphraseModal Container#passphrase_container {
     width: 60%;
     max-width: 64;
     height: auto;
@@ -517,7 +522,7 @@ PassphraseModal {
     padding: 1 2;
 }
 
-#passphrase_title {
+PassphraseModal Container#passphrase_container #passphrase_title {
     padding: 0 0 1 0;
     text-style: bold;
 }
@@ -527,120 +532,25 @@ PassphraseModal {
     color: $text-muted;
 }
 
-#input_passphrase_field,
-#input_passphrase_confirm_field {
+PassphraseModal Container#passphrase_container #input_passphrase_field,
+PassphraseModal Container#passphrase_container #input_passphrase_confirm_field {
     margin: 0 0 1 0;
     width: 1fr;
 }
 
-#passphrase_error {
+PassphraseModal Container#passphrase_container #passphrase_error {
     padding: 0 0 1 0;
     height: auto;
     color: $error;
 }
 
-#passphrase_buttons {
+PassphraseModal Container#passphrase_container #passphrase_buttons {
     layout: horizontal;
     height: auto;
     align: right middle;
 }
 
 #passphrase_buttons Button {
-    margin-left: 1;
-    min-width: 12;
-}
-
-/* ---- Label input modal (rename + push-new) ---- */
-
-LabelInputModal {
-    align: center middle;
-}
-
-#label_modal_container {
-    width: 60%;
-    max-width: 64;
-    height: auto;
-    background: $surface;
-    border: round $accent;
-    padding: 1 2;
-}
-
-#label_modal_title {
-    padding: 0 0 1 0;
-    text-style: bold;
-}
-
-#label_modal_hint {
-    padding: 0 0 1 0;
-    color: $text-muted;
-}
-
-#label_input {
-    margin: 0 0 1 0;
-    width: 1fr;
-}
-
-#label_modal_error {
-    padding: 0 0 1 0;
-    height: auto;
-    color: $error;
-}
-
-#label_modal_buttons {
-    layout: horizontal;
-    height: auto;
-    align: right middle;
-}
-
-#label_modal_buttons Button {
-    margin-left: 1;
-    min-width: 12;
-}
-
-/* ---- Confirm modals (snapshot + backup flows, power actions) ---- */
-
-ConfirmModal,
-BackupConfirmModal,
-PowerActionConfirmModal {
-    align: center middle;
-}
-
-#confirm_modal_container,
-#bkp_confirm_container,
-#power_confirm_container {
-    width: 60%;
-    max-width: 70;
-    height: auto;
-    background: $surface;
-    border: round $accent;
-    padding: 1 2;
-}
-
-#confirm_modal_title,
-#bkp_confirm_title,
-#power_confirm_title {
-    padding: 0 0 1 0;
-    text-style: bold;
-}
-
-#confirm_modal_message,
-#bkp_confirm_message,
-#power_confirm_message {
-    padding: 0 0 1 0;
-    height: auto;
-}
-
-#confirm_modal_buttons,
-#bkp_confirm_buttons,
-#power_confirm_buttons {
-    layout: horizontal;
-    height: auto;
-    align: right middle;
-}
-
-#confirm_modal_buttons Button,
-#bkp_confirm_buttons Button,
-#power_confirm_buttons Button {
     margin-left: 1;
     min-width: 12;
 }
@@ -735,4 +645,114 @@ PowerActionConfirmModal {
 #backups_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
+}
+
+/* Provider action rows reflow within the available workspace column. */
+AWSManagerScreen.-content-narrow #aws_mgr_actions,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_actions,
+OVHDNSScreen.-content-narrow #dns_actions {
+    layout: grid;
+    grid-size: 3;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+OVHManagerScreen.-content-narrow #ovh_mgr_actions,
+BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions {
+    layout: grid;
+    grid-size: 2;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+/* Eleven storage actions need two rows at wide widths, four when narrow. */
+ObjectStorageScreen #s3_actions {
+    layout: grid;
+    grid-size: 6;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+ObjectStorageScreen.-content-narrow #s3_actions {
+    grid-size: 3;
+}
+
+AWSManagerScreen.-content-narrow #aws_mgr_actions Button,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_actions Button,
+OVHManagerScreen.-content-narrow #ovh_mgr_actions Button,
+BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions Button,
+OVHDNSScreen.-content-narrow #dns_actions Button,
+ObjectStorageScreen #s3_actions Button {
+    width: 1fr;
+    margin: 0;
+}
+
+/* Setup actions retain their labels in a constrained content column. */
+HetznerSetupScreen .hetzner_action_row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+HetznerSetupScreen .hetzner_action_row > Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0;
+}
+
+/* Setup actions retain their labels in a constrained content column. */
+OVHSetupScreen .ovh_action_row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+OVHSetupScreen .ovh_action_row > Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0;
+}
+
+/* Keep resource actions inside narrow content without shrinking native buttons. */
+OVHSnapshotsScreen.-content-narrow #snapshots_actions,
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions,
+OVHStorageScreen.-content-narrow #storage_actions,
+SnapshotManagerScreen.-content-narrow #snapshots_actions {
+    layout: grid;
+    height: auto;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    padding: 0;
+}
+
+OVHSnapshotsScreen.-content-narrow #snapshots_actions,
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions {
+    grid-size: 2;
+}
+
+OVHStorageScreen.-content-narrow #storage_actions,
+SnapshotManagerScreen.-content-narrow #snapshots_actions {
+    grid-size: 3;
+}
+
+OVHSnapshotsScreen.-content-narrow #snapshots_actions Button,
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions Button,
+OVHStorageScreen.-content-narrow #storage_actions Button,
+SnapshotManagerScreen.-content-narrow #snapshots_actions Button {
+    width: 1fr;
+    margin: 0;
+}
+
+/* Short storage labels need no global width floor in the horizontal row. */
+OVHStorageScreen #storage_actions Button {
+    min-width: 0;
+}
+
+/* Two border rows, a header, a data row and the native horizontal scrollbar. */
+SnapshotManagerScreen #snapshots_table {
+    min-height: 5;
 }

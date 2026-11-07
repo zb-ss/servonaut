@@ -3,7 +3,7 @@
    =================================================================== */
 
 ScrollableContainer {
-    background: $surface;
+    background: transparent;
     overflow-y: auto;
 }
 

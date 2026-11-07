@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING, Iterator, List, Optional
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
 from servonaut.styles.themes import (
     SERVONAUT_ANSI_DARK,
     SERVONAUT_ANSI_LIGHT,
@@ -75,12 +77,16 @@ class ServonautApp(App):
     TITLE = "Servonaut"
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
-        Binding("q", "quit", "Quit", show=True, tooltip="Quit Servonaut"),
+        Binding("q", "quit_from_content", "Quit", show=True, tooltip="Quit Servonaut"),
         Binding("question_mark", "show_help", "Help", show=True,
                 tooltip="This help screen"),
         Binding("f2", "toggle_chat", "Chat", show=True, tooltip="Show or hide the chat panel"),
         # Fallback for terminals/multiplexers that swallow F-keys.
         Binding("ctrl+g", "toggle_chat", "Chat", show=False),
+        Binding("f3", "end_chat", "End chat", show=False,
+                tooltip="End chat and stop its reply, including while collapsed"),
+        Binding("shift+f6", "focus_navigation", "Navigation", show=False,
+                tooltip="Focus navigation; press again or Esc to return to content"),
         Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False,
                 tooltip="Demo mode: stand-ins for every identifier on screen"),
         # Fallback: many terminals (xterm.js/ttyd, some multiplexers) cannot
@@ -234,10 +240,13 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        from servonaut import get_version
+        self.sub_title = f"v{get_version()}"
         for theme in SERVONAUT_THEMES:
             self.register_theme(theme)
         self._textual_ansi_themes = (self.ansi_theme_dark, self.ansi_theme_light)
         self.instances = []
+        self.workspace_state = WorkspaceState()
         self.memory_first_connect_seen = set()
         self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
@@ -2533,26 +2542,16 @@ class ServonautApp(App):
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
 
-        Checks both Screen-level selection (for Static widgets) and
-        TextArea.selected_text (for TextArea widgets, which have their
-        own selection mechanism).
+        Prefer the screen selection, otherwise use only the focused
+        TextArea. Other editors may retain selections from older gestures.
         """
         import re
         from textual.widgets import TextArea
 
-        # 1. Try Screen-level selection (works on Static, Label, etc.)
         text = self.screen.get_selected_text()
-
-        # 2. If nothing, check TextArea selections on the current screen
-        if not text or not text.strip():
-            try:
-                for ta in self.screen.query(TextArea):
-                    sel = ta.selected_text
-                    if sel and sel.strip():
-                        text = sel
-                        break
-            except Exception:
-                pass
+        if not text:
+            focused = self.focused
+            text = focused.selected_text if isinstance(focused, TextArea) else None
 
         if not text or not text.strip():
             return
@@ -2577,16 +2576,74 @@ class ServonautApp(App):
         self.push_screen(HelpScreen())
 
     def action_toggle_chat(self) -> None:
-        """Toggle the chat panel on the current screen."""
+        """Collapse or restore this screen's chat without ending its text turn."""
         from textual.css.query import NoMatches
         from servonaut.widgets.chat_panel import ChatPanel
+        if not self.screen_stack or isinstance(self.screen, ModalScreen):
+            return
         try:
             panel = self.screen.query_one("#chat-panel", ChatPanel)
-            panel.close_panel()
+            if panel._collapsed:
+                panel.restore_panel()
+            else:
+                panel.collapse_panel()
         except NoMatches:
             panel = ChatPanel()
-            self.screen.mount(panel)
+            panel._content_focus = self.focused
+            host = (
+                self.screen.chat_host()
+                if isinstance(self.screen, WorkspaceScreen) else self.screen
+            )
+            host.mount(panel)
             panel.focus_input()
+        if isinstance(self.screen, WorkspaceScreen):
+            self.screen.call_after_refresh(self.screen.sync_workspace_controls)
+
+    def action_end_chat(self) -> None:
+        """End only the active screen's chat, respecting operation holds."""
+        from servonaut.widgets.chat_panel import ChatPanel
+
+        if (not self.screen_stack or isinstance(self.screen, ModalScreen)
+                or self._navigation_hold_reason()):
+            return
+        panel = next(iter(self.screen.query(ChatPanel)), None)
+        if panel is not None:
+            panel.close_panel()
+
+    def _active_workspace(self) -> WorkspaceScreen | None:
+        """Workspace actions only target an active pilot, never a modal."""
+        if not self.screen_stack:
+            return None
+        if isinstance(self.screen, WorkspaceScreen) and not self._navigation_hold_reason():
+            return self.screen
+        return None
+
+    def action_toggle_navigation(self) -> None:
+        """Choose navigation visibility for this application session."""
+        from servonaut.widgets.sidebar import Sidebar
+
+        screen = self._active_workspace()
+        if screen is None:
+            return
+        sidebar = screen.query_one(Sidebar)
+        navigation_visible = not sidebar.display
+        sidebar.exit_navigation_mode()
+        self.workspace_state.navigation_visible = navigation_visible
+        screen.apply_workspace_state()
+
+    def action_focus_navigation(self) -> None:
+        """Enter the rail explicitly, or return to the previous content widget."""
+        from servonaut.widgets.sidebar import Sidebar
+
+        screen = self._active_workspace()
+        if screen is None:
+            return
+        sidebar = screen.query_one(Sidebar)
+        if sidebar.navigation_mode:
+            sidebar.exit_navigation_mode()
+        else:
+            sidebar.enter_navigation_mode()
+        screen.call_after_refresh(screen.sync_workspace_controls)
 
     def action_toggle_demo(self) -> None:
         """Toggle demo mode at runtime (ctrl+shift+d).
@@ -2723,9 +2780,8 @@ class ServonautApp(App):
         other_instances = [i for i in self.instances if i.get("is_custom")]
         return resolve_instance_from_lists(id_or_name, aws_instances, other_instances)
 
-    # Sidebar targets reachable from the command palette (ctrl+p). The sidebar
-    # itself is mouse-only, so keyboard-only sessions and terminal recorders
-    # need a way to switch sections. Order mirrors the sidebar.
+    # Destinations remain available from the palette on every screen, including
+    # those whose sidebar has not adopted explicit keyboard navigation yet.
     _PALETTE_NAVIGATION = (
         ("Instances", "nav_list", "Fleet table: every server across providers"),
         ("Custom Servers", "nav_custom_servers", "Add, edit and remove non-cloud servers"),
@@ -2768,6 +2824,21 @@ class ServonautApp(App):
         from servonaut.widgets.sidebar import Sidebar
 
         yield from super().get_system_commands(screen)
+        if (not isinstance(screen, ModalScreen) and not self._navigation_hold_reason()
+                and screen.query("#chat-panel")):
+            yield SystemCommand(
+                "End chat", "End this chat and stop its reply, even when collapsed (F3)",
+                self.action_end_chat,
+            )
+        if isinstance(screen, WorkspaceScreen) and not self._navigation_hold_reason():
+            yield SystemCommand(
+                "Toggle navigation", "Show or hide the navigation pane",
+                self.action_toggle_navigation,
+            )
+            yield SystemCommand(
+                "Focus navigation", "Move to navigation; Esc returns to content",
+                self.action_focus_navigation,
+            )
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
             if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
@@ -2868,9 +2939,28 @@ class ServonautApp(App):
         return True
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action in {"quit", "command_palette"} and self._navigation_hold_reason():
+        if action == "quit_from_content":
+            workspace = self._active_workspace()
+            if workspace is not None and workspace.navigation_focused:
+                return False
+        if action == "end_chat":
+            return bool(
+                self.screen_stack and not isinstance(self.screen, ModalScreen)
+                and not self._navigation_hold_reason()
+                and self.screen.query("#chat-panel")
+            )
+        if action in {"toggle_navigation", "focus_navigation"}:
+            return self._active_workspace() is not None
+        if (
+            action in {"quit", "quit_from_content", "command_palette"}
+            and self._navigation_hold_reason()
+        ):
             return False
         return super().check_action(action, parameters)
+
+    async def action_quit_from_content(self) -> None:
+        """Use the ordinary quit path for the unmodified content shortcut."""
+        await self.action_quit()
 
     async def action_quit(self) -> None:
         if not self._refuse_navigation():
@@ -2912,6 +3002,9 @@ class ServonautApp(App):
         target_id = message.target_id
         if not target_id:
             return
+        if isinstance(self.screen, WorkspaceScreen):
+            for sidebar in self.screen.query("Sidebar"):
+                sidebar.exit_navigation_mode()
             
         if target_id == "nav_list":
             from servonaut.screens.instance_list import InstanceListScreen
@@ -3169,7 +3262,7 @@ class ServonautApp(App):
         from textual.widgets import Button
         try:
             btn = self.screen.query_one("#nav_update", Button)
-            btn.label = f"📥 Update to v{version}"
+            btn.label = f"Update to v{version}"
             btn.remove_class("hidden")
         except Exception:
             pass

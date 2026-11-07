@@ -102,7 +102,7 @@ def _visible(screen) -> str:
 @pytest.mark.asyncio
 async def test_records_hide_their_names_in_demo_mode() -> None:
     app = DNSApp(demo=True)
-    with patch("servonaut.screens.ovh_dns.Sidebar", side_effect=lambda: Static(id="sidebar")):
+    with patch.object(OVHDNSScreen, "workspace_sidebar", new=lambda self: Static(id="sidebar")):
         async with app.run_test(size=(160, 50)) as pilot:
             screen = await _open_zone(pilot)
             shown = _visible(screen)
@@ -115,7 +115,7 @@ async def test_records_hide_their_names_in_demo_mode() -> None:
 @pytest.mark.asyncio
 async def test_records_show_their_names_outside_demo_mode() -> None:
     app = DNSApp(demo=False)
-    with patch("servonaut.screens.ovh_dns.Sidebar", side_effect=lambda: Static(id="sidebar")):
+    with patch.object(OVHDNSScreen, "workspace_sidebar", new=lambda self: Static(id="sidebar")):
         async with app.run_test(size=(160, 50)) as pilot:
             shown = _visible(await _open_zone(pilot))
             for name in ("shop", "api", "portal.eu", ZONE):
@@ -125,7 +125,7 @@ async def test_records_show_their_names_outside_demo_mode() -> None:
 @pytest.mark.asyncio
 async def test_editing_a_record_in_demo_mode_keeps_its_real_name() -> None:
     app = DNSApp(demo=True)
-    with patch("servonaut.screens.ovh_dns.Sidebar", side_effect=lambda: Static(id="sidebar")):
+    with patch.object(OVHDNSScreen, "workspace_sidebar", new=lambda self: Static(id="sidebar")):
         async with app.run_test(size=(160, 50)) as pilot:
             screen = await _open_zone(pilot)
             screen._show_edit_form(RECORDS[0])
@@ -141,7 +141,7 @@ async def test_editing_a_record_in_demo_mode_keeps_its_real_name() -> None:
 @pytest.mark.asyncio
 async def test_toggle_redraws_zones_and_records() -> None:
     app = DNSApp(demo=False)
-    with patch("servonaut.screens.ovh_dns.Sidebar", side_effect=lambda: Static(id="sidebar")):
+    with patch.object(OVHDNSScreen, "workspace_sidebar", new=lambda self: Static(id="sidebar")):
         async with app.run_test(size=(160, 50)) as pilot:
             screen = await _open_zone(pilot)
             assert "shop" in _visible(screen)

@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING
 
+from servonaut.screens._busy_work import BusyWork
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from rich.markup import escape
@@ -28,13 +30,14 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.coordinate import Coordinate
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import DialogActions, DialogFrame, DialogNotificationSpace
 from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
@@ -172,7 +175,7 @@ class FleetScanSummaryModal(ModalScreen[None]):
                 [{module, reason, message}, …]}]`` for failed scans.
             skipped: Servers not probed because they are stopped.
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._succeeded = succeeded
         self._failed = failed
         self._skipped = skipped or []
@@ -182,22 +185,24 @@ class FleetScanSummaryModal(ModalScreen[None]):
         skipped_text = (
             f", [dim]{len(self._skipped)} skipped: stopped[/dim]" if self._skipped else ""
         )
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 f"[bold $text-accent]Fleet scan complete[/bold $text-accent] — "
                 f"[$text-success]{len(self._succeeded)} succeeded[/$text-success], "
                 f"[$text-error]{len(self._failed)} failed[/$text-error]"
                 f"{skipped_text} ({total} total)",
                 id="fleet-scan-title",
             ),
-            VerticalScroll(
+            body=VerticalScroll(
                 Static(self._render_body(), id="fleet-scan-body"),
                 id="fleet-scan-failures",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("OK", id="btn_close", variant="primary"),
             ),
             id="fleet-scan-modal",
+            size="standard",
         )
 
     def _render_body(self) -> str:
@@ -258,13 +263,27 @@ class FleetScanSummaryModal(ModalScreen[None]):
 # ---------------------------------------------------------------------------
 
 
-class FleetMemoryScreen(Screen):
+class FleetMemoryScreen(WorkspaceScreen):
     """Fleet-wide view of memory status + bulk memory operations.
 
     Discoverability tier 1: a dedicated sidebar entry that makes the memory
     feature visible without needing to drill into a server.  All rows are
     linked to the per-instance :class:`MemoryScreen` via ``enter``.
     """
+
+    DEFAULT_CSS = """
+    FleetMemoryScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    # Set initial focus on mount without scrolling the fleet summary away.
+    AUTO_FOCUS = ""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 120
+    CONTENT_NARROW_WIDTH = 140
 
     CSS_PATH = [*_APP_CSS_FILES, Path(__file__).parent.parent / "memory_screen.tcss"]
 
@@ -291,10 +310,13 @@ class FleetMemoryScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._rows: List[Dict[str, Any]] = []
         self._scanning = False
         self._marked = frozenset()
@@ -305,16 +327,56 @@ class FleetMemoryScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Fleet Memory")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(
-                    "[bold]Fleet Memory[/bold]",
-                    id="memory-title",
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Container(
+                    Static("[bold]Fleet Memory[/bold]", id="memory-title"),
+                    Static(
+                        "AI-queryable server memory across your fleet.",
+                        id="memory-subtitle",
+                    ),
+                    Static("", id="fleet-memory-status"),
+                    Static("", id="fleet-auto-scan-status"),
+                    id="fleet-memory-context",
                 ),
-                Static(
-                    "AI-queryable server memory across your fleet.",
-                    id="memory-subtitle",
+                # Live progress line for bulk scans — hidden when idle so
+                # it never competes with the status summary above.
+                Static("", id="fleet-memory-progress", classes="hidden"),
+                Horizontal(
+                    Container(
+                        Static("Fleet scanning", classes="memory-panel-heading"),
+                        Container(
+                            Button("s. Scan All", id="btn_scan_all", variant="primary"),
+                            Button("f. Refresh Stale", id="btn_refresh_stale"),
+                            Button("r. Refresh", id="btn_refresh_view"),
+                            Button("a. Toggle Auto-scan", id="btn_toggle_auto_scan"),
+                            classes="fleet-memory-scan-buttons",
+                        ),
+                        classes="fleet-memory-action-group",
+                        id="fleet-memory-scan-actions",
+                    ),
+                    Container(
+                        Static("Selected server", classes="memory-panel-heading"),
+                        Horizontal(
+                            Button("enter. Open", id="btn_open"),
+                            Button("x. Clear", id="btn_clear", variant="error"),
+                            classes="fleet-memory-selection-buttons",
+                        ),
+                        classes="fleet-memory-action-group",
+                        id="fleet-memory-selection-actions",
+                    ),
+                    id="memory-actions",
+                ),
+                # Wrap the table in a sub-container so the rounded card
+                # treatment can be applied via CSS without affecting the
+                # DataTable's own selection styling.
+                Container(
+                    Static("Server records", classes="memory-panel-heading"),
+                    DataTable(id="fleet-memory-table"),
+                    id="fleet-memory-table-card",
                 ),
                 Static(
                     "[dim]Memory stores OS / runtime / service / log facts for "
@@ -325,30 +387,8 @@ class FleetMemoryScreen(Screen):
                     "modules.[/dim]",
                     id="fleet-memory-help",
                 ),
-                Static("", id="fleet-memory-status"),
-                # Auto-scan state indicator — updated on mount, after
-                # manual scans, and after a refresh-view.
-                Static("", id="fleet-auto-scan-status"),
-                # Live progress line for bulk scans — hidden when idle so
-                # it never competes with the status summary above.
-                Static("", id="fleet-memory-progress", classes="hidden"),
-                # Wrap the table in a sub-container so the rounded card
-                # treatment can be applied via CSS without affecting the
-                # DataTable's own selection styling.
-                Container(
-                    DataTable(id="fleet-memory-table"),
-                    id="fleet-memory-table-card",
-                ),
-                Horizontal(
-                    Button("s. Scan All", id="btn_scan_all", variant="primary"),
-                    Button("f. Refresh Stale", id="btn_refresh_stale"),
-                    Button("r. Refresh", id="btn_refresh_view"),
-                    Button("enter. Open", id="btn_open"),
-                    Button("x. Clear", id="btn_clear", variant="error"),
-                    Button("a. Toggle Auto-scan", id="btn_toggle_auto_scan"),
-                    id="memory-actions",
-                ),
                 id="memory-container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -386,6 +426,7 @@ class FleetMemoryScreen(Screen):
         if getattr(self.app, "_fleet_manual_scan_in_progress", False):
             self._scanning = True
             self._set_progress("[$text-accent]Fleet scan in progress…[/$text-accent]")
+        table.focus(scroll_visible=False)
 
     # ------------------------------------------------------------------
     # Data / populate
@@ -590,30 +631,31 @@ class FleetMemoryScreen(Screen):
             self._populate_table()
             return
 
-        try:
-            merged = await fleet_service.get_merged_fleet(
-                hidden_ids=folded_share_ids(self.app)
-            )
-        except BackendMaintenance:
-            self.app.notify(
-                "Memory cloud sync is in maintenance — showing local data only.",
-                severity="warning",
-            )
-            self._populate_table()
-            return
-        except UpsellRequired:
-            self.app.notify(
-                "Memory cloud sync requires a paid plan — showing local data only.",
-                severity="information",
-            )
-            self._populate_table()
-            return
-        except Exception as exc:
-            logger.warning("Fleet async load failed: %s", exc)
-            self._populate_table()
-            return
+        with self._read_loading.running('Loading fleet memory…'):
+            try:
+                merged = await fleet_service.get_merged_fleet(
+                    hidden_ids=folded_share_ids(self.app)
+                )
+            except BackendMaintenance:
+                self.app.notify(
+                    "Memory cloud sync is in maintenance — showing local data only.",
+                    severity="warning",
+                )
+                self._populate_table()
+                return
+            except UpsellRequired:
+                self.app.notify(
+                    "Memory cloud sync requires a paid plan — showing local data only.",
+                    severity="information",
+                )
+                self._populate_table()
+                return
+            except Exception as exc:
+                logger.warning("Fleet async load failed: %s", exc)
+                self._populate_table()
+                return
 
-        self._populate_table_from_merged(merged)
+            self._populate_table_from_merged(merged)
 
     def _reason_cell(self, raw_id: str) -> str:
         """Cell text for why the row's latest scan did not succeed, or ``—``.
@@ -847,7 +889,7 @@ class FleetMemoryScreen(Screen):
                 none_count += 1
         total = len(rows)
         return (
-            f"[dim]{total} instances  ·  "
+            f"[dim]{total} instance{'s' if total != 1 else ''}  ·  "
             f"[$text-success]{fresh} fresh[/$text-success]  ·  "
             f"[$text-warning]{stale} stale[/$text-warning]  ·  "
             f"{none_count} not probed  ·  "

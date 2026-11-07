@@ -48,7 +48,9 @@ def _build_panel():
     return panel
 
 
-def test_pinned_error_event_disables_input_and_send():
+def test_pinned_error_event_disables_input_and_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B1 — receiving PINNED_ERROR_NO_PROVIDER toggles the disabled state.
 
     We can't mount real Textual widgets, so the test patches
@@ -65,7 +67,7 @@ def test_pinned_error_event_disables_input_and_send():
 
     app = MagicMock()
     app.provider_preference_resolver = resolver
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     banner = MagicMock()
     banner.remove_class = MagicMock()
@@ -104,7 +106,9 @@ def test_pinned_error_event_disables_input_and_send():
     banner.remove_class.assert_called_with("hidden")
 
 
-def test_pinned_error_clears_when_resolver_recovers():
+def test_pinned_error_clears_when_resolver_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B1 — a healthy resolve() un-pins the banner and re-enables input.
 
     Models the flow: lapse → resubscribe → first chat-screen render with
@@ -125,7 +129,7 @@ def test_pinned_error_clears_when_resolver_recovers():
 
     app = MagicMock()
     app.provider_preference_resolver = resolver
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     banner = MagicMock()
     chat_input = MagicMock()

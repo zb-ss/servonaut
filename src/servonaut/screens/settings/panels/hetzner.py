@@ -20,7 +20,7 @@ import logging
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Static, Switch
 
@@ -30,6 +30,7 @@ from servonaut.screens.settings.accounts import (
     refresh_provider_fleet,
 )
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
 
@@ -71,62 +72,57 @@ class HetznerPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield all Hetzner form rows."""
-        # Status + setup launcher
-        yield Static("", id="hetzner_status_label", classes="hetzner-status")
-        yield Horizontal(
-            Button("Setup Hetzner", id="btn_hetzner_setup", variant="primary"),
-            classes="setting_row",
-        )
-        yield Static(
-            "API token, SSH and server defaults and Object Storage keys are in "
-            "each project's form: Setup Hetzner for the primary project, "
-            "Projects below for the others.",
-            classes="help-note",
-        )
+        with Vertical(classes="settings-form-section"):
+            # Status + setup launcher
+            yield Static("", id="hetzner_status_label", classes="hetzner-status")
+            yield Horizontal(
+                Button("Setup Hetzner", id="btn_hetzner_setup", variant="primary"),
+                classes="setting_row",
+            )
+            yield Static(
+                "API token, SSH and server defaults and Object Storage keys are in "
+                "each project's form: Setup Hetzner for the primary project, "
+                "Projects below for the others.",
+                classes="help-note",
+            )
 
-        # Enable switch
-        yield Horizontal(
-            Static("Enabled", classes="label"),
-            Switch(id="hetzner_enabled"),
-            classes="setting_row",
-        )
-
-        # Server creation policy
-        yield Static("Server Creation", classes="section-heading")
-        yield Horizontal(
-            Static("Require SSH keys on create", classes="label"),
-            Switch(id="hetzner_require_ssh_keys"),
-            classes="setting_row",
-        )
-
-        # Cache / paths / alerts
-        yield Static("Cache & Paths", classes="section-heading")
-        yield Horizontal(
-            Static("Cache TTL (seconds)", classes="label"),
-            Input(placeholder="300", id="hetzner_cache_ttl"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cache path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/hetzner_cache.json",
-                id="hetzner_cache_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Audit log path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/hetzner_audit.jsonl",
-                id="hetzner_audit_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cost alert threshold (0 = disabled)", classes="label"),
-            Input(placeholder="0.0", id="hetzner_cost_alert_threshold"),
-            classes="setting_row",
-        )
+            # Enable switch
+            yield setting_row(
+                "Enabled",
+                Switch(id="hetzner_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # Server creation policy
+            yield Static("Server Creation", classes="section-heading settings-group-title")
+            yield setting_row(
+                "Require SSH keys on create",
+                Switch(id="hetzner_require_ssh_keys"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # Cache / paths / alerts
+            yield Static("Cache & Paths", classes="section-heading settings-group-title")
+            yield setting_row(
+                "Cache TTL (seconds)",
+                Input(placeholder="300", id="hetzner_cache_ttl"),
+            )
+            yield setting_row(
+                "Cache path",
+                Input(
+                    placeholder="~/.servonaut/hetzner_cache.json",
+                    id="hetzner_cache_path",
+                ),
+            )
+            yield setting_row(
+                "Audit log path",
+                Input(
+                    placeholder="~/.servonaut/hetzner_audit.jsonl",
+                    id="hetzner_audit_path",
+                ),
+            )
+            yield setting_row(
+                "Cost alert threshold (0 = disabled)",
+                Input(placeholder="0.0", id="hetzner_cost_alert_threshold"),
+            )
 
         # Projects (each one edited in its own form)
         yield HetznerAccountsSection(heading_classes="section-heading")

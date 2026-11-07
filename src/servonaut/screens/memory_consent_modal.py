@@ -20,9 +20,22 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
+
+
+class _ConsentBody(DialogBody):
+    """Keep keyboard focus on the disclosure before an explicit decision."""
+
+    def allow_focus(self) -> bool:
+        return VerticalScroll.allow_focus(self)
 
 
 class MemoryInjectionConsentModal(ModalScreen[Optional[str]]):
@@ -43,62 +56,12 @@ class MemoryInjectionConsentModal(ModalScreen[Optional[str]]):
     BINDINGS = [
         Binding("escape", "dismiss_none", "Decide later", show=True),
     ]
+    DEFAULT_CLASSES = "dialog-screen"
 
     DEFAULT_CSS = """
-    MemoryInjectionConsentModal {
-        align: center middle;
-    }
-
-    MemoryInjectionConsentModal #consent_container {
-        width: 86;
-        height: auto;
-        max-height: 40;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    MemoryInjectionConsentModal #consent_title {
-        height: auto;
-        text-style: bold;
-        color: $accent;
-        text-align: center;
-        margin-bottom: 1;
-    }
-
-    MemoryInjectionConsentModal #consent_body {
-        height: auto;
-        max-height: 22;
-        margin-bottom: 1;
-    }
-
     MemoryInjectionConsentModal .consent_para {
         height: auto;
         margin-bottom: 1;
-    }
-
-    MemoryInjectionConsentModal #consent_buttons {
-        height: auto;
-        align-horizontal: center;
-        margin-top: 1;
-    }
-
-    MemoryInjectionConsentModal Button {
-        margin: 0 1;
-        min-width: 14;
-    }
-
-    MemoryInjectionConsentModal #btn_allow {
-        background: $primary;
-        color: $text;
-    }
-
-    MemoryInjectionConsentModal #btn_deny {
-        background: $surface-darken-2;
-    }
-
-    MemoryInjectionConsentModal #btn_details {
-        background: $boost;
     }
 
     MemoryInjectionConsentModal #consent_details {
@@ -117,13 +80,14 @@ class MemoryInjectionConsentModal(ModalScreen[Optional[str]]):
     """
 
     def compose(self) -> ComposeResult:
-        with Container(id="consent_container"):
-            yield Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "Send local server memory to Servonaut AI?",
                 id="consent_title",
-            )
-            with VerticalScroll(id="consent_body"):
-                yield Static(
+            ),
+            body=_ConsentBody(
+                Static(
                     "Servonaut can pre-fill every chat turn with a "
                     "snapshot of what your CLI has probed locally about "
                     "the server in scope (OS, runtimes, services, web "
@@ -132,8 +96,8 @@ class MemoryInjectionConsentModal(ModalScreen[Optional[str]]):
                     '"what services are running on srv-X?" instantly '
                     "instead of running SSH commands on every turn.",
                     classes="consent_para",
-                )
-                yield Static(
+                ),
+                Static(
                     "[bold]What this means in practice:[/bold]\n"
                     "  • Memory is sent over TLS to api.servonaut.dev "
                     "as part of the chat request.\n"
@@ -147,21 +111,29 @@ class MemoryInjectionConsentModal(ModalScreen[Optional[str]]):
                     "Provider, or run [bold]servonaut memory purge "
                     "--all[/bold] to wipe everything that was probed.",
                     classes="consent_para",
-                )
-                yield Static(
+                ),
+                Static(
                     "[dim]Press Esc to decide later — we won't ask "
                     "again on THIS turn but the prompt will fire again "
                     "next time an in-scope server is detected.[/dim]",
                     classes="consent_para",
-                )
-                yield Static(
+                ),
+                Static(
                     "",
                     id="consent_details",
-                )
-            with Horizontal(id="consent_buttons"):
-                yield Button("Allow", id="btn_allow", variant="primary")
-                yield Button("Deny",  id="btn_deny",  variant="default")
-                yield Button("What's sent?", id="btn_details", variant="default")
+                    classes="dialog-muted",
+                ),
+                id="consent_body",
+            ),
+            actions=DialogActions(
+                Button("Allow", id="btn_allow", variant="primary"),
+                Button("Deny", id="btn_deny", variant="default"),
+                Button("What's sent?", id="btn_details", variant="default"),
+                id="consent_buttons",
+            ),
+            id="consent_container",
+            size="large",
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_allow":

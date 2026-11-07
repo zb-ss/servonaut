@@ -32,10 +32,10 @@ from typing import List, Optional, TYPE_CHECKING
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -49,8 +49,9 @@ from servonaut.screens._provider_accounts import (
     shown_label,
 )
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -58,8 +59,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class HetznerCreateScreen(Screen):
+class HetznerCreateScreen(WorkspaceScreen):
     """Wizard for creating a new Hetzner Cloud server."""
+
+    DEFAULT_CSS = """
+    HetznerCreateScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 88
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -73,6 +85,8 @@ class HetznerCreateScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -81,6 +95,7 @@ class HetznerCreateScreen(Screen):
 
     def __init__(self, account: Optional[str] = None) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._account = account or ""
         self._server_types: List[dict] = []
         self._images: List[dict] = []
@@ -93,75 +108,103 @@ class HetznerCreateScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Create Hetzner server")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]Create Hetzner Cloud Server[/bold $text-accent]",
-                    id="hetzner_create_title",
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Vertical(
+                    Static(
+                        "[bold $text-accent]Create Hetzner Cloud Server[/bold $text-accent]",
+                        id="hetzner_create_title",
+                    ),
+                    Static(
+                        "Hetzner Cloud: match the image architecture to your server type.",
+                        classes="compute-form-context",
+                    ),
+                    classes="compute-workflow-heading",
                 ),
-                # Hidden unless several Hetzner projects are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "hetzner"), "hetzner",
-                    value=self._account or None, id="hetzner_create_account",
-                ),
-
-                Static("[bold]Server Name[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Display name for the server — appears in the "
-                    "Hetzner console and Servonaut's instance list. "
-                    "1-253 ASCII chars, must start with a letter or "
-                    "digit.[/dim]",
-                    classes="note",
-                ),
-                Input(placeholder="e.g. demo-web-01", id="hetzner_input_name"),
-
-                Static("[bold]Select Server Type[/bold]",
-                       classes="section_header"),
-                Static(
-                    "[dim]Hetzner server types vary by architecture (x86 vs "
-                    "arm) and price. Pick a row — its [b]Arch[/b] column "
-                    "must match the image you select below.[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="hetzner_types_table"),
-
-                Static("[bold]Select Image[/bold]", classes="section_header"),
-                Static(
-                    "[dim]Stock OS images only (snapshots and backups are "
-                    "managed elsewhere). [b]Arch[/b] must match the "
-                    "selected server type.[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="hetzner_images_table"),
-
-                Static("[bold]Select Location[/bold]",
-                       classes="section_header"),
-                DataTable(id="hetzner_locations_table"),
-
-                Static(
-                    "[bold]SSH Key (optional)[/bold]",
-                    classes="section_header",
-                ),
-                Static(
-                    "[dim]Leave unselected to use your configured default key "
-                    "([b]config.hetzner.default_hetzner_ssh_key[/b]). "
-                    "Hetzner refuses to create a server without keys to "
-                    "avoid leaking root passwords on a billed but "
-                    "unreachable box.[/dim]",
-                    classes="note",
-                ),
-                DataTable(id="hetzner_keys_table"),
-
                 Horizontal(
-                    Button("Create Server", variant="primary",
-                           id="btn_hetzner_create_submit"),
-                    Button("Back", variant="default",
-                           id="btn_hetzner_create_back"),
-                    id="hetzner_create_actions",
+                    Vertical(
+                        Static("Project and identity", classes="compute-section-title"),
+                        AccountPicker.for_provider(
+                            registry_for(self.app, "hetzner"), "hetzner",
+                            value=self._account or None, id="hetzner_create_account",
+                        ),
+                        Static("[bold]Server Name[/bold]", classes="section_header"),
+                        Static(
+                            "[dim]Display name for the server — appears in the "
+                            "Hetzner console and Servonaut's instance list. "
+                            "1-253 ASCII chars, must start with a letter or "
+                            "digit.[/dim]",
+                            classes="note",
+                        ),
+                        Input(placeholder="e.g. demo-web-01", id="hetzner_input_name"),
+                        classes="compute-form-section compute-identity-section",
+                    ),
+                    Vertical(
+                        Vertical(
+                            Static("Compute and image", classes="compute-section-title"),
+                            Static("[bold]Select Server Type[/bold]",
+                                   classes="section_header"),
+                            Static(
+                                "[dim]Hetzner server types vary by architecture (x86 vs "
+                                "arm) and price. Pick a row — its [b]Arch[/b] column "
+                                "must match the image you select below.[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="hetzner_types_table"),
+                            Static("[bold]Select Image[/bold]", classes="section_header"),
+                            Static(
+                                "[dim]Stock OS images only (snapshots and backups are "
+                                "managed elsewhere). [b]Arch[/b] must match the "
+                                "selected server type.[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="hetzner_images_table"),
+                            classes="compute-form-section",
+                        ),
+                        Vertical(
+                            Static("Location and access", classes="compute-section-title"),
+                            Static("[bold]Select Location[/bold]",
+                                   classes="section_header"),
+                            DataTable(id="hetzner_locations_table"),
+                            Static(
+                                "[bold]SSH Key (optional)[/bold]",
+                                classes="section_header",
+                            ),
+                            Static(
+                                "[dim]Leave unselected to use your configured default key "
+                                "([b]config.hetzner.default_hetzner_ssh_key[/b]). "
+                                "Hetzner refuses to create a server without keys to "
+                                "avoid leaking root passwords on a billed but "
+                                "unreachable box.[/dim]",
+                                classes="note",
+                            ),
+                            DataTable(id="hetzner_keys_table"),
+                            classes="compute-form-section",
+                        ),
+                        classes="compute-catalog-column",
+                    ),
+                    classes="compute-decision-workspace",
                 ),
-
+                Vertical(
+                    Static(
+                        "Review the server configuration and quoted monthly price "
+                        "before confirming.",
+                        classes="compute-review-note",
+                    ),
+                    Horizontal(
+                        Button("Create Server", variant="primary",
+                               id="btn_hetzner_create_submit"),
+                        Button("Back", variant="default",
+                               id="btn_hetzner_create_back"),
+                        id="hetzner_create_actions",
+                    ),
+                    classes="compute-submit-region",
+                ),
                 id="hetzner_create_container",
+                classes="workspace-content compute-form-content compute-workflow",
             )
         yield Footer()
 
@@ -274,7 +317,8 @@ class HetznerCreateScreen(Screen):
             return
         tbl = self.query_one("#hetzner_types_table", DataTable)
         try:
-            self._server_types = await svc.list_server_types()
+            with self._read_loading.running('Loading server types…'):
+                self._server_types = await svc.list_server_types()
             for st in self._server_types:
                 tbl.add_row(
                     st.get("name", ""),
@@ -299,7 +343,8 @@ class HetznerCreateScreen(Screen):
             return
         tbl = self.query_one("#hetzner_images_table", DataTable)
         try:
-            self._images = await svc.list_images()
+            with self._read_loading.running('Loading images…'):
+                self._images = await svc.list_images()
             for img in self._images:
                 tbl.add_row(
                     img.get("name", ""),
@@ -321,7 +366,8 @@ class HetznerCreateScreen(Screen):
             return
         tbl = self.query_one("#hetzner_locations_table", DataTable)
         try:
-            self._locations = await svc.list_locations()
+            with self._read_loading.running('Loading locations…'):
+                self._locations = await svc.list_locations()
             for loc in self._locations:
                 tbl.add_row(
                     loc.get("name", ""),
@@ -344,7 +390,8 @@ class HetznerCreateScreen(Screen):
             return
         tbl = self.query_one("#hetzner_keys_table", DataTable)
         try:
-            self._ssh_keys = await svc.list_ssh_keys()
+            with self._read_loading.running('Loading SSH keys…'):
+                self._ssh_keys = await svc.list_ssh_keys()
             for key in self._ssh_keys:
                 name = str(key.get("name", ""))
                 # Key labels are user-chosen (an email address is common) --

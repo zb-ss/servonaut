@@ -12,22 +12,25 @@ from typing import Any, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, Footer, Input, Label, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryExportScreen(Screen):
+class MemoryExportScreen(WorkspaceScreen):
     """Screen for exporting memory archives with Ed25519 signature verification.
 
     Tier-gated on ``memory_compliance_export``.  Provides from/to date inputs,
     an export button, and in-place status updates after verification.
     """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -35,6 +38,8 @@ class MemoryExportScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -43,45 +48,64 @@ class MemoryExportScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Memory export")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield VerticalScroll(
                 Container(
-                    Static(
-                        "[bold $text-accent]Compliance Memory Export[/bold $text-accent]",
-                        id="export-title",
-                    ),
-                    Static(
-                        "[dim]Export a signed archive of all memory envelopes for audit "
-                        "or compliance purposes.  The archive is verified with an "
-                        "Ed25519 signature from the server.[/dim]",
-                        id="export-description",
-                    ),
                     Container(
-                        Label("From date (ISO-8601, optional)"),
-                        Input(
-                            placeholder="e.g. 2024-01-01T00:00:00Z",
-                            id="export-from-input",
+                        Static(
+                            "[bold $text-accent]Compliance Memory Export[/bold $text-accent]",
+                            id="export-title",
                         ),
-                        classes="export-field-row",
-                    ),
-                    Container(
-                        Label("To date (ISO-8601, optional)"),
-                        Input(
-                            placeholder="e.g. 2024-12-31T23:59:59Z",
-                            id="export-to-input",
+                        Static(
+                            "[dim]Export a signed archive of all memory envelopes for audit "
+                            "or compliance purposes.  The archive is verified with an "
+                            "Ed25519 signature from the server.[/dim]",
+                            id="export-description",
                         ),
-                        classes="export-field-row",
+                        id="export-context",
                     ),
-                    Static("", id="export-status"),
                     Horizontal(
-                        Button("ctrl+s. Start Export", variant="primary", id="btn-export-start"),
-                        Button("Back", variant="default", id="btn-export-back"),
-                        id="export-btn-row",
+                        Container(
+                            Static("Archive date range", classes="memory-secondary-heading"),
+                            Horizontal(
+                                Container(
+                                    Label("From date (ISO-8601, optional)"),
+                                    Input(
+                                        placeholder="e.g. 2024-01-01T00:00:00Z",
+                                        id="export-from-input",
+                                    ),
+                                    classes="export-field-row",
+                                ),
+                                Container(
+                                    Label("To date (ISO-8601, optional)"),
+                                    Input(
+                                        placeholder="e.g. 2024-12-31T23:59:59Z",
+                                        id="export-to-input",
+                                    ),
+                                    classes="export-field-row",
+                                ),
+                                id="export-date-fields",
+                            ),
+                            Horizontal(
+                                Button("ctrl+s. Start Export", variant="primary", id="btn-export-start"),
+                                Button("Back", variant="default", id="btn-export-back"),
+                                id="export-btn-row",
+                            ),
+                            id="export-range-panel",
+                        ),
+                        Container(
+                            Static("Archive verification", classes="memory-secondary-heading"),
+                            Static("Choose the optional date range, then start the export. The signature verification result appears here.", id="export-status"),
+                            id="export-result-panel",
+                        ),
+                        id="export-workspace",
                     ),
                     id="export-container",
                 ),
                 id="export-scroll",
+                classes="workspace-content",
             )
         yield Footer()
 

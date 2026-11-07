@@ -1,4 +1,4 @@
-"""Top-up pack picker modal (T8).
+"""Top-up pack picker modal.
 
 The caller supplies the current server-advertised pack inventory. The caller
 may also offer an explicit billing-page action for a refusal that included a
@@ -15,16 +15,21 @@ descriptions.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from typing import Any, Optional, Sequence
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Static
 
 from servonaut.services.ai_balance import safe_terminal_text
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 
 
@@ -54,41 +59,24 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss_none", "Cancel", show=True),
     ]
 
+    CSS_PATH = Path(__file__).parent.parent / "styles/screens/ai_choice_dialogs.tcss"
+
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    AITopUpModal {
-        align: center middle;
-    }
-
     AITopUpModal #ai_topup_container {
-        width: 78;
-        height: auto;
         max-height: 24;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    AITopUpModal #ai_topup_title {
-        text-style: bold;
-        color: $accent;
-        margin-bottom: 1;
-    }
-
-    AITopUpModal #ai_topup_reason {
-        color: $warning;
-        margin-bottom: 1;
-    }
-
-    AITopUpModal #ai_topup_body {
-        margin-bottom: 1;
     }
 
     AITopUpModal #ai_topup_catalog {
-        height: auto;
+        height: 1fr;
         max-height: 9;
-        margin-bottom: 1;
-        border: round $primary-background;
+        border: round $border-blurred;
         background: $panel;
+    }
+
+    AITopUpModal #ai_topup_catalog:focus {
+        border: heavy $accent;
     }
 
     AITopUpModal .ai_topup_pack {
@@ -114,10 +102,6 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         margin: 0;
     }
 
-    AITopUpModal #ai_topup_cancel {
-        margin-top: 1;
-        align: center middle;
-    }
     """
 
     def __init__(
@@ -139,26 +123,14 @@ class AITopUpModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        children = [
-            Static(
-                "[bold $text-accent]Top up Servonaut AI[/bold $text-accent]",
-                id="ai_topup_title",
-            ),
-        ]
-        if self._reason:
-            children.append(
-                Static(
-                    f"[bold]{escape(self._reason)}[/bold]",
-                    id="ai_topup_reason",
-                )
-            )
+        yield DialogNotificationSpace()
         body = (
             "Open billing in your browser to review available top-up options."
             if self._show_billing_action and not self._packs else
             "Pick a pack to open Stripe Checkout in your browser. Your "
             "available balance updates after checkout completes."
         )
-        children.extend([
+        children = [
             Static(
                 body,
                 id="ai_topup_body",
@@ -190,12 +162,35 @@ class AITopUpModal(ModalScreen[Optional[str]]):
                 ]
                 if self._packs or self._show_billing_action else []
             ),
-            Vertical(
+        ]
+        frame = DialogFrame(
+            heading=Static(
+                "[bold $text-accent]Top up Servonaut AI[/bold $text-accent]",
+                id="ai_topup_title",
+            ),
+            body=DialogContent(*children),
+            status=(
+                DialogBody(
+                    Static(
+                        f"[bold]{escape(self._reason)}[/bold]",
+                        id="ai_topup_reason",
+                    ),
+                    id="ai_topup_reason_scroll",
+                ) if self._reason else None
+            ),
+            actions=DialogActions(
                 Button("Cancel", id="btn_topup_cancel", variant="default"),
                 id="ai_topup_cancel",
             ),
-        ])
-        yield Container(*children, id="ai_topup_container")
+            id="ai_topup_container",
+        )
+        if not self._packs:
+            # No pack rows need an expanding viewport; keep these choices compact.
+            frame.styles.height = "auto"
+            for child in children:
+                if isinstance(child, VerticalScroll):
+                    child.styles.height = "auto"
+        yield frame
         yield Footer()
 
     @staticmethod

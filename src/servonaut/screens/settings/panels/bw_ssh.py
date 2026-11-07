@@ -17,13 +17,24 @@ import logging
 from typing import Any, Dict, Optional
 
 from rich.markup import escape
+from textual import events
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, VerticalGroup
+from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
+
+
+class _VaultFormActions(Horizontal):
+    """Keep the inline action captions intact at the actual form width."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Two equal columns need Cancel's 6 cells, borders/line padding, and a gap.
+        self.set_class(event.size.width < 21, "-stacked")
 
 
 class BwSshPanel(SettingsPanel):
@@ -74,56 +85,52 @@ class BwSshPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the vault-wiring status, action button, and inline edit form."""
-        yield Static(
-            "[dim]Set up vault wiring to resolve per-instance SSH keys "
-            "from your Bitwarden vault.[/dim]",
-            classes="note",
-        )
-        # Current status line — updated by _refresh_bw_ssh_status after load/save.
-        yield Static(
-            "[dim]Not configured.[/dim]",
-            id="bw_ssh_status",
-            classes="bw-status-row",
-        )
-        # Local Bitwarden CLI session state (install / login / lock / unlock).
-        yield Static(
-            "[dim]Bitwarden CLI: checking…[/dim]",
-            id="bw_session_status",
-            classes="bw-status-row",
-        )
-        yield Horizontal(
-            Button("Edit", id="btn_bw_ssh_edit", variant="default"),
-            Button("Unlock now", id="btn_bw_unlock", variant="default"),
-            classes="bw-actions-row",
-        )
-        # Inline edit form — hidden until the user clicks Edit.
+        with VerticalGroup(classes="settings-access-context"):
+            yield Static(
+                "[dim]Set up vault wiring to resolve per-instance SSH keys "
+                "from your Bitwarden vault.[/dim]",
+                classes="note",
+            )
+        with VerticalGroup(classes="settings-access-status"):
+            yield Static(
+                "[dim]Not configured.[/dim]",
+                id="bw_ssh_status",
+                classes="bw-status-row",
+            )
+            yield Static(
+                "[dim]Bitwarden CLI: checking…[/dim]",
+                id="bw_session_status",
+                classes="bw-status-row",
+            )
+            yield Horizontal(
+                Button("Edit", id="btn_bw_ssh_edit", variant="default"),
+                Button("Unlock now", id="btn_bw_unlock", variant="default"),
+                classes="bw-actions-row",
+            )
         yield Container(
             Static("[bold]Edit Vault Wiring[/bold]", classes="section_header"),
-            Horizontal(
-                Static("Vault URL", classes="label"),
+            setting_row(
+                "Vault URL",
                 Input(
                     id="bw_ssh_vault_url",
                     placeholder="https://vault.bitwarden.com",
                 ),
-                classes="setting_row",
             ),
-            Horizontal(
-                Static("Default Collection ID (optional)", classes="label"),
+            setting_row(
+                "Default Collection ID (optional)",
                 Input(
                     id="bw_ssh_default_collection_id",
                     placeholder="",
                 ),
-                classes="setting_row",
             ),
-            Horizontal(
-                Static("Vault folder", classes="label"),
+            setting_row(
+                "Vault folder",
                 Input(
                     id="bw_ssh_vault_folder",
                     placeholder="Servonaut",
                 ),
-                classes="setting_row",
             ),
-            Horizontal(
+            _VaultFormActions(
                 Button("Save", id="btn_bw_ssh_save", variant="primary"),
                 Button("Cancel", id="btn_bw_ssh_cancel", variant="default"),
                 classes="bw-form-actions",
@@ -226,6 +233,11 @@ class BwSshPanel(SettingsPanel):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle Edit / Cancel in addition to the base Save logic."""
         button_id = event.button.id or ""
+        if button_id == "btn_bw_ssh_save":
+            event.stop()
+            event.prevent_default()
+            self.query_one(f"#save_{self.PANEL_ID}", Button).press()
+            return
         if button_id == "btn_bw_ssh_edit":
             event.stop()
             self._show_form()
@@ -313,6 +325,9 @@ class BwSshPanel(SettingsPanel):
         svc = getattr(self.app, "bw_ssh_config_service", None)
         if svc is None:
             return
+        self.query_one("#bw_ssh_status", Static).update(
+            "[dim]Loading vault configuration…[/dim]"
+        )
         self.run_worker(
             self._do_load_bw_ssh_config(),
             group="settings_bw_ssh",
@@ -331,12 +346,26 @@ class BwSshPanel(SettingsPanel):
             config = await svc.get_personal_config()
         except APIError as exc:
             logger.warning("BW SSH config load failed: %s", exc)
+            self._show_load_error(exc)
             return
         except Exception as exc:
             logger.warning("BW SSH config load failed: %s", exc)
+            self._show_load_error(exc)
             return
         self._bw_ssh_config = config
         self._refresh_bw_ssh_status()
+
+    def _show_load_error(self, exc: Exception) -> None:
+        """Finish loading feedback with a literal, demo-safe failure message."""
+        try:
+            status = self.query_one("#bw_ssh_status", Static)
+        except NoMatches:
+            return
+        message = f"Could not load vault configuration: {exc}"
+        redact = getattr(self.app, "redact_display_text", None)
+        if callable(redact):
+            message = redact(message)
+        status.update(f"[$text-error]{escape(message)}[/$text-error]")
 
     # ------------------------------------------------------------------
     # Async save
@@ -419,7 +448,7 @@ class BwSshPanel(SettingsPanel):
             self.query_one("#bw_ssh_vault_form").display = True
         except Exception:
             pass
-        vault_url_input.focus()
+        self.call_after_refresh(vault_url_input.focus)
         self._snapshot_now()
 
     def _hide_form(self) -> None:

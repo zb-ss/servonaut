@@ -35,7 +35,6 @@ from rich.markup import escape
 from textual.binding import Binding
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -52,7 +51,7 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +168,12 @@ def _status_markup(status: str, *, cell: bool = False) -> str:
     return _styled(_STATUS_STYLE, status, cell=cell)
 
 
-class FindingsScreen(Screen):
+class FindingsScreen(WorkspaceScreen):
     """Findings inbox — fleet-wide, or scoped to one instance."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 104
+    CONTENT_NARROW_WIDTH = 120
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -201,6 +204,8 @@ class FindingsScreen(Screen):
             return False
         if action == "open_login" and self._gate_state != "unauth":
             return False
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: Optional[dict] = None) -> None:
@@ -232,40 +237,43 @@ class FindingsScreen(Screen):
             name = self._display_name(self._instance)
             scope = f" — [dim]{escape(name)}[/dim]"
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(f"🛡 [bold]Monitoring findings[/bold]{scope}", id="findings_title"),
-                Static(
-                    "Proactive monitoring findings from server-side scans. "
-                    "The CLI renders and triages — detection runs in the "
-                    "Servonaut cloud over your connected relay.",
+        yield WorkspaceControls("Findings")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="findings_container", classes="workspace-content"):
+                yield Horizontal(
+                    Static(f"[bold]Monitoring findings[/bold]{scope}", id="findings_title"),
+                    Static("", id="findings_status_pill"),
+                    id="findings_heading",
+                )
+                yield Static(
+                    "Scans run in the Servonaut cloud over your connected relay. "
+                    "Review evidence and triage findings for this server."
+                    if self._instance is not None else
+                    "Scans run in the Servonaut cloud over your connected relay. "
+                    "Review evidence and triage findings across your servers.",
                     id="findings_subtitle",
-                ),
-                Static("", id="findings_status_pill"),
-                Static("", id="findings_filter_line"),
-                # Live scan progress — hidden while idle.
-                Static("", id="findings_progress", classes="hidden"),
-                # State cards (sign-in / upgrade / error) swap in here;
-                # hidden while the table is active.
-                VerticalScroll(id="findings_state_body", classes="hidden"),
-                Container(
-                    DataTable(id="findings_table"),
-                    id="findings_table_card",
-                ),
-                Horizontal(
-                    Button("s. Scan Now", id="btn_findings_scan", variant="primary"),
-                    Button("r. Refresh", id="btn_findings_refresh"),
-                    Button("enter. Open", id="btn_findings_open"),
-                    Button("f. Status Filter", id="btn_findings_status_filter"),
-                    Button("v. Severity Filter", id="btn_findings_severity_filter"),
-                    id="findings_actions",
-                ),
-                id="findings_container",
-            )
+                )
+                yield Static("", id="findings_progress", classes="hidden")
+                yield VerticalScroll(id="findings_state_body", classes="hidden")
+                with Horizontal(id="findings_triage_workspace"):
+                    yield Horizontal(
+                        Button("s. Scan Now", id="btn_findings_scan", variant="primary"),
+                        Button("r. Refresh", id="btn_findings_refresh"),
+                        Button("enter. Open", id="btn_findings_open"),
+                        Button("f. Status Filter", id="btn_findings_status_filter"),
+                        Button("v. Severity Filter", id="btn_findings_severity_filter"),
+                        id="findings_actions",
+                    )
+                    yield Container(
+                        Static("", id="findings_filter_line"),
+                        DataTable(id="findings_table"),
+                        id="findings_table_card",
+                    )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#findings_table_card").border_title = "Findings inbox"
         table = self.query_one("#findings_table", DataTable)
         table.cursor_type = "row"
         table.add_column("Severity", key="severity", width=10)
@@ -343,6 +351,7 @@ class FindingsScreen(Screen):
         state.set_class(not show, "hidden")
         table_card.display = not show
         actions.display = not show
+        self.query_one("#findings_triage_workspace").display = not show
         if show:
             state.remove_children()
 
@@ -803,7 +812,7 @@ class FindingsScreen(Screen):
         self.app.switch_screen(LoginScreen())
 
 
-class FindingDetailScreen(Screen[bool]):
+class FindingDetailScreen(WorkspaceScreen):
     """One finding, full detail + triage + guarded remediation.
 
     Dismisses with ``True`` when a triage or remediation changed the
@@ -815,6 +824,10 @@ class FindingDetailScreen(Screen[bool]):
     command client-side.
     """
 
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 80
+    CONTENT_NARROW_WIDTH = 96
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("a", "ack", "Acknowledge", show=True),
@@ -823,6 +836,8 @@ class FindingDetailScreen(Screen[bool]):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, finding: Dict[str, Any]) -> None:
@@ -845,24 +860,28 @@ class FindingDetailScreen(Screen[bool]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("", id="finding_detail_title"),
-                Static("", id="finding_detail_pill"),
-                VerticalScroll(id="finding_detail_body"),
-                Horizontal(
-                    Button("a. Acknowledge", id="btn_finding_ack", variant="primary"),
-                    Button("r. Resolve", id="btn_finding_resolve", variant="success"),
-                    Button("x. Suppress", id="btn_finding_suppress"),
-                    Button("esc. Back", id="btn_finding_back"),
-                    id="finding_detail_actions",
-                ),
-                id="finding_detail_container",
-            )
+        yield WorkspaceControls("Finding Detail")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="finding_detail_container", classes="workspace-content"):
+                yield Vertical(
+                    Static("", id="finding_detail_title"),
+                    Static("", id="finding_detail_pill"),
+                    id="finding_detail_context",
+                )
+                with Horizontal(id="finding_detail_workspace"):
+                    yield Horizontal(
+                        Button("a. Acknowledge", id="btn_finding_ack", variant="primary"),
+                        Button("r. Resolve", id="btn_finding_resolve", variant="success"),
+                        Button("x. Suppress", id="btn_finding_suppress"),
+                        Button("esc. Back", id="btn_finding_back"),
+                        id="finding_detail_actions",
+                    )
+                    yield VerticalScroll(id="finding_detail_body")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#finding_detail_body").border_title = "Evidence and remediation"
         self._render_finding()
 
     def _card(self, title: str, *children, warning: bool = False) -> Container:

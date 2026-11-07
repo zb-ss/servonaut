@@ -25,8 +25,8 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.content import Content
-from textual.containers import Container, Horizontal, ScrollableContainer, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.containers import Container, Horizontal, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Label, Select, SelectionList, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -34,9 +34,11 @@ from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
 from servonaut.services.memory.interfaces import MemoryBackendError
 from servonaut.services.retry_after import is_rate_limited, retry_after_seconds, wait_text
+from servonaut.styles import CSS_FILES
 from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 
 logger = logging.getLogger(__name__)
 
@@ -140,17 +142,23 @@ class PurgeCopiesModal(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "dismiss(False)", "Cancel", show=True)]
 
     def compose(self) -> ComposeResult:
-        with Container(id="purge-box"):
-            yield Static("[bold]Delete the members' copies?[/bold]", id="purge-title")
-            yield Static(
+        self.add_class("dialog-screen")
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Delete the members' copies?[/bold]", id="purge-title"),
+            body=DialogBody(Static(
                 "This stops the sharing and deletes the copies the team's "
                 "members hold. Your own memory is not touched. They cannot "
                 "read the server again until you share it again.",
                 id="purge-text",
-            )
-            with Horizontal(id="purge-btn-row"):
-                yield Button("Cancel", id="purge-btn-cancel")
-                yield Button("Delete copies", variant="error", id="purge-btn-confirm")
+            )),
+            actions=DialogActions(
+                Button("Cancel", id="purge-btn-cancel"),
+                Button("Delete copies", variant="error", id="purge-btn-confirm"),
+                id="purge-btn-row",
+            ),
+            id="purge-box", size="compact", severity="danger",
+        )
 
     def on_mount(self) -> None:
         self.query_one("#purge-btn-cancel", Button).focus()
@@ -159,7 +167,7 @@ class PurgeCopiesModal(ModalScreen[bool]):
         self.dismiss(event.button.id == "purge-btn-confirm")
 
 
-class ShareInstanceScreen(Screen):
+class ShareInstanceScreen(WorkspaceScreen):
     """Screen for sharing a server memory instance with a team.
 
     Args:
@@ -170,68 +178,19 @@ class ShareInstanceScreen(Screen):
     via dismiss — the only existing caller didn't read it anyway.
     """
 
-    DEFAULT_CSS = """
-    ShareInstanceScreen #share_outer {
-        width: 1fr;
-        height: 100%;
-        padding: 1 2;
-        align: center middle;
-        background: $surface;
-    }
-    ShareInstanceScreen #share-container {
-        width: 80%;
-        max-width: 90;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 2 4;
-    }
-    ShareInstanceScreen #share-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    ShareInstanceScreen #share-status {
-        height: auto;
-        min-height: 1;
-        margin-bottom: 1;
-    }
-    ShareInstanceScreen .share-field-row {
-        height: auto;
-        margin-bottom: 1;
-    }
-    ShareInstanceScreen #share-readers,
-    ShareInstanceScreen #share-existing-text {
-        height: auto;
-        margin-bottom: 1;
-    }
-    ShareInstanceScreen #share-existing {
-        height: auto;
-        display: none;
-    }
-    ShareInstanceScreen #share-existing.-shown { display: block; }
-    ShareInstanceScreen #share-existing-row {
-        height: auto;
-        layout: vertical;
-    }
-    ShareInstanceScreen #share-existing-row Button {
-        margin-bottom: 1;
-    }
-    ShareInstanceScreen #share-btn-row {
-        height: auto;
-        align: center middle;
-        margin-top: 1;
-    }
-    ShareInstanceScreen #share-btn-row Button {
-        margin: 0 1;
-        min-width: 16;
-    }
-    """
+    CSS_PATH = CSS_FILES
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 76
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: Dict[str, Any]) -> None:
@@ -255,38 +214,58 @@ class ShareInstanceScreen(Screen):
     def compose(self) -> ComposeResult:
         name = str(self._instance.get("name") or self._instance.get("id", "?"))
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
+        yield WorkspaceControls("Share Memory")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield Container(
                 Container(
-                    Static(
-                        Content.from_markup(
-                            "[bold $text-accent]Share Memory: $name[/bold $text-accent]", name=name
+                    Container(
+                        Static(
+                            Content.from_markup(
+                                "[bold $text-accent]Share Memory: $name[/bold $text-accent]", name=name
+                            ),
+                            id="share-title",
                         ),
-                        id="share-title",
+                        Static("", id="share-status"),
+                        id="share-context",
                     ),
-                    Static("", id="share-status"),
                     VerticalScroll(
-                        Container(
-                            Label("Team"),
-                            Select(
-                                options=[("Loading...", "__loading__")],
-                                value="__loading__",
-                                id="share-team-select",
+                        Horizontal(
+                            Container(
+                                Static("Team access", classes="memory-secondary-heading"),
+                                Container(
+                                    Label("Team"),
+                                    Select(
+                                        options=[("Loading...", "__loading__")],
+                                        value="__loading__",
+                                        id="share-team-select",
+                                    ),
+                                    classes="share-field-row",
+                                ),
+                                Container(
+                                    Label("Required Role"),
+                                    Select(
+                                        options=_ROLE_OPTIONS,
+                                        value="viewer",
+                                        id="share-role-select",
+                                    ),
+                                    classes="share-field-row",
+                                ),
+                                Static("", id="share-readers"),
+                                id="share-access-panel",
                             ),
-                            classes="share-field-row",
+                            Container(
+                                Label("Modules to share", classes="memory-secondary-heading"),
+                                SelectionList(
+                                    *_module_options(),
+                                    id="share-modules-list",
+                                ),
+                                id="share-modules-panel",
+                            ),
+                            id="share-access-fields",
                         ),
                         Container(
-                            Label("Required Role"),
-                            Select(
-                                options=_ROLE_OPTIONS,
-                                value="viewer",
-                                id="share-role-select",
-                            ),
-                            classes="share-field-row",
-                        ),
-                        Static("", id="share-readers"),
-                        Container(
+                            Static("Current share", classes="memory-secondary-heading"),
                             Static("", id="share-existing-text"),
                             Container(
                                 Button("Revoke", id="share-btn-revoke"),
@@ -301,14 +280,6 @@ class ShareInstanceScreen(Screen):
                             ),
                             id="share-existing",
                         ),
-                        Container(
-                            Label("Modules to share"),
-                            SelectionList(
-                                *_module_options(),
-                                id="share-modules-list",
-                            ),
-                            classes="share-field-row",
-                        ),
                         id="share-form-scroll",
                     ),
                     Horizontal(
@@ -321,6 +292,7 @@ class ShareInstanceScreen(Screen):
                     id="share-container",
                 ),
                 id="share_outer",
+                classes="workspace-content",
             )
         yield Footer()
 

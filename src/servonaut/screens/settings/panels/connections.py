@@ -19,11 +19,12 @@ from typing import Any, Dict, List, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalGroup
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.config.schema import ConnectionProfile, ConnectionRule
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
 
 logger = logging.getLogger(__name__)
@@ -110,115 +111,107 @@ class ConnectionsPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the connection profiles section and connection rules section."""
+        with VerticalGroup(classes="settings-access-section"):
+            with VerticalGroup(classes="settings-access-context"):
+                yield Static("Connection Profiles", classes="conn-section-header")
+                yield Static(
+                    "Define SSH bastion/proxy configurations that can be applied to instances.",
+                    classes="conn-note",
+                )
+            with VerticalGroup(classes="settings-access-catalog"):
+                yield DataTable(id="conn_profiles_table")
+                yield Horizontal(
+                    Button("Add", id="btn_profile_add", variant="primary"),
+                    Button("Edit", id="btn_profile_edit"),
+                    Button("Remove", id="btn_profile_remove", variant="error"),
+                    classes="conn-action-row",
+                )
+            with Vertical(id="profile_form", classes="conn-form"):
+                yield Static("", id="profile_form_title", classes="conn-form-title")
+                yield setting_row(
+                    "Profile name",
+                    Input(placeholder="e.g. prod-bastion", id="pf_name"),
+                )
+                yield setting_row(
+                    "Bastion host",
+                    Input(placeholder="bastion.example.com", id="pf_bastion_host"),
+                )
+                yield setting_row(
+                    "Bastion user",
+                    Input(placeholder="ec2-user", id="pf_bastion_user"),
+                )
+                yield setting_row(
+                    "Bastion key",
+                    Input(placeholder="~/.ssh/bastion_key.pem", id="pf_bastion_key"),
+                )
+                yield setting_row(
+                    "Username (target)",
+                    Input(placeholder="ec2-user", id="pf_username"),
+                )
+                yield setting_row(
+                    "Proxy command",
+                    Input(placeholder="ssh -W %h:%p bastion", id="pf_proxy_command"),
+                )
+                yield setting_row(
+                    "SSH port (1-65535)",
+                    Input(placeholder="22", id="pf_ssh_port"),
+                )
+                yield Static("Extra SSH options (-o KEY=VALUE)", classes="conn-subsection")
+                yield Static(
+                    "One entry per line, e.g. ServerAliveInterval=60",
+                    classes="conn-note",
+                )
+                yield StringListEditor(
+                    placeholder="KEY=VALUE",
+                    id="pf_extra_ssh_options",
+                )
+                yield Horizontal(
+                    Button("Save profile", id="btn_profile_save", variant="primary"),
+                    Button("Cancel", id="btn_profile_cancel"),
+                    classes="conn-form-buttons",
+                )
 
-        # ---- Connection Profiles ----------------------------------------
-        yield Static("Connection Profiles", classes="conn-section-header")
-        yield Static(
-            "Define SSH bastion/proxy configurations that can be applied to instances.",
-            classes="conn-note",
-        )
-        yield DataTable(id="conn_profiles_table")
-        yield Horizontal(
-            Button("Add", id="btn_profile_add", variant="primary"),
-            Button("Edit", id="btn_profile_edit"),
-            Button("Remove", id="btn_profile_remove", variant="error"),
-            classes="conn-action-row",
-        )
-        # Profile form (hidden until add/edit)
-        with Vertical(id="profile_form", classes="conn-form"):
-            yield Static("", id="profile_form_title", classes="conn-form-title")
-            yield Horizontal(
-                Static("Profile name", classes="label"),
-                Input(placeholder="e.g. prod-bastion", id="pf_name"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("Bastion host", classes="label"),
-                Input(placeholder="bastion.example.com", id="pf_bastion_host"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("Bastion user", classes="label"),
-                Input(placeholder="ec2-user", id="pf_bastion_user"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("Bastion key", classes="label"),
-                Input(placeholder="~/.ssh/bastion_key.pem", id="pf_bastion_key"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("Username (target)", classes="label"),
-                Input(placeholder="ec2-user", id="pf_username"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("Proxy command", classes="label"),
-                Input(placeholder="ssh -W %h:%p bastion", id="pf_proxy_command"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Static("SSH port (1-65535)", classes="label"),
-                Input(placeholder="22", id="pf_ssh_port"),
-                classes="setting_row",
-            )
-            yield Static("Extra SSH options (-o KEY=VALUE)", classes="conn-subsection")
-            yield Static(
-                "One entry per line, e.g. ServerAliveInterval=60",
-                classes="conn-note",
-            )
-            yield StringListEditor(
-                placeholder="KEY=VALUE",
-                id="pf_extra_ssh_options",
-            )
-            yield Horizontal(
-                Button("Save profile", id="btn_profile_save", variant="primary"),
-                Button("Cancel", id="btn_profile_cancel"),
-                classes="conn-form-buttons",
-            )
-
-        # ---- Connection Rules --------------------------------------------
-        yield Static("Connection Rules", classes="conn-section-header")
-        yield Static(
-            "Rules map instance match conditions to a connection profile. "
-            "The first matching rule wins.",
-            classes="conn-note",
-        )
-        yield DataTable(id="conn_rules_table")
-        yield Horizontal(
-            Button("Add", id="btn_rule_add", variant="primary"),
-            Button("Edit", id="btn_rule_edit"),
-            Button("Remove", id="btn_rule_remove", variant="error"),
-            classes="conn-action-row",
-        )
-        # Rule form (hidden until add/edit)
-        with Vertical(id="rule_form", classes="conn-form"):
-            yield Static("", id="rule_form_title", classes="conn-form-title")
-            yield Horizontal(
-                Static("Rule name", classes="label"),
-                Input(placeholder="e.g. private-subnets", id="rl_name"),
-                classes="setting_row",
-            )
-            yield Static("Match conditions", classes="conn-subsection")
-            yield Static(
-                "key=value pairs, e.g. name_contains=web  region=us-east-1",
-                classes="conn-note",
-            )
-            yield KeyValueEditor(
-                key_placeholder="condition key",
-                value_placeholder="value",
-                id="rl_match_conditions",
-            )
-            yield Horizontal(
-                Static("Profile name", classes="label"),
-                Input(placeholder="profile name", id="rl_profile_name"),
-                classes="setting_row",
-            )
-            yield Horizontal(
-                Button("Save rule", id="btn_rule_save", variant="primary"),
-                Button("Cancel", id="btn_rule_cancel"),
-                classes="conn-form-buttons",
-            )
+        with VerticalGroup(classes="settings-access-section"):
+            with VerticalGroup(classes="settings-access-context"):
+                yield Static("Connection Rules", classes="conn-section-header")
+                yield Static(
+                    "Rules map instance match conditions to a connection profile. "
+                    "The first matching rule wins.",
+                    classes="conn-note",
+                )
+            with VerticalGroup(classes="settings-access-catalog"):
+                yield DataTable(id="conn_rules_table")
+                yield Horizontal(
+                    Button("Add", id="btn_rule_add", variant="primary"),
+                    Button("Edit", id="btn_rule_edit"),
+                    Button("Remove", id="btn_rule_remove", variant="error"),
+                    classes="conn-action-row",
+                )
+            with Vertical(id="rule_form", classes="conn-form"):
+                yield Static("", id="rule_form_title", classes="conn-form-title")
+                yield setting_row(
+                    "Rule name",
+                    Input(placeholder="e.g. private-subnets", id="rl_name"),
+                )
+                yield Static("Match conditions", classes="conn-subsection")
+                yield Static(
+                    "key=value pairs, e.g. name_contains=web  region=us-east-1",
+                    classes="conn-note",
+                )
+                yield KeyValueEditor(
+                    key_placeholder="condition key",
+                    value_placeholder="value",
+                    id="rl_match_conditions",
+                )
+                yield setting_row(
+                    "Profile name",
+                    Input(placeholder="profile name", id="rl_profile_name"),
+                )
+                yield Horizontal(
+                    Button("Save rule", id="btn_rule_save", variant="primary"),
+                    Button("Cancel", id="btn_rule_cancel"),
+                    classes="conn-form-buttons",
+                )
 
     # ------------------------------------------------------------------
     # Lifecycle

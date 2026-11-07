@@ -30,7 +30,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
@@ -40,7 +40,13 @@ from servonaut.services.db_credential_scanner import (
     engine_display_name,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
@@ -68,15 +74,7 @@ class _DbLabelPromptModal(ModalScreen[Optional[str]]):
     with the trimmed label (``""`` allowed = unlabelled) or ``None`` on cancel.
     """
 
-    DEFAULT_CSS = """
-    _DbLabelPromptModal { align: center middle; }
-    _DbLabelPromptModal #db_label_modal_container {
-        width: 64; height: auto; max-width: 90%;
-        padding: 1 2; border: round $primary; background: $surface;
-    }
-    _DbLabelPromptModal #db_label_modal_buttons { height: auto; margin-top: 1; }
-    _DbLabelPromptModal Button { margin-right: 1; }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
@@ -85,25 +83,29 @@ class _DbLabelPromptModal(ModalScreen[Optional[str]]):
         self._initial = initial
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold]Name this database[/bold]", id="db_label_modal_title"),
-            Static(
-                "[dim]A short name, such as the site it belongs to. Leave it "
-                "blank if this server has only one database. Storing another "
-                "database under the same name replaces it.[/dim]",
-                id="db_label_modal_hint",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Name this database[/bold]", id="db_label_modal_title"),
+            body=DialogBody(
+                Static(
+                    "[dim]A short name, such as the site it belongs to. Leave it "
+                    "blank if this server has only one database. Storing another "
+                    "database under the same name replaces it.[/dim]",
+                    id="db_label_modal_hint",
+                ),
             ),
-            Input(
+            status=Input(
                 value=self._initial,
                 placeholder="e.g. shop",
                 id="db_label_input",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Store", variant="success", id="btn_db_label_store"),
                 Button("Cancel", id="btn_db_label_cancel"),
                 id="db_label_modal_buttons",
             ),
             id="db_label_modal_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -126,8 +128,14 @@ class _DbLabelPromptModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class DbCredentialScanScreen(Screen):
+class DbCredentialScanScreen(WorkspaceScreen):
     """Scan a server for database settings, review masked rows, store them."""
+
+    CHAT_REFLOW = True
+    # Body padding and scrollbar plus the Store / Rescan / Scan roots
+    # row at the global button minimum beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 60
+    CONTENT_NARROW_WIDTH = 80
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -194,33 +202,51 @@ class DbCredentialScanScreen(Screen):
     def compose(self) -> ComposeResult:
         yield SafeHeader()
         name = escape(self._display_name())
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("DB credential scan")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static("🔐 Scan for DB credentials", id="db_scan_title"),
-                Static(
-                    f"Finds the database settings of the apps on [b]{name}[/b], "
-                    "without changing anything. Passwords stay hidden: you see "
-                    "at most their last 3 characters.",
-                    id="db_scan_subtitle",
-                ),
-                VerticalScroll(
-                    Static("", id="db_scan_roots_line"),
-                    Static("Scanning…", id="db_scan_status"),
-                    OptionList(id="db_scan_candidates"),
-                    Horizontal(
-                        Button("Store", id="db_scan_store", variant="success"),
-                        Button("Rescan", id="db_scan_rescan"),
-                        Button("Scan roots…", id="db_scan_roots_btn"),
-                        id="db_scan_buttons",
+                Container(
+                    Static("Database credentials", id="db_scan_title"),
+                    Static(
+                        f"Finds the database settings of the apps on [b]{name}[/b], "
+                        "without changing anything. Passwords stay hidden: you see "
+                        "at most their last 3 characters.",
+                        id="db_scan_subtitle",
                     ),
-                    id="db_scan_body",
+                    classes="db-view-heading",
+                ),
+                Horizontal(
+                    Container(
+                        OptionList(id="db_scan_candidates"),
+                        Static("Scanning…", id="db_scan_empty"),
+                        id="db_scan_body",
+                        classes="db-records",
+                    ),
+                    VerticalScroll(
+                        Static("Scan scope and storage", classes="db-section-title"),
+                        Static("", id="db_scan_roots_line", classes="db-scan-scope"),
+                        Static("Scanning…", id="db_scan_status", classes="db-status-band"),
+                        Horizontal(
+                            Button("Store", id="db_scan_store", variant="success"),
+                            Button("Rescan", id="db_scan_rescan"),
+                            Button("Scan roots…", id="db_scan_roots_btn"),
+                            id="db_scan_buttons",
+                            classes="db-action-row",
+                        ),
+                        id="db_scan_review",
+                        classes="db-review-tools",
+                    ),
+                    id="db_scan_workspace",
+                    classes="db-review-workspace",
                 ),
                 id="db_scan_container",
+                classes="workspace-content",
             )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#db_scan_body", Container).border_title = "Credentials to review"
         self._render_roots_line()
         self._start_scan()
 
@@ -257,6 +283,10 @@ class DbCredentialScanScreen(Screen):
         markup = f"[{colour}]{escape(message)}[/{colour}]" if colour else escape(message)
         try:
             self.query_one("#db_scan_status", Static).update(markup)
+            self.query_one("#db_scan_status").set_class(error, "-error")
+            empty = self.query_one("#db_scan_empty", Static)
+            empty.update(markup)
+            empty.display = not self._candidates
         except Exception:  # noqa: BLE001
             pass
 

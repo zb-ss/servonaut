@@ -5,14 +5,22 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
-from textual.screen import ModalScreen, Screen
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.services import config_crypto
 
 logger = logging.getLogger(__name__)
@@ -26,31 +34,42 @@ class LabelInputModal(ModalScreen[Optional[str]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
+    AUTO_FOCUS = "#label_input"
+
     def __init__(self, title: str, initial: str = "", placeholder: str = "") -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._title = title
         self._initial = initial
         self._placeholder = placeholder or "e.g. MacBook Pro"
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="label_modal_title"),
-            Static(
-                "[dim]1–100 characters. Visible server-side.[/dim]",
-                id="label_modal_hint",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                f"[bold $text-accent]{self._title}[/bold $text-accent]",
+                id="label_modal_title",
             ),
-            Input(
-                value=self._initial,
-                placeholder=self._placeholder,
-                id="label_input",
+            body=DialogBody(
+                Static(
+                    "[dim]1–100 characters. Visible server-side.[/dim]",
+                    id="label_modal_hint",
+                ),
             ),
-            Static("", id="label_modal_error"),
-            Horizontal(
+            status=Vertical(
+                Input(
+                    value=self._initial,
+                    placeholder=self._placeholder,
+                    id="label_input",
+                ),
+                Static("", id="label_modal_error"),
+            ),
+            actions=DialogActions(
                 Button("Save", variant="primary", id="btn_label_save"),
                 Button("Cancel", id="btn_label_cancel"),
                 id="label_modal_buttons",
             ),
             id="label_modal_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -90,17 +109,23 @@ class ConfirmModal(ModalScreen[bool]):
         Binding("n", "cancel", "No", show=False),
     ]
 
+    AUTO_FOCUS = "#btn_confirm_no"
+
     def __init__(self, title: str, message: str, danger: bool = False) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._title = title
         self._message = message
         self._danger = danger
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="confirm_modal_title"),
-            Static(self._message, id="confirm_modal_message"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                f"[bold $text-accent]{self._title}[/bold $text-accent]",
+                id="confirm_modal_title",
+            ),
+            body=DialogBody(Static(self._message, id="confirm_modal_message")),
+            actions=DialogActions(
                 Button(
                     "Confirm",
                     variant="error" if self._danger else "primary",
@@ -110,6 +135,8 @@ class ConfirmModal(ModalScreen[bool]):
                 id="confirm_modal_buttons",
             ),
             id="confirm_modal_container",
+            size="compact",
+            severity="danger" if self._danger else "neutral",
         )
 
     def on_mount(self) -> None:
@@ -125,8 +152,14 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class SnapshotManagerScreen(Screen):
+class SnapshotManagerScreen(WorkspaceScreen):
     """List and manage cloud config snapshots."""
+
+    AUTO_FOCUS = "#snapshots_container"
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 112
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -145,28 +178,59 @@ class SnapshotManagerScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static("[bold $text-accent]Config Snapshots[/bold $text-accent]", id="snapshots_header"),
-                Static(
-                    "[dim]Click a row, then use the keys below or the buttons. "
-                    "Restore pulls a snapshot and replaces your local config. "
-                    "Snapshots are client-encrypted; decryption needs the sync passphrase.[/dim]",
-                    id="snapshots_hint",
+        yield WorkspaceControls("Config snapshots")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield VerticalScroll(
+                Container(
+                    Static("[bold $text-accent]Config Snapshots[/bold $text-accent]", id="snapshots_header"),
+                    id="snapshots_context",
                 ),
-                DataTable(id="snapshots_table", zebra_stripes=True, cursor_type="row"),
-                Static("", id="snapshots_status"),
                 Horizontal(
-                    Button("Pull Latest (l)", variant="primary", id="btn_pull_latest"),
-                    Button("Push New (p)", variant="primary", id="btn_push_new"),
-                    Button("Restore (r)", id="btn_restore"),
-                    Button("Rename (n)", id="btn_rename"),
-                    Button("Delete (d)", variant="error", id="btn_delete"),
-                    Button("Refresh (F5)", id="btn_refresh"),
-                    id="snapshots_actions",
+                    VerticalScroll(
+                        Static(
+                            "[dim]Click a row, then use the keys below or the buttons. "
+                            "Restore pulls a snapshot and replaces your local config. "
+                            "Snapshots are client-encrypted; decryption needs the sync passphrase.[/dim]",
+                            id="snapshots_hint",
+                        ),
+                        Static("", id="snapshots_status"),
+                        Horizontal(
+                            Container(
+                                Static("Cloud snapshots", classes="backup-panel-heading"),
+                                Horizontal(
+                                    Button("Pull Latest (l)", variant="primary", id="btn_pull_latest"),
+                                    Button("Push New (p)", variant="primary", id="btn_push_new"),
+                                    Button("Refresh (F5)", id="btn_refresh"),
+                                    classes="backup-action-buttons",
+                                ),
+                                id="snapshots_cloud_actions",
+                                classes="backup-action-panel",
+                            ),
+                            Container(
+                                Static("Selected snapshot", classes="backup-panel-heading"),
+                                Horizontal(
+                                    Button("Restore (r)", id="btn_restore"),
+                                    Button("Rename (n)", id="btn_rename"),
+                                    Button("Delete (d)", variant="error", id="btn_delete"),
+                                    classes="backup-action-buttons",
+                                ),
+                                classes="backup-action-panel",
+                            ),
+                            id="snapshots_actions",
+                        ),
+                        id="snapshots_tools",
+                    ),
+                    Container(
+                        Static("Encrypted cloud history", classes="backup-panel-heading"),
+                        Static("Loading snapshots…", id="snapshots_empty"),
+                        DataTable(id="snapshots_table", zebra_stripes=True, cursor_type="row"),
+                        id="snapshots_records",
+                    ),
+                    id="snapshots_workspace",
                 ),
                 id="snapshots_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -219,7 +283,7 @@ class SnapshotManagerScreen(Screen):
         for idx, snap in enumerate(self._snapshots, start=1):
             table.add_row(
                 str(idx),
-                _s(str(snap.get("label") or snap.get("name") or "—")),
+                Text(_s(str(snap.get("label") or snap.get("name") or "—"))),
                 str(snap.get("version", "—")),
                 self._format_date(snap.get("created_at")),
                 str(snap.get("hash", ""))[:16],
@@ -276,7 +340,7 @@ class SnapshotManagerScreen(Screen):
             ConfirmModal(
                 title="Restore Snapshot",
                 message=(
-                    f"Replace your local config with snapshot [bold]{label}[/bold]?\n"
+                    f"Replace your local config with snapshot [bold]{escape(str(label))}[/bold]?\n"
                     "Local-only fields (instance keys, paths) will be preserved."
                 ),
             ),
@@ -338,7 +402,9 @@ class SnapshotManagerScreen(Screen):
         self._set_status("[dim]Renaming…[/dim]")
         try:
             await sync.rename_snapshot(str(snapshot_id), new_label)
-            self.notify(f"Renamed to {new_label}", severity="information")
+            self.notify(
+                f"Renamed to {new_label}", severity="information", markup=False,
+            )
             await self._load_snapshots()
         except Exception as exc:
             logger.error("Rename failed: %s", exc)
@@ -354,7 +420,7 @@ class SnapshotManagerScreen(Screen):
             ConfirmModal(
                 title="Delete Snapshot",
                 message=(
-                    f"Permanently delete [bold]{label}[/bold]?\n"
+                    f"Permanently delete [bold]{escape(str(label))}[/bold]?\n"
                     "This cannot be undone."
                 ),
                 danger=True,
@@ -417,7 +483,9 @@ class SnapshotManagerScreen(Screen):
         self._set_status("[dim]Encrypting and uploading…[/dim]")
         try:
             await sync.push(passphrase=passphrase, label=label)
-            self.notify(f"Pushed snapshot: {label}", severity="information")
+            self.notify(
+                f"Pushed snapshot: {label}", severity="information", markup=False,
+            )
             await self._load_snapshots()
         except config_crypto.CryptoUnavailableError:
             self.notify("Install cryptography: pip install 'servonaut[sync]'",
@@ -450,6 +518,9 @@ class SnapshotManagerScreen(Screen):
     def _set_status(self, msg: str) -> None:
         try:
             self.query_one("#snapshots_status", Static).update(msg)
+            empty = self.query_one("#snapshots_empty", Static)
+            empty.update(msg)
+            empty.display = not self._snapshots
         except Exception:
             pass
 

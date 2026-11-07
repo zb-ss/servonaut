@@ -2263,3 +2263,124 @@ async def test_memory_screen_opens_on_the_probe_button_when_empty(tmp_path: Path
         await pilot.pause(0.2)
         assert app.focused is not None
         assert app.focused.id == "btn_empty_probe"
+
+
+@pytest.mark.asyncio
+async def test_record_reader_keeps_full_literal_values_and_demo_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native reader copies full values literally, including after demo scrub."""
+    from types import SimpleNamespace
+    from textual.widgets import TextArea
+    from tests._async_bounds import wait_until
+
+    observed = "[bold]observed[/bold] " + "long value Ω " * 40 + "sensitive-host"
+    declared = "[link=https://example.invalid]declared[/link]\n" + "pinned " * 50 + "sensitive-host"
+    svc = _make_memory_service(tmp_path)
+    svc.get_all_modules = MagicMock(return_value={"os": {
+        "observed": {"payload": observed},
+        "declared": {"payload": {"value": declared}},
+        "probed_at": "2026-01-01T12:34:56.123456+00:00",
+    }})
+    app = _focus_test_app(svc, _make_instance())
+    copied: list[str] = []
+    monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#memory-record-detail"))
+                         and observed in app.screen.query_one("#memory-record-detail", TextArea).text)
+        screen = app.screen
+        reader = screen.query_one("#memory-record-detail", TextArea)
+        assert reader.read_only and reader.soft_wrap
+        assert observed in reader.text and declared in reader.text
+        assert "2026-01-01T12:34:56.123456+00:00" in reader.text
+        reader.focus(scroll_visible=False)
+        await wait_until(lambda: app.focused is reader)
+        await pilot.press("f7", "ctrl+c")
+        assert copied == [reader.text] and reader.selected_text == reader.text
+
+        app.demo_mode = True
+        app.redaction_service = SimpleNamespace(
+            redact_name=lambda name: "shown-name",
+            scrub_stream=lambda value: value.replace("sensitive-host", "shown-host"),
+        )
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert observed.replace("sensitive-host", "shown-host") in reader.text
+        assert declared.replace("sensitive-host", "shown-host") in reader.text
+        assert "sensitive-host" not in reader.text
+        await pilot.press("f7", "ctrl+c")
+        assert copied[-1] == reader.text and len(copied) == 2
+
+
+@pytest.mark.asyncio
+async def test_record_reader_refresh_retains_selected_record_and_native_scroll(
+    tmp_path: Path,
+) -> None:
+    """Redrawing stored memory leaves the selected identity and table viewport intact."""
+    from textual.widgets import DataTable, TextArea
+    from tests._async_bounds import wait_until
+
+    svc = _make_memory_service(tmp_path)
+    svc.get_all_modules = MagicMock(return_value={"os": {
+        "observed": {f"key-{index:03}": "wide record value " * 20 for index in range(100)},
+        "declared": {}, "probed_at": "2026-01-01T12:34:56+00:00",
+    }})
+    app = _focus_test_app(svc, _make_instance())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#memory-table"))
+                         and app.screen.query_one("#memory-table", DataTable).row_count == 100)
+        screen = app.screen
+        table = screen.query_one("#memory-table", DataTable)
+        table.move_cursor(row=45, scroll=False)
+        table.scroll_to(x=8, y=40, animate=False, force=True)
+        await pilot.pause()
+        before_scroll = table.scroll_offset
+        assert before_scroll.x > 0 and before_scroll.y > 0
+        assert screen._get_cursor_module_key() == ("os", "key-045")
+        reader = screen.query_one("#memory-record-detail", TextArea)
+        reader.select_all()
+        selection = reader.selection
+        screen._render_table()
+        await pilot.pause()
+        assert screen._get_cursor_module_key() == ("os", "key-045")
+        assert table.scroll_offset == before_scroll
+        assert reader.text.startswith("os / key-045\n")
+        assert reader.selection == selection
+        assert app.focused is table
+
+
+@pytest.mark.asyncio
+async def test_record_reader_clears_stale_values_when_empty_or_opted_out(
+    tmp_path: Path,
+) -> None:
+    """Neither an empty refresh nor opt-out leaves old record text copyable."""
+    from textual.widgets import DataTable, TextArea
+    from tests._async_bounds import wait_until
+
+    svc = _make_memory_service(tmp_path)
+    modules = {"os": {"observed": {"key": "previous-record-value"}, "declared": {}}}
+    svc.get_all_modules = MagicMock(return_value=modules)
+    app = _focus_test_app(svc, _make_instance())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#memory-record-detail"))
+                         and "previous-record-value" in app.screen.query_one("#memory-record-detail", TextArea).text)
+        screen = app.screen
+        reader = screen.query_one("#memory-record-detail", TextArea)
+        svc.get_all_modules.return_value = {}
+        screen._render_table()
+        await pilot.pause()
+        assert screen.query_one("#memory-table", DataTable).row_count == 0
+        assert "previous-record-value" not in reader.text
+        assert not screen.query_one("#memory-empty-state").has_class("hidden")
+        assert screen.query_one("#memory-workbench").has_class("hidden")
+
+        svc.get_all_modules.return_value = modules
+        screen._render_table()
+        await pilot.pause()
+        assert "previous-record-value" in reader.text
+        svc._config.enabled = False
+        screen._render_table()
+        await pilot.pause()
+        assert screen.query_one("#memory-table", DataTable).row_count == 0
+        assert "previous-record-value" not in reader.text
+        assert not screen.query_one("#memory-opt-out-banner").has_class("hidden")

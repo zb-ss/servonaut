@@ -6,107 +6,243 @@
     width: 1fr;
     height: 100%;
     background: $surface;
+    layout: vertical;
 }
 
-/* Left: sectioned action rail. On a wide terminal the actions sit two to a
-   row (section labels, Browse and Back take a whole row), so every action
-   fits without scrolling. A narrow terminal gets one column of one-row
-   buttons, and a short one one-row buttons, so the rail still fits and the
-   detail pane keeps its width. */
+/* Full-width compact context banner leading the screen */
+#sa-context {
+    width: 100%;
+    height: auto;
+    max-height: 4;
+    padding: 0 1;
+    background: transparent;
+    border-left: thick $accent;
+    border-bottom: solid $surface-lighten-1;
+    scrollbar-gutter: stable;
+}
+
+#server_context {
+    text-align: left;
+    height: auto;
+    padding: 0;
+}
+
+/* Grouped action toolbar above the overview:
+   Consistent 3-column grid with full-width group headings and aligned rows */
 #action_buttons {
+    width: 100%;
+    height: auto;
     layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
     grid-rows: auto;
     grid-gutter: 0 1;
-    width: 46;
-    height: 100%;
-    padding: 0 1;
-    overflow-y: auto;
-    border-right: round $primary;
+    padding: 0 1 1 1;
+    background: $surface;
+    border-bottom: solid $panel-lighten-2;
 }
 
 #action_buttons Button {
     width: 100%;
     min-width: 0;
+    height: 1;
+    min-height: 1;
     margin: 0;
-}
-
-#action_buttons .section_label {
-    column-span: 2;
-    color: $accent;
-    text-style: bold;
-    padding: 1 0 0 0;
-    margin: 0;
+    padding: 0 1;
+    border: none;
+    border-left: tall $surface-lighten-1;
+    background: transparent;
+    color: $text;
+    text-align: left;
 }
 
 #action_buttons #btn_browse,
-#action_buttons #btn_back {
+#action_buttons #btn_command,
+#action_buttons #btn_ssh {
+    border-left: tall $primary;
+    color: $text-accent;
+}
+
+#action_buttons #btn_browse:ansi,
+#action_buttons #btn_command:ansi,
+#action_buttons #btn_ssh:ansi {
+    color: $foreground;
+}
+
+#action_buttons Button:hover {
+    background: $panel-lighten-1;
+    color: $text-accent;
+    border-left: tall $accent;
+}
+
+#action_buttons Button:focus {
+    background: $panel-lighten-2;
+    color: $text;
+    border: none;
+    border-left: tall $accent;
+    text-style: bold;
+}
+
+#action_buttons .section_label {
+    column-span: 3;
+    color: $text-accent;
+    text-style: bold;
+    padding: 0 1;
+    margin: 0;
+    height: 1;
+}
+
+#action_buttons #btn_browse {
+    column-span: 1;
+}
+
+#action_buttons #btn_scp {
     column-span: 2;
 }
 
-ServerActionsScreen.-narrow #action_buttons {
-    layout: vertical;
-    width: 24;
+#action_buttons #btn_back,
+#action_buttons #btn_ovh_firewall {
+    column-span: 3;
+}
+
+#action_buttons #btn_back {
+    background: transparent;
+    color: $text-muted;
+}
+
+#action_buttons #btn_back:hover {
+    background: $panel-lighten-1;
+    color: $text;
+}
+
+#action_buttons #btn_back:focus {
+    background: $panel-lighten-2;
+    color: $text;
+    border: none;
+    text-style: bold;
+}
+
+#action_buttons Button:ansi:hover,
+#action_buttons Button.-primary:ansi:hover,
+#action_buttons Button.-error:ansi:hover,
+#action_buttons #btn_back:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    border: none;
+    border-left: tall $accent;
+    text-style: underline not bold;
+}
+
+#action_buttons Button:ansi:focus,
+#action_buttons Button.-primary:ansi:focus,
+#action_buttons Button.-error:ansi:focus,
+#action_buttons #btn_back:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: none;
+    border-left: tall $warning;
+    text-style: not bold;
+}
+
+/* Narrow view reflow: hide decorative group labels and span all buttons 1 column,
+   restoring ~5 rows generic and ~7 rows OVH while preserving every control and order */
+ServerActionsScreen.-narrow #action_buttons .section_label,
+ServerActionsScreen.-content-narrow #action_buttons .section_label {
+    display: none;
 }
 
 ServerActionsScreen.-narrow #action_buttons Button,
-ServerActionsScreen.-short #action_buttons Button {
-    height: 1;
-    border: none;
-    content-align: left middle;
-    text-align: left;
+ServerActionsScreen.-content-narrow #action_buttons Button {
+    column-span: 1;
 }
 
-ServerActionsScreen.-narrow #action_buttons .section_label:first-child,
-ServerActionsScreen.-short #action_buttons .section_label:first-child {
-    padding: 0;
+ServerActionsScreen.-narrow #action_buttons #btn_scp,
+ServerActionsScreen.-narrow #action_buttons #btn_back,
+ServerActionsScreen.-narrow #action_buttons #btn_ovh_firewall,
+ServerActionsScreen.-content-narrow #action_buttons #btn_scp,
+ServerActionsScreen.-content-narrow #action_buttons #btn_back,
+ServerActionsScreen.-content-narrow #action_buttons #btn_ovh_firewall {
+    column-span: 1;
 }
 
-/* Right: detail pane (identity + live + memory + focus help) */
+/* Main detail workspace (overview + inline tools) */
 #sa-detail {
     width: 1fr;
-    height: 100%;
-    padding: 1 3;
-    overflow-y: auto;
+    height: 1fr;
+    padding: 1 2;
 }
 
-#server_info {
-    text-align: left;
+#sa-overview {
+    height: 1fr;
+    scrollbar-gutter: stable;
+}
+
+#sa-facts,
+#sa-monitoring {
+    height: auto;
+    align-vertical: top;
+}
+
+#sa-detail .sa-section {
+    height: auto;
     padding: 1 2;
     margin-bottom: 1;
-    border: round $primary;
-    background: $boost;
+    border: round $border-blurred;
+    background: transparent;
 }
 
-#live_stats {
-    padding: 1 2;
-    margin-bottom: 1;
-    border: round $accent;
-    background: $boost;
-}
-
+#server_identity,
+#server_info,
+#live_stats,
 #memory_panel {
-    padding: 1 2;
-    margin-bottom: 1;
-    border: round $primary;
-    background: $boost;
+    width: 1fr;
+}
+
+#server_identity,
+#live_stats {
+    margin-right: 1;
+}
+
+ServerActionsScreen.-narrow #sa-facts,
+ServerActionsScreen.-narrow #sa-monitoring,
+ServerActionsScreen.-content-narrow #sa-facts,
+ServerActionsScreen.-content-narrow #sa-monitoring {
+    layout: vertical;
+}
+
+ServerActionsScreen.-narrow #server_identity,
+ServerActionsScreen.-narrow #live_stats,
+ServerActionsScreen.-content-narrow #server_identity,
+ServerActionsScreen.-content-narrow #live_stats {
+    margin-right: 0;
 }
 
 #action_help {
-    padding: 0 2;
+    padding: 0 1;
     height: auto;
+    color: $text-muted;
 }
 
-/* Slow work started from this screen (binding a vault key, preparing SSH):
-   pinned to the bottom of the detail pane so it stays in view however far
-   the panels scroll. Hidden while nothing runs. */
+#action_help:hover {
+    color: $text;
+}
+
+/* Slow work indicator: pinned to bottom of detail pane */
 #sa_busy {
     dock: bottom;
     padding: 0 2;
 }
 
-/* Inline read-only views (Browse / Logs) mounted below the dashboard panels */
+/* Inline read-only views (Browse / Logs):
+   Collapse the action grid so the inline tree/log gets the full vertical viewport */
+ServerActionsScreen.-inline-open #action_buttons {
+    display: none;
+}
+
+#sa-detail.-inline-open #sa-overview {
+    display: none;
+}
+
 #sa-inline {
     width: 100%;
     height: auto;
@@ -116,15 +252,15 @@ ServerActionsScreen.-short #action_buttons .section_label:first-child {
 #sa-inline.visible {
     display: block;
     height: 1fr;
-    min-height: 14;
-    margin-top: 1;
-    border: round $accent;
+    min-height: 0;
+    border: round $border-blurred;
+    background: transparent;
 }
 
 #sa-inline .inline_title {
     padding: 0 1;
     background: $boost;
-    color: $accent;
+    color: $text;
     text-style: bold;
 }
 
@@ -139,14 +275,20 @@ ServerActionsScreen.-short #action_buttons .section_label:first-child {
     height: 1fr;
 }
 
-/* A short terminal: less padding around the detail panels, so the server
-   memory stays on screen under the server's details. */
+/* The note remains complete; its separator need not consume a tree row. */
+ServerActionsScreen.-short #sa-inline .inline_note {
+    border-top: none;
+}
+
+/* Short terminal adjustment */
 ServerActionsScreen.-short #sa-detail {
     padding: 0 1;
 }
 
-ServerActionsScreen.-short #server_info,
-ServerActionsScreen.-short #live_stats,
-ServerActionsScreen.-short #memory_panel {
+ServerActionsScreen.-short #sa-detail .sa-section {
     padding: 0 1;
+}
+
+ServerActionsScreen.-short #action_buttons .section_label {
+    padding: 0;
 }

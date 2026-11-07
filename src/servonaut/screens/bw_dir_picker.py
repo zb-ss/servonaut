@@ -28,8 +28,12 @@ from typing import Callable, Iterable, Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Vertical
 from textual.screen import ModalScreen
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogFrame, DialogNotificationSpace,
+)
 from textual.widgets import Button, DirectoryTree, Input, Static
 
 
@@ -93,6 +97,8 @@ class BwDirPickerModal(ModalScreen[Optional[Path]]):
     Dismisses the validated directory :class:`Path`, or ``None`` on cancel.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
     ]
@@ -133,26 +139,30 @@ class BwDirPickerModal(ModalScreen[Optional[Path]]):
         scrub: Optional[Callable[[str], str]] = None
         if self._demo_scrub_active():
             scrub = self.app.redaction_service.scrub_stream
-        yield Container(
-            Static(
-                "[bold $text-accent]Import SSH keys — pick a directory[/bold $text-accent]",
-                id="bw_dir_picker_title",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(
+                    "[bold $text-accent]Import SSH keys — pick a directory[/bold $text-accent]",
+                    id="bw_dir_picker_title",
+                ),
+                Static(
+                    "[dim]Click a directory in the tree or edit the path below. "
+                    "Enter = Select.[/dim]",
+                    id="bw_dir_picker_hint",
+                ),
             ),
-            Static(
-                "[dim]Click a directory in the tree or edit the path below. "
-                "Enter = Select.[/dim]",
-                id="bw_dir_picker_hint",
-            ),
-            _DirsOnlyTree(Path.home(), id="bw_dir_tree", scrub=scrub),
-            Input(
+            body=_DirsOnlyTree(Path.home(), id="bw_dir_tree", scrub=scrub),
+            status=Input(
                 value=self._display_path(Path.home() / ".ssh"),
                 id="bw_dir_input",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="bw_dir_cancel_btn"),
                 Button("Select", variant="primary", id="bw_dir_select_btn"),
                 classes="bw_dir_actions",
             ),
+            size="large",
             id="bw_dir_picker_container",
         )
 

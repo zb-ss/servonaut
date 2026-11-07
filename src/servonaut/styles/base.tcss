@@ -7,14 +7,63 @@
    =================================================================== */
 
 * {
-    scrollbar-background: $boost;
-    scrollbar-color: $primary;
-    scrollbar-color-hover: $accent;
+    scrollbar-background: transparent;
+    scrollbar-color: $panel-lighten-2;
+    scrollbar-color-hover: $primary;
     scrollbar-color-active: $accent;
 }
 
 Screen {
     background: $surface;
+}
+
+/* Keep native slider fills distinct from both the track and themed surfaces. */
+Switch .switch--slider {
+    color: $text-muted;
+}
+
+Switch:hover .switch--slider {
+    color: $text;
+}
+
+Switch.-on .switch--slider {
+    color: $success;
+}
+
+Switch.-on:hover .switch--slider {
+    color: $success-lighten-1;
+}
+
+/* The native right position identifies ON when light themes need neutral fills. */
+Switch:light.-on .switch--slider {
+    color: $text;
+}
+
+Switch:light.-on:hover .switch--slider {
+    color: $text-muted;
+}
+
+/* Explicit terminal roles retain hover feedback without relying on ANSI alpha.
+   Keep these after the light-theme rules so ANSI state colors win ties. */
+Switch:ansi .switch--slider {
+    color: ansi_bright_black;
+}
+
+Switch:ansi:hover .switch--slider {
+    color: ansi_default;
+}
+
+Switch:ansi.-on .switch--slider {
+    color: $success;
+}
+
+Switch:ansi.-on:hover .switch--slider {
+    color: ansi_bright_green;
+}
+
+/* A visible native frame keeps the slider's left/right position readable. */
+Switch:ansi:enabled:blur {
+    border: tall $foreground;
 }
 
 /* Global default: every ModalScreen centres its dialog. Individual modals
@@ -41,8 +90,7 @@ ModalScreen {
    rule wins over any DEFAULT_CSS, so without this the dimmed backdrop would
    show through the dialog itself. */
 #copy-mode-container,
-#text-editor-container,
-#discard-box {
+#text-editor-container {
     background: $surface;
 }
 
@@ -51,10 +99,23 @@ ModalScreen {
    =================================================================== */
 
 Header {
-    background: $primary;
+    background: $surface;
     color: $text;
     text-style: bold;
     dock: top;
+}
+
+Header:ansi {
+    background: $panel;
+    color: $foreground;
+}
+
+Header HeaderTitle {
+    color: auto 100%;
+}
+
+Header:ansi HeaderTitle {
+    color: $foreground;
 }
 
 Footer {
@@ -65,6 +126,15 @@ Footer {
     border-top: wide $primary;
 }
 
+/* Light themes may pair their native footer text with an accent fill. Our
+   quiet panel needs its own text role, including native binding components. */
+Footer:light,
+Footer:light FooterLabel,
+Footer:light FooterKey .footer-key--key,
+Footer:light FooterKey .footer-key--description {
+    color: $text;
+}
+
 /* ===================================================================
    BUTTONS - Global Styling
    =================================================================== */
@@ -72,36 +142,122 @@ Footer {
 Button {
     min-width: 16;
     height: 3;
-    background: $boost;
+    background: transparent;
     color: $text;
-    border: round $primary-background;
+    border: round $primary 65%;
     text-align: center;
     content-align: center middle;
 }
 
+Button.-primary {
+    color: $text-accent;
+    border: round $primary;
+}
+
+Button.-success {
+    color: $text-success;
+    border: round $success;
+}
+
+Button.-warning {
+    color: $text-warning;
+    border: round $warning;
+}
+
+Button.-error {
+    color: $text-error;
+    border: round $error;
+}
+
 Button:hover {
-    background: $primary;
-    color: $text;
+    background: transparent;
+    color: $text-accent;
     border: round $accent;
     text-style: bold;
 }
 
 Button:focus {
-    background: $accent;
-    color: $text;
+    background: transparent;
+    color: $text-accent;
+    border: round $accent;
+    text-style: bold underline;
+}
+
+Button.-warning:hover,
+Button.-warning:focus {
+    background: transparent;
+    color: $text-warning;
     border: round $warning;
-    text-style: bold;
+    text-style: bold underline;
+}
+
+Button.-error:hover,
+Button.-error:focus {
+    background: transparent;
+    color: $text-error;
+    border: round $error;
+    text-style: bold underline;
 }
 
 #btn_back {
-    color: $error;
+    background: transparent;
+    color: $text-muted;
+    border: round $border-blurred;
+}
+
+#btn_back:hover {
+    background: transparent;
+    color: $text;
+    border: round $accent;
+    text-style: bold;
 }
 
 #btn_back:focus {
-    background: $error;
-    color: $text;
-    border: round $error-darken-1;
-    text-style: bold;
+    background: transparent;
+    color: $text-accent;
+    border: round $accent;
+    text-style: bold underline;
+}
+
+Button.-primary:ansi,
+Button.-success:ansi,
+Button.-warning:ansi,
+Button.-error:ansi,
+#btn_back:ansi {
+    color: $foreground;
+}
+
+Button:ansi:hover,
+Button.-primary:ansi:hover,
+Button.-success:ansi:hover,
+Button.-warning:ansi:hover,
+Button.-error:ansi:hover,
+#btn_back:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    border: round $accent;
+    text-style: underline not bold;
+}
+
+Button:ansi:focus,
+Button.-primary:ansi:focus,
+Button.-success:ansi:focus,
+Button.-warning:ansi:focus,
+Button.-error:ansi:focus,
+#btn_back:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+Button:ansi:disabled:hover,
+Button.-primary:ansi:disabled:hover,
+Button.-success:ansi:disabled:hover,
+Button.-warning:ansi:disabled:hover,
+Button.-error:ansi:disabled:hover,
+#btn_back:ansi:disabled:hover {
+    text-style: not underline not bold;
 }
 
 /* ===================================================================
@@ -109,18 +265,41 @@ Button:focus {
    =================================================================== */
 
 Input {
-    background: $boost;
+    background: transparent;
     border: round $primary-background;
     padding: 0 1;
 }
 
 Input:focus {
     border: round $accent;
-    background: $panel;
+    background: transparent;
 }
 
 Input.-invalid {
     border: round $error;
+}
+
+/* Keep the selected label readable on the theme's native cursor fill. */
+SelectOverlay:focus > .option-list--option-highlighted {
+    color: auto 100%;
+}
+
+/* Terminal palettes retain their explicit native foreground/background pair. */
+SelectOverlay:ansi:focus > .option-list--option-highlighted {
+    color: $block-cursor-foreground;
+}
+
+/* Native ANSI selections reverse the terminal's readable foreground pair. */
+TextArea:ansi .text-area--selection {
+    color: $foreground;
+}
+
+/* Keep native editor edges visible when focus moves away. */
+CopyModeScreen #copy-mode-text:ansi:enabled:blur,
+TextEditorModal #text-editor-area:ansi:enabled:blur,
+CustomServersScreen #input_extra_ssh_options:ansi:enabled:blur,
+BugReportScreen #description:ansi:enabled:blur {
+    border: tall $foreground;
 }
 
 /* ===================================================================
@@ -128,7 +307,7 @@ Input.-invalid {
    =================================================================== */
 
 DataTable {
-    background: $surface;
+    background: transparent;
     color: $text;
     border: none;
     height: auto;
@@ -141,14 +320,26 @@ DataTable > .datatable--header {
 }
 
 DataTable > .datatable--cursor {
-    background: $accent;
-    color: $text;
-    text-style: bold;
+    background: $surface;
+    color: auto 100%;
+    text-style: bold reverse;
 }
 
 DataTable:focus > .datatable--cursor {
-    background: $accent;
-    color: $text;
+    background: $surface;
+    color: auto 100%;
+}
+
+DataTable:ansi > .datatable--header {
+    background: $panel;
+    color: $foreground;
+}
+
+DataTable:ansi > .datatable--cursor,
+DataTable:ansi:focus > .datatable--cursor {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: not bold;
 }
 
 DataTable > .datatable--odd-row {

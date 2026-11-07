@@ -13,9 +13,12 @@ from typing import Callable, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TextArea
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 
 # Returns a warning to show before saving the given text, or None when fine.
 SaveCheck = Callable[[str], Optional[str]]
@@ -36,23 +39,12 @@ class TextEditorModal(ModalScreen[Optional[str]]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    TextEditorModal {
-        align: center middle;
-    }
-
-    TextEditorModal #text-editor-container {
-        width: 90%;
-        height: 85%;
-        background: $surface;
-        border: round $accent;
-        border-title-color: $accent;
-    }
-
     TextEditorModal #text-editor-hint {
         height: auto;
         padding: 0 2;
-        color: $text-muted;
         background: $panel;
     }
 
@@ -71,19 +63,6 @@ class TextEditorModal(ModalScreen[Optional[str]]):
         display: block;
     }
 
-    TextEditorModal #text-editor-buttons {
-        height: auto;
-        align: right middle;
-        padding: 0 1;
-    }
-
-    TextEditorModal #text-editor-cancel {
-        margin-right: 1;
-    }
-
-    TextEditorModal #text-editor-save {
-        margin-right: 1;
-    }
     """
 
     def __init__(
@@ -102,25 +81,35 @@ class TextEditorModal(ModalScreen[Optional[str]]):
         self._confirmed_text: Optional[str] = None
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="text-editor-container") as container:
-            # Border titles are parsed as markup: a server named "api [/]"
-            # would otherwise raise MarkupError.
-            container.border_title = escape(self._title)
-            hint = f"{escape(self._hint)} | " if self._hint else ""
-            yield Static(
+        yield DialogNotificationSpace()
+        hint = f"{escape(self._hint)} | " if self._hint else ""
+        frame = DialogFrame(
+            heading=Static(
                 f"{hint}[bold]Ctrl+S[/bold] Save | [bold]Esc[/bold] Cancel",
                 id="text-editor-hint",
-            )
-            yield TextArea(
-                self._original,
-                id="text-editor-area",
-                soft_wrap=True,
-                show_line_numbers=True,
-            )
-            yield Static("", id="text-editor-warning", markup=False)
-            with Horizontal(id="text-editor-buttons"):
-                yield Button("Cancel", id="text-editor-cancel")
-                yield Button("Save", variant="primary", id="text-editor-save")
+                classes="dialog-muted",
+            ),
+            body=DialogContent(
+                TextArea(
+                    self._original,
+                    id="text-editor-area",
+                    soft_wrap=True,
+                    show_line_numbers=True,
+                ),
+            ),
+            status=Static("", id="text-editor-warning", markup=False),
+            actions=DialogActions(
+                Button("Cancel", id="text-editor-cancel"),
+                Button("Save", variant="primary", id="text-editor-save"),
+                id="text-editor-buttons",
+            ),
+            size="fill",
+            id="text-editor-container",
+        )
+        # Border titles are parsed as markup: a server named "api [/]"
+        # would otherwise raise MarkupError.
+        frame.border_title = escape(self._title)
+        yield frame
 
     def on_mount(self) -> None:
         self.query_one("#text-editor-area", TextArea).focus()

@@ -35,10 +35,11 @@ import logging
 from typing import List, Optional, TYPE_CHECKING
 
 from rich.markup import escape as markup_escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -61,7 +62,7 @@ from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_pow
 from servonaut.utils.formatting import escape_cell
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -113,8 +114,12 @@ _POWER_TEXT = {
 }
 
 
-class AWSManagerScreen(DemoRowsMixin, Screen):
+class AWSManagerScreen(DemoRowsMixin, WorkspaceScreen):
     """AWS EC2 instance manager — list + lifecycle toolbar."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 104
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -131,6 +136,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -146,52 +153,93 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]AWS EC2 Manager[/bold $text-accent]",
-                    id="aws_mgr_header",
-                ),
-                Static(
-                    "[dim]Click a row, then use the keys below or the action "
-                    "buttons. State-aware: Start only enables on stopped "
-                    "instances; Stop/Reboot only on running ones. Terminated "
-                    "rows disable all actions.[/dim]",
-                    id="aws_mgr_hint",
-                ),
+        yield WorkspaceControls("AWS servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            inventory_panel = Vertical(
+                Static("", id="aws_mgr_status"),
                 DataTable(
                     id="aws_mgr_table",
                     zebra_stripes=True,
                     cursor_type="row",
                 ),
-                Static("", id="aws_mgr_status"),
+                classes="provider-manager-inventory",
+            )
+            inventory_panel.border_title = "EC2 inventory"
+            selection = Vertical(
+                Static("Selected resource", classes="provider-manager-selection-label"),
+                Static(
+                    "No server selected", id="aws_mgr_selection",
+                    classes="provider-manager-selection-name", markup=False,
+                ),
+                Static(
+                    "Choose a row to see its full ID and address.",
+                    id="aws_mgr_identity",
+                    classes="provider-manager-selection-identity", markup=False,
+                ),
+                classes="provider-manager-selection",
+            )
+            actions = Vertical(
                 Horizontal(
-                    Button("Refresh (F5)", id="btn_aws_mgr_refresh"),
-                    Button(
-                        "+ New (n)", variant="primary",
-                        id="btn_aws_mgr_new",
+                    Static("Inventory", classes="provider-manager-action-label"),
+                    Horizontal(
+                        Button("Refresh (F5)", id="btn_aws_mgr_refresh"),
+                        Button("+ New (n)", variant="primary", id="btn_aws_mgr_new"),
+                        classes="provider-manager-buttons provider-manager-inventory-buttons",
                     ),
-                    Button(
-                        "Start (s)", id="btn_aws_mgr_start",
-                        disabled=True,
+                    classes="provider-manager-action-group",
+                ),
+                selection,
+                Horizontal(
+                    Static("Selected server", classes="provider-manager-action-label"),
+                    Horizontal(
+                        Button("Start (s)", id="btn_aws_mgr_start", disabled=True),
+                        Button("Stop (t)", id="btn_aws_mgr_stop", disabled=True),
+                        Button("Reboot (b)", id="btn_aws_mgr_reboot", disabled=True),
+                        classes="provider-manager-buttons provider-manager-power-buttons",
                     ),
-                    Button(
-                        "Stop (t)", id="btn_aws_mgr_stop",
-                        disabled=True,
+                    classes="provider-manager-action-group",
+                ),
+                Horizontal(
+                    Static("Remove", classes="provider-manager-action-label"),
+                    Horizontal(
+                        Button(
+                            "Terminate (d)", variant="error",
+                            id="btn_aws_mgr_terminate", disabled=True,
+                        ),
+                        classes="provider-manager-buttons provider-manager-remove-buttons",
                     ),
-                    Button(
-                        "Reboot (b)", id="btn_aws_mgr_reboot",
-                        disabled=True,
+                    classes="provider-manager-action-group",
+                ),
+                id="aws_mgr_actions",
+                classes="provider-manager-actions",
+            )
+            actions.border_title = "Resource actions"
+            rail = Vertical(actions, classes="provider-manager-rail")
+            rail.border_title = "Resource workspace"
+            yield ScrollableContainer(
+                Vertical(
+                    Horizontal(
+                        Static("AWS EC2 instances", id="aws_mgr_header"),
+                        Static(
+                            "Inventory", id="aws_mgr_overview",
+                            classes="provider-manager-overview", markup=False,
+                        ),
+                        classes="provider-manager-heading-row",
                     ),
-                    Button(
-                        "Terminate (d)", variant="error",
-                        id="btn_aws_mgr_terminate",
-                        disabled=True,
+                    Static(
+                        "Select an instance to manage its power. Start requires a "
+                        "stopped instance; Stop and Reboot require a running one. "
+                        "Terminated rows have no actions.",
+                        id="aws_mgr_hint",
                     ),
-                    id="aws_mgr_actions",
+                    classes="provider-manager-heading",
+                ),
+                Horizontal(
+                    inventory_panel, rail, classes="provider-manager-body",
                 ),
                 id="aws_mgr_container",
+                classes="workspace-content provider-manager-content",
             )
         yield Footer()
 
@@ -294,6 +342,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()
+        self._update_resource_context()
 
     @staticmethod
     def _colorize_state(state: str) -> str:
@@ -312,8 +361,39 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     # Selection-driven button enablement
     # ------------------------------------------------------------------
 
+    def _update_resource_context(self) -> None:
+        """Show the drawn row's identity beside its existing resource actions."""
+        try:
+            selection = self.query_one("#aws_mgr_selection", Static)
+            identity = self.query_one("#aws_mgr_identity", Static)
+            overview = self.query_one("#aws_mgr_overview", Static)
+        except NoMatches:
+            return
+        count = len(self._instances)
+        accounts = {str(row.get("account") or "") for row in self._instances}
+        summary = f"{count} instance{'s' if count != 1 else ''}"
+        if len(accounts) > 1:
+            summary += f" across {len(accounts)} accounts"
+        overview.update(summary)
+        instance = self._selected_instance()
+        if instance is None:
+            selection.update("No server selected")
+            identity.update("Choose a row to see its full ID and address.")
+            return
+        selection.update(Text(self._row_label(instance), style="bold"))
+        details = Text()
+        for index, (label, key) in enumerate((
+            ("State", "state"), ("ID", "id"), ("Address", "public_ip"),
+        )):
+            if index:
+                details.append("\n")
+            details.append(f"{label}: ", style="dim")
+            details.append(str(instance.get(key) or "—"))
+        identity.update(details)
+
     def on_data_table_row_highlighted(self, event) -> None:  # noqa: ANN001
         self._sync_action_buttons()
+        self._update_resource_context()
 
     def _selected_instance(self) -> Optional[dict]:
         table = self.query_one("#aws_mgr_table", DataTable)

@@ -10,13 +10,19 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from rich.markup import escape
+from rich.text import Text
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import ModalScreen, Screen
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -89,28 +95,30 @@ class FilterValueModal(ModalScreen[Optional[str]]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
     def __init__(self, field_label: str, example: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._field_label = field_label
         self._example = example
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 f"[bold $text-accent]Filter by {self._field_label}[/bold $text-accent]",
                 id="ct_value_modal_title",
             ),
-            Static(
+            body=DialogBody(Static(
                 "[dim]Matched exactly, and case-sensitively, against the whole "
                 "time range.[/dim]",
                 id="ct_value_modal_hint",
-            ),
-            Input(placeholder=self._example, id="ct_value_input"),
-            Horizontal(
+            )),
+            status=Vertical(Input(placeholder=self._example, id="ct_value_input")),
+            actions=DialogActions(
                 Button("Search", variant="primary", id="btn_ct_value_ok"),
                 Button("Cancel", id="btn_ct_value_cancel"),
                 id="ct_value_modal_buttons",
             ),
             id="ct_value_modal",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -133,8 +141,12 @@ class FilterValueModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class CloudTrailBrowserScreen(Screen):
+class CloudTrailBrowserScreen(WorkspaceScreen):
     """Screen for browsing and filtering AWS CloudTrail events."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 80
+    CONTENT_NARROW_WIDTH = 125
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -144,9 +156,10 @@ class CloudTrailBrowserScreen(Screen):
         Binding("p", "prev_page", "Prev", show=True),
     ]
 
-    # The screen gets -narrow / -wide classes by terminal width; the
-    # stylesheet lays the filters out on one row only when they fit.
+    # Filter columns follow the available workspace content width; the
+    # terminal breakpoints remain available for other screen presentation.
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     # Label of the AWS account whose trail is read ("" = default).
     _account: str = ""
@@ -158,6 +171,7 @@ class CloudTrailBrowserScreen(Screen):
         # The event the reader selected, kept by identity: the table shows
         # the filtered list, so a row number is not an index into _events.
         self._selected_event: Optional[Dict[str, Any]] = None
+        self._fetch_error: Optional[str] = None
         self._current_page: int = 0
         self._cap_reached: bool = False
         self._fleet_names_cache: Optional[Dict[str, str]] = None
@@ -171,6 +185,8 @@ class CloudTrailBrowserScreen(Screen):
         self._applied_filters: Dict[str, str] = {}
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     @property
@@ -186,92 +202,97 @@ class CloudTrailBrowserScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Label(
-                    "[bold]CloudTrail Event Browser[/bold]",
-                    id="cloudtrail_title",
-                ),
-            # A grid, so a narrow terminal can wrap the filters onto two rows
-            # (see HORIZONTAL_BREAKPOINTS and the stylesheet).
-            Container(
-                # Shown only when there are several AWS accounts; the
-                # stylesheet then gives the grid a column for it.
-                AccountPicker(provider_accounts(self.app, "aws"), id="ct_filter_account"),
-                Vertical(
-                    Label("Region"),
-                    Select(
-                        [(f"{label} ({value})", value) for label, value in _AWS_REGIONS],
-                        prompt="All regions",
-                        id="ct_select_region",
-                        allow_blank=True,
+        yield WorkspaceControls("CloudTrail Events")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="cloudtrail_container", classes="workspace-content"):
+                yield Horizontal(
+                    Label("[bold]CloudTrail Events[/bold]", id="cloudtrail_title"),
+                    Static("No events loaded", id="cloudtrail_context"),
+                    id="cloudtrail_heading",
+                )
+                yield Container(
+                    # Shown only when there are several AWS accounts; the
+                    # stylesheet then gives the grid a column for it.
+                    AccountPicker(provider_accounts(self.app, "aws"), id="ct_filter_account"),
+                    Vertical(
+                        Label("Region"),
+                        Select(
+                            [(f"{label} ({value})", value) for label, value in _AWS_REGIONS],
+                            prompt="All regions",
+                            id="ct_select_region",
+                            allow_blank=True,
+                        ),
+                        id="ct_filter_region",
                     ),
-                    id="ct_filter_region",
-                ),
-                Vertical(
-                    Label("Time Range"),
-                    Select(
-                        _TIME_RANGE_OPTIONS,
-                        value=1440,
-                        id="ct_select_time_range",
-                        allow_blank=False,
+                    Vertical(
+                        Label("Time Range"),
+                        Select(
+                            _TIME_RANGE_OPTIONS,
+                            value=1440,
+                            id="ct_select_time_range",
+                            allow_blank=False,
+                        ),
+                        id="ct_filter_time_range",
                     ),
-                    id="ct_filter_time_range",
-                ),
-                Vertical(
-                    Label("Event"),
-                    Select(
-                        [],
-                        prompt="All events",
-                        id="ct_select_event_name",
-                        allow_blank=True,
+                    Vertical(
+                        Label("Event"),
+                        Select(
+                            [],
+                            prompt="All events",
+                            id="ct_select_event_name",
+                            allow_blank=True,
+                        ),
+                        id="ct_filter_event_name",
                     ),
-                    id="ct_filter_event_name",
-                ),
-                Vertical(
-                    Label("User"),
-                    Select(
-                        [],
-                        prompt="All users",
-                        id="ct_select_username",
-                        allow_blank=True,
+                    Vertical(
+                        Label("User"),
+                        Select(
+                            [],
+                            prompt="All users",
+                            id="ct_select_username",
+                            allow_blank=True,
+                        ),
+                        id="ct_filter_username",
                     ),
-                    id="ct_filter_username",
-                ),
-                Vertical(
-                    Label("Resource Type"),
-                    Select(
-                        [],
-                        prompt="All types",
-                        id="ct_select_resource_type",
-                        allow_blank=True,
+                    Vertical(
+                        Label("Resource Type"),
+                        Select(
+                            [],
+                            prompt="All types",
+                            id="ct_select_resource_type",
+                            allow_blank=True,
+                        ),
+                        id="ct_filter_resource_type",
                     ),
-                    id="ct_filter_resource_type",
-                ),
-                Button("Fetch", id="ct_btn_fetch", variant="primary"),
-                Button("Back", id="ct_btn_back", variant="default"),
-                id="cloudtrail_filters",
-            ),
-            DataTable(id="cloudtrail_table"),
-            Horizontal(
-                Button("◀ Prev", id="ct_btn_prev", variant="default"),
-                Static("", id="ct_page_info"),
-                Button("Next ▶", id="ct_btn_next", variant="default"),
-                id="cloudtrail_pager",
-            ),
-            VerticalScroll(
-                Static(
-                    "Select an event to view details.",
-                    id="event_detail_text",
-                ),
-                id="event_detail",
-            ),
-            id="cloudtrail_container",
-        )
+                    Button("Fetch", id="ct_btn_fetch", variant="primary"),
+                    Button("Back", id="ct_btn_back", variant="default"),
+                    id="cloudtrail_filters",
+                )
+                with Horizontal(id="cloudtrail_workspace"):
+                    yield Vertical(
+                        DataTable(id="cloudtrail_table"),
+                        Horizontal(
+                            Button("◀ Prev", id="ct_btn_prev", variant="default"),
+                            Static("", id="ct_page_info"),
+                            Button("Next ▶", id="ct_btn_next", variant="default"),
+                            id="cloudtrail_pager",
+                        ),
+                        id="cloudtrail_results",
+                    )
+                    yield VerticalScroll(
+                        Static(
+                            "Select an event to view details.",
+                            id="event_detail_text",
+                        ),
+                        id="event_detail",
+                    )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#cloudtrail_filters").border_title = "Search activity"
+        self.query_one("#cloudtrail_results").border_title = "Events"
+        self.query_one("#event_detail").border_title = "Selected event"
         table = self.query_one("#cloudtrail_table", DataTable)
         table.add_columns("Time", "Event", "User", "Source IP", "Resource", "Region", "Error")
         table.cursor_type = "row"
@@ -311,6 +332,7 @@ class CloudTrailBrowserScreen(Screen):
         self._loading_more = False
         self._cap_reached = False
         self._selected_event = None
+        self._fetch_error = None
         self._fleet_names_cache = None
         self._suppress_filter_events = True
         try:
@@ -423,12 +445,19 @@ class CloudTrailBrowserScreen(Screen):
         active = {f: v for f, v in values.items() if v}
         if not active:
             self._visible = list(self._events)
-            return
-        self._visible = [
-            ev
-            for ev in self._events
-            if all(str(ev.get(f) or "") == v for f, v in active.items())
-        ]
+        else:
+            self._visible = [
+                ev
+                for ev in self._events
+                if all(str(ev.get(f) or "") == v for f, v in active.items())
+            ]
+        if self._selected_event is not None and not any(
+            ev is self._selected_event for ev in self._visible
+        ):
+            self._selected_event = None
+            self.query_one("#event_detail_text", Static).update(
+                "Select an event to view details."
+            )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """Narrow the loaded events as soon as a picker changes."""
@@ -458,6 +487,9 @@ class CloudTrailBrowserScreen(Screen):
 
         loaded = len(self._events)
         shown = len(self._visible)
+        self.query_one("#cloudtrail_context", Static).update(
+            f"{shown:,} of {loaded:,} events" if loaded else "No events loaded"
+        )
         if not loaded:
             summary = ""
         elif shown != loaded:
@@ -485,10 +517,31 @@ class CloudTrailBrowserScreen(Screen):
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1 and not more_available
 
+    def _render_fetch_error(self) -> bool:
+        """Render literally; withhold diagnostics if demo redaction is unavailable."""
+        if self._fetch_error is None:
+            return False
+        message = self._fetch_error
+        can_notify = True
+        if self.app.demo_mode:
+            try:
+                message = (
+                    self.app.redact_display_text(message)
+                    if self.app.redaction_service is not None else None
+                )
+            except Exception:  # noqa: BLE001 - never fall back to raw private text
+                message = None
+            if not isinstance(message, str):
+                message = "CloudTrail fetch failed: details unavailable in demo mode."
+                can_notify = False
+        self.query_one("#event_detail_text", Static).update(Text(message))
+        return can_notify
+
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched events for the new demo-mode state."""
         show_account_labels(self.query_one("#ct_filter_account", AccountPicker))
         self._populate_table()
+        self._render_fetch_error()
 
     def _populate_table(self) -> None:
         table = self.query_one("#cloudtrail_table", DataTable)
@@ -601,6 +654,7 @@ class CloudTrailBrowserScreen(Screen):
         self._show_event_detail(self._selected_event)
 
     def _show_event_detail(self, event: Dict[str, Any]) -> None:
+        self._fetch_error = None
         event_time = event.get("event_time", "")
         if hasattr(event_time, "strftime"):
             event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -612,15 +666,15 @@ class CloudTrailBrowserScreen(Screen):
 
         raw_event = event.get("raw_event", "")
         self.query_one("#event_detail_text", Static).update(
-            f"[bold]Event:[/bold] {event.get('event_name', '')}\n"
-            f"[bold]Time:[/bold] {event_time}\n"
-            f"[bold]User:[/bold] {self._user_detail(event.get('username', ''))}\n"
-            f"[bold]Source IP:[/bold] {_s(event.get('source_ip', ''))}\n"
-            f"[bold]Resource Type:[/bold] {_s(event.get('resource_type', ''))}\n"
-            f"[bold]Resource Name:[/bold] {_s(event.get('resource_name', ''))}\n"
-            f"[bold]Region:[/bold] {event.get('region', '')}\n"
-            f"[bold]Error:[/bold] {event.get('error_code', '') or '(none)'}\n\n"
-            f"[bold]Raw Event:[/bold]\n{_s(raw_event)}"
+            f"[bold]Event:[/bold] {escape(str(event.get('event_name', '')))}\n"
+            f"[bold]Time:[/bold] {escape(str(event_time))}\n"
+            f"[bold]User:[/bold] {escape(str(self._user_detail(event.get('username', ''))))}\n"
+            f"[bold]Source IP:[/bold] {escape(str(_s(event.get('source_ip', ''))))}\n"
+            f"[bold]Resource Type:[/bold] {escape(str(_s(event.get('resource_type', ''))))}\n"
+            f"[bold]Resource Name:[/bold] {escape(str(_s(event.get('resource_name', ''))))}\n"
+            f"[bold]Region:[/bold] {escape(str(event.get('region', '')))}\n"
+            f"[bold]Error:[/bold] {escape(str(event.get('error_code', '') or '(none)'))}\n\n"
+            f"[bold]Raw Event:[/bold]\n{escape(str(_s(raw_event)))}"
         )
 
     # ------------------------------------------------------------------
@@ -748,11 +802,13 @@ class CloudTrailBrowserScreen(Screen):
         username = selections["username"]
         resource_type = selections["resource_type"]
 
+        self._fetch_error = None
         self.query_one("#ct_btn_fetch", Button).disabled = True
         self.query_one("#event_detail_text", Static).update("Loading...")
         self.query_one("#cloudtrail_table", DataTable).clear()
         self._events = []
         self._visible = []
+        self._selected_event = None
         self._current_page = 0
         self._update_pager()
 
@@ -791,10 +847,14 @@ class CloudTrailBrowserScreen(Screen):
             page = await self._cloudtrail().lookup_page(**self._fetch_args)
             events = page.events
         except Exception as exc:
-            self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error", markup=False)
+            message = f"CloudTrail fetch failed: {exc}"
+            self._fetch_error = message
+            if self._render_fetch_error():
+                self.app.notify(message, severity="error", markup=False)
             self.query_one("#ct_btn_fetch", Button).disabled = False
             return
 
+        self._fetch_error = None
         self._events = events
         self._next_token = page.next_token
         self._fleet_names_cache = None

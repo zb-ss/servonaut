@@ -78,9 +78,11 @@ async def test_a_member_finds_the_team_servers_in_the_server_list(tui, seed, fak
         await t.select_instance("server-1")
         await t.press("enter")
         await t.wait_for_screen("ServerActionsScreen")
+        context = str(t.on_screen("#server_context").visual)
+        identity = str(t.on_screen("#server_identity").visual)
         info = str(t.on_screen("#server_info").visual)
-        assert "Team server: server-1" in info
-        assert "Team: Ops" in info
+        assert "Team server: server-1" in context
+        assert "Team: Ops" in identity
         assert "Team login: deploy" in info
 
         # A command runs as the login the share names, not the configured default.

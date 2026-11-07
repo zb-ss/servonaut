@@ -11,7 +11,8 @@ Each entry belongs to an AWS account (``IPBanConfig.account``, empty for the
 default one). The Account row appears only when there are several AWS
 accounts, and discovery runs with the chosen account's credentials.
 
-Panel-specific CSS lives in :attr:`DEFAULT_CSS` — never in the main stylesheet bundle.
+Panel-specific defaults live in :attr:`DEFAULT_CSS`; the settings stylesheet
+provides the scoped record and form layout.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.config.schema import IPBanConfig
@@ -33,6 +34,7 @@ from servonaut.screens._provider_accounts import (
     shown_label,
 )
 from servonaut.screens.settings.base import SettingsPanel
+from servonaut.screens.settings.forms import setting_row
 from servonaut.services.accounts.aws_account import aws_client
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,7 @@ class IpBanPanel(SettingsPanel):
 
     PANEL_ID = "ip_ban"
     TITLE = "IP Ban Configurations"
+    DESCRIPTION = 'Reusable AWS targets for WAF, security-group and network-ACL bans.'
 
     DEFAULT_CSS = """
     IpBanPanel .ipban-action-row {
@@ -123,44 +126,46 @@ class IpBanPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the IP ban CRUD form rows."""
-        yield Static(
-            "Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
-            "WAF IP sets are the recommended method.",
-            classes="note",
+        account_row = setting_row(
+            "Account:",
+            Select(
+                [],
+                prompt="Select account...",
+                id="ipban_select_account",
+                allow_blank=True,
+            ),
         )
-        yield DataTable(id="ipban_table")
-        yield Horizontal(
-            Button("Add", id="btn_ipban_add", variant="primary"),
-            Button("Edit", id="btn_ipban_edit"),
-            Button("Remove", id="btn_ipban_remove", variant="error"),
-            classes="ipban-action-row",
-        )
+        account_row.id = "ipban_account_row"
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static("Configured targets", classes="settings-group-title", markup=False)
+            yield Static(
+                "Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
+                "WAF IP sets are the recommended method.",
+                classes="note",
+            )
+            yield DataTable(id="ipban_table")
+            yield Horizontal(
+                Button("Add", id="btn_ipban_add", variant="primary"),
+                Button("Edit", id="btn_ipban_edit"),
+                Button("Remove", id="btn_ipban_remove", variant="error"),
+                classes="ipban-action-row",
+            )
         # Inline CRUD form — hidden until Add / Edit is pressed.
         yield Container(
+            Static("Target details", classes="settings-group-title", markup=False),
             # Common fields
-            Horizontal(
-                Static("Name:", classes="label"),
+            setting_row(
+                "Name:",
                 Input(
                     placeholder="e.g. production-waf-blocklist",
                     id="ipban_input_name",
                 ),
-                classes="setting_row",
             ),
             # Shown only when there is an account to choose (see
             # _fill_account_select).
-            Horizontal(
-                Static("Account:", classes="label"),
-                Select(
-                    [],
-                    prompt="Select account...",
-                    id="ipban_select_account",
-                    allow_blank=True,
-                ),
-                classes="setting_row",
-                id="ipban_account_row",
-            ),
-            Horizontal(
-                Static("Method:", classes="label"),
+            account_row,
+            setting_row(
+                "Method:",
                 Select(
                     options=[
                         ("WAF IP Set (recommended)", "waf"),
@@ -170,17 +175,15 @@ class IpBanPanel(SettingsPanel):
                     prompt="Select method...",
                     id="ipban_select_method",
                 ),
-                classes="setting_row",
             ),
-            Horizontal(
-                Static("Region:", classes="label"),
+            setting_row(
+                "Region:",
                 Select(
                     [(f"{label} ({value})", value) for label, value in _AWS_REGIONS],
                     prompt="Select region...",
                     id="ipban_select_region",
                     allow_blank=True,
                 ),
-                classes="setting_row",
             ),
             # Discover button row
             Horizontal(
@@ -194,34 +197,31 @@ class IpBanPanel(SettingsPanel):
             ),
             # WAF-specific fields
             Container(
-                Horizontal(
-                    Static("WAF IP Set:", classes="label"),
+                setting_row(
+                    "WAF IP Set:",
                     Select(
                         [],
                         prompt="Discover or enter manually below",
                         id="ipban_select_ip_set",
                         allow_blank=True,
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("IP Set ID:", classes="label"),
+                setting_row(
+                    "IP Set ID:",
                     Input(
                         placeholder="e.g. 12345678-abcd-1234-efgh-123456789012",
                         id="ipban_input_ip_set_id",
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("IP Set Name:", classes="label"),
+                setting_row(
+                    "IP Set Name:",
                     Input(
                         placeholder="e.g. my-blocklist",
                         id="ipban_input_ip_set_name",
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("WAF Scope:", classes="label"),
+                setting_row(
+                    "WAF Scope:",
                     Select(
                         options=[
                             ("Regional (ALB, API Gateway)", "REGIONAL"),
@@ -230,58 +230,55 @@ class IpBanPanel(SettingsPanel):
                         value="REGIONAL",
                         id="ipban_select_waf_scope",
                     ),
-                    classes="setting_row",
                 ),
                 id="ipban_waf_fields",
+                classes="settings-form-section settings-operations-section",
             ),
             # Security Group fields
             Container(
-                Horizontal(
-                    Static("Security Group:", classes="label"),
+                setting_row(
+                    "Security Group:",
                     Select(
                         [],
                         prompt="Discover or enter manually below",
                         id="ipban_select_sg",
                         allow_blank=True,
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("Security Group ID:", classes="label"),
+                setting_row(
+                    "Security Group ID:",
                     Input(
                         placeholder="e.g. sg-0123456789abcdef0",
                         id="ipban_input_sg_id",
                     ),
-                    classes="setting_row",
                 ),
                 id="ipban_sg_fields",
+                classes="settings-form-section settings-operations-section",
             ),
             # NACL fields
             Container(
-                Horizontal(
-                    Static("Network ACL:", classes="label"),
+                setting_row(
+                    "Network ACL:",
                     Select(
                         [],
                         prompt="Discover or enter manually below",
                         id="ipban_select_nacl",
                         allow_blank=True,
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("NACL ID:", classes="label"),
+                setting_row(
+                    "NACL ID:",
                     Input(
                         placeholder="e.g. acl-0123456789abcdef0",
                         id="ipban_input_nacl_id",
                     ),
-                    classes="setting_row",
                 ),
-                Horizontal(
-                    Static("Rule Number Start:", classes="label"),
+                setting_row(
+                    "Rule Number Start:",
                     Input(placeholder="100", id="ipban_input_rule_number_start"),
-                    classes="setting_row",
                 ),
                 id="ipban_nacl_fields",
+                classes="settings-form-section settings-operations-section",
             ),
             # Form action buttons
             Horizontal(
@@ -290,6 +287,7 @@ class IpBanPanel(SettingsPanel):
                 classes="ipban-form-actions",
             ),
             id="ipban-form-container",
+            classes="settings-form-section settings-operations-section",
         )
 
     # ------------------------------------------------------------------
@@ -721,6 +719,12 @@ class IpBanPanel(SettingsPanel):
 
         self.query_one("#btn_ipban_discover", Button).disabled = True
         self.query_one("#ipban_discover_hint", Static).update("Discovering...")
+        # Keep the trigger and pending status visible after the hint reflows.
+        self.call_after_refresh(
+            self.query_one(".ipban-discover-row").scroll_visible,
+            animate=False,
+            immediate=True,
+        )
 
         self.run_worker(
             self._discover_aws_resources(method, region, scope, context),

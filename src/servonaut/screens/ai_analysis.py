@@ -9,10 +9,11 @@ from typing import Optional, Dict, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, Vertical
+from textual.content import Content
+from textual.events import TextSelected
 from textual.timer import Timer
-from textual.widgets import Footer, Static, Button, TextArea, Input
+from textual.widgets import Footer, Static, Button, TextArea, Input, Label
 
 from rich.markup import escape
 
@@ -23,7 +24,7 @@ from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance, fleet_rows, team_rows
 
 logger = logging.getLogger(__name__)
@@ -32,12 +33,16 @@ logger = logging.getLogger(__name__)
 _TOKEN_DEBOUNCE = 0.2
 
 
-class AIAnalysisScreen(Screen):
+class AIAnalysisScreen(WorkspaceScreen):
     """Screen for AI-powered log analysis using OpenAI, Anthropic, Ollama, or Gemini.
 
     Accepts text to analyze and displays AI-generated insights including
     summaries, errors, security concerns, and recommended actions.
     """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 90
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -63,44 +68,51 @@ class AIAnalysisScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("[bold $text-accent]AI Log Analysis[/bold $text-accent]", id="ai_header"),
-                Static("", id="ai_provider_info"),
-                TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False),
-                Horizontal(
-                    Input(
-                        placeholder="Filter lines (substring or /regex/)",
-                        id="ai_filter_input",
-                    ),
-                    Button("Apply", id="btn_filter_apply", variant="default"),
-                    Button("Clear", id="btn_filter_clear", variant="default"),
-                    id="ai_filter_row",
-                ),
-                Static("", id="ai_token_estimate"),
-                Input(
-                    placeholder="Custom prompt (leave empty for default analysis)",
-                    id="ai_user_prompt",
-                ),
-                Horizontal(
-                    Button("Fetch Logs", id="btn_fetch_logs", variant="default"),
-                    Button("Analyze (F5)", id="btn_analyze", variant="primary"),
-                    id="ai_action_row",
-                ),
-                ProgressIndicator(),
-                Static("", id="ai_status"),
-                TextArea("", id="ai_output", read_only=True, soft_wrap=True),
-                Static("", id="ai_cost_info"),
-                Button("Back", id="btn_back", variant="error"),
-                id="ai_container",
-            )
+        yield WorkspaceControls("AI Log Analysis")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="ai_container", classes="workspace-content"):
+                yield Static("[bold $text-accent]AI Log Analysis[/bold $text-accent]", id="ai_header")
+                yield Static("", id="ai_provider_info")
+                with Horizontal(id="ai_workbench"):
+                    with Vertical(id="ai_source_panel"):
+                        yield TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False)
+                        yield Horizontal(
+                            Input(
+                                placeholder="Filter lines (substring or /regex/)",
+                                id="ai_filter_input",
+                            ),
+                            Button("Apply", id="btn_filter_apply", variant="default"),
+                            Button("Clear", id="btn_filter_clear", variant="default"),
+                            id="ai_filter_row",
+                        )
+                        yield Static("", id="ai_token_estimate")
+                    with Vertical(id="ai_result_panel"):
+                        yield ProgressIndicator()
+                        yield Static("", id="ai_status")
+                        yield TextArea("", id="ai_output", read_only=True, soft_wrap=True)
+                yield Static("", id="ai_cost_info")
+                with Container(id="ai_run_controls"):
+                    with Vertical(id="ai_prompt_control"):
+                        yield Label("Analysis instructions", classes="analysis_field_label")
+                        yield Input(
+                            placeholder="Custom prompt (leave empty for default analysis)",
+                            id="ai_user_prompt",
+                        )
+                    with Horizontal(id="ai_action_row"):
+                        yield Button("Fetch Logs", id="btn_fetch_logs", variant="default")
+                        yield Button("Analyze (F5)", id="btn_analyze", variant="primary")
+                        yield Button("Back", id="btn_back")
         yield Footer()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def on_mount(self) -> None:
+        self.query_one("#ai_source_panel").border_title = "Source text"
+        self.query_one("#ai_result_panel").border_title = "Analysis output"
         self._update_provider_info()
 
         if not self._instance:
@@ -113,7 +125,7 @@ class AIAnalysisScreen(Screen):
             self._raw_text = self._text
 
             status = self.query_one("#ai_status", Static)
-            status.update("[dim]Text loaded. Press Analyze or F5 to start.[/dim]")
+            status.update(Content.assemble("Text loaded. Press Analyze or F5 to start."))
 
             tokens = self.app.ai_analysis_service.estimate_tokens(self._text)
             if tokens > 8000:
@@ -262,12 +274,12 @@ class AIAnalysisScreen(Screen):
         if self._filter_pattern:
             filtered_count = len(text.splitlines()) if text else 0
             total_count = len(self._raw_text.splitlines()) if self._raw_text else 0
-            line_info = f"  [dim]({filtered_count}/{total_count} lines)[/dim]"
+            line_info = f"  ({filtered_count}/{total_count} lines)"
         else:
             line_info = ""
 
         self.query_one("#ai_token_estimate", Static).update(
-            f"Input: ~[$text-warning]{tokens}[/$text-warning] tokens{chunk_note}{line_info}"
+            Content.assemble("Input: ~", (str(tokens), "bold"), f" tokens{chunk_note}{line_info}")
         )
 
     def _get_input_text(self) -> str:
@@ -380,7 +392,7 @@ class AIAnalysisScreen(Screen):
             self.app.notify("No server context available.", severity="warning")
             return
 
-        self.query_one("#ai_status", Static).update("[dim]Probing available logs...[/dim]")
+        self.query_one("#ai_status", Static).update(Content.assemble("Probing available logs..."))
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Probing logs...")
@@ -403,7 +415,7 @@ class AIAnalysisScreen(Screen):
                 self.app.connection_service,
             )
             if not conn["host"]:
-                status.update("[$text-error]No IP address available for this instance.[/$text-error]")
+                status.update(Content.assemble(("No IP address available for this instance.", "bold")))
                 return
 
             # Probe for readable log files
@@ -416,11 +428,11 @@ class AIAnalysisScreen(Screen):
             self._available_logs = available
 
             if not available:
-                status.update("[$text-warning]No readable log files found on this server.[/$text-warning]")
+                status.update(Content.assemble(("No readable log files found on this server.", "bold")))
                 return
 
             progress.stop()
-            status.update("")
+            status.update(Content.assemble(""))
 
             # Open log picker modal
             self.app.push_screen(
@@ -445,7 +457,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
+            status.update(Content.assemble(("Error:", "bold"), f" {exc_str}"))
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -489,7 +501,7 @@ class AIAnalysisScreen(Screen):
 
     def _fetch_log_file(self, log_path: str) -> None:
         """Fetch a specific log file from the server."""
-        self.query_one("#ai_status", Static).update(f"[dim]Fetching {log_path}...[/dim]")
+        self.query_one("#ai_status", Static).update(Content.assemble("Fetching ", log_path, "..."))
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Fetching log...")
@@ -560,9 +572,10 @@ class AIAnalysisScreen(Screen):
                 self._raw_text = display_log_text
                 self._update_token_estimate()
                 status.update(
-                    f"[$text-success]Fetched {len(display_log_text.splitlines())} lines "
-                    f"from {display_log_path}.[/$text-success] "
-                    f"Press [bold]Analyze[/bold] to send to AI."
+                    Content.assemble(
+                        f"Fetched {len(display_log_text.splitlines())} lines from {display_log_path}. "
+                        "Press ", ("Analyze", "bold"), " to send to AI.",
+                    )
                 )
             else:
                 err_text = stderr.decode("utf-8", errors="replace").strip()
@@ -572,15 +585,15 @@ class AIAnalysisScreen(Screen):
                     if self.app.demo_mode and self.app.redaction_service:
                         err_text = self.app.redaction_service.scrub_stream(err_text)
                     status.update(
-                        f"[$text-warning]No logs fetched.[/$text-warning] [dim]{err_text}[/dim]"
+                        Content.assemble(("No logs fetched.", "bold"), f" {err_text}")
                     )
                 else:
                     status.update(
-                        "[$text-warning]Log file is empty or not readable.[/$text-warning]"
+                        Content.assemble(("Log file is empty or not readable.", "bold"))
                     )
 
         except asyncio.TimeoutError:
-            status.update("[$text-error]Timed out fetching logs from server.[/$text-error]")
+            status.update(Content.assemble(("Timed out fetching logs from server.", "bold")))
         except Exception as exc:
             logger.error("Error fetching log %s: %s", log_path, exc)
             # Demo-mode: exception messages can carry paths, IPs, or account IDs
@@ -588,7 +601,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
+            status.update(Content.assemble(("Error:", "bold"), f" {exc_str}"))
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -607,8 +620,10 @@ class AIAnalysisScreen(Screen):
         # Read custom prompt if provided
         user_prompt = self.query_one("#ai_user_prompt", Input).value.strip()
 
-        self.query_one("#ai_status", Static).update("")
+        self.query_one("#ai_status", Static).update(Content.assemble(""))
+        self.query_one("#ai_cost_info", Static).update(Content.assemble(""))
         self.query_one("#ai_output", TextArea).load_text("")
+        self._output_text = ""
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Analyzing with AI...")
@@ -630,7 +645,7 @@ class AIAnalysisScreen(Screen):
             result = await self.app.ai_analysis_service.analyze_text(
                 text, system_prompt=system_prompt
             )
-            status.update("[$text-success]Analysis complete.[/$text-success] Select text to copy.")
+            status.update(Content.assemble(("Analysis complete.", "bold"), " Select text to copy."))
             # Demo-mode: scrub AI output before displaying and before storing
             # in _output_text (which feeds action_copy_output). Display-only.
             ai_content = result['content']
@@ -646,33 +661,40 @@ class AIAnalysisScreen(Screen):
             cost = result.get('estimated_cost')
 
             if cost is None:
-                cost_str = "[dim]pricing unavailable[/dim]"
+                cost_str = "pricing unavailable"
             elif cost == 0:
-                cost_str = "[$text-success]free (local)[/$text-success]"
+                cost_str = "free (local)"
             else:
-                cost_str = f"[$text-warning]${cost:.4f}[/$text-warning]"
+                cost_str = f"${cost:.4f}"
             cost_info.update(
-                f"Tokens: [$text-warning]{input_tok}[/$text-warning] in / "
-                f"[$text-warning]{output_tok}[/$text-warning] out "
-                f"([$text-warning]{total_tok}[/$text-warning] total)  "
-                f"Model: [$text-accent]{model}[/$text-accent]  "
-                f"Est. cost: {cost_str}"
+                Content.assemble(
+                    "Tokens: ", (str(input_tok), "bold"), " in / ",
+                    (str(output_tok), "bold"), " out (", (str(total_tok), "bold"),
+                    " total)  Model: ", (str(model), "bold"),
+                    "  Est. cost: ", (cost_str, "bold"),
+                )
             )
         except Exception as exc:
-            # Demo-mode: scrub exception message BEFORE embedding in markup.
+            # Demo-mode: scrub exception text before constructing status content.
             # Exception strings can carry paths, IPs, or account IDs from
             # the underlying AI service call.
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
+            status.update(Content.assemble(("Error:", "bold"), f" {exc_str}"))
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
 
-    def on_mouse_up(self, event) -> None:
-        """Auto-copy text selected in the output TextArea."""
+    def on_text_selected(self, event: TextSelected) -> None:
+        """Keep output copying literal and let other selections reach the app."""
         output = self.query_one("#ai_output", TextArea)
+        if self.focused is not output or self.get_selected_text():
+            return
+
+        # Own this selection once, including an empty output selection:
+        # older editor selections must not become a clipboard fallback.
+        event.stop()
         selected = output.selected_text
         if selected:
             from servonaut.utils.platform_utils import copy_to_clipboard

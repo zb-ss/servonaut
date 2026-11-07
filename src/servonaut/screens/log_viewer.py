@@ -15,8 +15,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.events import Key
-from textual.screen import Screen
-from textual.widgets import Footer, Static, RichLog
+from textual.widgets import Button, Footer, Static, RichLog
 
 from servonaut.utils.ssh_utils import (
     SshLog,
@@ -25,7 +24,7 @@ from servonaut.utils.ssh_utils import (
     with_diagnostics,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from servonaut.screens.log_picker import (
     LogPickerModal,
@@ -69,7 +68,7 @@ def _format_cache_age(probed_at_iso: Optional[str]) -> str:
     return f" {int(age_seconds // 86400)}d ago"
 
 
-class LogViewerScreen(Screen):
+class LogViewerScreen(WorkspaceScreen):
     """Real-time remote log viewer via SSH tail -f.
 
     Architecture: a dedicated OS thread reads lines from the SSH subprocess
@@ -78,6 +77,14 @@ class LogViewerScreen(Screen):
     all blocking I/O off the asyncio event loop so key events are never
     starved.
     """
+
+    AUTO_FOCUS = "#log_output"
+    CHAT_REFLOW = True
+    # The log pane's margin, border and padding (6) plus about 58 columns
+    # of log text beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # The action dock wraps before labels would be truncated.
+    CONTENT_NARROW_WIDTH = 104
 
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
@@ -132,31 +139,56 @@ class LogViewerScreen(Screen):
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(
-                    f"[bold $text-accent]Log Viewer:[/bold $text-accent] {name}  [dim]Probing available logs...[/dim]",
+        yield WorkspaceControls("Log viewer")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="log_viewer_container", classes="workspace-content"):
+                yield Static("[bold]Remote log stream[/bold]", id="log_title")
+                yield Static(
+                    f"[bold $text-accent]Log Viewer:[/bold $text-accent] {escape(str(name))}  [dim]Probing available logs...[/dim]",
                     id="log_header",
-                ),
-                RichLog(id="log_output", highlight=True, markup=True),
-                Static(
+                )
+                yield RichLog(id="log_output", highlight=True, markup=True)
+                with Container(id="log_actions"):
+                    yield Button("Pick log", id="log_pick", variant="primary")
+                    yield Button("Pause / resume", id="log_pause")
+                    yield Button("Select text", id="log_select")
+                    yield Button("Copy all", id="log_copy")
+                    yield Button("Send to AI", id="log_analyze")
+                    yield Button("Clear", id="log_clear")
+                yield Static(
                     "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
                     id="log_hints",
-                ),
-                id="log_viewer_container",
-            )
+                )
         yield Footer()
 
     def on_key(self, event: Key) -> None:
         """Handle keys that can't be expressed as Textual bindings."""
+        # Like the screen's own bindings, typing on the focused navigation
+        # rail must not act on the log.
+        if self.navigation_focused:
+            return
         if event.character == "+":
             self.action_add_path()
             event.prevent_default()
 
     def on_mount(self) -> None:
         """Probe for available logs and start streaming."""
+        self.query_one("#log_output", RichLog).border_title = "Log output"
         self.run_worker(self._probe_and_start(), name="probe_logs", exclusive=True)
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "log_pick": "pick_log",
+            "log_pause": "toggle_pause",
+            "log_select": "copy_mode",
+            "log_copy": "copy_output",
+            "log_analyze": "send_to_ai",
+            "log_clear": "clear_output",
+        }
+        action = actions.get(event.button.id)
+        if action:
+            await self.run_action(action)
 
     async def _probe_and_start(self) -> None:
         """Probe available log paths, then start streaming the first one.

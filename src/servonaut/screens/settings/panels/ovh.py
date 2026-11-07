@@ -20,7 +20,7 @@ import logging
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Static, Switch
 
@@ -30,6 +30,7 @@ from servonaut.screens.settings.accounts import (
     refresh_provider_fleet,
 )
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
 
@@ -74,50 +75,47 @@ class OvhPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield OVHcloud form rows."""
-        # Status line (updated on load)
-        yield Static("", id="ovh_status_display", classes="ovh-status")
-
-        # The account form
-        yield Static("Account settings", classes="ovh-section-header")
-        yield Static(
-            "Credentials, projects, SSH defaults and Object Storage keys are "
-            "in each account's form: Setup OVHcloud for the primary account, "
-            "Accounts below for the others.",
-            classes="ovh-note",
-        )
-        yield Horizontal(
-            Button("Setup OVHcloud", id="ovh_btn_setup", variant="primary"),
-            classes="ovh-setup-row",
-        )
-
-        # Provider toggle
-        yield Static("Provider", classes="ovh-section-header")
-        yield Horizontal(
-            Static("Enable OVHcloud", classes="label"),
-            Switch(value=False, id="ovh_enabled"),
-            classes="setting_row",
-        )
-
-        # Audit + cost
-        yield Static("Audit & cost alerts", classes="ovh-section-header")
-        yield Horizontal(
-            Static("Audit log path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/ovh_audit.json",
-                id="ovh_audit_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cost alert threshold", classes="label"),
-            Input(placeholder="0.0", id="ovh_cost_threshold"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cost alert currency", classes="label"),
-            Input(placeholder="EUR", id="ovh_cost_currency"),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section"):
+            # Status line (updated on load)
+            yield Static("", id="ovh_status_display", classes="ovh-status")
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # The account form
+            yield Static("Account settings", classes="ovh-section-header settings-group-title")
+            yield Static(
+                "Credentials, projects, SSH defaults and Object Storage keys are "
+                "in each account's form: Setup OVHcloud for the primary account, "
+                "Accounts below for the others.",
+                classes="ovh-note",
+            )
+            yield Horizontal(
+                Button("Setup OVHcloud", id="ovh_btn_setup", variant="primary"),
+                classes="ovh-setup-row",
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # Provider toggle
+            yield Static("Provider", classes="ovh-section-header settings-group-title")
+            yield setting_row(
+                "Enable OVHcloud",
+                Switch(value=False, id="ovh_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # Audit + cost
+            yield Static("Audit & cost alerts", classes="ovh-section-header settings-group-title")
+            yield setting_row(
+                "Audit log path",
+                Input(
+                    placeholder="~/.servonaut/ovh_audit.json",
+                    id="ovh_audit_path",
+                ),
+            )
+            yield setting_row(
+                "Cost alert threshold",
+                Input(placeholder="0.0", id="ovh_cost_threshold"),
+            )
+            yield setting_row(
+                "Cost alert currency",
+                Input(placeholder="EUR", id="ovh_cost_currency"),
+            )
 
         # Accounts (each one edited in its own form)
         yield OvhAccountsSection(heading_classes="ovh-section-header")

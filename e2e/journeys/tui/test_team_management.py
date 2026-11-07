@@ -55,7 +55,14 @@ async def _open_team(t) -> None:
     await t.wait_until(lambda: t.table_rows("#teams_table") == [[TEAM, "owner", "1"]], desc="team listed")
     await t.click("#btn_view_team")
     # The team's sections open below the teams table, out of view until scrolled to.
-    await t.wait_until(lambda: _text(t, "#team_header") == f"Team: {TEAM}\nSeats: 1 / 5", desc="team header")
+    expected_header = (
+        f"Team: {TEAM}\nSeats: 1 / 5\n"
+        "Your role: owner   Members: 1   Shared servers: 1   Config versions: 0"
+    )
+    await t.wait_until(
+        lambda: _text(t, "#team_header") == expected_header,
+        desc="team header",
+    )
 
 
 def _text(t, selector: str) -> str:

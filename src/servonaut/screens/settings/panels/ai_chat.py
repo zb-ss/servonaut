@@ -13,10 +13,11 @@ from typing import Any, Dict, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Select, Static, Switch, TextArea
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class AiChatPanel(SettingsPanel):
 
     PANEL_ID = "ai_chat"
     TITLE = "AI Chat"
+    DESCRIPTION = "Prompts, tool limits and context shared with your AI sessions."
 
     DEFAULT_CSS = """
     AiChatPanel .ai-chat-section-header {
@@ -83,81 +85,70 @@ class AiChatPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield all AI chat form rows."""
-        # --- Log analysis section ---
-        yield Static("Log Analysis", classes="ai-chat-section-header")
-        yield Horizontal(
-            Static("Log chunk size (chars)", classes="label"),
-            Input(placeholder="100000", id="ai_chat_chunk_size"),
-            classes="setting_row",
-        )
-        yield Static(
-            "System prompt for log analysis mode:",
-            classes="ai-chat-help",
-        )
-        yield TextArea(id="ai_chat_system_prompt", language=None)
-
-        # --- Chat behaviour section ---
-        yield Static("Chat Behaviour", classes="ai-chat-section-header")
-        yield Horizontal(
-            Static("Max history messages", classes="label"),
-            Input(placeholder="20", id="ai_chat_max_history_messages"),
-            classes="setting_row",
-        )
-        yield Static(
-            "System prompt prepended to each chat turn (leave blank for default):",
-            classes="ai-chat-help",
-        )
-        yield TextArea(id="ai_chat_chat_system_prompt", language=None)
-
-        # --- Agentic loop limits ---
-        yield Static("Agentic Loop Limits", classes="ai-chat-section-header")
-        yield Horizontal(
-            Static("Max tool iterations (local AI)", classes="label"),
-            Input(placeholder="10", id="ai_chat_max_tool_iterations"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max tool rounds (hosted AI, blank=server default)", classes="label"),
-            Input(placeholder="", id="ai_chat_max_tool_rounds"),
-            classes="setting_row",
-        )
-
-        # --- Guard level ---
-        yield Static("Tool Guard Level", classes="ai-chat-section-header")
-        yield Horizontal(
-            Static("Chat tool guard level", classes="label"),
-            Select(
-                _GUARD_OPTIONS,
-                value="standard",
-                allow_blank=False,
-                id="ai_chat_tool_guard_level",
-            ),
-            classes="setting_row",
-        )
-        yield Static("", id="ai_chat_guard_warning", classes="ai-chat-warning")
-
-        # --- Memory and result switches ---
-        yield Static("Context & History", classes="ai-chat-section-header")
-        yield Horizontal(
-            Static("Keep tool results in chat history", classes="label"),
-            Switch(value=True, id="ai_chat_keep_tool_results"),
-            classes="setting_row",
-        )
-        yield Static(
-            "When off, tool results are dropped on save and won't appear on reload.",
-            classes="ai-chat-help",
-        )
-        yield Horizontal(
-            Static("Inject server memory into chats", classes="label"),
-            Switch(value=False, id="ai_chat_inject_server_memory"),
-            classes="setting_row",
-        )
-        yield Static(
-            "Pre-flights a <CONTEXT> block of local server memory on each turn. "
-            "Disable for compliance scenarios where memory must not leave the local store. "
-            "Toggling this also sets the memory-inject consent decision.",
-            classes="ai-chat-help",
-        )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Log Analysis", classes="ai-chat-section-header")
+            yield setting_row(
+                "Log chunk size (chars)",
+                Input(placeholder="100000", id="ai_chat_chunk_size"),
+            )
+            yield Static(
+                "System prompt for log analysis mode:",
+                classes="ai-chat-help",
+            )
+            yield TextArea(id="ai_chat_system_prompt", language=None)
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Chat Behaviour", classes="ai-chat-section-header")
+            yield setting_row(
+                "Max history messages",
+                Input(placeholder="20", id="ai_chat_max_history_messages"),
+            )
+            yield Static(
+                "System prompt prepended to each chat turn (leave blank for default):",
+                classes="ai-chat-help",
+            )
+            yield TextArea(id="ai_chat_chat_system_prompt", language=None)
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Agentic Loop Limits", classes="ai-chat-section-header")
+            yield setting_row(
+                "Max tool iterations (local AI)",
+                Input(placeholder="10", id="ai_chat_max_tool_iterations"),
+            )
+            yield setting_row(
+                "Max tool rounds (hosted AI, blank=server default)",
+                Input(placeholder="", id="ai_chat_max_tool_rounds"),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Tool Guard Level", classes="ai-chat-section-header")
+            yield setting_row(
+                "Chat tool guard level",
+                Select(
+                    _GUARD_OPTIONS,
+                    value="standard",
+                    allow_blank=False,
+                    id="ai_chat_tool_guard_level",
+                ),
+            )
+            yield Static("", id="ai_chat_guard_warning", classes="ai-chat-warning")
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Context & History", classes="ai-chat-section-header")
+            yield setting_row(
+                "Keep tool results in chat history",
+                Switch(value=True, id="ai_chat_keep_tool_results"),
+            )
+            yield Static(
+                "When off, tool results are dropped on save and won't appear on reload.",
+                classes="ai-chat-help",
+            )
+            yield setting_row(
+                "Inject server memory into chats",
+                Switch(value=False, id="ai_chat_inject_server_memory"),
+            )
+            yield Static(
+                "Pre-flights a <CONTEXT> block of local server memory on each turn. "
+                "Disable for compliance scenarios where memory must not leave the local store. "
+                "Toggling this also sets the memory-inject consent decision.",
+                classes="ai-chat-help",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -381,6 +372,8 @@ class AiChatPanel(SettingsPanel):
         except Exception:
             return
         if guard_level == "dangerous":
-            warning.update(escape(_DANGEROUS_WARNING))
+            warning.update(
+                f"[$text-warning]{escape(_DANGEROUS_WARNING)}[/$text-warning]"
+            )
         else:
             warning.update("")

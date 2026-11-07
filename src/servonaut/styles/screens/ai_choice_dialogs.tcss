@@ -1,0 +1,127 @@
+/* Explicit provider decisions and server-supplied credit choices. */
+
+AIProviderFirstRunModal #ai_picker_existing {
+    height: auto;
+    margin-top: 1;
+    padding: 0 1;
+    border-left: heavy $accent;
+    background: $panel;
+    color: $text;
+    text-style: none;
+}
+
+AIProviderFirstRunModal #ai_picker_buttons {
+    layout: grid;
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-rows: 3;
+    height: 6;
+}
+
+AIProviderFirstRunModal #ai_picker_buttons Button {
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+}
+
+AIEmptyStateModal #ai_empty_body {
+    height: auto;
+    padding: 0 1;
+    border-left: heavy $accent;
+    background: $panel;
+}
+
+AIEmptyStateModal #ai_empty_buttons {
+    layout: grid;
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-rows: 3;
+    height: 9;
+}
+
+AIEmptyStateModal #ai_empty_buttons Button {
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+}
+
+/* Retain the session disclosure and four native choices above Cancel. */
+AIFallbackPromptModal #ai_fallback_container {
+    height: 20;
+    max-height: 100%;
+}
+
+AIFallbackPromptModal #ai_fallback_options_label {
+    height: 1;
+    color: $text-muted;
+}
+
+AIFallbackPromptModal #ai_fallback_buttons {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 0;
+}
+
+AIFallbackPromptModal #ai_fallback_buttons Button {
+    height: 3;
+    width: 100%;
+    margin: 0;
+}
+
+AIFallbackPromptModal #ai_fallback_no_alternate {
+    height: auto;
+    padding: 0 1;
+    border-left: heavy $warning;
+    background: $panel;
+}
+
+AITopUpModal #ai_topup_body {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+AITopUpModal #ai_topup_catalog {
+    height: 1fr;
+    min-height: 3;
+    max-height: 13;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+AITopUpModal #ai_topup_catalog:focus {
+    border: heavy $accent;
+}
+
+AITopUpModal #ai_topup_catalog .ai_topup_pack {
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    margin-bottom: 1;
+}
+
+AITopUpModal #ai_topup_catalog .ai_topup_pack_details {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    padding: 0 1 0 0;
+    content-align: left middle;
+}
+
+AITopUpModal #ai_topup_reason_scroll {
+    height: auto;
+    max-height: 4;
+    overflow-y: auto;
+    background: $panel;
+    border-left: heavy $warning;
+    padding: 0 1;
+}
+
+AITopUpModal #ai_topup_reason {
+    height: auto;
+}

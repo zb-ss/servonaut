@@ -1,7 +1,7 @@
 """Typed-confirmation modal for executing a finding remediation.
 
-Phase 3 of proactive monitoring. The modal renders the SERVER-SIGNED
-preview — the exact structured command the server will dispatch, not a
+The modal renders the SERVER-SIGNED preview — the exact structured
+command the server will dispatch, not a
 client-side reconstruction — and requires the user to type ``RUN``
 before the Execute button does anything. It returns a decision string;
 the owning :class:`FindingDetailScreen` performs the actual API call so
@@ -21,9 +21,16 @@ from typing import Any, Dict, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 #: The literal the user must type to arm the Execute button.
 CONFIRM_PHRASE = "RUN"
@@ -36,7 +43,7 @@ NO_REVERT_TEXT = "no clean revert — this cannot be undone automatically"
 def preview_command_lines(preview: Dict[str, Any]) -> list:
     """Render the preview's command deterministically.
 
-    Contract §F.3: ``command.human`` is the byte-for-byte string the
+    ``command.human`` is the byte-for-byte string the
     confirm token was signed over — render it VERBATIM, never a
     client-side reconstruction. Older/other shapes (``type``/``args``)
     fall back to a sorted structural render.
@@ -58,7 +65,7 @@ def preview_command_lines(preview: Dict[str, Any]) -> list:
 def revert_plan_summary(preview: Dict[str, Any]) -> str:
     """Return the human "what undoes this" line for the confirm modal.
 
-    Contract §6.4: the preview carries ``revert_plan`` so the operator
+    The preview carries ``revert_plan`` so the operator
     sees the undo path at the moment of confirmation, not after the
     fact. ``human`` is the server-authored sentence; anything missing,
     non-dict or blank falls back to :data:`NO_REVERT_TEXT` so the modal
@@ -79,6 +86,16 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    AUTO_FOCUS = "#remediation_confirm_input"
+
+    DEFAULT_CSS = """
+    RemediationConfirmModal .remediation-undo {
+        height: auto;
+        max-height: 3;
+        overflow-x: hidden;
+    }
+    """
+
     def __init__(
         self, preview: Dict[str, Any], *, dry_run: bool,
         label: Optional[str] = None,
@@ -90,7 +107,7 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
         knows the playbook option's wording ("Block 198.51.100.23")
         passes it here rather than letting the header read "block_ip".
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._preview = dict(preview)
         self._dry_run = dry_run
         self._label = label
@@ -114,14 +131,15 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
         expires = escape(str(p.get("expires_at") or ""))
         revert_line = escape(revert_plan_summary(p))
 
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 f"[bold]{label}[/bold]\n"
                 f"[dim]{risk} risk · {reversible}[/dim]\n\n"
                 f"{mode}",
                 id="remediation_confirm_header",
             ),
-            VerticalScroll(
+            body=DialogBody(
                 Static(
                     "[bold]Exact command (server-signed):[/bold]\n"
                     f"{command_block}\n\n"
@@ -132,15 +150,21 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
             ),
             # Outside the scroll on purpose: a long command must not
             # push the undo path out of view at confirm time.
-            Static(
-                f"[dim]Undo, if needed: {revert_line}[/dim]",
-                id="remediation_confirm_revert",
+            status=Vertical(
+                Static("[dim]Undo, if needed:[/dim]"),
+                DialogBody(
+                    Static(
+                        f"[dim]{revert_line}[/dim]",
+                        id="remediation_confirm_revert",
+                    ),
+                    classes="remediation-undo",
+                ),
+                Input(
+                    placeholder=f"Type {CONFIRM_PHRASE} to arm Execute",
+                    id="remediation_confirm_input",
+                ),
             ),
-            Input(
-                placeholder=f"Type {CONFIRM_PHRASE} to arm Execute",
-                id="remediation_confirm_input",
-            ),
-            Horizontal(
+            actions=DialogActions(
                 Button(
                     "Execute", id="remediation_confirm_run",
                     variant="primary" if self._dry_run else "error",
@@ -158,6 +182,7 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
                 id="remediation_confirm_buttons",
             ),
             id="remediation_confirm_container",
+            severity="danger",
         )
 
     def on_input_changed(self, event: Input.Changed) -> None:

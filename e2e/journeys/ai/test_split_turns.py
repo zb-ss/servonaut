@@ -69,7 +69,7 @@ def _seed(seed, fake_cloud, **config):
 
     # A prompt limit far below the service's window: a paused turn's prompt
     # must not be held to it.
-    limit = AIProviderConfig(tool_confirm_timeout_seconds=1.0)
+    limit = config.pop("ai_provider", AIProviderConfig(tool_confirm_timeout_seconds=1.0))
     seed_hosted(seed, fake_cloud, custom_servers=[web_1_server()], ai_provider=limit, **config)
 
 
@@ -109,7 +109,11 @@ async def test_a_paused_turn_frees_the_service_while_the_user_decides(tui, seed,
 async def test_a_service_that_does_not_announce_pauses_is_still_continued(
     tui, seed, fake_cloud
 ):
-    _seed(seed, fake_cloud)
+    from servonaut.config.schema import AIProviderConfig
+
+    # The short seed proves announced pauses; this success journey uses the
+    # normal confirmation window rather than racing the expiry case.
+    _seed(seed, fake_cloud, ai_provider=AIProviderConfig())
     fake_cloud.ai.script(_paused(says_it_pauses=False), _rest())
     async with tui() as t:
         await open_chat(t)

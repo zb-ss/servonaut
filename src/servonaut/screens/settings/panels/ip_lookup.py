@@ -14,10 +14,11 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import EnvVarInput
 
 
@@ -26,6 +27,7 @@ class IpLookupPanel(SettingsPanel):
 
     PANEL_ID = "ip_lookup"
     TITLE = "IP Lookup"
+    DESCRIPTION = 'API credentials used when you inspect an IP address.'
 
     DEFAULT_CSS = """
     IpLookupPanel .ip-lookup-help {
@@ -44,25 +46,26 @@ class IpLookupPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the IP Lookup form rows."""
-        yield Static(
-            "AbuseIPDB enriches IP addresses with abuse report data. "
-            "Press 'i' on any IP in the CloudWatch Top IPs view to look it up.",
-            classes="ip-lookup-help",
-        )
-        yield Static(
-            "A free API key (up to 1000 checks/day) is available at abuseipdb.com. "
-            "Supports $ENV_VAR syntax (e.g. $ABUSEIPDB_API_KEY).",
-            classes="ip-lookup-subhelp",
-        )
-        yield Horizontal(
-            Static("AbuseIPDB API key", classes="label"),
-            EnvVarInput(
-                placeholder="your-api-key or $ABUSEIPDB_API_KEY",
-                id="ip_lookup_abuseipdb_key",
-                password=True,
-            ),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('AbuseIPDB credentials', classes="settings-group-title", markup=False)
+            yield Static(
+                "AbuseIPDB enriches IP addresses with abuse report data. "
+                "Press 'i' on any IP in the CloudWatch Top IPs view to look it up.",
+                classes="ip-lookup-help",
+            )
+            yield Static(
+                "A free API key (up to 1000 checks/day) is available at abuseipdb.com. "
+                "Supports $ENV_VAR syntax (e.g. $ABUSEIPDB_API_KEY).",
+                classes="ip-lookup-subhelp",
+            )
+            yield setting_row(
+                "AbuseIPDB API key",
+                EnvVarInput(
+                    placeholder="your-api-key or $ABUSEIPDB_API_KEY",
+                    id="ip_lookup_abuseipdb_key",
+                    password=True,
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

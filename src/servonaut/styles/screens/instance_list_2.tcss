@@ -1,6 +1,3 @@
-
-
-
 #instance_list_container {
     width: 1fr;
     height: 100%;
@@ -9,17 +6,136 @@
     background: $surface;
 }
 
-#instance_list_container InstanceTable {
+#instance_list_container #fleet_workspace_row {
+    width: 100%;
     height: 1fr;
     margin-top: 1;
 }
 
-#instance_detail {
+#instance_list_container InstanceTable {
+    width: 1fr;
+    height: 100%;
+    margin-top: 0;
+}
+
+#fleet_inspector {
+    width: 38;
+    height: 100%;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    overflow-y: auto;
+}
+
+InstanceListScreen.-narrow #fleet_inspector,
+InstanceListScreen.-content-narrow #fleet_inspector,
+InstanceListScreen.-chat-open #fleet_inspector {
+    display: none;
+}
+
+#fleet_inspector_header {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    border-bottom: solid $surface-lighten-1;
+    margin-bottom: 0;
+}
+
+#fleet_inspector Button {
+    width: 100%;
+    min-width: 0;
     height: 3;
     min-height: 3;
+    padding: 0;
+    margin: 0;
+}
+
+#fleet_inspector_grid {
+    width: 100%;
+    height: auto;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3 3 3;
+    grid-gutter: 0 1;
+    margin: 0;
+}
+
+#fleet_inspector_grid Button {
+    margin: 0;
+}
+
+#fleet_btn_ssh,
+#fleet_btn_browse,
+#fleet_btn_scp,
+#fleet_btn_command,
+#fleet_btn_logs,
+#fleet_btn_memory,
+#fleet_btn_ai,
+#fleet_btn_actions {
+    width: 100%;
+}
+
+#instance_detail {
+    width: 100%;
+    height: 4;
+    min-height: 4;
     background: $panel;
     border: none;
     color: $text;
-    margin-top: 1;
+    padding: 0 1;
+    margin: 0;
 }
 
+#instance_detail.--empty {
+    color: $text-muted;
+}
+
+#fleet-bottom {
+    dock: bottom;
+    width: 100%;
+    height: auto;
+    border-top: solid $panel-lighten-2;
+}
+
+#fleet-bottom > StatusBar,
+#fleet-bottom > Footer {
+    dock: none;
+}
+
+#fleet-detail-toolbar {
+    width: 100%;
+    height: 1;
+    background: $panel-darken-1;
+}
+
+#fleet-detail-heading {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+#fleet_copy_row {
+    width: 16;
+    min-width: 0;
+    height: 1;
+    border: none;
+    margin: 0;
+    padding: 0 1;
+    background: $boost;
+    color: $text;
+    text-style: underline;
+}
+
+#fleet_copy_row:hover {
+    background: $panel-lighten-1;
+    color: $text-accent;
+}
+
+#fleet_copy_row:focus {
+    background: $panel-lighten-2;
+    color: $text;
+}

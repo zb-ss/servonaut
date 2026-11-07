@@ -1,0 +1,238 @@
+/* Provider setup keeps test/save controls separate from the scrolling form. */
+HetznerSetupScreen #hetzner_setup_container,
+OVHSetupScreen #ovh_setup_container {
+    padding: 1 2;
+    background: $surface;
+}
+
+HetznerSetupScreen .provider_form_section,
+OVHSetupScreen .provider_form_section {
+    height: auto;
+    margin-bottom: 1;
+    padding: 1;
+    background: transparent;
+    border: round $border-blurred;
+}
+
+HetznerSetupScreen .provider_form_section .section_header,
+OVHSetupScreen .provider_form_section .section_header {
+    height: auto;
+    border: none;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text;
+}
+
+HetznerSetupScreen .provider_setup_actions,
+OVHSetupScreen .provider_setup_actions {
+    dock: bottom;
+    width: 100%;
+    height: auto;
+    padding: 1 0 0 0;
+    background: $surface;
+}
+
+HetznerSetupScreen .hetzner_action_row,
+OVHSetupScreen .ovh_action_row {
+    layout: grid;
+    grid-size: 5;
+    grid-columns: 1fr 1fr 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 0;
+}
+
+HetznerSetupScreen .hetzner_action_row Button,
+OVHSetupScreen .ovh_action_row Button {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+}
+
+HetznerSetupScreen #hetzner_test_result,
+OVHSetupScreen #ovh_test_result {
+    height: auto;
+    max-height: 4;
+    overflow-y: auto;
+}
+
+HetznerSetupScreen.-content-narrow .hetzner_action_row,
+OVHSetupScreen.-content-narrow .ovh_action_row {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+HetznerSetupScreen.-content-narrow .setting_row,
+OVHSetupScreen.-content-narrow .setting_row {
+    layout: vertical;
+    height: auto;
+    margin-bottom: 1;
+}
+
+HetznerSetupScreen.-content-narrow .setting_row .label,
+OVHSetupScreen.-content-narrow .setting_row .label {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+}
+
+/* Cloud registries remain distinct from local SSH key management. */
+HetznerSSHKeysScreen #hetzner_ssh_keys_container,
+OVHSSHKeysScreen #ovh_ssh_keys_container {
+    padding: 1 2;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen .provider_key_catalog,
+OVHSSHKeysScreen .provider_key_catalog,
+HetznerSSHKeysScreen .provider_key_editor,
+OVHSSHKeysScreen .provider_key_editor {
+    height: auto;
+    padding: 1;
+    margin-bottom: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.provider_catalog_heading {
+    height: auto;
+    margin-bottom: 1;
+}
+
+HetznerSSHKeysScreen #hetzner_ssh_keys_table,
+OVHSSHKeysScreen #ssh_keys_table {
+    height: 10;
+    min-height: 6;
+    border: none;
+}
+
+OVHSSHKeysScreen #ovh_ssh_keys_scope {
+    dock: top;
+    height: auto;
+}
+
+OVHSSHKeysScreen #ovh_ssh_keys_container {
+    overflow: hidden hidden;
+}
+
+OVHSSHKeysScreen #ovh_ssh_keys_document {
+    height: 1fr;
+    min-height: 0;
+}
+
+/* Keep operation scope in view when focusing a narrow catalog scrolls the
+   longer registry explanation away. A small catalog does not reserve blank rows. */
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_scope {
+    dock: top;
+    height: auto;
+    max-height: 6;
+    overflow-y: auto;
+    background: $surface;
+}
+
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_project_label {
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_scope AccountPicker,
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_scope AccountPicker > Select {
+    width: 100%;
+}
+
+OVHSSHKeysScreen.-content-narrow #ssh_keys_table {
+    height: auto;
+    min-height: 4;
+    max-height: 6;
+}
+
+OVHSSHKeysScreen.-content-narrow .provider_key_catalog {
+    padding: 0 1;
+}
+
+OVHSSHKeysScreen.-content-narrow .provider_catalog_heading {
+    margin-bottom: 0;
+}
+
+HetznerSSHKeysScreen #hetzner_ssh_keys_actions,
+OVHSSHKeysScreen #ovh_ssh_keys_actions {
+    dock: bottom;
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    padding: 1 0 0 0;
+    height: auto;
+    background: $surface;
+}
+
+HetznerSSHKeysScreen #hetzner_ssh_keys_actions Button,
+OVHSSHKeysScreen #ovh_ssh_keys_actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0;
+}
+
+HetznerSSHKeysScreen.-content-narrow #hetzner_ssh_keys_actions,
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+}
+
+HetznerSSHKeysScreen #hetzner_ssh_add_form_actions,
+OVHSSHKeysScreen #add_key_form_actions {
+    height: auto;
+    padding: 1 0 0 0;
+}
+
+/* The full instance context scrolls above a bounded native option catalog. */
+OVHResizeScreen #resize_container,
+OVHReinstallScreen #reinstall_container {
+    padding: 1 2;
+    background: $surface;
+}
+
+OVHResizeScreen .provider_instance_context,
+OVHReinstallScreen .provider_instance_context,
+OVHResizeScreen .provider_maintenance_catalog,
+OVHReinstallScreen .provider_maintenance_catalog {
+    height: auto;
+    padding: 1;
+    margin: 1 0;
+    background: transparent;
+    border: round $border-blurred;
+}
+
+OVHResizeScreen #models_table,
+OVHReinstallScreen #images_table {
+    height: 12;
+    min-height: 6;
+    border: none;
+}
+
+OVHResizeScreen #resize_actions,
+OVHReinstallScreen #reinstall_actions {
+    dock: bottom;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 100%;
+    padding-top: 1;
+    background: $surface;
+}
+
+OVHResizeScreen #resize_actions Button,
+OVHReinstallScreen #reinstall_actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0;
+}

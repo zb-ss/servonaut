@@ -12,9 +12,9 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Checkbox, Footer, Input, Label, OptionList, Select, Static,
 )
@@ -36,7 +36,10 @@ from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._busy_work import BusyJob, BusyWork
 from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
 from servonaut.screens._demo_resolve import (
@@ -121,14 +124,9 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
 class VaultBindingScopeModal(ModalScreen[Optional[str]]):
     """Choose a sharing team, personal access (''), or cancel (None)."""
 
+    DEFAULT_CLASSES = "dialog-screen"
     DEFAULT_CSS = """
-    VaultBindingScopeModal { align: center middle; }
-    #vault_scope_modal {
-        width: 76; max-width: 92%; height: auto; max-height: 88%;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    #vault_scope_choices { max-height: 12; margin: 1 0; }
-    #vault_scope_cancel { dock: bottom; }
+    VaultBindingScopeModal #vault_scope_choices { height: auto; max-height: 12; }
     """
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
@@ -164,10 +162,11 @@ class VaultBindingScopeModal(ModalScreen[Optional[str]]):
         return options
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold]Who is this key for?[/bold]"),
-            OptionList(*self._options(), id="vault_scope_choices"),
-            Button("Cancel", id="vault_scope_cancel"),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Who is this key for?[/bold]"),
+            body=OptionList(*self._options(), id="vault_scope_choices"),
+            actions=DialogActions(Button("Cancel", id="vault_scope_cancel")),
             id="vault_scope_modal",
         )
 
@@ -201,16 +200,7 @@ class OwnKeyUpdateModal(ModalScreen[bool]):
     on an explicit Update.
     """
 
-    DEFAULT_CSS = """
-    OwnKeyUpdateModal { align: center middle; }
-    #own_key_modal {
-        width: 76; max-width: 92%; height: auto; max-height: 88%;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    #own_key_body { margin: 1 0; }
-    #own_key_buttons { height: auto; }
-    #own_key_keep, #own_key_update { min-width: 12; margin-right: 1; }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
     BINDINGS = [Binding("escape", "keep", "Keep mine", show=False)]
 
     def __init__(self, body: str) -> None:
@@ -218,11 +208,12 @@ class OwnKeyUpdateModal(ModalScreen[bool]):
         self._body = body
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("[bold]Also update your own key for this server?[/bold]"),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Also update your own key for this server?[/bold]"),
             # Logins and names come from servers and other users: inert text.
-            Static(Text(self._body), id="own_key_body"),
-            Horizontal(
+            body=DialogBody(Static(Text(self._body), id="own_key_body")),
+            actions=DialogActions(
                 Button("Keep mine", id="own_key_keep"),
                 Button("Update mine", id="own_key_update", variant="primary"),
                 id="own_key_buttons",
@@ -247,6 +238,8 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
     Per the project convention: ModalScreen for brief blocking prompts.
     Per style constraints: round $accent border, fixed height, Cancel button.
     """
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [
         Binding("escape", "action_cancel", "Cancel", show=False),
@@ -296,10 +289,11 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
             )
             confirm_label = "Add SSH Ref"
 
-        yield Container(
-            Static("[bold]Verify SSH[/bold]", id="ssh_verify_modal_title"),
-            Static(body_text, id="ssh_verify_modal_body"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Verify SSH[/bold]", id="ssh_verify_modal_title"),
+            body=DialogBody(Static(body_text, id="ssh_verify_modal_body")),
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="btn_ssh_verify_cancel"),
                 Button(confirm_label, variant="primary", id="btn_ssh_verify_confirm"),
                 classes="ssh_verify_actions_row",
@@ -331,15 +325,13 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     are listed by name and fingerprint, and the result carries identifiers only.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
     DEFAULT_CSS = """
     #vault_bind_scope { color: $text-muted; }
     #vault_bind_trusted { margin: 1 0 0 0; }
     #vault_bind_use_trusted { margin: 0 0 1 0; }
     #vault_bind_message { color: $warning; margin: 1 0 0 0; }
     #vault_bind_match { color: $text-muted; display: none; }
-    /* Bind stays in reach, and what is loading in view, however far the form scrolls. */
-    #vault_bind_footer { dock: bottom; height: auto; margin-top: 1; }
-    #vault_bind_footer > Horizontal { height: auto; }
     #vault_bind_busy { margin: 0; }
     #vault_bind_use_trusted.-hidden { display: none; }
     #vault_bind_fetch_host_key { margin: 0 0 1 0; }
@@ -390,7 +382,6 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             login = self._suggested_login()
         self._login = login
         rows: list[Any] = [
-            Static("[bold]Use vault key[/bold]"),
             Static(escape(self.scrub_for_display(self._scope_text())), id="vault_bind_scope"),
             Label("Vault"),
             Input(placeholder="Search vaults…", id="vault_bind_vault_search"),
@@ -415,18 +406,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             rows.append(
                 Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
             )
-        rows.extend((
-            Static("", id="vault_bind_message"),
-            Vertical(
-                BusyIndicator(id="vault_bind_busy"),
-                Horizontal(
-                    Button("Cancel", id="vault_bind_cancel"),
-                    Button("Bind", variant="primary", id="vault_bind_confirm"),
-                ),
+        rows.append(Static("", id="vault_bind_message"))
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Use vault key[/bold]"),
+            body=DialogBody(*rows),
+            status=BusyIndicator(id="vault_bind_busy"),
+            actions=DialogActions(
+                Button("Cancel", id="vault_bind_cancel"),
+                Button("Bind", variant="primary", id="vault_bind_confirm"),
                 id="vault_bind_footer",
             ),
-        ))
-        yield Container(*rows, id="vault_bind_modal")
+            size="large",
+            id="vault_bind_modal",
+        )
 
     def on_mount(self) -> None:
         self.run_worker(self._load_vaults(), group="vault_bind_choices", exclusive=True)
@@ -799,7 +792,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         })
 
 
-class ServerActionsScreen(ServerAccountMixin, Screen):
+class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     """Screen displaying available actions for a selected EC2 instance.
 
     Shows server information and action buttons:
@@ -834,6 +827,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         Binding("escape", "back", "Back", show=False),
     ]
 
+    AUTO_FOCUS = "#btn_browse"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 105
+
     # The screen gets -narrow / -wide and -short / -tall classes by terminal
     # size; the stylesheet lays the action rail out two to a row only when
     # there is room for it and the detail pane beside it.
@@ -860,6 +858,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Which read-only view is mounted inline in the detail pane, if any:
         # None | "browse" | "logs".
         self._inline_view: Optional[str] = None
+        self._overview_scroll_y = 0.0
+        self._inline_return_focus = "btn_browse"
         # Markup source of #server_info, so later additions (reverse DNS)
         # edit the text we wrote instead of reading it back from the widget.
         self._server_info_text: str = ""
@@ -900,6 +900,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """Redraw the identity and memory panes for the new demo-mode state."""
         self._render_server_info()
         self._render_memory_panel()
+        for controls in self.query(WorkspaceControls):
+            controls.set_context(self._workspace_context())
+
+    def _workspace_context(self) -> str:
+        name = display_name(self._instance) or self._instance.get("id") or "server"
+        return f"Server actions · {log_safe(self.app, name)}"
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -925,12 +931,17 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             buttons[next_idx].focus()
 
     def compose(self) -> ComposeResult:
-        """Compose the server actions UI (narrow action rail + detail pane)."""
+        """Compose the server actions UI (context header + action toolbar + detail workspace)."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Horizontal(id="sa-body"):
-                # --- Left: sectioned action rail ---
+        yield WorkspaceControls(self._workspace_context())
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Vertical(id="sa-body", classes="workspace-content"):
+                heading, identity, connection = self._server_info_sections()
+                self._server_info_text = "\n\n".join((heading, identity, connection))
+                # Full-width compact context banner
+                yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
+                # Grouped action toolbar above the overview
                 yield Vertical(
                     Static("CONNECT", classes="section_label"),
                     Button("1. Browse Files", id="btn_browse", variant="primary"),
@@ -955,13 +966,22 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     Button("9. Back", id="btn_back", variant="error"),
                     id="action_buttons",
                 )
-                # --- Right: identity + live + memory + focus help + inline view ---
-                self._server_info_text = self._build_server_info()
+                # Main detail workspace
                 yield Vertical(
-                    Static(self._server_info_text, id="server_info"),
-                    Static(self._live_stats_idle_text(), id="live_stats"),
-                    Static("", id="memory_panel"),
-                    Static("", id="action_help"),
+                    VerticalScroll(
+                        Horizontal(
+                            Static(identity, id="server_identity", classes="sa-section"),
+                            Static(connection, id="server_info", classes="sa-section"),
+                            id="sa-facts",
+                        ),
+                        Horizontal(
+                            Static(self._live_stats_idle_text(), id="live_stats", classes="sa-section"),
+                            Static("[bold]Server Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel", classes="sa-section"),
+                            id="sa-monitoring",
+                        ),
+                        Static("", id="action_help"),
+                        id="sa-overview",
+                    ),
                     # Mount target for inline read-only views (Browse / Logs).
                     # Hidden until an action opens it (see _open_inline).
                     Vertical(id="sa-inline"),
@@ -972,120 +992,95 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         yield Footer()
 
     def _build_server_info(self) -> str:
-        """Build server information display string.
+        """The complete overview, also useful to non-layout consumers."""
+        return "\n\n".join(self._server_info_sections())
 
-        Every value comes from a provider or from the user's server list, so
-        each is markup-escaped: a name like ``web-[b]1`` shows as typed.
+    def _server_info_sections(self) -> tuple[str, str, str]:
+        """Build the compact context and two sections from displayed records.
 
-        Returns:
-            Rich-formatted string with server details.
+        Resolve connection rules against the real record, but render only the
+        displayed row and redacted connection details. Provider strings remain
+        literal Rich text, including names containing markup characters.
         """
         def field(key: str, default: str) -> str:
             return escape(str(self._instance.get(key) or default))
 
         name = escape(display_name(self._instance) or 'Unnamed')
         public_ip = field('public_ip', 'N/A')
-        # With several accounts of this provider, say which one it is in.
-        account_line = (
-            f"[dim]Account:[/dim] {field('account', '-')}\n"
-            if self._instance.get('account_qualified') else ""
-        )
-        credential_line = self._credential_source_line() + self._shared_with_line()
-
+        identity = []
+        network = []
+        title = "Server"
+        state = self._colorize_state(self._instance.get('state', 'unknown'))
+        provider = field('provider', 'AWS')
         if self._instance.get('is_shared') is True:
-            port = escape(str(self._instance.get('port') or 22))
-            return (
-                f"[bold $text-accent]Team server: {name}[/bold $text-accent]\n\n"
-                f"[dim]Team:[/dim] {field('team_name', '-')}\n"
-                f"[dim]Host:[/dim] {public_ip}\n"
-                f"[dim]Port:[/dim] {port}\n"
-                f"[dim]Team login:[/dim] {field('login_user', '-')}\n"
-                f"[dim]State:[/dim] [dim]N/A (shared by the team)[/dim]\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
-            )
-
-        if self._instance.get('is_ovh'):
-            provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
-            region = field('region', '-')
-            state = self._instance.get('state', 'unknown')
-            instance_id = field('id', 'unknown')
-            private_ip = field('private_ip', 'N/A')
-            server_type = field('type', '-')
-            os_label = field('os', '-')
-            ram = field('ram_gb', '-')
+            title = "Team server"
+            provider = field('provider', 'Team')
+            state = "[dim]N/A (shared by the team)[/dim]"
+            identity.append(f"[dim]Team:[/dim] {field('team_name', '-')}")
+            network.extend([
+                f"[dim]Host:[/dim] {public_ip}",
+                f"[dim]Port:[/dim] {field('port', '22')}",
+                f"[dim]Team login:[/dim] {field('login_user', '-')}",
+            ])
+        elif self._instance.get('is_ovh'):
+            title, provider = "OVH Server", "OVH"
+            identity.extend([
+                f"[dim]ID:[/dim] {field('id', 'unknown')}",
+                f"[dim]Type:[/dim] {field('provider_type', 'unknown').upper()} — {field('type', '-')}",
+                f"[dim]Region:[/dim] {field('region', '-')}",
+                f"[dim]OS:[/dim] {field('os', '-')}",
+                f"[dim]RAM:[/dim] {field('ram_gb', '-')} GB",
+            ])
+            network.append(f"[dim]Public IP:[/dim] {public_ip}")
             reverse_dns = self._display_reverse_dns()
-            rdns_line = (
-                f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
-            )
-            return (
-                f"[bold $text-accent]OVH Server: {name}[/bold $text-accent]\n\n"
-                f"{account_line}"
-                f"[dim]ID:[/dim] {instance_id}\n"
-                f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
-                f"[dim]Public IP:[/dim] {public_ip}\n"
-                f"{rdns_line}"
-                f"[dim]Private IP:[/dim] {private_ip}\n"
-                f"[dim]Region:[/dim] {region}\n"
-                f"[dim]State:[/dim] {self._colorize_state(state)}\n"
-                f"[dim]OS:[/dim] {os_label}\n"
-                f"[dim]RAM:[/dim] {ram} GB\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
-            )
-
-        if self._instance.get('is_custom'):
+            if reverse_dns:
+                network.append(f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}")
+            network.append(f"[dim]Private IP:[/dim] {field('private_ip', 'N/A')}")
+        elif self._instance.get('is_custom'):
             provider = field('provider', 'custom')
-            group = field('group', '-')
-            port = escape(str(self._instance.get('port', 22)))
-            username = field('username', 'root')
-            return (
-                f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
-                f"[dim]Host:[/dim] {public_ip}\n"
-                f"[dim]Port:[/dim] {port}\n"
-                f"[dim]Username:[/dim] {username}\n"
-                f"[dim]Provider:[/dim] {provider}\n"
-                f"[dim]Group:[/dim] {group}\n"
-                f"[dim]State:[/dim] [dim]N/A (custom server)[/dim]\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
-            )
-
-        instance_id = field('id', 'unknown')
-        private_ip = field('private_ip', 'N/A')
-        region = field('region', 'unknown')
-        state = self._instance.get('state', 'unknown')
-
-        # Resolve connection method for AWS instances. Connection rules match
-        # the real record (names, tags); the bastion is shown redacted.
-        profile = self.app.connection_service.resolve_profile(
-            connection_instance(self.app, self._instance)
-        )
-        if profile and profile.bastion_host:
-            bastion = str(profile.bastion_host)
-            if self.app.demo_mode and self.app.redaction_service:
-                bastion = self.app.redaction_service.redact_host(bastion)
-            connection_info = f"[$text-accent]via Bastion:[/$text-accent] {escape(bastion)}"
-            target_ip = private_ip
+            state = "[dim]N/A (custom server)[/dim]"
+            identity.extend([
+                f"[dim]ID:[/dim] {field('id', 'unknown')}",
+                f"[dim]Provider:[/dim] {provider}",
+                f"[dim]Group:[/dim] {field('group', '-')}",
+            ])
+            network.extend([
+                f"[dim]Host:[/dim] {public_ip}",
+                f"[dim]Port:[/dim] {field('port', '22')}",
+                f"[dim]Username:[/dim] {field('username', 'root')}",
+            ])
         else:
-            connection_info = "[$text-accent]Direct Connection[/$text-accent]"
-            target_ip = public_ip
+            identity.extend([
+                f"[dim]Instance ID:[/dim] {field('id', 'unknown')}",
+                f"[dim]Type:[/dim] {field('type', '-')}",
+                f"[dim]Region:[/dim] {field('region', 'unknown')}",
+            ])
+            network.extend([
+                f"[dim]Public IP:[/dim] {public_ip}",
+                f"[dim]Private IP:[/dim] {field('private_ip', 'N/A')}",
+            ])
 
-        return (
-            f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
-            f"{account_line}"
-            f"[dim]Instance ID:[/dim] {instance_id}\n"
-            f"[dim]Public IP:[/dim] {public_ip}\n"
-            f"[dim]Private IP:[/dim] {private_ip}\n"
-            f"[dim]Region:[/dim] {region}\n"
-            f"[dim]State:[/dim] {self._colorize_state(state)}\n\n"
-            f"{credential_line}"
-            f"{connection_info}\n"
-            f"[dim]Target:[/dim] {target_ip}"
-        )
+        context = [f"[bold $text-accent]{title}: {name}[/bold $text-accent]", f"[dim]State:[/dim] {state}   [dim]Provider:[/dim] {provider}"]
+        if self._instance.get('account_qualified'):
+            context.append(f"[dim]Account:[/dim] {field('account', '-')}")
+        connection = "[dim]Direct Connection[/dim]"
+        target = public_ip
+        if not any(self._instance.get(key) for key in ('is_shared', 'is_custom', 'is_ovh')):
+            profile = self.app.connection_service.resolve_profile(connection_instance(self.app, self._instance))
+            if profile and profile.bastion_host:
+                bastion = str(profile.bastion_host)
+                if self.app.demo_mode and self.app.redaction_service:
+                    bastion = self.app.redaction_service.redact_host(bastion)
+                connection = f"[dim]via Bastion:[/dim] {escape(bastion)}"
+                target = field('private_ip', 'N/A')
+        network.extend([
+            "", connection, f"[dim]Target:[/dim] {target}",
+            self._credential_source_line().rstrip(),
+        ])
+        shared_with = self._shared_with_line().rstrip()
+        if shared_with:
+            identity.append(shared_with)
+        return "\n".join(context), "[bold]Identity[/bold]\n\n" + "\n".join(identity), "[bold]Network / Connection[/bold]\n\n" + "\n".join(network)
 
     def _shared_with_line(self) -> str:
         """``Also shared with: team …`` for one of the user's own servers a team shares too."""
@@ -1233,8 +1228,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         Rebuilt from its source rather than edited in place, so a demo-mode
         toggle and a late reverse-DNS answer both land in one consistent text.
         """
-        self._server_info_text = self._build_server_info()
-        self.query_one("#server_info", Static).update(self._server_info_text)
+        heading, identity, connection = self._server_info_sections()
+        self._server_info_text = "\n\n".join((heading, identity, connection))
+        self.query_one("#server_context", Static).update(heading)
+        self.query_one("#server_identity", Static).update(identity)
+        self.query_one("#server_info", Static).update(connection)
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
@@ -1291,14 +1289,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
-            panel.update("[dim]Server memory is unavailable.[/dim]")
+            panel.update("[bold]Server Memory[/bold]\n\n[dim]Server memory is unavailable.[/dim]")
             return
 
         instance_id = str(self._instance.get("id") or "")
         instance_name = self._instance.get("name") or ""
         try:
             if memory_service.is_memory_disabled(instance_id, instance_name):
-                panel.update("[dim]Memory is disabled for this server.[/dim]")
+                panel.update("[bold]Server Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press M to review its settings.[/dim]")
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -1307,7 +1305,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             modules = memory_service.get_all_modules(instance_id, self._provider_for_memory())
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
-            modules = {}
+            panel.update("[bold]Server Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press M to open Server Memory and try again.[/dim]")
+            return
 
         text = render_memory_panel(modules)
         # Demo mode: the snapshot can embed paths / hostnames / versions from
@@ -1337,6 +1336,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
         inline.remove_children()
         inline.remove_class("visible")
+        self.remove_class("-inline-open")
+        self.query_one("#sa-detail").remove_class("-inline-open")
+        if self._inline_view is not None:
+            overview = self.query_one("#sa-overview", VerticalScroll)
+            self.call_after_refresh(
+                lambda: overview.scroll_to(y=self._overview_scroll_y, animate=False, force=True)
+            )
         self._inline_view = None
 
     def _open_inline_browse(self) -> None:
@@ -1360,6 +1366,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             self.app.notify("Could not open file browser.", severity="error", markup=False)
             return
 
+        self._overview_scroll_y = self.query_one("#sa-overview", VerticalScroll).scroll_y
+        focused = getattr(self.focused, "id", None)
+        self._inline_return_focus = focused if focused in _ACTION_HELP else "btn_browse"
         self._inline_view = "browse"
         inline.mount(
             Static(
@@ -1374,6 +1383,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             ),
         )
         inline.add_class("visible")
+        self.add_class("-inline-open")
+        self.query_one("#sa-detail").add_class("-inline-open")
         self.call_after_refresh(lambda: self._safe_focus("#remote_tree"))
 
     # ------------------------------------------------------------------
@@ -1382,7 +1393,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
     def _live_stats_idle_text(self) -> str:
         """Text shown in the live-stats pane while polling is off."""
-        return "[dim]Live stats: off — press [b]L[/b] to start (SSH-polled).[/dim]"
+        return (
+            "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n\n"
+            "[dim]CPU, memory, load, disk and uptime appear here.\n"
+            "Press [b]L[/b] to start monitoring over SSH.[/dim]"
+        )
 
     def action_toggle_live(self) -> None:
         """Toggle the live resource-stats poller on/off."""
@@ -1402,7 +1417,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
         self._live_on = True
         try:
-            self.query_one("#live_stats", Static).update("[$text-accent]Live stats: connecting…[/$text-accent]")
+            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press L to cancel.[/dim]")
         except Exception:  # noqa: BLE001
             pass
         self.run_worker(
@@ -2796,7 +2811,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """
         if self._inline_view is not None:
             self._clear_inline()
-            self._safe_focus("#btn_browse")
+            self._safe_focus(f"#{self._inline_return_focus}")
             return
         self.app.pop_screen()
 

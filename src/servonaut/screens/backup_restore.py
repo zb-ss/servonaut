@@ -9,13 +9,19 @@ from typing import Any, Dict, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import ModalScreen, Screen
+from textual.containers import Container, Horizontal, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS, describe_backup
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +35,28 @@ class BackupConfirmModal(ModalScreen[bool]):
         Binding("n", "cancel", "No", show=False),
     ]
 
+    AUTO_FOCUS = "#btn_bkp_no"
+
     def __init__(self, message: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._message = message
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold $text-accent]Restore Local Backup[/bold $text-accent]", id="bkp_confirm_title"),
-            Static(self._message, id="bkp_confirm_message"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                "[bold $text-accent]Restore Local Backup[/bold $text-accent]",
+                id="bkp_confirm_title",
+            ),
+            body=DialogBody(Static(self._message, id="bkp_confirm_message")),
+            actions=DialogActions(
                 Button("Restore", variant="primary", id="btn_bkp_yes"),
                 Button("Cancel", id="btn_bkp_no"),
                 id="bkp_confirm_buttons",
             ),
             id="bkp_confirm_container",
+            size="compact",
+            severity="warning",
         )
 
     def on_mount(self) -> None:
@@ -58,8 +72,14 @@ class BackupConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class BackupRestoreScreen(Screen):
+class BackupRestoreScreen(WorkspaceScreen):
     """List local config backups and restore one."""
+
+    AUTO_FOCUS = "#backups_container"
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 88
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -73,25 +93,45 @@ class BackupRestoreScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static("[bold $text-accent]Local Config Backups[/bold $text-accent]", id="backups_header"),
-                Static(
-                    "[dim]Every time the config is saved (settings edit, sync pull, "
-                    "setup wizard…) the previous version is snapshotted here. The "
-                    f"{MAX_BACKUPS} most recent are kept, plus the copies taken before "
-                    f"the last {MAX_UPGRADE_BACKUPS} config format upgrades.[/dim]",
-                    id="backups_hint",
+        yield WorkspaceControls("Local backups")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield VerticalScroll(
+                Container(
+                    Static("[bold $text-accent]Local Config Backups[/bold $text-accent]", id="backups_header"),
+                    id="backups_context",
                 ),
-                DataTable(id="backups_table", zebra_stripes=True, cursor_type="row"),
-                Static("", id="backups_status"),
                 Horizontal(
-                    Button("Restore (r)", variant="primary", id="btn_bkp_restore"),
-                    Button("Refresh (F5)", id="btn_bkp_refresh"),
-                    id="backups_actions",
+                    VerticalScroll(
+                        Static(
+                            "[dim]Every time the config is saved (settings edit, sync pull, "
+                            "setup wizard…) the previous version is snapshotted here. The "
+                            f"{MAX_BACKUPS} most recent are kept, plus the copies taken before "
+                            f"the last {MAX_UPGRADE_BACKUPS} config format upgrades.[/dim]",
+                            id="backups_hint",
+                        ),
+                        Static("", id="backups_status"),
+                        Container(
+                            Static("Selected backup", classes="backup-panel-heading"),
+                            Horizontal(
+                                Button("Restore (r)", variant="primary", id="btn_bkp_restore"),
+                                Button("Refresh (F5)", id="btn_bkp_refresh"),
+                                id="backups_actions",
+                            ),
+                            classes="backup-action-panel",
+                        ),
+                        id="backups_tools",
+                    ),
+                    Container(
+                        Static("Local backup history", classes="backup-panel-heading"),
+                        Static("Loading local backup history…", id="backups_empty"),
+                        DataTable(id="backups_table", zebra_stripes=True, cursor_type="row"),
+                        id="backups_records",
+                    ),
+                    id="backups_workspace",
                 ),
                 id="backups_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -207,6 +247,9 @@ class BackupRestoreScreen(Screen):
     def _set_status(self, msg: str) -> None:
         try:
             self.query_one("#backups_status", Static).update(msg)
+            empty = self.query_one("#backups_empty", Static)
+            empty.update(msg)
+            empty.display = not self._backups
         except Exception:
             pass
 

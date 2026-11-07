@@ -17,10 +17,11 @@ import dataclasses
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import PreviewBanner, StringListEditor
 
 
@@ -62,43 +63,44 @@ class GcpPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the GCP form rows."""
-        yield PreviewBanner("Google Cloud integration")
-        yield Horizontal(
-            Static("Enabled", classes="label"),
-            Switch(value=False, id="gcp_enabled"),
-            classes="setting_row",
-        )
-        yield Static("Project IDs", classes="gcp-section-label")
-        yield Static(
-            "One GCP project ID per entry. Leave empty to disable.",
-            classes="gcp-help",
-        )
-        yield StringListEditor(
-            placeholder="my-project-id",
-            id="gcp_project_ids",
-        )
-        yield Horizontal(
-            Static("Credentials path", classes="label"),
-            Input(
-                placeholder="~/.config/gcloud/application_default_credentials.json",
-                id="gcp_credentials_path",
-            ),
-            classes="setting_row",
-        )
-        yield Static(
-            "Path to a service-account JSON key file. Leave empty to use"
-            " Application Default Credentials (ADC).",
-            classes="gcp-help",
-        )
-        yield Static("Zones", classes="gcp-section-label")
-        yield Static(
-            "One zone per entry (e.g. us-central1-a). Leave empty to query all zones.",
-            classes="gcp-help",
-        )
-        yield StringListEditor(
-            placeholder="us-central1-a",
-            id="gcp_zones",
-        )
+        with Vertical(classes="settings-form-section"):
+            yield PreviewBanner("Google Cloud integration")
+            yield setting_row(
+                "Enabled",
+                Switch(value=False, id="gcp_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            yield Static("Project IDs", classes="gcp-section-label settings-group-title")
+            yield Static(
+                "One GCP project ID per entry. Leave empty to disable.",
+                classes="gcp-help",
+            )
+            yield StringListEditor(
+                placeholder="my-project-id",
+                id="gcp_project_ids",
+            )
+            yield setting_row(
+                "Credentials path",
+                Input(
+                    placeholder="~/.config/gcloud/application_default_credentials.json",
+                    id="gcp_credentials_path",
+                ),
+            )
+            yield Static(
+                "Path to a service-account JSON key file. Leave empty to use"
+                " Application Default Credentials (ADC).",
+                classes="gcp-help",
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            yield Static("Zones", classes="gcp-section-label settings-group-title")
+            yield Static(
+                "One zone per entry (e.g. us-central1-a). Leave empty to query all zones.",
+                classes="gcp-help",
+            )
+            yield StringListEditor(
+                placeholder="us-central1-a",
+                id="gcp_zones",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

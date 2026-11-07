@@ -24,8 +24,8 @@ from typing import List, Optional, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
@@ -41,7 +41,7 @@ from servonaut.screens._provider_accounts import (
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -49,8 +49,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHSSHKeysScreen(Screen):
+class _ProjectKeysTable(DataTable):
+    """Keep the selected key visible after the catalog's native rows reflow."""
+
+    def on_resize(self) -> None:
+        # A content-sized table can shrink after its rows are populated.
+        # Textual retains its old scroll offset across that resize, which
+        # otherwise leaves the selected key below the shorter viewport.
+        self.call_after_refresh(self._restore_cursor_visibility)
+
+    def on_focus(self) -> None:
+        # Focus can arrive before the catalog has finished its native reflow.
+        self.call_after_refresh(self._restore_cursor_visibility)
+
+    def _restore_cursor_visibility(self) -> None:
+        self.move_cursor(row=self.cursor_row, column=self.cursor_column, animate=False)
+        if self.has_focus:
+            self.scroll_visible(animate=False, immediate=True)
+
+
+class OVHSSHKeysScreen(WorkspaceScreen):
     """Manage OVH Public Cloud project SSH keys."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -69,6 +92,8 @@ class OVHSSHKeysScreen(Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -78,33 +103,66 @@ class OVHSSHKeysScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("SSH keys")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]OVH Public Cloud SSH Keys[/bold $text-accent]",
-                    id="ovh_ssh_keys_header",
+                VerticalScroll(
+                    Static(
+                        "[bold $text-accent]OVH Public Cloud SSH Keys[/bold $text-accent]",
+                        id="ovh_ssh_keys_header",
+                    ),
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh",
+                        id="ovh_ssh_keys_account",
+                    ),
+                    Static("", id="ovh_ssh_keys_project_label", classes="note"),
+                    id="ovh_ssh_keys_scope",
                 ),
-                Static(
-                    "[dim]Project-level keys registered with OVHcloud "
-                    "(/cloud/project/{id}/sshkey). The Public Cloud "
-                    "create wizard injects keys from this list at "
-                    "provision time. Account-level /me/sshKey keys "
-                    "(used by VPS / dedicated bare-metal) are a "
-                    "separate registry — manage those via the OVH "
-                    "web console.[/dim]",
-                    classes="note",
+                VerticalScroll(
+                    Horizontal(
+                        Container(
+                            Static("[bold]Registered project keys[/bold]", classes="provider_catalog_heading"),
+                            Static("", id="ovh_ssh_keys_status"),
+                            _ProjectKeysTable(id="ssh_keys_table"),
+                            classes="provider_key_catalog",
+                        ),
+                        Vertical(
+                            Static(
+                                "[dim]Project-level keys registered with OVHcloud "
+                                "(/cloud/project/{id}/sshkey). The Public Cloud "
+                                "create wizard injects keys from this list at "
+                                "provision time. Account-level /me/sshKey keys "
+                                "(used by VPS / dedicated bare-metal) are a "
+                                "separate registry — manage those via the OVH "
+                                "web console.[/dim]",
+                                classes="note",
+                            ),
+                            Static("Selected key", classes="provider-key-selection-heading"),
+                            Static("Select a registered key to inspect its identity.", id="provider_key_selection", classes="provider-key-selection", markup=False),
+                            classes="provider-key-context",
+                        ),
+                        classes="provider-key-inventory",
+                    ),
+                    Container(
+                        Static(
+                            "[bold]Add SSH Key[/bold]",
+                            classes="section_header",
+                        ),
+                        Label("Key name:"),
+                        Input(placeholder="my-laptop", id="input_key_name"),
+                        Label(
+                            "Public key (full ssh-ed25519 / ssh-rsa line):",
+                        ),
+                        Input(
+                            placeholder="ssh-ed25519 AAAA... user@host",
+                            id="input_public_key",
+                        ),
+                        id="add_key_form",
+                        classes="hidden provider_key_editor",
+                    ),
+                    id="ovh_ssh_keys_document",
                 ),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh",
-                    id="ovh_ssh_keys_account",
-                ),
-                Static("", id="ovh_ssh_keys_project_label", classes="note"),
-
-                DataTable(id="ssh_keys_table"),
-                Static("", id="ovh_ssh_keys_status"),
-
                 Horizontal(
                     Button("Refresh (r)", id="btn_refresh"),
                     Button(
@@ -118,27 +176,6 @@ class OVHSSHKeysScreen(Screen):
                     Button("Back", id="btn_back"),
                     id="ovh_ssh_keys_actions",
                 ),
-
-                # Add Key form (hidden by default).
-                Container(
-                    Static(
-                        "[bold]Add SSH Key[/bold]",
-                        classes="section_header",
-                    ),
-                    Label("Key name:"),
-                    Input(placeholder="my-laptop", id="input_key_name"),
-                    Label(
-                        "Public key (full ssh-ed25519 / ssh-rsa line):",
-                    ),
-                    Input(
-                        placeholder="ssh-ed25519 AAAA... user@host",
-                        id="input_public_key",
-                    ),
-                    id="add_key_form",
-                    classes="hidden",
-                ),
-                # Bottom-docked Save / Cancel — visibility mirrors the
-                # form's. Same pattern as the Hetzner SSH-keys screen.
                 Horizontal(
                     Button(
                         "Save", id="btn_save_key", variant="primary",
@@ -147,8 +184,8 @@ class OVHSSHKeysScreen(Screen):
                     id="add_key_form_actions",
                     classes="hidden",
                 ),
-
                 id="ovh_ssh_keys_container",
+                classes="workspace-content provider-key-workspace",
             )
         yield Footer()
 
@@ -291,6 +328,7 @@ class OVHSSHKeysScreen(Screen):
                 f"[dim]{n} key{'s' if n != 1 else ''}.[/dim]"
             )
         self._sync_action_buttons()
+        self._update_selected_context()
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -298,6 +336,25 @@ class OVHSSHKeysScreen(Screen):
 
     def on_data_table_row_highlighted(self, event) -> None:
         self._sync_action_buttons()
+        self._update_selected_context()
+
+    def _update_selected_context(self) -> None:
+        """Show the chosen key identity using the registry's demo rules."""
+        try:
+            context = self.query_one("#provider_key_selection", Static)
+        except NoMatches:
+            return
+        key = self._selected_key()
+        if key is None:
+            context.update("Select a registered key to inspect its identity.")
+            return
+        name = str(key.get("name") or "—")
+        identifier = str(key.get("id") or "—")
+        if self.app.demo_mode:
+            redactor = self.app.redaction_service
+            name = redactor.redact_key_name(name) if redactor else "Hidden"
+            identifier = "Hidden"
+        context.update(f"{name}\nID: {identifier}")
 
     def _selected_key(self) -> Optional[dict]:
         table = self.query_one("#ssh_keys_table", DataTable)
