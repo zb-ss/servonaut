@@ -986,12 +986,13 @@ class InstanceListScreen(WorkspaceScreen):
             if len(content) > 200:
                 content = content[:200] + "..."
 
-            result_text = (
-                f"[bold]Server: {server_id}[/bold]\n"
-                f"  Source: {source}\n"
-                f"  [dim]{content}[/dim]\n"
-            )
-            container.mount(Static(result_text))
+            # Scan output is raw text from the server: content, not markup.
+            container.mount(Static(Content.assemble(
+                literal(f"Server: {server_id}", "bold"),
+                f"\n  Source: {source}\n  ",
+                literal(content, "dim"),
+                "\n",
+            )))
 
     def _clear_keyword_results(self) -> None:
         """Hide and clear keyword results panel."""

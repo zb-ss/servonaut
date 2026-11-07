@@ -274,3 +274,33 @@ def test_demo_mode_never_puts_a_real_value_in_the_header() -> None:
         assert connection_instance(app, custom) is not custom
 
     _run(scenario, demo=True)
+
+
+@pytest.mark.parametrize(
+    "content", ["/var/www/[/x]/index.php", "[link=x", "[ @click=screen.view_logs]hit"]
+)
+def test_keyword_matches_show_scan_output_literally(
+    content: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: List[str] = []
+    monkeypatch.setattr(InstanceListScreen, "action_view_logs", lambda self: calls.append("logs"))
+
+    async def scenario(pilot: Any) -> None:
+        app = pilot.app
+        monkeypatch.setattr(
+            app.keyword_store, "search",
+            lambda _query: [{"server_id": "web-1 [/", "source": "[src", "content": content}],
+        )
+        await _search(pilot, "needle")
+        screen = app.screen
+        assert type(screen).__name__ == "InstanceListScreen"
+        shown = " ".join(
+            static.visual.plain
+            for static in screen.query("#keyword_matches_container Static")
+        )
+        assert content in shown and "web-1 [/" in shown and "[src" in shown
+        for static in screen.query("#keyword_matches_container Static"):
+            await pilot.click(static)
+        assert calls == []
+
+    _run(scenario)
