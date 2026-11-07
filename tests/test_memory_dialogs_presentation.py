@@ -22,6 +22,7 @@ from servonaut.app import ServonautApp
 from servonaut.screens.memory_keys import PassphraseEnrolModal, PassphraseResult
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal
 from servonaut.services.memory import passphrase_store
+from servonaut.services.memory.crypto import PassphraseAssessment
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.styles.themes import SERVONAUT_THEMES
 from tests._async_bounds import wait_until
@@ -819,11 +820,11 @@ async def test_passphrase_feedback_visible_glyph_contrast(theme, record_property
     scores = {"": 0, "Abcd12!localx": 2, PHRASE: 4}
     score_calls = []
 
-    def estimate_score(phrase):
+    def assess(phrase):
         score_calls.append(phrase)
-        return scores.get(phrase, 0)
+        return PassphraseAssessment(scores.get(phrase, 0), 3, ("Use a strong passphrase.",), (), requirements_met=(scores.get(phrase, 0) >= 3,))
 
-    monkeypatch.setattr("servonaut.services.memory.crypto.estimate_pw_score", estimate_score)
+    monkeypatch.setattr("servonaut.services.memory.crypto.assess_passphrase", assess)
     _colour_fixture(monkeypatch)
     app = _Host()
     app.theme = theme
@@ -842,7 +843,7 @@ async def test_passphrase_feedback_visible_glyph_contrast(theme, record_property
         ):
             previous_calls = len(score_calls)
             first.value, second.value = phrase, other
-            await wait_until(lambda: getattr(screen, "_last_score", None) == score and screen.query_one(selector, Static).render().plain == expected)
+            await wait_until(lambda: screen.query_one(selector, Static).render().plain.startswith(expected))
             await pilot.pause()
             assert phrase in score_calls[previous_calls:], "The native change must use the local estimator"
             target = screen.query_one(selector, Static)

@@ -217,10 +217,10 @@ DialogFrame.dialog-compact > .dialog-body,
 DialogFrame.dialog-standard > .dialog-body { height: auto; max-height: 100%; }
 
 /* A dialog screen that declares these vertical breakpoints (below 24 rows is
-   -dialog-minimal, 24 to 39 is -dialog-tight) trades padding for room, so its
-   content and actions both stay on a short terminal. */
-.dialog-screen.-dialog-minimal > DialogFrame,
-.dialog-screen.-dialog-tight > DialogFrame {
+   -dialog-minimal, 24 to 39 is -dialog-tight) trades spacing for room, so its
+   content and actions both stay on a short terminal. Standard dialogs keep
+   their padding and size cap down to -dialog-tight. */
+.dialog-screen.-dialog-minimal > DialogFrame {
     padding: 0 2;
     max-height: 100%;
 }
@@ -230,9 +230,11 @@ DialogFrame.dialog-standard > .dialog-body { height: auto; max-height: 100%; }
 
 /* Toasts then overlay the dialog's top instead of reserving a lane that the
    dialog needs, which keeps them clear of the actions. */
-.dialog-screen.-dialog-minimal > DialogNotificationSpace { display: none; }
+.dialog-screen.-dialog-minimal > DialogNotificationSpace,
+.dialog-screen.-dialog-tight > DialogNotificationSpace { display: none; }
 
-.dialog-screen.-dialog-minimal > ToastRack {
+.dialog-screen.-dialog-minimal > ToastRack,
+.dialog-screen.-dialog-tight > ToastRack {
     dock: top;
     align: right top;
     margin: 0;
