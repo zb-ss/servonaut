@@ -50,14 +50,21 @@ _REASON_TEXT: Dict[str, str] = {
     bulk.NEVER_PROBED: "never probed; scan it first",
     bulk.MEMORY_OFF: "memory is turned off for this server",
     bulk.UNRESOLVED: "the real server is not known in demo mode",
-    bulk.SAME_SETTINGS: "it already has these settings",
+    bulk.SAME_SETTINGS: "it already has these settings, and every member who may read it can",
     bulk.KEY_RACE: "a member's key changed while sharing; nothing was shared for it",
     bulk.REVOKED_ONLY: "the old share was stopped but the new one was not created; share it again",
+    bulk.NOT_ADDED: "the service did not add the members who cannot read it yet; try again",
     bulk.UNLISTED: (
         "already shared, but the service does not list that share to you, "
         "so it cannot be changed from here"
     ),
 }
+
+# Under the readers: what happens for a member who sets up Memory Sync later.
+LATER_MEMBERS_TEXT = (
+    "Members who set up Memory Sync later can read the snapshots you upload after that. "
+    "To add them to servers already shared, tick \"Update existing shares to these settings\"."
+)
 
 # What the screen says while a batch runs and the user tries to leave.
 _HOLD_TEXT = "Sharing is in progress. Press s (Stop) to end it after the current server."
@@ -66,6 +73,7 @@ _HOLD_TEXT = "Sharing is in progress. Press s (Stop) to end it after the current
 _GROUPS: Tuple[Tuple[str, str], ...] = (
     (bulk.SHARED, "shared"),
     (bulk.UPDATED, "updated"),
+    (bulk.READERS_ADDED, "opened to more members"),
     (bulk.ALREADY_SHARED, "already shared"),
     (bulk.SKIPPED, "skipped"),
     (bulk.FAILED, "failed"),
@@ -106,12 +114,16 @@ class BulkShareScreen(Screen[bool]):
         width: 1fr;
         height: 100%;
         padding: 0 1;
+        align: center middle;
         background: $surface;
     }
+    /* As tall as what it shows, never taller than the screen: a short
+       summary must not leave a screen-high empty box. */
     BulkShareScreen #bulk-container {
         width: 100%;
         max-width: 100;
-        height: 100%;
+        height: auto;
+        max-height: 100%;
         border: round $primary;
         background: $surface;
         padding: 0 2;
@@ -125,7 +137,9 @@ class BulkShareScreen(Screen[bool]):
         min-height: 1;
     }
     BulkShareScreen #bulk-form-scroll {
-        height: 1fr;
+        height: auto;
+        max-height: 100%;
+        min-height: 0;
     }
     BulkShareScreen #bulk-form {
         height: auto;
@@ -156,6 +170,7 @@ class BulkShareScreen(Screen[bool]):
         display: block;
     }
     BulkShareScreen #bulk-btn-row {
+        dock: bottom;
         height: auto;
         align: center middle;
         margin-top: 1;
@@ -207,6 +222,7 @@ class BulkShareScreen(Screen[bool]):
 
     def compose(self) -> ComposeResult:
         count = len(self._targets)
+        servers = f"{count} server" if count == 1 else f"{count} servers"
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
@@ -214,8 +230,8 @@ class BulkShareScreen(Screen[bool]):
                 with Container(id="bulk-container"):
                     yield Static(
                         Content.from_markup(
-                            "[bold $text-accent]Share Memory: $count servers[/bold $text-accent]",
-                            count=str(count),
+                            "[bold $text-accent]Share Memory: $servers[/bold $text-accent]",
+                            servers=servers,
                         ),
                         id="bulk-title",
                     )
@@ -249,7 +265,7 @@ class BulkShareScreen(Screen[bool]):
                         yield Button("Cancel", variant="default", id="bulk-btn-cancel")
                         yield Button("Stop after this server", variant="warning", id="bulk-btn-stop")
                         yield Button(
-                            f"Share {count} servers", variant="primary",
+                            f"Share {servers}", variant="primary",
                             id="bulk-btn-confirm", disabled=True,
                         )
         yield Footer()
@@ -394,10 +410,7 @@ class BulkShareScreen(Screen[bool]):
             if eligible
             else Content("No member with a memory key has this role yet.")
         )
-        self._say(readers, Content.assemble(
-            line,
-            "\nMembers who set up Memory Sync later are added automatically on the next sync.",
-        ))
+        self._say(readers, Content.assemble(line, "\n", LATER_MEMBERS_TEXT))
 
     # ------------------------------------------------------------------
     # Actions
@@ -543,9 +556,10 @@ class BulkShareScreen(Screen[bool]):
         self._say(widget, value if value is not None else "")
 
     def _on_progress(self, index: int, total: int, outcome: bulk.ShareOutcome) -> None:
-        if outcome.status in (bulk.SHARED, bulk.UPDATED) or outcome.reason == bulk.REVOKED_ONLY:
+        changes = (bulk.SHARED, bulk.UPDATED, bulk.READERS_ADDED)
+        if outcome.status in changes or outcome.reason == bulk.REVOKED_ONLY:
             self._changed += 1
-        good = outcome.status in (bulk.SHARED, bulk.UPDATED)
+        good = outcome.status in changes
         bad = outcome.status in (bulk.FAILED, bulk.NOT_SENT)
         mark, style = ("✓", "$text-success") if good else ("✗", "$text-error") if bad else ("–", "")
         self._progress(Content.assemble(
@@ -623,10 +637,14 @@ class BulkShareScreen(Screen[bool]):
             "Team: ", literal(self._team_name(self._report_team)), "\n")]
         self._group(parts, report.with_status(bulk.SHARED), "Shared")
         self._group(parts, report.with_status(bulk.UPDATED), "Already shared, updated to these settings")
+        self._group(parts, report.with_status(bulk.READERS_ADDED),
+                    "Already shared, opened to members who could not read it yet")
         left = report.with_status(bulk.ALREADY_SHARED)
         # Only for the shares left because the option was off.
-        hint = "Tick \"Update existing shares to these settings\" to change them." \
-            if not report.update_existing and any(not o.reason for o in left) else ""
+        hint = (
+            "Tick \"Update existing shares to these settings\" to change them, "
+            "or to add members who cannot read them yet."
+        ) if not report.update_existing and any(not o.reason for o in left) else ""
         self._group(parts, left, "Already shared, left as it was", hint)
         self._group(parts, report.with_status(bulk.SKIPPED), "Skipped")
         self._group(parts, report.with_status(bulk.FAILED), "Failed")
@@ -656,6 +674,9 @@ class BulkShareScreen(Screen[bool]):
         """Why, in words; a failure's service text only outside demo mode."""
         if outcome.status == bulk.NOT_SENT:
             return ""  # the group's heading says why
+        members = self._members_text(outcome)
+        if members:
+            return members
         detail = outcome.detail
         if detail and self._demo():
             detail = "turn demo mode off to see why"
@@ -663,6 +684,18 @@ class BulkShareScreen(Screen[bool]):
         if text and detail:
             return f"{text} ({detail})"
         return text or detail
+
+    def _members_text(self, outcome: bulk.ShareOutcome) -> str:
+        """Whom an existing share was opened to, and whom the service did not take."""
+        parts = []
+        if outcome.added:
+            parts.append(f"now also {_shown_names(self.app, list(outcome.added))}")
+        if outcome.not_added:
+            parts.append(
+                f"could not add {_shown_names(self.app, list(outcome.not_added))}; "
+                "open the server's share to see why"
+            )
+        return "; ".join(parts)
 
     def _stop_text(self, report: bulk.BulkShareReport) -> str:
         reason = report.stop_reason

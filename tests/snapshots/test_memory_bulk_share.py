@@ -145,6 +145,9 @@ async def _bulk_summary(pilot: Any) -> None:
         outcomes=(
             bulk.ShareOutcome(_TARGETS[0], bulk.SHARED),
             bulk.ShareOutcome(_TARGETS[1], bulk.ALREADY_SHARED),
+            # A share that already had these settings, opened to a late member.
+            bulk.ShareOutcome(bulk.ShareTarget("i-00000000000000005", "web-1"),
+                              bulk.READERS_ADDED, added=("bob",)),
             bulk.ShareOutcome(_TARGETS[2], bulk.SKIPPED, bulk.NEVER_PROBED),
             bulk.ShareOutcome(_TARGETS[3], bulk.SKIPPED, bulk.ID_NOT_ACCEPTED),
         ),
@@ -184,5 +187,8 @@ def test_bulk_share_sending(screen_snapshot, size: str) -> None:
 
 @sizes
 def test_bulk_share_summary(screen_snapshot, size: str) -> None:
-    """After a batch: one line per server, grouped, with each skip's reason."""
+    """After a batch: one line per server, grouped, with each skip's reason.
+
+    Includes a share opened to a member who set up Memory Sync after it was made.
+    """
     _capture(screen_snapshot, size, _bulk_summary)
