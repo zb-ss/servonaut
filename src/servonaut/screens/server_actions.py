@@ -836,7 +836,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Binding("L", "toggle_live", "Live", show=False),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
-        Binding("k", "use_vault_key", "Vault Key", show=False),
+        Binding("u", "use_vault_key", "Vault Key", show=False),
         Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -981,7 +981,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                     ),
                     _action_group(
                         "MANAGE",
-                        Button("K. Use Vault Key", id="btn_use_vault_key"),
+                        Button("U. Use Vault Key", id="btn_use_vault_key"),
                         Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
                         Button("V. Verify SSH", id="btn_verify_ssh"),
                     ),
