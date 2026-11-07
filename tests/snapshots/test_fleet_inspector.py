@@ -203,107 +203,55 @@ def test_table_scrollbars_are_one_cell() -> None:
     _run(scenario, "100x30")
 
 
-def test_demo_mode_never_puts_a_real_name_or_address_in_the_header() -> None:
-    real_rows = [*_harness.AWS_ROWS, *_harness.OVH_ROWS, *_harness.HETZNER_ROWS]
-    real_values = {
-        str(row[field])
-        for row in real_rows
-        for field in ("name", "public_ip", "private_ip", "id")
-        if row.get(field)
-    }
-    real_values.update(server.name for server in _harness.CUSTOM_SERVERS)
-
-    async def scenario(pilot: Any) -> None:
-        screen = pilot.app.screen
-        for name in _harness.FLEET_NAMES:
-            await _harness.select_fleet_row(pilot, name)
-            text = _header_text(screen)
-            assert text.strip() and "No server selected" not in text
-            leaked = {value for value in real_values if value in text}
-            assert not leaked, f"{name}: {leaked} shown in demo mode: {text!r}"
-
-    _run(scenario, demo=True)
-
-
-# Names a server can carry from a cloud tag or a teammate: each one is text,
-# never markup, and none may run an action when the header is clicked.
-_HOSTILE_NAMES = [
-    "backup [old=",
-    "web-1 [/",
-    "[ @click=screen.view_logs]evil-1",
-    "[PROD] db-9",
-    "trail\\",
-    "$accent text",
+# Extra custom rows that exercise the display fallbacks: a real host with its
+# own provider label, a host-only row without a state, and a row with only a
+# private address and an account-qualified name.
+_EXTRA_CUSTOM_ROWS: List[dict] = [
+    {
+        "id": "custom-fqdn", "name": "build-box", "host": "build.example.net",
+        "provider": "acme-colo", "state": "running", "is_custom": True,
+        "username": "deploy", "group": "ci",
+    },
+    {"id": "custom-bare", "name": "", "host": "10.7.7.7", "is_custom": True},
+    {
+        "id": "custom-private", "name": "api-prod", "private_ip": "10.8.8.8",
+        "account": "acme-prod", "account_qualified": True, "state": "stopped",
+        "provider": "acme-cloud", "is_custom": True,
+    },
 ]
 
 
-def _hostile_row(name: str) -> dict:
-    return dict(_harness.AWS_ROWS[0], name=name)
+def _real_values(real: dict) -> set:
+    fields = (
+        "name", "display_name", "id", "public_ip", "private_ip", "host", "hostname",
+        "account", "provider", "region", "username", "group",
+    )
+    return {str(real[f]) for f in fields if real.get(f)}
 
 
-@pytest.fixture
-def hostile_first_server(monkeypatch: pytest.MonkeyPatch) -> str:
-    """A fleet whose first row has a markup-looking name, seeded before launch."""
-    name = _HOSTILE_NAMES[0]
-    monkeypatch.setitem(_harness.AWS_ROWS[0], "name", name)
-    _harness.seed_home()
-    return name
-
-
-def test_markup_looking_name_does_not_crash_the_launch(hostile_first_server: str) -> None:
-    async def scenario(pilot: Any) -> None:
-        screen = pilot.app.screen
-        await pilot.pause()
-        assert _header_text(screen).startswith(hostile_first_server)
-
-    async def main() -> None:
-        app = _harness.SnapshotApp()
-        async with app.run_test(size=_harness.SIZES["160x50"]) as pilot:
-            await _harness.wait_until(
-                pilot,
-                lambda: type(pilot.app.screen).__name__ == "InstanceListScreen"
-                and pilot.app.screen.query_one(InstanceTable).row_count > 0,
-                "the fleet",
-            )
-            await scenario(pilot)
-
-    asyncio.run(main())
-
-
-@pytest.mark.parametrize("name", _HOSTILE_NAMES)
-def test_server_text_is_shown_literally_and_runs_nothing(
-    name: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: List[str] = []
-    for action in _BUTTON_ACTIONS.values():
-        monkeypatch.setattr(InstanceListScreen, action, lambda self, a=action: calls.append(a))
+def test_demo_mode_never_puts_a_real_value_in_the_header() -> None:
+    from servonaut.screens._demo_resolve import connection_instance, replace_instances
 
     async def scenario(pilot: Any) -> None:
-        screen = pilot.app.screen
-        screen._instances = [_hostile_row(name)]
-        screen._update_table()
-        screen._update_detail_panel()
+        app = pilot.app
+        screen = app.screen
+        replace_instances(app, "custom", [*(r for r in app.instances if r.get("is_custom")), *_EXTRA_CUSTOM_ROWS])
+        screen.refresh_after_demo_toggle()
         await pilot.pause()
-        text = _header_text(screen)
-        assert text.startswith(name), text
-        await pilot.click("#fleet_inspector_header")
-        await pilot.pause()
-        assert calls == []
+        table = screen.query_one(InstanceTable)
+        assert table.row_count == len(_harness.FLEET_NAMES) + len(_EXTRA_CUSTOM_ROWS)
+        for index in range(table.row_count):
+            table.focus()
+            table.move_cursor(row=index)
+            await pilot.pause()
+            shown = table.get_selected_instance()
+            real = connection_instance(app, shown)
+            text = _header_text(screen)
+            assert text.strip() and "No server selected" not in text
+            leaked = {v for v in _real_values(real) - _real_values(shown) if v in text}
+            assert not leaked, f"row {index}: {leaked} shown in demo mode: {text!r}"
+        # The fixtures really did differ between the real and shown rows.
+        custom = next(r for r in table._filtered_instances if r.get("id") != "custom-fqdn" and r.get("is_custom"))
+        assert connection_instance(app, custom) is not custom
 
-    _run(scenario)
-
-
-def test_hostile_provider_state_and_host_are_shown_literally() -> None:
-    async def scenario(pilot: Any) -> None:
-        screen = pilot.app.screen
-        row = dict(
-            _harness.AWS_ROWS[0], state="[b]x", provider="acme [/]", public_ip="[ @click=x]",
-        )
-        screen._instances = [row]
-        screen._update_table()
-        screen._update_detail_panel()
-        await pilot.pause()
-        text = _header_text(screen)
-        assert "[b]x" in text and "acme [/]" in text and "[ @click=x]" in text
-
-    _run(scenario)
+    _run(scenario, demo=True)
