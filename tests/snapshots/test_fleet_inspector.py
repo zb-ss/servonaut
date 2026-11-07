@@ -126,6 +126,25 @@ def test_header_survives_a_refresh_that_drops_the_selected_row() -> None:
     _run(scenario)
 
 
+@pytest.mark.parametrize("state", ["", None, "  ", "__missing__"])
+def test_a_server_without_a_state_reads_unknown_in_the_inspector(state: Any) -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        row = dict(_harness.AWS_ROWS[0])
+        if state == "__missing__":
+            del row["state"]
+        else:
+            row["state"] = state
+        screen._instances = [row]
+        screen._update_table()
+        screen._update_detail_panel()
+        await pilot.pause()
+        text = _header_text(screen)
+        assert "unknown" in text and "running" not in text
+
+    _run(scenario)
+
+
 def test_a_missing_state_is_not_shown_as_running() -> None:
     badge = InstanceListScreen._inspector_state_badge
     for row in ({}, {"state": None}, {"state": ""}, {"state": "  "}):
