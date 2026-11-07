@@ -10,9 +10,8 @@ Two ModalScreen flavours, sized by the tool's ``guard_level``:
 Per the "ModalScreen vs Screen" convention: both fit the
 "brief blocking choice" pattern (small surface, single decision, dim
 background returns to chat). All user-influenced strings (tool names,
-arg values from the model) are passed through ``rich.markup.escape``
-before interpolation — the model output can contain rich-markup
-metacharacters and we don't want a malformed brace to corrupt the row.
+arg values from the model) are built as ``Content`` and never parsed as
+markup, so what the user approves is exactly what the model sent.
 """
 from __future__ import annotations
 
@@ -21,37 +20,34 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 
 logger = logging.getLogger(__name__)
 
-
-# Maximum displayed length per arg value before we truncate. Models
-# can dump multi-KB blobs into args (e.g. file content for transfer);
-# long values blow out the modal layout.
-_MAX_ARG_VALUE_LEN = 200
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
 # anything else returns False.
 _DANGEROUS_CONFIRM_WORD = "RUN"
 
 
-def _format_args(args: Dict[str, Any]) -> str:
-    """Render an args dict as escaped ``key: value`` pairs, one per line.
+def _format_args(args: Dict[str, Any]) -> Content:
+    """Render an args dict as ``key: value`` lines, one per argument.
 
-    Long values are truncated with an ellipsis. Non-string values are
-    JSON-serialised for compact display so a list of paths shows up
-    without Python's repr noise.
+    Every value is shown in full: the user approves what is displayed, so
+    nothing may be cut or hidden. The argument area scrolls. Non-string
+    values are JSON-serialised for compact display so a list of paths shows
+    up without Python's repr noise.
     """
     if not args:
-        return "[dim]<no arguments>[/dim]"
+        return Content.styled("<no arguments>", "dim")
     lines = []
     for key, value in args.items():
         if isinstance(value, str):
@@ -61,10 +57,8 @@ def _format_args(args: Dict[str, Any]) -> str:
                 display = json.dumps(value, default=str)
             except (TypeError, ValueError):
                 display = str(value)
-        if len(display) > _MAX_ARG_VALUE_LEN:
-            display = display[: _MAX_ARG_VALUE_LEN - 3] + "..."
-        lines.append(f"[dim]{escape(str(key))}:[/dim] {escape(display)}")
-    return "\n".join(lines)
+        lines.append(Content.assemble(literal(f"{key}:", "dim"), " ", literal(display)))
+    return Content("\n").join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +127,7 @@ class ToolConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Container(
             Static(
-                f"[bold]{escape(self._tool)}[/bold]",
+                literal(self._tool, "bold"),
                 id="tool_confirm_title",
             ),
             Static(
@@ -248,7 +242,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Container(
             Static(
-                f"[bold]Dangerous tool:[/bold] [bold]{escape(self._tool)}[/bold]",
+                Content.assemble(
+                    Content.styled("Dangerous tool:", "bold"),
+                    " ",
+                    literal(self._tool, "bold"),
+                ),
                 id="dangerous_confirm_title",
             ),
             Static(
