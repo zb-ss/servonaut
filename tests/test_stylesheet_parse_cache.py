@@ -12,7 +12,7 @@ from textual.css import stylesheet as css_stylesheet
 from textual.css.stylesheet import Stylesheet
 
 from servonaut.app import ServonautApp
-from servonaut.styles import widen_parse_cache
+from servonaut.styles import PARSE_CACHE_SIZE, widen_parse_cache
 
 # More sources than Textual's default cache holds.
 SOURCE_COUNT = 100
@@ -37,7 +37,11 @@ def test_reparse_only_parses_new_sources() -> None:
     assert parse.call_count == 1
 
 
-def test_app_stylesheet_keeps_a_parsed_entry_per_source() -> None:
+def test_app_stylesheet_keeps_its_cache_size_through_a_variable_refresh() -> None:
     app = ServonautApp()
 
-    assert app.stylesheet._parse_cache.maxsize > 64
+    # Start-up and every theme switch go through set_variables; a Textual
+    # that rebuilds the cache there would silently undo the wider cache.
+    app.stylesheet.set_variables(app.get_css_variables())
+
+    assert app.stylesheet._parse_cache.maxsize == PARSE_CACHE_SIZE
