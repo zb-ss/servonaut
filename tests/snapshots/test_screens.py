@@ -70,6 +70,11 @@ async def _fleet(pilot: Any) -> None:
     del pilot
 
 
+async def _fleet_selected_stopped(pilot: Any) -> None:
+    """A stopped server selected: the inspector shows its state and address."""
+    await _harness.select_fleet_row(pilot, "db-1")
+
+
 async def _fleet_memory_banner(pilot: Any) -> None:
     """No server has memory yet: the fleet shows its one-line memory hint."""
     app = pilot.app
@@ -254,6 +259,12 @@ async def _cloudwatch_top_ips(pilot: Any) -> None:
 def test_fleet_table(screen_snapshot, size: str) -> None:
     """The fleet table with AWS, custom, OVH and Hetzner servers."""
     _capture(screen_snapshot, size, _fleet)
+
+
+@sizes
+def test_fleet_selected_stopped_server(screen_snapshot, size: str) -> None:
+    """The fleet with a stopped server selected; the inspector follows the cursor."""
+    _capture(screen_snapshot, size, _fleet_selected_stopped)
 
 
 @sizes

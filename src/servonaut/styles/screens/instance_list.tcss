@@ -14,6 +14,9 @@ InstanceTable {
     margin: 0 1;
     border: round $panel-lighten-2;
     background: transparent;
+    /* One cell, muted: a solid bar under the rows reads as a second table. */
+    scrollbar-size: 1 1;
+    scrollbar-color: $border-blurred;
 }
 
 StatusBar {

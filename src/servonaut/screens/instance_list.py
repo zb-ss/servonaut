@@ -3,9 +3,10 @@
 from __future__ import annotations
 from typing import Optional, List
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
+from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
@@ -31,6 +32,7 @@ from servonaut.screens._demo_resolve import (
 )
 from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.instance_resolver import display_name, is_aws_row
+from servonaut.utils.markup import literal
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -890,26 +892,33 @@ class InstanceListScreen(WorkspaceScreen):
         """Update the right-hand Selected Server quick-action inspector."""
         try:
             header = self.query_one("#fleet_inspector_header", Static)
-        except Exception:
+        except NoMatches:
             return
         for btn in self.query("#fleet_inspector Button"):
             btn.disabled = not instance
         if not instance:
             header.update("[bold]Selected Server[/bold]\n[dim]No server selected[/dim]")
             return
-        name = escape(display_name(instance) or str(instance.get("id") or "Unnamed"))
-        state_raw = str(instance.get("state") or "running")
-        provider = escape(str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS")))
-        ip = escape(str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—"))
-        state_badge = (
-            f"[$text-success]● {escape(state_raw)}[/$text-success]"
-            if state_raw == "running"
-            else f"[dim]○ {escape(state_raw)}[/dim]"
-        )
-        header.update(
-            f"[bold $text-accent]{name}[/bold $text-accent]  {state_badge}\n"
-            f"[dim]{provider} · {ip}[/dim]"
-        )
+        name = display_name(instance) or str(instance.get("id") or "Unnamed")
+        provider = str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS"))
+        address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
+        # Server-sourced text is content, never markup: a name such as
+        # "[ @click=...]" must neither crash the screen nor run an action.
+        header.update(Content.assemble(
+            literal(name, "bold $text-accent"),
+            "  ",
+            self._inspector_state_badge(instance),
+            "\n",
+            literal(f"{provider} · {address}", "dim"),
+        ))
+
+    @staticmethod
+    def _inspector_state_badge(instance: dict) -> Content:
+        """The state marker; a server without a state reads as unknown, not running."""
+        state = str(instance.get("state") or "").strip() or "unknown"
+        if state == "running":
+            return literal(f"● {state}", "$text-success")
+        return literal(f"○ {state}", "dim")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
@@ -977,12 +986,13 @@ class InstanceListScreen(WorkspaceScreen):
             if len(content) > 200:
                 content = content[:200] + "..."
 
-            result_text = (
-                f"[bold]Server: {server_id}[/bold]\n"
-                f"  Source: {source}\n"
-                f"  [dim]{content}[/dim]\n"
-            )
-            container.mount(Static(result_text))
+            # Scan output is raw text from the server: content, not markup.
+            container.mount(Static(Content.assemble(
+                literal(f"Server: {server_id}", "bold"),
+                f"\n  Source: {source}\n  ",
+                literal(content, "dim"),
+                "\n",
+            )))
 
     def _clear_keyword_results(self) -> None:
         """Hide and clear keyword results panel."""
