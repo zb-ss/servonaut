@@ -12,7 +12,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -119,6 +119,19 @@ def _can_bind_team(row: Mapping[str, Any]) -> bool:
 def _team_key_label(row: Mapping[str, Any]) -> str:
     """The unescaped scope label; callers scrub and escape it for display."""
     return f"Team key for {row.get('team_name') or row.get('team_slug') or 'team'}"
+
+
+def _action_group(label: str, *buttons: Button) -> Horizontal:
+    """One labelled category: its heading beside a grid of its own actions.
+
+    Each category owns its grid, so a button can never share a cell with
+    another category's button and every group starts on the same left edge.
+    """
+    return Horizontal(
+        Static(label, classes="section_label"),
+        Grid(*buttons, classes="sa-group-actions"),
+        classes="sa-group",
+    )
 
 
 class VaultBindingScopeModal(ModalScreen[Optional[str]]):
@@ -823,6 +836,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Binding("L", "toggle_live", "Live", show=False),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
+        Binding("k", "use_vault_key", "Vault Key", show=False),
         Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -884,14 +898,15 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 self.run_worker(self._fetch_rdns(), exclusive=False)
         # Dynamically add OVH action buttons for OVH instances
         if self._instance.get('is_ovh'):
-            action_buttons = self.query_one("#action_buttons")
-            action_buttons.mount(
-                Static("OVH", classes="section_label"),
-                Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
-                Button("Resize / Upgrade", id="btn_ovh_resize"),
-                Button("Snapshots", id="btn_ovh_snapshots"),
-                Button("Firewall", id="btn_ovh_firewall"),
-                before=self.query_one("#btn_back"),
+            self.query_one("#action_buttons").mount(
+                _action_group(
+                    "OVH",
+                    Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
+                    Button("Resize / Upgrade", id="btn_ovh_resize"),
+                    Button("Snapshots", id="btn_ovh_snapshots"),
+                    Button("Firewall", id="btn_ovh_firewall"),
+                ),
+                before=self.query("#action_buttons .sa-group").last(),
             )
         # Populate the cached-memory snapshot pane.
         self._render_memory_panel()
@@ -943,27 +958,34 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
                 # Grouped action toolbar above the overview
                 yield Vertical(
-                    Static("CONNECT", classes="section_label"),
-                    Button("1. Browse Files", id="btn_browse", variant="primary"),
-                    Button("2. Run Command", id="btn_command"),
-                    Button("3. SSH Connect", id="btn_ssh"),
-                    Static("INSPECT", classes="section_label"),
-                    # Memory promoted to the top of INSPECT — highest-leverage
-                    # feature for AI / MCP workflows.
-                    Button("M. Memory", id="btn_memory"),
-                    Button("F. Monitoring", id="btn_findings"),
-                    Button("6. View Logs", id="btn_logs"),
-                    Button("5. Scan Results", id="btn_scan"),
-                    Button("D. Scan DB Creds", id="btn_db_creds"),
-                    Button("7. AI Analysis", id="btn_ai_analysis"),
-                    Static("OPERATE", classes="section_label"),
-                    Button("4. SCP Transfer", id="btn_scp"),
-                    Button("8. Ban IP", id="btn_ban_ip"),
-                    Static("MANAGE", classes="section_label"),
-                    Button("Use Vault Key", id="btn_use_vault_key"),
-                    Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
-                    Button("V. Verify SSH", id="btn_verify_ssh"),
-                    Button("9. Back", id="btn_back", variant="error"),
+                    _action_group(
+                        "CONNECT",
+                        Button("1. Browse Files", id="btn_browse", variant="primary"),
+                        Button("2. Run Command", id="btn_command", variant="primary"),
+                        Button("3. SSH Connect", id="btn_ssh", variant="primary"),
+                    ),
+                    _action_group(
+                        "INSPECT",
+                        # Memory leads: highest-leverage feature for AI / MCP workflows.
+                        Button("M. Memory", id="btn_memory"),
+                        Button("F. Monitoring", id="btn_findings"),
+                        Button("6. View Logs", id="btn_logs"),
+                        Button("5. Scan Results", id="btn_scan"),
+                        Button("D. Scan DB Creds", id="btn_db_creds"),
+                        Button("7. AI Analysis", id="btn_ai_analysis"),
+                    ),
+                    _action_group(
+                        "OPERATE",
+                        Button("4. SCP Transfer", id="btn_scp"),
+                        Button("8. Ban IP", id="btn_ban_ip", variant="warning"),
+                    ),
+                    _action_group(
+                        "MANAGE",
+                        Button("K. Use Vault Key", id="btn_use_vault_key"),
+                        Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
+                        Button("V. Verify SSH", id="btn_verify_ssh"),
+                    ),
+                    _action_group("", Button("9. Back", id="btn_back")),
                     id="action_buttons",
                 )
                 # Main detail workspace
