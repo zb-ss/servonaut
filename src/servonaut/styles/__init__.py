@@ -18,8 +18,8 @@ _S = Path(__file__).parent
 
 # Textual keeps parsed rule sets in an LRU cache of 64 entries.  The bundle
 # plus the DEFAULT_CSS of every widget class is well past that, so each
-# re-parse (one per newly mounted widget class) evicted entries it was about
-# to need and parsed the whole bundle again.
+# parse after a widget class adds its DEFAULT_CSS (one per newly mounted class)
+# evicted entries it was about to need and parsed the whole bundle again.
 PARSE_CACHE_SIZE = 1024
 
 

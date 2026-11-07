@@ -1,8 +1,8 @@
-"""The app's stylesheet keeps every parsed CSS source between re-parses.
+"""The app's stylesheet keeps every parsed CSS source between parses.
 
-Textual re-parses all sources whenever a widget class adds its DEFAULT_CSS.
+Textual parses all sources again whenever a widget class adds its DEFAULT_CSS.
 With its stock 64-entry parse cache, an app that holds more sources than that
-parses the whole bundle again each time (several seconds at start-up).
+parses the whole bundle each time (several seconds at start-up).
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _stylesheet_with_sources(count: int) -> Stylesheet:
     return stylesheet
 
 
-def test_reparse_only_parses_new_sources() -> None:
+def test_parse_after_a_new_source_only_parses_that_source() -> None:
     stylesheet = _stylesheet_with_sources(SOURCE_COUNT)
     stylesheet.add_source(".extra { color: red; }", read_from=("test", "extra"))
 
