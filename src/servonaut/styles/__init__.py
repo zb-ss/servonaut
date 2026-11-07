@@ -3,11 +3,37 @@
 CSS_FILES is the single source of truth for the load order — import it from
 app.py, memory.py, fleet_memory.py, and any test host that needs the full
 stylesheet.  Textual evaluates CSS_PATH entries in sequence, so the list
-order is the cascade order.
+order is the cascade order.  ``widen_parse_cache`` sizes Textual's parse
+cache for a bundle this large.
 """
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from textual.css.stylesheet import Stylesheet
 
 _S = Path(__file__).parent
+
+# Textual keeps parsed rule sets in an LRU cache of 64 entries.  The bundle
+# plus the DEFAULT_CSS of every widget class is well past that, so each
+# parse after a widget class adds its DEFAULT_CSS (one per newly mounted class)
+# evicted entries it was about to need and parsed the whole bundle again.
+PARSE_CACHE_SIZE = 1024
+
+
+def widen_parse_cache(stylesheet: Stylesheet) -> None:
+    """Let *stylesheet* keep a parsed rule set for every CSS source it holds.
+
+    Grows Textual's own cache in place, so a larger stock size is never
+    shrunk. Does nothing if Textual stops exposing it, which only costs speed.
+    A stylesheet copied by Textual's CSS live reload gets a stock cache again.
+    """
+    grow = getattr(getattr(stylesheet, "_parse_cache", None), "grow", None)
+    if grow is not None:
+        grow(PARSE_CACHE_SIZE)
+
 
 CSS_FILES = [
     _S / "base.tcss",
