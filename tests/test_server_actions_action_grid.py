@@ -36,6 +36,8 @@ def _assert_action_geometry(screen: ServerActionsScreen) -> None:
     toolbar = screen.query_one("#action_buttons")
     buttons = list(screen.query("#action_buttons Button"))
     assert len(buttons) >= 15
+    widths = [button.region.width for button in buttons]
+    assert max(widths) - min(widths) <= 1, dict(zip((b.id for b in buttons), widths))
     for button in buttons:
         region = button.region
         assert region.width > 0 and region.height > 0, button.id
@@ -44,8 +46,6 @@ def _assert_action_geometry(screen: ServerActionsScreen) -> None:
         assert group is not None, f"{button.id} is not inside a category group"
         assert group.region.contains_region(region), button.id
         assert button.label.plain.strip(), button.id
-    widths = [button.region.width for button in buttons]
-    assert max(widths) - min(widths) <= 1, dict(zip((b.id for b in buttons), widths))
     for index, first in enumerate(buttons):
         for second in buttons[index + 1:]:
             assert not first.region.overlaps(second.region), (first.id, second.id)
@@ -85,6 +85,8 @@ async def test_wide_layout_aligns_buttons_into_three_columns() -> None:
             button.region.x for button in screen.query("#action_buttons Button")
         }
         assert len(columns) == 3
+        widths = {button.region.width for button in screen.query("#action_buttons Button")}
+        assert max(widths) - min(widths) <= 1, widths
 
 
 @pytest.mark.asyncio
