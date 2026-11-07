@@ -499,12 +499,7 @@ VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
     margin-top: 1;
 }
 
-/* Accent text only: a border of its own hid the label in the one-line narrow
-   and short layouts, and focus keeps the readable text of every other button. */
-#action_buttons #btn_use_vault_key {
-    color: $accent;
-}
-
+/* Focus keeps the readable text of every other button. */
 #action_buttons #btn_use_vault_key:focus {
     color: $text;
 }
