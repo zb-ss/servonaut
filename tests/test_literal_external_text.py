@@ -671,7 +671,7 @@ def test_screenshot_action_ignores_a_file_name_and_folder() -> None:
 
 
 def _declared_actions() -> List[tuple]:
-    """Every ``(owner, action name, parameters)`` the app's bindings declare."""
+    """Every ``(class name, action name, parameters)`` the app's bindings declare."""
     import importlib
     import pkgutil
 
@@ -720,7 +720,7 @@ def test_no_binding_the_app_declares_is_refused() -> None:
     declared = _declared_actions()
     assert len(declared) > 100, "binding discovery found too few bindings"
     refused = [
-        (owner, name) for owner, name, params in declared
+        (cls_name, name) for cls_name, name, params in declared
         if _is_generic_framework_action(name, params)
     ]
     assert refused == []
