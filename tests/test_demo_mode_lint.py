@@ -200,6 +200,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Redact.for_app() before the cells reach add_row."),
     AllowlistEntry("screens/memory.py", "_render_findings", "update",
                    "The heading shows counts only; the empty line is fixed text."),
+    AllowlistEntry("screens/memory.py", "_show_own_shares", "update",
+                   "shared_with_text() gets redaction_service.redact_name in demo mode "
+                   "for the team names; the roles and the hint are fixed text."),
     AllowlistEntry("screens/memory_authored.py", "_show_redacted", "update",
                    "Every field goes through Redact.for_app(self.app) (scrub_stream / "
                    "redact_name in demo mode); the server name is the displayed row, "

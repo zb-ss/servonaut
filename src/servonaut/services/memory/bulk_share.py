@@ -6,7 +6,10 @@ this runs it for a list of servers with one set of choices. What it holds to:
 - the team's member keys are fetched once and checked once, before anything
   is sent: a changed or unusable key refuses the whole batch;
 - the team's existing shares are read once; a server already shared is
-  reported and left alone, or replaced with the new settings when asked;
+  reported and left alone, or, when asked, replaced with the new settings.
+  A share that already has them is completed instead: its newest snapshots
+  are sealed for the members who cannot read them yet (someone who set up
+  Memory Sync after it was shared), without stopping it;
 - servers are sent one after another; one failure does not stop the others;
 - a rate limit is retried once, after the service's ``Retry-After`` (or the
   configured pause) when that fits the configured wait; when it persists, the
@@ -52,6 +55,7 @@ T = TypeVar("T")
 # What happened to one server.
 SHARED = "shared"
 UPDATED = "updated"  # already shared; replaced with the batch's settings
+READERS_ADDED = "readers_added"  # already shared as asked; opened to members who could not read it
 ALREADY_SHARED = "already_shared"  # already shared; left as it was
 SKIPPED = "skipped"
 FAILED = "failed"
@@ -68,6 +72,7 @@ RATE_LIMITED = "rate_limited"
 KEY_RACE = "key_race"
 UNAVAILABLE = "unavailable"
 REVOKED_ONLY = "revoked_only"
+NOT_ADDED = "not_added"  # the service did not store the keys sealed for a member
 STOPPED = "stopped"  # the user stopped the batch
 UNLISTED = "unlisted"  # shared, but the service does not list that share to the caller
 
@@ -116,7 +121,8 @@ class ShareOutcome:
 
     ``reason`` is one of the reason codes above (empty when there is none);
     ``detail`` is a failure's plain-text explanation, which may carry the
-    service's own wording.
+    service's own wording. ``added`` names the members an existing share was
+    opened to, ``not_added`` those the service did not take.
     """
 
     target: ShareTarget
@@ -124,6 +130,8 @@ class ShareOutcome:
     reason: str = ""
     detail: str = ""
     retry_after: Optional[float] = None
+    added: Tuple[str, ...] = ()
+    not_added: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,6 +180,12 @@ def memory_sync_accepts(instance_id: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _same_settings(grant: Any, role: str, modules: List[str]) -> bool:
+    """Whether *grant* already shares exactly *modules* with *role*."""
+    return grant.required_role == role and grant.modules is not None \
+        and set(grant.modules) == set(modules)
 
 
 def failure_text(exc: BaseException) -> str:
@@ -239,8 +253,10 @@ class BulkMemoryShareService:
             required_role: The lowest team role that may read.
             modules: The modules to share (an explicit, non-empty list).
             targets: The servers.
-            update_existing: Replace a share that exists with these settings.
-                Off: such a server is reported and left as it is.
+            update_existing: Replace a share that exists with these settings,
+                or complete it for the members who cannot read it yet when it
+                already has them. Off: such a server is reported and left as
+                it is.
             on_progress: Called with ``(index, total, outcome)`` after each
                 server, counting from 1. An error it raises is logged and the
                 batch goes on.
@@ -278,9 +294,12 @@ class BulkMemoryShareService:
             if stop is None and should_stop is not None and should_stop():
                 stop = _Stopped(STOPPED)
             grant = live.get(target.instance_id)
-            outcome = self._without_request(target, grant, required_role, chosen, update_existing)
+            outcome = self._without_request(target, grant, update_existing)
             if outcome is None and stop is not None:
                 outcome = ShareOutcome(target, NOT_SENT, stop.reason, stop.detail, stop.retry_after)
+            elif outcome is None and grant is not None and _same_settings(grant, required_role, chosen):
+                outcome = await self._complete(team_slug, target, grant)
+                stop = self._stop_after(outcome) or stop
             elif outcome is None:
                 outcome, created, stopped = await self._send(
                     team_slug, target, grant, required_role, chosen, member_keys)
@@ -322,7 +341,7 @@ class BulkMemoryShareService:
 
     @staticmethod
     def _without_request(
-        target: ShareTarget, grant: Any, role: str, modules: List[str], update_existing: bool
+        target: ShareTarget, grant: Any, update_existing: bool
     ) -> Optional[ShareOutcome]:
         """The outcome when no request is needed for it, else None."""
         if not target.resolved:
@@ -331,14 +350,31 @@ class BulkMemoryShareService:
             return ShareOutcome(target, SKIPPED, MEMORY_OFF)
         if not memory_sync_accepts(target.instance_id):
             return ShareOutcome(target, SKIPPED, ID_NOT_ACCEPTED)
-        if grant is None:
-            return None
-        if not update_existing:
+        if grant is not None and not update_existing:
             return ShareOutcome(target, ALREADY_SHARED)
-        if grant.required_role == role and grant.modules is not None \
-                and set(grant.modules) == set(modules):
-            return ShareOutcome(target, ALREADY_SHARED, SAME_SETTINGS)
         return None
+
+    async def _complete(self, team_slug: str, target: ShareTarget, grant: Any) -> ShareOutcome:
+        """Seal an unchanged share's newest snapshots for whoever cannot read them yet.
+
+        Typically a member who set up Memory Sync after the share was made:
+        the share is neither stopped nor changed. A member whose key changed
+        since the batch's key check is a race, as in :meth:`_send`.
+        """
+        try:
+            result = await self._call(lambda: self._team.top_up_grant(
+                team_slug, grant.id, target.instance_id, list(grant.modules),
+            ))
+        except Exception as exc:  # noqa: BLE001 — reported on its row
+            return self._failed(target, exc)
+        added, not_added = tuple(result.sealed_names), tuple(result.skipped_names)
+        if added:
+            return ShareOutcome(target, READERS_ADDED, added=added, not_added=not_added)
+        if result.waiting:
+            return ShareOutcome(target, FAILED, KEY_RACE)
+        if not_added:
+            return ShareOutcome(target, FAILED, NOT_ADDED, not_added=not_added)
+        return ShareOutcome(target, ALREADY_SHARED, SAME_SETTINGS)
 
     async def _send(
         self, team_slug: str, target: ShareTarget, grant: Any, role: str,

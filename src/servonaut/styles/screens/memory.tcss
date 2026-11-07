@@ -187,20 +187,19 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 #share-container {
     width: 70;
     height: auto;
-    max-height: 90%;
+    max-height: 100%;
     border: round $primary;
     background: $surface;
-    padding: 1 2;
+    padding: 0 2;
 }
 
 #share-title {
     margin-bottom: 1;
 }
 
+/* No room kept while empty: at 100x30 every row counts. */
 #share-status {
     height: auto;
-    min-height: 1;
-    margin-bottom: 1;
 }
 
 .share-field-row {
@@ -218,7 +217,8 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     margin-top: 1;
 }
 
-#share-btn-keys {
+#share-btn-keys,
+#share-btn-add {
     min-width: 16;
 }
 

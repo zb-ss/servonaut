@@ -118,7 +118,7 @@ async def test_a_shared_server_with_no_local_record_shows_its_age_and_module_cou
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count and "team" in str(_cells(app)[0][3]))
         row = _cells(app)[0]
-        assert "Shared" in str(row[4]) and str(row[5]) == "3" and row[7] != "—"
+        assert "Shared" in str(row[4]) and str(row[6]) == "3" and row[8] != "—"
         status = str(app.screen.query_one("#fleet-memory-status", Static).render())
         assert "1 shared by a team" in status
 
@@ -151,19 +151,19 @@ async def test_a_revoked_share_turns_the_row_back(tmp_path):
         app.screen._sync_shared_rows()
         await pilot.pause(0.1)
         row = _cells(app)[0]
-        assert "Shared" not in str(row[4]) and str(row[5]) == "—"
+        assert "Shared" not in str(row[4]) and str(row[6]) == "—"
 
 
 async def test_changed_module_counts_reach_a_row_already_marked_shared(tmp_path):
     team = _Team({"team-a": [_shared(modules=3)]})
     app, reader = _host(tmp_path, team)
     async with app.run_test(headless=True) as pilot:
-        await _wait_for(pilot, lambda: _table(app).row_count and str(_cells(app)[0][5]) == "3")
+        await _wait_for(pilot, lambda: _table(app).row_count and str(_cells(app)[0][6]) == "3")
         team.listings = {"team-a": [_shared(modules=1)]}
         await reader.prefetch_all()
         app.screen._sync_shared_rows()
         await pilot.pause(0.1)
-        assert str(_cells(app)[0][5]) == "1"
+        assert str(_cells(app)[0][6]) == "1"
 
 
 async def test_a_grant_with_no_server_row_still_gets_a_read_only_row(tmp_path):
@@ -171,7 +171,7 @@ async def test_a_grant_with_no_server_row_still_gets_a_read_only_row(tmp_path):
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count)
         row = _cells(app)[0]
-        assert "owner-web" in str(row[0]) and "team" in str(row[3]) and str(row[5]) == "3"
+        assert "owner-web" in str(row[0]) and "team" in str(row[3]) and str(row[6]) == "3"
         notes: list = []
         app.notify = lambda m, **kw: notes.append(str(m))
         app.screen.action_clear_selected()
@@ -232,7 +232,7 @@ async def test_a_warm_cache_refresh_still_turns_a_revoked_row_back(tmp_path):
         app.screen._sync_shared_rows()
         await pilot.pause(0.1)
         row = _cells(app)[0]
-        assert "Shared" not in str(row[4]) and str(row[5]) == "—"
+        assert "Shared" not in str(row[4]) and str(row[6]) == "—"
 
 
 async def test_the_fleet_count_is_the_union_of_modules_across_grants(tmp_path):
@@ -241,7 +241,7 @@ async def test_the_fleet_count_is_the_union_of_modules_across_grants(tmp_path):
     b = SharedInstance(grant=b.grant, instance=b.instance, readable_modules=["services"])
     app, _ = _host(tmp_path, _Team({"team-a": [a], "team-b": [b]}), rows=[])
     async with app.run_test(headless=True) as pilot:
-        await _wait_for(pilot, lambda: _table(app).row_count and str(_cells(app)[0][5]) == "2")
+        await _wait_for(pilot, lambda: _table(app).row_count and str(_cells(app)[0][6]) == "2")
         assert _table(app).row_count == 1
 
 

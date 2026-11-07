@@ -360,6 +360,7 @@ class FleetMemoryScreen(Screen):
         table.add_column("Provider", key="provider", width=10)
         table.add_column("Source", key="source", width=8)
         table.add_column("Memory", key="status", width=16)
+        table.add_column("Shared with", key="shared_with", width=14)
         table.add_column("Modules", key="modules", width=10)
         table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
@@ -483,6 +484,13 @@ class FleetMemoryScreen(Screen):
                 ids.add(own.instance_id)
             # Every grant that covers this server stays on its one row.
             found = [c for i in sorted(ids) for c in by_id.get(i, [])]
+            # Under its real id: demo mode lists stand-ins.
+            real = connection_instance(self.app, inst)
+            real_id = str(real.get("id") or "") if isinstance(real, dict) else ""
+            row["shared_with"] = [
+                listing.team_name or listing.team_slug
+                for listing in reader.shared_by(self._caller_user_id(), ids | {real_id})
+            ]
             if found:
                 row["grant_candidates"] = found
             else:
@@ -549,17 +557,7 @@ class FleetMemoryScreen(Screen):
             cursor = table.cursor_row
             table.clear()
             for row in self._rows:
-                table.add_row(
-                    self._name_cell(row),
-                    escape(str(row["id"])),
-                    escape(str(row["provider"])),
-                    _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
-                    _STATUS_CELL.get(row["status"], "—"),
-                    str(row["modules"]) if row["modules"] else "—",
-                    str(row["drift_7d"]) if row.get("drift_7d") else "—",
-                    row["age"],
-                    row["reason"],
-                )
+                table.add_row(*self._row_cells(row))
             if self._rows and cursor is not None:
                 table.move_cursor(row=min(cursor, len(self._rows) - 1))
             self.query_one("#fleet-memory-status", Static).update(self._status_line())
@@ -729,21 +727,19 @@ class FleetMemoryScreen(Screen):
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
         for row in self._rows:
-            source_cell = _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]")
-            table.add_row(
-                self._name_cell(row),
-                escape(str(row["id"])),
-                escape(str(row["provider"])),
-                source_cell,
-                _STATUS_CELL.get(row["status"], "—"),
-                str(row["modules"]) if row["modules"] else "—",
-                str(row["drift_7d"]) if row.get("drift_7d") else "—",
-                row["age"],
-                row["reason"],
-            )
+            table.add_row(*self._row_cells(row))
 
         self.query_one("#fleet-memory-status", Static).update(self._status_line())
         self._start_shared_prefetch()
+
+    # Set when a share form opens: coming back, what is shared may have changed.
+    _reread_shares = False
+
+    def on_screen_resume(self) -> None:
+        """Back from a share form: read again what is shared."""
+        if self._reread_shares and self._rows:
+            self._reread_shares = False
+            self._start_shared_prefetch()
 
     def _start_shared_prefetch(self) -> None:
         """Look up the team-shared rows without blocking the table."""
@@ -805,17 +801,7 @@ class FleetMemoryScreen(Screen):
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
         for row in self._rows:
-            table.add_row(
-                self._name_cell(row),
-                escape(str(row["id"])),
-                escape(str(row["provider"])),
-                _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
-                _STATUS_CELL.get(row["status"], "—"),
-                str(row["modules"]) if row["modules"] else "—",
-                "—",
-                row["age"],
-                row["reason"],
-            )
+            table.add_row(*self._row_cells(row))
 
         # Status footer — one glance tells the operator where to act.
         self.query_one("#fleet-memory-status", Static).update(self._status_line())
@@ -846,9 +832,12 @@ class FleetMemoryScreen(Screen):
             else:
                 none_count += 1
         total = len(rows)
+        # Early in the line: a narrow terminal cuts its end.
+        yours = sum(1 for row in rows if row.get("shared_with"))
         return (
             f"[dim]{total} instances  ·  "
-            f"[$text-success]{fresh} fresh[/$text-success]  ·  "
+            + (f"[$text-accent]{yours} shared with a team[/$text-accent]  ·  " if yours else "")
+            + f"[$text-success]{fresh} fresh[/$text-success]  ·  "
             f"[$text-warning]{stale} stale[/$text-warning]  ·  "
             f"{none_count} not probed  ·  "
             f"[$text-error]{opt_out} opted-out[/$text-error]"
@@ -927,6 +916,32 @@ class FleetMemoryScreen(Screen):
             return
         keep = {self._row_key(row) for row in self._rows if self._is_markable(row)}
         self._marked = self._marked & keep
+
+    def _row_cells(self, row: Dict[str, Any]) -> tuple:
+        """The table cells of *row*, in column order."""
+        return (
+            self._name_cell(row),
+            escape(str(row["id"])),
+            escape(str(row["provider"])),
+            _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
+            _STATUS_CELL.get(row["status"], "—"),
+            self._shared_with_cell(row),
+            str(row["modules"]) if row["modules"] else "—",
+            str(row["drift_7d"]) if row.get("drift_7d") else "—",
+            row["age"],
+            row["reason"],
+        )
+
+    def _shared_with_cell(self, row: Dict[str, Any]) -> str:
+        """The teams the user shares this server's memory with (stand-ins in demo mode)."""
+        teams = list(row.get("shared_with") or [])
+        if not teams:
+            return "[dim]—[/dim]"
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            teams = [redaction.redact_name(team) for team in teams]
+        more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
+        return f"[blue]{escape(teams[0])}{more}[/blue]"
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))
@@ -1067,6 +1082,7 @@ class FleetMemoryScreen(Screen):
             self._share_marked(marked)
             return
         from servonaut.screens.memory_share import ShareInstanceScreen
+        self._reread_shares = True
         self.app.push_screen(ShareInstanceScreen(row["instance"]))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1319,22 +1335,16 @@ class FleetMemoryScreen(Screen):
         row["age"] = new_age
         row["reason"] = self._reason_cell(raw_id)
 
-        # Update visible table cells (columns 4=status, 5=modules, 7=age, 8=last scan).
+        # Update the visible cells: status, modules, age and last scan.
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
-            table.update_cell_at(
-                Coordinate(row_index, 4),
-                _STATUS_CELL.get(new_status, "—"),
-            )
-            table.update_cell_at(
-                Coordinate(row_index, 5),
-                str(new_modules) if new_modules else "—",
-            )
-            table.update_cell_at(
-                Coordinate(row_index, 7),
-                new_age,
-            )
-            table.update_cell_at(Coordinate(row_index, 8), row["reason"])
+            for key, value in (
+                ("status", _STATUS_CELL.get(new_status, "—")),
+                ("modules", str(new_modules) if new_modules else "—"),
+                ("age", new_age),
+                ("reason", row["reason"]),
+            ):
+                table.update_cell_at(Coordinate(row_index, table.get_column_index(key)), value)
         except Exception:
             # Widget may be gone (screen navigated away during scan) — ignore.
             pass

@@ -197,7 +197,7 @@ async def test_the_form_lists_who_can_read_it_at_the_chosen_role():
         screen.query_one("#share-role-select", Select).value = "admin"
         await _settle(pilot, screen, lambda: "Kim Member" not in _text(screen, "#share-readers"), "role filter")
         assert "Lee Admin" in _text(screen, "#share-readers")
-        assert "added automatically" in _text(screen, "#share-readers")
+        assert "can read the snapshots you upload after that" in _text(screen, "#share-readers")
 
 
 async def test_a_team_name_with_markup_is_shown_literally():
