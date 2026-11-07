@@ -66,6 +66,9 @@ class MotoAws:
         # created, per account and region.
         self._networks: dict[tuple[str, str], tuple[str, str]] = {}
         self._key_pairs: set[tuple[str, str, str]] = set()
+        # moto serves the same Amazon-owned images in every region and
+        # account, and listing them takes over a second, so it is done once.
+        self._image_id: Optional[str] = None
 
     def start(self) -> "MotoAws":
         self._server.start()
@@ -156,9 +159,13 @@ class MotoAws:
         if (role_key, region) not in self._networks:
             vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
             subnet = ec2.create_subnet(VpcId=vpc_id, CidrBlock="10.0.0.0/16")["Subnet"]
-            image_id = ec2.describe_images(Owners=["amazon"])["Images"][0]["ImageId"]
-            self._networks[(role_key, region)] = (subnet["SubnetId"], image_id)
+            self._networks[(role_key, region)] = (subnet["SubnetId"], self._any_image_id(ec2))
         return self._networks[(role_key, region)]
+
+    def _any_image_id(self, ec2) -> str:
+        if self._image_id is None:
+            self._image_id = ec2.describe_images(Owners=["amazon"])["Images"][0]["ImageId"]
+        return self._image_id
 
     def describe_names(
         self, region: str = "us-east-1", *, role_arn: Optional[str] = None
