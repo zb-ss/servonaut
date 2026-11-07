@@ -16,10 +16,7 @@ InstanceTable {
     background: transparent;
     /* One cell, muted: a solid bar under the rows reads as a second table. */
     scrollbar-size: 1 1;
-    scrollbar-background: transparent;
     scrollbar-color: $border-blurred;
-    scrollbar-color-hover: $primary;
-    scrollbar-color-active: $accent;
 }
 
 StatusBar {
