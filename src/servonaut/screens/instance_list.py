@@ -3,9 +3,9 @@
 from __future__ import annotations
 from typing import Optional, List
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
@@ -32,6 +32,7 @@ from servonaut.screens._demo_resolve import (
 )
 from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.instance_resolver import display_name, is_aws_row
+from servonaut.utils.markup import literal
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -898,21 +899,26 @@ class InstanceListScreen(WorkspaceScreen):
         if not instance:
             header.update("[bold]Selected Server[/bold]\n[dim]No server selected[/dim]")
             return
-        name = escape(display_name(instance) or str(instance.get("id") or "Unnamed"))
-        provider = escape(str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS")))
-        ip = escape(str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—"))
-        header.update(
-            f"[bold $text-accent]{name}[/bold $text-accent]  {self._inspector_state_badge(instance)}\n"
-            f"[dim]{provider} · {ip}[/dim]"
-        )
+        name = display_name(instance) or str(instance.get("id") or "Unnamed")
+        provider = str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS"))
+        address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
+        # Server-sourced text is content, never markup: a name such as
+        # "[ @click=...]" must neither crash the screen nor run an action.
+        header.update(Content.assemble(
+            literal(name, "bold $text-accent"),
+            "  ",
+            self._inspector_state_badge(instance),
+            "\n",
+            literal(f"{provider} · {address}", "dim"),
+        ))
 
     @staticmethod
-    def _inspector_state_badge(instance: dict) -> str:
+    def _inspector_state_badge(instance: dict) -> Content:
         """The state marker; a server without a state reads as unknown, not running."""
         state = str(instance.get("state") or "").strip() or "unknown"
         if state == "running":
-            return f"[$text-success]● {escape(state)}[/$text-success]"
-        return f"[dim]○ {escape(state)}[/dim]"
+            return literal(f"● {state}", "$text-success")
+        return literal(f"○ {state}", "dim")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""

@@ -129,14 +129,10 @@ def test_header_survives_a_refresh_that_drops_the_selected_row() -> None:
 def test_a_missing_state_is_not_shown_as_running() -> None:
     badge = InstanceListScreen._inspector_state_badge
     for row in ({}, {"state": None}, {"state": ""}, {"state": "  "}):
-        text = badge(row)
+        text = badge(row).plain
         assert "unknown" in text and "running" not in text
-    assert "running" in badge({"state": "running"})
-    assert "stopped" in badge({"state": "stopped"})
-
-
-def test_state_text_cannot_inject_markup() -> None:
-    assert "\\[" in InstanceListScreen._inspector_state_badge({"state": "[b]x"})
+    assert "running" in badge({"state": "running"}).plain
+    assert "stopped" in badge({"state": "stopped"}).plain
 
 
 @pytest.mark.parametrize("button_id", sorted(_BUTTON_ACTIONS))
@@ -227,3 +223,87 @@ def test_demo_mode_never_puts_a_real_name_or_address_in_the_header() -> None:
             assert not leaked, f"{name}: {leaked} shown in demo mode: {text!r}"
 
     _run(scenario, demo=True)
+
+
+# Names a server can carry from a cloud tag or a teammate: each one is text,
+# never markup, and none may run an action when the header is clicked.
+_HOSTILE_NAMES = [
+    "backup [old=",
+    "web-1 [/",
+    "[ @click=screen.view_logs]evil-1",
+    "[PROD] db-9",
+    "trail\\",
+    "$accent text",
+]
+
+
+def _hostile_row(name: str) -> dict:
+    return dict(_harness.AWS_ROWS[0], name=name)
+
+
+@pytest.fixture
+def hostile_first_server(monkeypatch: pytest.MonkeyPatch) -> str:
+    """A fleet whose first row has a markup-looking name, seeded before launch."""
+    name = _HOSTILE_NAMES[0]
+    monkeypatch.setitem(_harness.AWS_ROWS[0], "name", name)
+    _harness.seed_home()
+    return name
+
+
+def test_markup_looking_name_does_not_crash_the_launch(hostile_first_server: str) -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        await pilot.pause()
+        assert _header_text(screen).startswith(hostile_first_server)
+
+    async def main() -> None:
+        app = _harness.SnapshotApp()
+        async with app.run_test(size=_harness.SIZES["160x50"]) as pilot:
+            await _harness.wait_until(
+                pilot,
+                lambda: type(pilot.app.screen).__name__ == "InstanceListScreen"
+                and pilot.app.screen.query_one(InstanceTable).row_count > 0,
+                "the fleet",
+            )
+            await scenario(pilot)
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("name", _HOSTILE_NAMES)
+def test_server_text_is_shown_literally_and_runs_nothing(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: List[str] = []
+    for action in _BUTTON_ACTIONS.values():
+        monkeypatch.setattr(InstanceListScreen, action, lambda self, a=action: calls.append(a))
+
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        screen._instances = [_hostile_row(name)]
+        screen._update_table()
+        screen._update_detail_panel()
+        await pilot.pause()
+        text = _header_text(screen)
+        assert text.startswith(name), text
+        await pilot.click("#fleet_inspector_header")
+        await pilot.pause()
+        assert calls == []
+
+    _run(scenario)
+
+
+def test_hostile_provider_state_and_host_are_shown_literally() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        row = dict(
+            _harness.AWS_ROWS[0], state="[b]x", provider="acme [/]", public_ip="[ @click=x]",
+        )
+        screen._instances = [row]
+        screen._update_table()
+        screen._update_detail_panel()
+        await pilot.pause()
+        text = _header_text(screen)
+        assert "[b]x" in text and "acme [/]" in text and "[ @click=x]" in text
+
+    _run(scenario)
