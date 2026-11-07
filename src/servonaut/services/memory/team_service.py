@@ -1138,6 +1138,26 @@ class TeamMemoryService:
             waiting.update({c.user_id: c for c in split.changed})
         return list(waiting.values())
 
+    def addable_members(
+        self, team_slug: str, coverage: GrantCoverage, modules: Optional[List[str]] = None
+    ) -> List[str]:
+        """Names of the members a top-up would seal for now, once each.
+
+        They may read the share, hold a key that needs no confirmation (new
+        or trusted), and cannot open at least one of its newest snapshots:
+        typically a member who set up Memory Sync after the share was made.
+        A changed key is not listed here (see :meth:`waiting_key_changes`).
+        ``modules`` limits it to the share's modules (None means all).
+        """
+        pins = self._pins()
+        names: Dict[int, str] = {}
+        for envelope in coverage.envelopes:
+            if modules is not None and envelope.module not in modules:
+                continue
+            for recipient in split_recipients(pins, team_slug, envelope.missing).sealable:
+                names.setdefault(recipient.user_id, display_name(recipient.name, recipient.user_id))
+        return list(names.values())
+
     async def top_up_grant(
         self,
         team_slug: str,

@@ -103,6 +103,11 @@ class MemoryRetrievalService:
         crypto: The crypto module (services.memory.crypto) — used for decrypt_envelope.
         passphrase_provider: Async callable returning the user's passphrase string.
         rate_limiter: Optional shared RateLimiter; defaults to a private one.
+        key_material_provider: Returns Memory Sync's unlocked key, or None
+            while it is locked. Asked before this service unlocks on its own,
+            so an unlocked Memory Sync never leads to a second prompt.
+        user_id_provider: Async callable returning the signed-in user's id.
+            Its own unlock needs it: envelopes are decrypted for that user.
     """
 
     def __init__(
@@ -111,11 +116,15 @@ class MemoryRetrievalService:
         crypto: Any,
         passphrase_provider: Callable[[], Any],
         rate_limiter: Optional[RateLimiter] = None,
+        key_material_provider: Optional[Callable[[], Optional[KeyMaterial]]] = None,
+        user_id_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._api = api_client
         self._crypto = crypto
         self._passphrase_provider = passphrase_provider
         self._rate_limiter = rate_limiter or RateLimiter()
+        self._key_material_provider = key_material_provider
+        self._user_id_provider = user_id_provider
 
         self._cache = _LRUCache()
         self._lock = asyncio.Lock()
@@ -179,6 +188,24 @@ class MemoryRetrievalService:
         wrapped = WrappedPrivateKey.from_json(wrapped_json)
         self._self_privkey = unwrap_private_key(wrapped, passphrase)
 
+    async def _ensure_key_material(self) -> None:
+        """Have a keypair and the user id to decrypt for.
+
+        Memory Sync's unlocked key comes first; this service only unlocks on
+        its own (``/keys/me`` plus a passphrase prompt) while Memory Sync is
+        locked, and then resolves the user id itself.
+        """
+        if self._self_privkey is not None and self._self_pubkey is not None and self._self_user_id is not None:
+            return
+        material = self._key_material_provider() if self._key_material_provider is not None else None
+        if material is not None:
+            self.set_key_material(material)
+            return
+        if self._self_privkey is None or self._self_pubkey is None:
+            await self._ensure_keypair()
+        if self._self_user_id is None and self._user_id_provider is not None:
+            self._self_user_id = await self._user_id_provider()
+
     # ------------------------------------------------------------------
     # Private decrypt helper
     # ------------------------------------------------------------------
@@ -188,8 +215,7 @@ class MemoryRetrievalService:
 
         On fingerprint change (rotation), clears the LRU cache first.
         """
-        if self._self_privkey is None or self._self_pubkey is None:
-            await self._ensure_keypair()
+        await self._ensure_key_material()
 
         if self._self_user_id is None:
             # Without a resolved user_id we cannot pick the right dek_wrap;

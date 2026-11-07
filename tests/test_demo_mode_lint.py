@@ -263,6 +263,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Redact.for_app() before the cells reach add_row."),
     AllowlistEntry("screens/memory.py", "_render_findings", "update",
                    "The heading shows counts only; the empty line is fixed text."),
+    AllowlistEntry("screens/memory.py", "_show_own_shares", "update",
+                   "shared_with_text() gets redaction_service.redact_name in demo mode "
+                   "for the team names; the roles and the hint are fixed text."),
     AllowlistEntry("screens/memory_authored.py", "_show_redacted", "update",
                    "Every field goes through Redact.for_app(self.app) (scrub_stream / "
                    "redact_name in demo mode); the server name is the displayed row, "
@@ -640,14 +643,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes '[red]Export service not available.[/red]' — "
                    "hard-coded error string, no user data."),
 
-    # memory_keys.py — _update_strength and _update_confirm_state write
-    # code-controlled strength labels and match/mismatch indicators.
-    AllowlistEntry("screens/memory_keys.py", "_update_strength", "update",
-                   "Writes password-strength label (Weak/Fair/Strong) "
-                   "— code-controlled taxonomy, not user PII."),
-    AllowlistEntry("screens/memory_keys.py", "_update_confirm_state", "update",
-                   "Writes 'Passwords match / do not match' indicator "
-                   "— code-controlled string."),
+    # memory_keys.py — _update_validation shows local rules and validation results.
+    AllowlistEntry("screens/memory_keys.py", "_update_validation", "update",
+                   "Only local rules, scores, and validation messages. "
+                   "No passphrase values or server data."),
 
     # memory_share.py — _do_share writes hard-coded status strings for each
     # phase of the share operation; exception is escaped before embedding.

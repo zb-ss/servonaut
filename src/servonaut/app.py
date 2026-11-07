@@ -51,6 +51,10 @@ _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 # the package) neither bundles it nor reports this import as missing.
 _DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
 
+# A headless or scripted session supplies the Memory Sync passphrase here
+# instead of through the passphrase dialog.
+MEMORY_PASSPHRASE_ENV = "SERVONAUT_MEMORY_PASSPHRASE"
+
 if TYPE_CHECKING:
     from servonaut.config.schema import VoiceConfig
     from servonaut.services.relay_manager import RelayManager
@@ -68,6 +72,19 @@ def _configured_account_labels(app) -> List[str]:
         return [ref.label for ref in all_account_refs(manager.get())]
     except Exception:  # a display helper never breaks a notification
         return []
+
+
+def _note_memory_bootstrap_outcome(task: "asyncio.Future[None]") -> None:
+    """Log a shared Memory Sync bootstrap that failed.
+
+    Its callers may have stopped waiting (a cancelled worker), so the error
+    is read here: logged once, never left as an unretrieved task exception.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("Memory Sync unlock did not finish: %s", exc)
 
 
 class ServonautApp(App):
@@ -176,6 +193,7 @@ class ServonautApp(App):
     shared_memory_reader = None
     memory_crypto = None
     _memory_key_material = None
+    _memory_bootstrap_task = None
 
     # Shared state. The mutable containers are created per app in __init__:
     # a class-level default would be one list/set shared by every instance.
@@ -1558,6 +1576,8 @@ class ServonautApp(App):
                 crypto=self.memory_crypto,
                 passphrase_provider=self._prompt_memory_passphrase,
                 rate_limiter=self.memory_rate_limiter,
+                key_material_provider=self._current_memory_key_material,
+                user_id_provider=self.auth_service.fetch_user_id,
             )
         except Exception as exc:
             logger.debug("MemoryRetrievalService init failed: %s", exc)
@@ -1624,7 +1644,7 @@ class ServonautApp(App):
                 api_client=self.api_client,
                 auth_service=self.auth_service,
                 crypto=self.memory_crypto,
-                key_store_provider=lambda: self._memory_key_material,
+                key_store_provider=self._current_memory_key_material,
                 retrieval_service=self.memory_retrieval_service,
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
@@ -1671,6 +1691,11 @@ class ServonautApp(App):
         Idempotent — safe to call multiple times; the underlying service
         skips the network round-trip if a key is already loaded.
 
+        Single flight: concurrent callers share one bootstrap, and a caller
+        that is cancelled (e.g. its worker replaced by another in the same
+        exclusive group) stops waiting without stopping the bootstrap. A
+        bootstrap that failed is started afresh by the next caller.
+
         Exceptions are NOT swallowed — the caller catches them and shows
         the user a notify with the actual reason (wrong passphrase, backend
         down, beta-waitlisted, etc.).
@@ -1682,11 +1707,22 @@ class ServonautApp(App):
         """
         if self.memory_sync_service is None:
             return
-        provider = (
-            passphrase_provider
-            if passphrase_provider is not None
-            else self._prompt_memory_passphrase
-        )
+        task = getattr(self, "_memory_bootstrap_task", None)
+        if task is None or task.done():
+            provider = (
+                passphrase_provider
+                if passphrase_provider is not None
+                else self._prompt_memory_passphrase
+            )
+            # The task copies this caller's context, so a passphrase modal
+            # opened inside it still runs under the caller's worker.
+            task = asyncio.ensure_future(self._run_memory_bootstrap(provider))
+            task.add_done_callback(_note_memory_bootstrap_outcome)
+            self._memory_bootstrap_task = task
+        await asyncio.shield(task)
+
+    async def _run_memory_bootstrap(self, provider) -> None:
+        """The bootstrap :meth:`bootstrap_memory_cloud` shares between callers."""
         await self.auth_service.fetch_user_id()
         await self.memory_sync_service.bootstrap(
             passphrase_provider=provider,
@@ -1856,6 +1892,7 @@ class ServonautApp(App):
         if sync is None:
             return False
         if sync.is_configured:
+            self._propagate_memory_key_material()
             return True
 
         cfg = self.config_manager.get()
@@ -1905,6 +1942,13 @@ class ServonautApp(App):
                 return True
             except Exception as exc:
                 if sync.is_configured:
+                    # The key loaded before a later step failed: Memory Sync
+                    # is usable, so hand the key on and say what failed.
+                    _logger.warning(
+                        "_try_silent_memory_unlock: unlocked, but bootstrap "
+                        "did not finish: %s", exc
+                    )
+                    self._propagate_memory_key_material()
                     return True
                 # Network/backend error — passphrase WAS valid; keep the
                 # credential and retry on the next launch / section open.
@@ -1934,13 +1978,24 @@ class ServonautApp(App):
         (no ``memory_sync`` entitlement) never reach the unlock path at all.
         """
         sync = getattr(self, "memory_sync_service", None)
-        if sync is None or sync.is_configured or not sync.is_enrolled_locally():
+        if sync is None:
+            return
+        if sync.is_configured:
+            self._propagate_memory_key_material()
+            return
+        if not sync.is_enrolled_locally():
             return
         # Auth guard — all cheap (reads from persisted token, no network).
         auth = getattr(self, "auth_service", None)
         if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
             return
-        await self._try_silent_memory_unlock()
+        try:
+            await self._try_silent_memory_unlock()
+        except asyncio.CancelledError:
+            # Replaced by another unlock in the same worker group; the shared
+            # bootstrap goes on without this worker.
+            logger.info("Memory Sync start-up unlock handed over to a newer unlock")
+            raise
 
     async def prompt_memory_sync_unlock(self) -> None:
         """Unlock Memory Sync when the user opens a memory section.
@@ -1957,11 +2012,14 @@ class ServonautApp(App):
         sync dormant until the user explicitly unlocks from the Memory Sync
         screen.
         """
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-
         sync = getattr(self, "memory_sync_service", None)
-        if sync is None or sync.is_configured or not sync.is_enrolled_locally():
+        if sync is None:
+            return
+        if sync.is_configured:
+            # Already unlocked: make sure sharing and the reader have the key.
+            self._propagate_memory_key_material()
+            return
+        if not sync.is_enrolled_locally():
             return
         auth = getattr(self, "auth_service", None)
         if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
@@ -1975,30 +2033,61 @@ class ServonautApp(App):
             return
         if sync.is_configured:
             return
+        await self._unlock_memory_sync_with_prompt()
 
-        try:
-            await self.bootstrap_memory_cloud()
-            self.notify(
-                "Memory Sync unlocked.",
-                severity="information",
-                timeout=4,
-            )
-        except RuntimeError:
-            # User cancelled the modal — leave sync dormant, no error toast.
-            self._memory_sync_prompt_skipped = True
-            _logger.info(
-                "prompt_memory_sync_unlock: user cancelled passphrase prompt; "
-                "sync stays dormant"
-            )
-            self.notify(
-                "Memory Sync locked — open Memory Sync to unlock.",
-                severity="information",
-                timeout=5,
-            )
-        except Exception as exc:
-            _logger.warning(
-                "prompt_memory_sync_unlock: prompt path failed: %s", exc
-            )
+    async def _unlock_memory_sync_with_prompt(self) -> None:
+        """Ask for the passphrase until it unlocks Memory Sync or the user cancels.
+
+        A wrong passphrase says so and opens the prompt again. Any other
+        failure is reported with its reason, and the next visit to a memory
+        section asks again. A cancel leaves sync dormant for this session.
+        """
+        from servonaut.services.memory.sync_errors import (
+            WRONG_PASSPHRASE_MESSAGE,
+            describe_sync_error,
+            is_wrong_passphrase,
+        )
+
+        while True:
+            try:
+                await self.bootstrap_memory_cloud()
+            except RuntimeError:
+                # User cancelled the modal — leave sync dormant, no error toast.
+                self._memory_sync_prompt_skipped = True
+                logger.info(
+                    "prompt_memory_sync_unlock: user cancelled passphrase prompt; "
+                    "sync stays dormant"
+                )
+                self.notify(
+                    "Memory Sync locked — open Memory Sync to unlock.",
+                    severity="information",
+                    timeout=5,
+                )
+                return
+            except Exception as exc:
+                if not is_wrong_passphrase(exc):
+                    logger.warning("prompt_memory_sync_unlock: unlock failed: %s", exc)
+                    self.notify(
+                        describe_sync_error(exc, failure_prefix="Could not unlock Memory Sync"),
+                        severity="error",
+                        timeout=8,
+                        markup=False,
+                    )
+                    return
+                if os.environ.get(MEMORY_PASSPHRASE_ENV):
+                    # No dialog to reopen: asking again would reuse the same passphrase.
+                    self.notify(
+                        f"The passphrase in {MEMORY_PASSPHRASE_ENV} does not unlock Memory Sync.",
+                        severity="error",
+                        timeout=8,
+                        markup=False,
+                    )
+                    return
+                logger.info("prompt_memory_sync_unlock: wrong passphrase; asking again")
+                self.notify(WRONG_PASSPHRASE_MESSAGE, severity="error", timeout=6, markup=False)
+                continue
+            self.notify("Memory Sync unlocked.", severity="information", timeout=4)
+            return
 
     def _refresh_fleet_auto_scan_loop(self) -> None:
         """Re-evaluate the fleet auto-scan loop after the config flag changes.
@@ -2446,11 +2535,11 @@ class ServonautApp(App):
     def _propagate_memory_key_material(self) -> None:
         """Mirror keypair material from MemorySyncService onto the app.
 
-        TeamMemoryService and MemoryRetrievalService both need access to
-        the unwrapped keypair after enrolment, but only MemorySyncService
-        knows when the user has provided their passphrase. This runs once
-        after bootstrap and again whenever the sync service fires its
-        key-material listener (after a rotate).
+        MemoryRetrievalService needs the unwrapped keypair, but only
+        MemorySyncService knows when the user has provided their passphrase.
+        This runs whenever the sync service fires its key-material listener
+        (the moment a key is unwrapped, and after a rotate), after bootstrap,
+        and whenever an unlock entry point finds Memory Sync already unlocked.
         """
         sync = self.memory_sync_service
         if sync is None:
@@ -2462,6 +2551,17 @@ class ServonautApp(App):
         if self.memory_retrieval_service is not None:
             self.memory_retrieval_service.set_key_material(material)
             self.memory_retrieval_service.clear_cache()
+
+    def _current_memory_key_material(self):
+        """Memory Sync's unlocked key, read live; ``None`` while it is locked.
+
+        Sharing reads the key through this rather than a copy, so it works as
+        soon as Memory Sync is unlocked and stops when Memory Sync is locked.
+        """
+        sync = self.memory_sync_service
+        if sync is None:
+            return None
+        return sync.get_key_material()
 
     async def _prompt_memory_passphrase(self, mode: str = "enrol") -> str:
         """Return the memory encryption passphrase.
@@ -2488,8 +2588,7 @@ class ServonautApp(App):
         Raises:
             RuntimeError: If the user cancels the modal.
         """
-        import os as _os
-        env = _os.environ.get("SERVONAUT_MEMORY_PASSPHRASE")
+        env = os.environ.get(MEMORY_PASSPHRASE_ENV)
         if env:
             return env
         from servonaut.screens.memory_keys import PassphraseEnrolModal

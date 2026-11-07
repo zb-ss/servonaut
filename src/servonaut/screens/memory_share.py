@@ -59,6 +59,12 @@ _DEFAULT_SHARED_MODULES = frozenset({"os", "runtimes", "services", "git", "logs"
 _AUTHORED_MODULES = ["annotations", "findings"]
 
 
+# Under the readers: what happens for a member who sets up Memory Sync later.
+LATER_MEMBERS_TEXT = (
+    "Members who set up Memory Sync later can read the snapshots you upload after that; "
+    "this form then offers to add them to the ones already shared."
+)
+
 # Placeholder values of the team picker; neither names a team.
 _NO_TEAM_VALUES = frozenset({"__loading__", "__none__"})
 
@@ -202,6 +208,9 @@ class ShareInstanceScreen(WorkspaceScreen):
         self._grant: Any = None
         # Members of the live share whose changed key waits for confirmation.
         self._waiting: List[Any] = []
+        # Members of the live share who cannot read its newest snapshots yet
+        # and can be added without a confirmation (names).
+        self._addable: List[str] = []
         # True while an error line is on show: a refresh must not wipe it.
         self._status_locked = False
         # The confirmation write in flight; the next one waits for it.
@@ -268,9 +277,10 @@ class ShareInstanceScreen(WorkspaceScreen):
                             Static("Current share", classes="memory-secondary-heading"),
                             Static("", id="share-existing-text"),
                             Container(
-                                Button("Revoke", id="share-btn-revoke"),
-                                Button("Share again", id="share-btn-reshare"),
+                                Button("Share with them too", id="share-btn-add"),
                                 Button("Review changed keys", id="share-btn-keys"),
+                                Button("Share again", id="share-btn-reshare"),
+                                Button("Revoke", id="share-btn-revoke"),
                                 Button(
                                     "Revoke and delete members' copies",
                                     variant="error",
@@ -435,7 +445,7 @@ class ShareInstanceScreen(WorkspaceScreen):
             except Exception as exc:  # noqa: BLE001 — a worker reports, never crashes the screen
                 logger.error("Could not load the share state: %s", _failure(exc))
                 self._grant = None
-                self._waiting = []
+                self._waiting, self._addable = [], []
                 self._keys_by_team.pop(slug, None)
                 self._show_error(self._explain("Could not check the share", exc))
                 self._render_form(slug)
@@ -447,19 +457,25 @@ class ShareInstanceScreen(WorkspaceScreen):
         self._render_form(slug)
 
     async def _load_waiting(self, service: Any, slug: str) -> None:
-        """Find the members of the live share whose changed key waits for the user.
+        """Find the members of the live share who cannot read it yet.
 
-        A failure only costs the line: the rest of the panel works without it.
-        A share the service no longer knows is dropped from the form.
+        Those whose changed key waits for the user, and those who can be added
+        right away (who set up Memory Sync after the share was made, say).
+        A failure only costs the lines: the rest of the panel works without
+        them. A share the service no longer knows is dropped from the form.
         """
         from servonaut.services.memory.team_service import ShareGoneError
 
-        self._waiting = []
+        self._waiting, self._addable = [], []
         if self._grant is None:
             return
         try:
             coverage = await service.grant_coverage(slug, self._grant.id)
             self._waiting = service.waiting_key_changes(slug, coverage)
+            modules = self._grant.modules
+            self._addable = service.addable_members(
+                slug, coverage, list(modules) if modules is not None else None
+            )
         except ShareGoneError:
             self._grant = None
             self._show_error("That share no longer exists. The form shows what is shared now.")
@@ -510,11 +526,7 @@ class ShareInstanceScreen(WorkspaceScreen):
                 if eligible
                 else Content("No member with a memory key has this role yet.")
             )
-            line = Content.assemble(
-                line,
-                "\nMembers who set up Memory Sync later are added "
-                "automatically on the next sync.",
-            )
+            line = Content.assemble(line, "\n", LATER_MEMBERS_TEXT)
             if pending:
                 waiting = _shown_names(
                     self.app, [str(p.get("name") or f"member {p.get('user_id')}") for p in pending]
@@ -532,13 +544,21 @@ class ShareInstanceScreen(WorkspaceScreen):
         panel.set_class(grant is not None, "-shown")
         self.query_one("#share-btn-confirm", Button).disabled = bool(grant) or not self._teams
         waiting = bool(grant is not None and self._waiting)
+        addable = bool(grant is not None and self._addable)
         self.query_one("#share-btn-keys", Button).display = waiting
+        self.query_one("#share-btn-add", Button).display = addable
         if grant is None:
             return
         modules = ", ".join(grant.modules) if grant.modules else "all modules"
         text = Content(
             f"Already shared with this team: role {grant.required_role}, modules {modules}."
         )
+        if addable:
+            who = _shown_names(self.app, list(self._addable))
+            text = Content.assemble(
+                text, "\nCannot read it yet: ", literal(who),
+                ". Share with them too to let them read the latest snapshots.",
+            )
         if waiting:
             who = _shown_names(self.app, [self._member_label(c) for c in self._waiting])
             text = Content.assemble(
@@ -567,7 +587,7 @@ class ShareInstanceScreen(WorkspaceScreen):
             self.app.notify("That share no longer exists.", markup=False)
             return True
         self._grant = None
-        self._waiting = []
+        self._waiting, self._addable = [], []
         self._keys_by_team.pop(self._selected_team(), None)
         self._show_error("That share no longer exists. The form shows what is shared now.")
         self._start_refresh(reload=True)
@@ -599,6 +619,13 @@ class ShareInstanceScreen(WorkspaceScreen):
             action = self._review_action()
             if action is not None:
                 self._ask_keys(list(self._waiting), action, mode="catch_up")
+        elif button_id == "share-btn-add":
+            action = self._review_action()
+            if action is not None:
+                self.run_worker(
+                    functools.partial(self._top_up, action, confirmed_keys=False),
+                    group="memory_share", name="share_add_readers", exclusive=True,
+                )
         elif button_id == "share-btn-purge":
             self.app.push_screen(PurgeCopiesModal(), self._on_purge_answer)
 
@@ -834,8 +861,12 @@ class ShareInstanceScreen(WorkspaceScreen):
         self._pin_write = write
         await asyncio.shield(write)
 
-    async def _top_up(self, action: _ShareAction) -> None:
-        """Seal the latest snapshots for the members whose key was just confirmed."""
+    async def _top_up(self, action: _ShareAction, *, confirmed_keys: bool = True) -> None:
+        """Seal the latest snapshots for the members who cannot read them yet.
+
+        After a key confirmation (*confirmed_keys*), or from "Share with them
+        too" for members whose key needs none.
+        """
         service = getattr(self.app, "team_memory_service", None)
         if action.grant_id is None or service is None:
             return
@@ -859,7 +890,8 @@ class ShareInstanceScreen(WorkspaceScreen):
         if result.skipped_names:
             self._show_error(self._skipped_text(result))
         elif not result.sealed_names:
-            self.app.notify("Keys confirmed. There was nothing to share right now.", markup=False)
+            nothing = "There was nothing to share right now."
+            self.app.notify(f"Keys confirmed. {nothing}" if confirmed_keys else nothing, markup=False)
         self._keys_by_team.pop(team_slug, None)
         self._start_refresh(reload=True)
 

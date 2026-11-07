@@ -67,6 +67,12 @@ class FakeTeamBackend:
         # When set, every grant POST waits for it: a batch held mid-flight.
         self.post_gate: Optional[asyncio.Event] = None
         self.pending: Dict[str, List[Dict[str, Any]]] = {}
+        # grant id -> {module: [members who cannot read its newest snapshot]}.
+        self.coverage: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        # Catch-up wraps posted, as (grant id, wraps); and the members the
+        # service is to skip ({user id: reason}).
+        self.topped_up: List[tuple] = []
+        self.wrap_skips: Dict[int, str] = {}
         self.api = MagicMock(spec=APIClient)
         self.api.get.side_effect = self._get
         self.api.post.side_effect = self._post
@@ -79,13 +85,46 @@ class FakeTeamBackend:
             raise queued.pop(0)
         if path == KEYS_PATH:
             return {"members": self.members}
+        if path.endswith("/wraps"):
+            return self._coverage(path.split("/")[-2])
         return {"instances": [
             {"grant": g, "instance": {"instance_id": g["instance_id"]}, "readable_modules": ["os"]}
             for g in self.live
         ]}
 
+    def _coverage(self, grant_id: str) -> Dict[str, Any]:
+        """The share's coverage report: its snapshots someone cannot read yet."""
+        found = next(g for g in self.live if g["id"] == grant_id)
+        return {
+            "grant_id": grant_id, "instance_id": found["instance_id"], "pending_recipients": [],
+            "envelopes": [
+                {"envelope_id": f"e-{module}", "module": module, "snapshot_version": 1,
+                 "wrapped_dek": None,
+                 "missing_recipients": [{"key_changed": False, **m} for m in missing]}
+                for module, missing in self.coverage.get(grant_id, {}).items() if missing
+            ],
+        }
+
+    def _store_wraps(self, path: str, wraps: List[Dict[str, Any]]) -> Dict[str, Any]:
+        self.topped_up.append((path.split("/")[-2], wraps))
+        kept = [w for w in wraps if w["recipient_user_id"] not in self.wrap_skips]
+        return {
+            "wraps_stored": len({(w["recipient_user_id"], w["envelope_id"]) for w in kept}),
+            "wraps_unchanged": 0,
+            "skipped_recipients": [
+                {"user_id": uid, "reason": reason} for uid, reason in self.wrap_skips.items()
+                if any(w["recipient_user_id"] == uid for w in wraps)
+            ],
+        }
+
     async def _post(self, path: str, **kw: Any) -> Dict[str, Any]:
         body = kw.get("json") or {}
+        if path.endswith("/wraps"):
+            self.calls.append(f"POST {path}")
+            queued = self.get_errors.get(path, [])
+            if queued:
+                raise queued.pop(0)
+            return self._store_wraps(path, body["wraps"])
         self.calls.append(f"POST {path} {body.get('instance_id', '')}".rstrip())
         if self.post_gate is not None:
             await self.post_gate.wait()

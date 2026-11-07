@@ -351,24 +351,27 @@ A team's server you do not own yourself keeps its own record, filed under `~/.se
 
 ### Sharing memory with a team
 
-In Fleet Memory, select a server and press `S`. Pick the team, the lowest role that may read it, and the modules. The form lists the members who will be able to read it. After you share, it names any member who has no memory key yet. Ask them to set up Memory Sync: the snapshots you upload after that reach them too; for older ones, use **Share again**.
+In Fleet Memory, select a server and press `S`. Pick the team, the lowest role that may read it, and the modules. The form lists the members who will be able to read it. After you share, it names any member who has no memory key yet. Ask them to set up Memory Sync: the snapshots you upload after that reach them too. A member cannot see a share at all until it is sealed for their key, so add them to the snapshots already shared as well: open the share again (below).
 
 When the server is already shared with that team, the form shows that share instead:
+- "Cannot read it yet" names the members who may read the share but cannot open its latest snapshots, typically someone who set up Memory Sync after you shared it. **Share with them too** seals the latest snapshots for them; the share itself is not stopped or changed;
 - **Share again** replaces it with the role and modules shown, which start from the current share's settings;
 - **Revoke** stops members reading it;
 - **Revoke and delete members' copies** also removes their access to the snapshots already shared, after a confirmation. Your own memory is kept.
 
 Snapshots you take after sharing reach the team's members as well: after each upload, Servonaut adds the keys the members need.
 
+Fleet Memory's **Shared with** column names the team you share each server with (and "+1", "+2" when there are more), and the server's Memory screen says "Shared with Team A (viewer and above)". Only your own shares count: a team's copy that someone else shares with you shows as "● Shared" in the Memory column instead.
+
 #### Sharing several servers at once
 
 In Fleet Memory, press `space` to mark a server (the cursor moves to the next row), or `m` to mark every server of your own; `m` again clears the marks. The status line counts the marked servers. A team's servers are read-only and cannot be marked. With servers marked, `S` opens one form for all of them: the team, the lowest role that may read, and the modules, with the same defaults as for one server. It lists once the members who will be able to read them. Memory Sync must be unlocked.
 
 - Servonaut reads the team's member keys once and checks them before it sends anything. A changed key opens **Confirm changed memory keys**, and nothing is shared until you confirm it.
-- A server you already share with that team is reported as already shared and left as it is. Tick **Update existing shares to these settings** to replace those shares with the role and modules on the form; a share that already has them is left alone. Only your own shares count: a teammate's share of a server with the same id is never reported or replaced.
+- A server you already share with that team is reported as already shared and left as it is. Tick **Update existing shares to these settings** to replace those shares with the role and modules on the form. A share that already has them is kept as it is, and the members who cannot read it yet (who set up Memory Sync after you shared it) are added to it, as **Share with them too** does for one server. Only your own shares count: a teammate's share of a server with the same id is never reported or replaced.
 - Servers are shared one after another, with a progress line, and one server's failure does not stop the others. When the service limits requests, Servonaut waits as long as it asks, once per request, if that fits `team_wrap_max_wait_seconds`. If the limit persists, it stops, and the summary says how many servers were not sent.
 - While the batch runs, the app stays on the form: leaving now would stop it halfway. Press `s` (**Stop after this server**) to end it early; the server being sent is finished first, so a share being replaced is never left stopped without its new one, and the rest are listed as not sent.
-- The summary lists every server: shared, already shared (updated or left as it was), skipped with the reason, failed with the reason, or not sent. A server is skipped when the service holds no snapshot of it yet, when it was never probed, when memory is turned off for it, or when Memory Sync does not accept its id. Memory Sync ids use letters, digits, `-` and `_` only, so a server whose id is a host name with dots cannot be shared.
+- The summary lists every server: shared, already shared (updated, opened to the members who could not read it yet, or left as it was), skipped with the reason, failed with the reason, or not sent. A server is skipped when the service holds no snapshot of it yet, when it was never probed, when memory is turned off for it, or when Memory Sync does not accept its id. Memory Sync ids use letters, digits, `-` and `_` only, so a server whose id is a host name with dots cannot be shared.
 - The marks are cleared once the batch has run; closing the form without sharing keeps them.
 
 #### A member's key changed

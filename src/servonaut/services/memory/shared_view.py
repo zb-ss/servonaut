@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from servonaut.services.memory.interfaces import MemoryBackendError
 
@@ -54,6 +54,7 @@ class SharedListing:
         module_count: How many modules the user can read.
         last_probe_at: When the server was last probed (``""`` if unknown).
         granted_by_user_id: Who shared it (None if the list did not say).
+        required_role: The lowest team role that may read it.
     """
 
     team_slug: str
@@ -63,6 +64,7 @@ class SharedListing:
     instance: Dict[str, Any] = field(default_factory=dict)
     modules: tuple = ()
     granted_by_user_id: Optional[int] = None
+    required_role: str = ""
 
     @property
     def instance_id(self) -> str:
@@ -106,6 +108,22 @@ class SharedMemoryReader:
         """The last listing of *instance_id*, without asking the service."""
         return self._listings.get((team_slug, instance_id))
 
+    def shared_by(self, user_id: Optional[int], instance_ids: Iterable[str]) -> List[SharedListing]:
+        """The shares *user_id* made of any of *instance_ids*, one per team.
+
+        What the owner of a server is told it is "shared with". Reads only the
+        listings held (see :meth:`prefetch_all`); empty when the caller is not
+        known. Sorted by team name.
+        """
+        if user_id is None:
+            return []
+        wanted = {str(i) for i in instance_ids if i}
+        found: Dict[str, SharedListing] = {}
+        for (slug, instance_id), listing in self._listings.items():
+            if instance_id in wanted and listing.granted_by_user_id == user_id:
+                found.setdefault(slug, listing)
+        return sorted(found.values(), key=lambda item: (item.team_name.lower(), item.team_slug))
+
     async def prefetch_all(self, extra_slugs: Any = ()) -> None:
         """List what every team of the user shares (plus *extra_slugs*)."""
         teams: Dict[str, str] = {}
@@ -144,6 +162,7 @@ class SharedMemoryReader:
                 instance=dict(item.instance),
                 modules=tuple(item.readable_modules),
                 granted_by_user_id=item.grant.granted_by_user_id,
+                required_role=str(item.grant.required_role or ""),
             )
         self._listings = {k: v for k, v in self._listings.items() if k[0] != team_slug}
         self._listings.update(fresh)
@@ -187,6 +206,19 @@ class SharedMemoryReader:
             logger.debug("Nothing readable from team %s: %s", team_slug, exc)
             return None
         return SharedMemory(team_slug, team_name, modules) if modules else None
+
+
+def shared_with_text(listings: Iterable[SharedListing], redact: Callable[[str], str]) -> str:
+    """``Shared with Team A (viewer and above).`` for the shares the user made.
+
+    One clause per team, its name passed through *redact* (demo mode); empty
+    when there is none.
+    """
+    parts = []
+    for listing in listings:
+        role = f" ({listing.required_role} and above)" if listing.required_role else ""
+        parts.append(f"{redact(listing.team_name or listing.team_slug)}{role}")
+    return f"Shared with {'; '.join(parts)}." if parts else ""
 
 
 def _for_display(module: Dict[str, Any]) -> Dict[str, Any]:

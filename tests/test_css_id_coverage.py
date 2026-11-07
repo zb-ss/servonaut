@@ -861,6 +861,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Share screen ----
         # Share form / purge confirmation: laid out by the screens' DEFAULT_CSS.
         "memory-shared-source",     # Reason: Static; inherits global Static styling
+        "memory-share-state",       # Reason: Static; inherits global Static styling
         "purge-btn-cancel",
         "purge-btn-confirm",
         "purge-text",

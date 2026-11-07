@@ -219,6 +219,15 @@ class TestUpdateRowForInstanceNoOp:
 
 
 class TestUpdateRowForInstanceCellUpdate:
+    # The table's column keys, in order: cells are found by key, as the screen does.
+    _COLUMNS = ["name", "id", "provider", "source", "status", "shared_with",
+                "modules", "drift_7d", "age", "reason"]
+
+    def _table(self) -> MagicMock:
+        table = MagicMock()
+        table.get_column_index.side_effect = self._COLUMNS.index
+        return table
+
     def test_stale_becomes_fresh_updates_cells(self) -> None:
         """When a probe makes an instance fresh the status/modules/age cells update."""
         from textual.coordinate import Coordinate
@@ -231,7 +240,7 @@ class TestUpdateRowForInstanceCellUpdate:
         screen._rows = [_row("i-abc123", raw_provider="aws", status=STATUS_STALE)]
         _set_app(screen, mock_app)
 
-        mock_table = MagicMock()
+        mock_table = self._table()
         mock_status_widget = MagicMock()
 
         def _query_one(selector, *args):
@@ -284,21 +293,21 @@ class TestUpdateRowForInstanceCellUpdate:
         screen._rows = [_row("i-xyz", status=STATUS_STALE, modules=0)]
         _set_app(screen, mock_app)
 
-        mock_widget = MagicMock()
+        mock_widget = self._table()
         with patch.object(screen, "query_one", return_value=mock_widget):
             screen._update_row_for_instance("i-xyz")
 
-        # Col 5 = modules
+        # Col 6 = modules
         update_calls = mock_widget.update_cell_at.call_args_list
         coords = [c[0][0] for c in update_calls]
         values = [c[0][1] for c in update_calls]
         col_indices = [coord.column for coord in coords]
-        assert 5 in col_indices
-        modules_value = values[col_indices.index(5)]
+        assert 6 in col_indices
+        modules_value = values[col_indices.index(6)]
         assert modules_value == "2"
 
     def test_age_cell_updated(self) -> None:
-        """Age cell (col 7) must be updated after a successful probe."""
+        """Age cell (col 8) must be updated after a successful probe."""
         from textual.coordinate import Coordinate
 
         fresh_mods = _fresh_modules(age_seconds=90)  # 1m 30s ago
@@ -309,7 +318,7 @@ class TestUpdateRowForInstanceCellUpdate:
         screen._rows = [_row("i-xyz", status=STATUS_STALE, age="—")]
         _set_app(screen, mock_app)
 
-        mock_widget = MagicMock()
+        mock_widget = self._table()
         with patch.object(screen, "query_one", return_value=mock_widget):
             screen._update_row_for_instance("i-xyz")
 
@@ -317,8 +326,8 @@ class TestUpdateRowForInstanceCellUpdate:
         coords = [c[0][0] for c in update_calls]
         values = [c[0][1] for c in update_calls]
         col_indices = [coord.column for coord in coords]
-        assert 7 in col_indices
-        age_value = values[col_indices.index(7)]
+        assert 8 in col_indices
+        age_value = values[col_indices.index(8)]
         # Age text should not be the placeholder "—" any more.
         assert age_value != "—"
 

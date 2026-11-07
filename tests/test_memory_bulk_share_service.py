@@ -22,8 +22,10 @@ from servonaut.services.memory.bulk_share import (
     MemorySyncLockedError,
     NEVER_PROBED,
     NO_SNAPSHOT,
+    NOT_ADDED,
     NOT_SENT,
     RATE_LIMITED,
+    READERS_ADDED,
     SAME_SETTINGS,
     SHARED,
     SKIPPED,
@@ -164,7 +166,7 @@ async def test_update_existing_reshares_them_with_the_new_settings():
 
 
 @pytest.mark.asyncio
-async def test_update_existing_leaves_a_share_that_already_has_these_settings():
+async def test_update_existing_leaves_a_share_that_already_has_these_settings_and_readers():
     backend = _Backend(members=[_member(2, "Kim")], live=[_grant("web-1")], stored={"web-1": ["os"]})
     service, _ = _service(backend)
     report = await service.share(SLUG, "member", ["logs", "os"], _targets("web-1"),
@@ -172,6 +174,81 @@ async def test_update_existing_leaves_a_share_that_already_has_these_settings():
     assert report.outcomes[0].status == ALREADY_SHARED
     assert report.outcomes[0].reason == SAME_SETTINGS
     assert backend.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_update_existing_opens_an_unchanged_share_to_a_member_who_enrolled_since():
+    """A member who set up Memory Sync after the share cannot read it: seal for them.
+
+    The share is neither stopped nor sent again; only their wraps are posted.
+    """
+    kim, lee = _member(2, "Kim"), _member(3, "Lee")
+    backend = _Backend(members=[kim, lee], live=[_grant("web-1"), _grant("web-2", "g-2")],
+                       stored={"web-1": ["os", "logs"], "web-2": ["os"]})
+    backend.coverage["g-1"] = {"os": [lee], "logs": [lee]}
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1", "web-2"),
+                                 update_existing=True)
+    first, second = report.outcomes
+    assert (first.status, first.added, first.not_added) == (READERS_ADDED, ("Lee",), ())
+    assert (second.status, second.reason) == (ALREADY_SHARED, SAME_SETTINGS)
+    assert backend.writes() == [f"POST {GRANT_PATH}/g-1/wraps"]
+    ((grant_id, wraps),) = backend.topped_up
+    assert grant_id == "g-1"
+    assert sorted((w["recipient_user_id"], w["envelope_id"]) for w in wraps) == [
+        (3, "e-logs"), (3, "e-os")]
+    assert all(w["recipient_fingerprint"] == lee["fingerprint"] for w in wraps)
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_share_is_not_checked_unless_asked_to_update():
+    lee = _member(3, "Lee")
+    backend = _Backend(members=[lee], live=[_grant("web-1")], stored={"web-1": ["os"]})
+    backend.coverage["g-1"] = {"os": [lee]}
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1"))
+    assert (report.outcomes[0].status, report.outcomes[0].reason) == (ALREADY_SHARED, "")
+    assert not any(c.endswith("/wraps") for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_member_the_service_does_not_take_is_reported_on_the_row():
+    lee = _member(3, "Lee")
+    backend = _Backend(members=[lee], live=[_grant("web-1")], stored={"web-1": ["os"]})
+    backend.coverage["g-1"] = {"os": [lee]}
+    backend.wrap_skips[3] = "no_memory_key"
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1"),
+                                 update_existing=True)
+    outcome = report.outcomes[0]
+    assert (outcome.status, outcome.reason, outcome.not_added) == (FAILED, NOT_ADDED, ("Lee",))
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_changed_since_the_check_stops_the_batch_without_sealing():
+    lee = _member(3, "Lee")
+    backend = _Backend(members=[lee], live=[_grant("web-1")],
+                       stored={"web-1": ["os"], "web-2": ["os"]})
+    backend.coverage["g-1"] = {"os": [{**lee, "key_changed": True}]}
+    service, _ = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1", "web-2"),
+                                 update_existing=True)
+    assert [(o.status, o.reason) for o in report.outcomes] == [
+        (FAILED, KEY_RACE), (NOT_SENT, KEY_RACE)]
+    assert backend.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_coverage_read_is_retried_once_within_the_budget():
+    lee = _member(3, "Lee")
+    backend = _Backend(members=[lee], live=[_grant("web-1")], stored={"web-1": ["os"]})
+    backend.coverage["g-1"] = {"os": [lee]}
+    backend.get_errors[f"{GRANT_PATH}/g-1/wraps"] = [_rate_limited("4")]
+    service, sleeps = _service(backend)
+    report = await service.share(SLUG, "member", ["os", "logs"], _targets("web-1"),
+                                 update_existing=True)
+    assert sleeps.waits == [4.0]
+    assert report.outcomes[0].status == READERS_ADDED
 
 
 @pytest.mark.asyncio

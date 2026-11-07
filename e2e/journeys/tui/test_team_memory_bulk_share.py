@@ -137,7 +137,8 @@ async def _open_bulk_form(t, count: int, reader: str = f"member {TEAMMATE}") -> 
     await t.wait_until(lambda: "Will be able to read them" in plain(readers.render()),
                        desc="the readers listed")
     assert reader in plain(readers.render())
-    assert plain(t.on_screen("#bulk-title").render()) == f"Share Memory: {count} servers"
+    servers = f"{count} server" if count == 1 else f"{count} servers"
+    assert plain(t.on_screen("#bulk-title").render()) == f"Share Memory: {servers}"
 
 
 async def _share(t) -> tuple[str, str]:

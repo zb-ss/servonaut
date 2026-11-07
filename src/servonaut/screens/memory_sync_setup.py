@@ -565,51 +565,18 @@ class MemorySyncSetupScreen(WorkspaceScreen):
     def _show_setup_error(self, exc: Exception) -> None:
         """Translate the raised exception into a clear, user-facing notify.
 
-        Wrong passphrase shows up as ``DecryptionFailedError`` from the crypto
-        layer; tier/maintenance issues come through as typed memory exceptions
-        so we can give a routing hint instead of a stack trace dump.
+        The wording is shared with the unlock prompt that opens with a memory
+        section (``describe_sync_error``); only a cancelled prompt reads
+        differently here.
         """
-        msg = str(exc) or exc.__class__.__name__
-        kind = exc.__class__.__name__
-        # Rate-limit detection — covers both api_client.RateLimitedError (HTTP 429)
-        # and the memory-domain RateLimited wrapper. Either way the user needs
-        # to wait, not retry immediately. Spec §6 caps key endpoints at 3/hour
-        # so test-drive iterations burn through the quota fast.
-        is_rate_limited = (
-            kind in {"RateLimitedError", "RateLimited", "RateLimitTimeoutError"}
-            or "rate limit" in msg.lower()
-        )
-        if is_rate_limited:
-            endpoint = getattr(exc, "endpoint", None)
-            retry_s = getattr(exc, "retry_after_s", None)
-            if endpoint and "keys/me" in str(endpoint):
-                label = (
-                    "Server rate limit hit on /keys/me (3 attempts per hour). "
-                    "Wait ~20 minutes and try again."
-                )
-            elif retry_s:
-                wait_min = max(1, int(retry_s) // 60)
-                label = f"Server rate limit hit. Try again in ~{wait_min} min."
-            else:
-                label = (
-                    "Server rate limit hit. Try again in a few minutes "
-                    "(spec caps key endpoints at 3 setup attempts per hour)."
-                )
-        elif kind == "DecryptionFailedError" or "decryption failed" in msg.lower():
-            label = "Wrong passphrase — try again."
-        elif kind == "BackendMaintenance":
-            label = "Memory backend is in maintenance — try again later."
-        elif kind == "BetaWaitlist":
-            label = "Memory Sync is in beta — your account is not on the allowlist yet."
-        elif kind == "UpsellRequired":
-            label = "Your plan doesn't include Memory Sync — upgrade to enable."
-        elif kind == "WeakPassphraseError":
-            label = "Passphrase is too weak — pick a stronger one."
-        elif kind == "RuntimeError" and "cancelled" in msg.lower():
+        from servonaut.services.memory.sync_errors import describe_sync_error
+
+        if exc.__class__.__name__ == "RuntimeError" and "cancelled" in str(exc).lower():
             label = "Setup cancelled."
         else:
-            label = f"Setup failed: {msg}"
-        self.app.notify(label, severity="error", timeout=8)
+            label = describe_sync_error(exc, failure_prefix="Setup failed")
+        # The label can carry the server's error text: never parse it as markup.
+        self.app.notify(label, severity="error", timeout=8, markup=False)
         try:
             self.query_one("#msync_status", Static).update(
                 f"[$error]✗ {escape(label)}[/$error]"

@@ -197,9 +197,9 @@ ShareInstanceScreen #share-container {
     height: 1fr;
 }
 
+/* No room kept while empty: at 100x30 every row counts. */
 ShareInstanceScreen #share-status {
     height: auto;
-    min-height: 1;
 }
 
 ShareInstanceScreen #share-form-scroll {
@@ -395,20 +395,32 @@ PassphraseEnrolModal:ansi #enrol-mismatch {
     color: $foreground;
 }
 
-#enrol-strength {
+#enrol-rules {
     margin-bottom: 1;
-    height: 1;
+    height: auto;
+}
+
+#enrol-strength {
+    height: auto;
 }
 
 #enrol-mismatch {
-    color: auto 100%;
+    color: $text-error;
     text-style: bold;
-    height: 1;
+    height: auto;
     margin-bottom: 1;
+}
+
+#enrol-mismatch.ready {
+    color: $text-success;
 }
 
 #enrol-pass1_field,
 #enrol-pass2_field {
+    margin: 0;
+}
+
+#enrol-pass1_field {
     margin-bottom: 1;
 }
 
