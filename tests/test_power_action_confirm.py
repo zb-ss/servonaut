@@ -112,7 +112,8 @@ async def test_hetzner_power_off_asks_and_enter_means_no() -> None:
 
         assert app.focused.id == "btn_power_confirm_no"
         # The server name is provider data: shown literally, never as markup.
-        assert "Power off [bold]web-\\[b]1\\[/b][/bold] (Hetzner Cloud)?" in modal.message
+        assert modal.message.plain.startswith("Power off web-[b]1[/b] (Hetzner Cloud)?")
+        assert [(s.start, s.end, str(s.style)) for s in modal.message.spans] == [(10, 22, "bold")]
         message = str(modal.query_one("#power_confirm_message", Static).content)
         assert "unsaved data can be lost" in message
 
@@ -173,7 +174,7 @@ async def test_aws_stop_and_reboot_ask_first(button_id: str, method: str) -> Non
         screen = AWSManagerScreen()
         await _open(app, pilot, screen, "aws_mgr_table")
         modal = await _press_and_get_modal(app, pilot, screen, button_id)
-        assert "app-1" in modal.message and "AWS EC2, eu-west-1" in modal.message
+        assert "app-1" in modal.message.plain and "AWS EC2, eu-west-1" in modal.message.plain
 
         await pilot.press("escape")
         await _wait_for(pilot, lambda: app.screen is screen, "the manager")
@@ -197,7 +198,7 @@ async def test_ovh_stop_and_reboot_ask_first(button_id: str, method: str) -> Non
         screen = OVHManagerScreen()
         await _open(app, pilot, screen, "ovh_mgr_table")
         modal = await _press_and_get_modal(app, pilot, screen, button_id)
-        assert "mail-1" in modal.message and "OVHcloud VPS" in modal.message
+        assert "mail-1" in modal.message.plain and "OVHcloud VPS" in modal.message.plain
 
         modal.query_one("#btn_power_confirm_yes", Button).press()
         await _wait_for(pilot, lambda: getattr(app.ovh_service, method).await_count == 1, method)
@@ -289,7 +290,7 @@ async def test_shared_flow_runs_after_yes_and_escapes_the_status() -> None:
     )
     app.push_screen_wait.assert_awaited_once()
     run.assert_awaited_once_with()
-    assert statuses == ["[dim]Rebooting web-\\[b]1\\[/b]…[/dim]"]
+    assert [status.plain for status in statuses] == ["Rebooting web-[b]1[/b]…"]
     declined.assert_not_called()
 
 
@@ -344,8 +345,8 @@ async def test_demo_mode_names_an_unnamed_ec2_instance_by_its_shown_id() -> None
         assert shown_id != REAL_EC2_ID
 
         modal = await _press_and_get_modal(app, pilot, screen, "btn_aws_mgr_stop")
-        assert f"Stop [bold]{shown_id}[/bold]" in modal.message
-        assert REAL_EC2_ID not in modal.message
+        assert f"Stop {shown_id} " in modal.message.plain
+        assert REAL_EC2_ID not in modal.message.plain
 
         modal.query_one("#btn_power_confirm_yes", Button).press()
         await _wait_for(pilot, lambda: app.aws_service.stop_instance.await_count == 1, "stop")
@@ -376,8 +377,8 @@ async def test_demo_mode_terminate_names_an_unnamed_ec2_instance_by_its_shown_id
         screen.query_one("#btn_aws_mgr_terminate", Button).press()
         await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmActionScreen), "confirm")
         confirm = app.screen
-        assert shown_id in confirm._description
-        assert REAL_EC2_ID not in confirm._description
+        assert shown_id in confirm._description.plain
+        assert REAL_EC2_ID not in confirm._description.plain
         await _wait_until_composed(pilot, confirm, "the confirmation's focus")
         confirm.query_one("#confirm_input", Input).value = "terminate"
         button = confirm.query_one("#btn_confirm", Button)
@@ -407,7 +408,7 @@ async def test_demo_mode_names_an_unnamed_hetzner_server_by_its_shown_id() -> No
         assert shown_id != REAL_HETZNER_ID
 
         modal = await _press_and_get_modal(app, pilot, screen, "btn_hetzner_mgr_reboot")
-        assert f"Reboot [bold]{shown_id}[/bold]" in modal.message
+        assert f"Reboot {shown_id} " in modal.message.plain
 
         modal.query_one("#btn_power_confirm_yes", Button).press()
         await _wait_for(pilot, lambda: app.hetzner_service.reboot.await_count == 1, "reboot")
@@ -493,7 +494,8 @@ async def _run_power_action(
 
 def _status_plain(screen, provider: str) -> str:
     status_id = _MANAGERS[provider][1].replace("_table", "_status")
-    return Content.from_markup(str(screen.query_one(f"#{status_id}", Static).content)).plain
+    content = screen.query_one(f"#{status_id}", Static).content
+    return content.plain if isinstance(content, Content) else Content.from_markup(str(content)).plain
 
 
 @pytest.mark.parametrize("provider, button_id, method, state, asks, expected", _POWER_NOTICES)

@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
+from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import with_bold_values
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
@@ -950,7 +952,7 @@ class ObjectStorageScreen(Screen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Bucket",
-                    description=f"Permanently delete bucket [bold]{markup_escape(display_name)}[/bold].",
+                    description=with_bold_values("Permanently delete bucket {}.", display_name),
                     consequences=[
                         "The bucket must be empty before it can be deleted",
                         "This operation is irreversible",
@@ -1003,7 +1005,7 @@ class ObjectStorageScreen(Screen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Object",
-                    description=f"Permanently delete [bold]{markup_escape(display_key)}[/bold].",
+                    description=with_bold_values("Permanently delete {}.", display_key),
                     consequences=[
                         "The object will be permanently removed from the bucket",
                         "This operation is irreversible",

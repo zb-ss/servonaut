@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeVar
+
+from textual.content import Content
+
+from servonaut.utils.markup import scrub
+
+_T = TypeVar("_T", str, Content)
 
 
 def connection_instance(app: Any, instance: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -90,8 +96,13 @@ def refuse_unresolved(app: Any, instance: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
-def display_text(app: Any, text: str) -> str:
-    """*text* as demo mode may show it (see ``ServonautApp.redact_display_text``)."""
+def display_text(app: Any, text: _T) -> _T:
+    """*text* as demo mode may show it (see ``ServonautApp.redact_display_text``).
+
+    Content keeps its styling unless something was actually redacted.
+    """
+    if isinstance(text, Content):
+        return scrub(text, lambda plain: display_text(app, plain))
     redact = getattr(app, "redact_display_text", None)
     if not callable(redact):
         return text

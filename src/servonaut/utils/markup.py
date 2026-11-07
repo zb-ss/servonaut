@@ -36,3 +36,19 @@ def scrub(value: Union[str, Content], scrubber: Callable[[str], str]) -> Union[s
         return scrubber(value)
     cleaned = scrubber(value.plain)
     return value if cleaned == value.plain else Content(cleaned)
+
+
+def with_bold_values(template: str, *values: object) -> Content:
+    """*template* with each ``{}`` replaced by a value shown literally in bold.
+
+    The template is fixed text written in the app; the values may come from
+    outside it, so none of them is ever read as markup.
+    """
+    parts = template.split("{}")
+    if len(parts) != len(values) + 1:
+        raise ValueError("template and values do not match")
+    pieces: list = [parts[0]]
+    for value, tail in zip(values, parts[1:]):
+        pieces.append(literal(str(value), "bold"))
+        pieces.append(tail)
+    return Content.assemble(*pieces)

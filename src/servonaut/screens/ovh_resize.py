@@ -11,6 +11,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
@@ -149,9 +150,8 @@ class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Resize VPS",
-                description=(
-                    f"Upgrade [bold]{instance_name}[/bold] to plan "
-                    f"[bold]{model_name}[/bold]."
+                description=with_bold_values(
+                    "Upgrade {} to plan {}.", instance_name, model_name,
                 ),
                 consequences=[
                     "The VPS will be temporarily unavailable during the resize",
