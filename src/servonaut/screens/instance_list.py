@@ -6,10 +6,13 @@ from typing import Optional, List
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
+from textual.content import Content
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
+
+from servonaut.utils.markup import literal
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._footer_fit import fit_footer
@@ -892,10 +895,13 @@ class InstanceListScreen(Screen):
             if len(content) > 200:
                 content = content[:200] + "..."
 
-            result_text = (
-                f"[bold]Server: {server_id}[/bold]\n"
-                f"  Source: {source}\n"
-                f"  [dim]{content}[/dim]\n"
+            result_text = Content.assemble(
+                literal(f"Server: {server_id}", "bold"),
+                "\n  ",
+                literal(f"Source: {source}"),
+                "\n  ",
+                literal(content, "dim"),
+                "\n",
             )
             container.mount(Static(result_text))
 
@@ -1341,7 +1347,7 @@ class InstanceListScreen(Screen):
 
         if copy_to_clipboard(text):
             name = instance.get('name') or instance.get('id', '')
-            self.app.notify(f"Copied: {name}")
+            self.app.notify(f"Copied: {name}", markup=False)
         else:
             self.app.notify("Clipboard not available", severity="warning")
 
