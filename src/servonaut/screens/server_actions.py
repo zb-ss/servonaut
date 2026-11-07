@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from rich.markup import escape
 from rich.text import Text
@@ -13,6 +13,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
@@ -33,6 +34,7 @@ from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
+from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -862,7 +864,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         self._inline_view: Optional[str] = None
         # Markup source of #server_info, so later additions (reverse DNS)
         # edit the text we wrote instead of reading it back from the widget.
-        self._server_info_text: str = ""
+        self._server_info_text: Content = Content("")
         # Slow work started here (binding a vault key, preparing SSH) and the
         # button that would restart it, held back until it ends.
         self._busy = BusyWork(self, "#sa_busy")
@@ -971,93 +973,93 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 )
         yield Footer()
 
-    def _build_server_info(self) -> str:
-        """Build server information display string.
+    def _build_server_info(self) -> Content:
+        """Build the server information display.
 
         Every value comes from a provider or from the user's server list, so
-        each is markup-escaped: a name like ``web-[b]1`` shows as typed.
+        each is shown literally: a name like ``web-[b]1`` shows as typed.
 
         Returns:
-            Rich-formatted string with server details.
+            Content with the server details.
         """
         def field(key: str, default: str) -> str:
-            return escape(str(self._instance.get(key) or default))
+            return str(self._instance.get(key) or default)
 
-        name = escape(display_name(self._instance) or 'Unnamed')
+        def line(label: str, value: Union[str, Content]) -> Content:
+            shown = literal(value) if isinstance(value, str) else value
+            return Content.assemble(Content.styled(f"{label}:", "dim"), " ", shown, "\n")
+
+        def title(prefix: str) -> Content:
+            return Content.assemble(
+                literal(f"{prefix}: {name}", "bold $text-accent"), "\n\n",
+            )
+
+        def connection(info: Content, target: str) -> Content:
+            # The pane ends at the target: no trailing newline, so the panels
+            # below it sit where they always did.
+            return Content.assemble(info, "\n", line("Target", target)).right_crop(1)
+
+        name = display_name(self._instance) or 'Unnamed'
         public_ip = field('public_ip', 'N/A')
+        direct = Content.styled("Direct Connection", "$text-accent")
         # With several accounts of this provider, say which one it is in.
         account_line = (
-            f"[dim]Account:[/dim] {field('account', '-')}\n"
-            if self._instance.get('account_qualified') else ""
+            line("Account", field('account', '-'))
+            if self._instance.get('account_qualified') else Content("")
         )
-        credential_line = self._credential_source_line() + self._shared_with_line()
+        credential_line = Content.assemble(
+            self._credential_source_line(), self._shared_with_line(),
+        )
 
         if self._instance.get('is_shared') is True:
-            port = escape(str(self._instance.get('port') or 22))
-            return (
-                f"[bold $text-accent]Team server: {name}[/bold $text-accent]\n\n"
-                f"[dim]Team:[/dim] {field('team_name', '-')}\n"
-                f"[dim]Host:[/dim] {public_ip}\n"
-                f"[dim]Port:[/dim] {port}\n"
-                f"[dim]Team login:[/dim] {field('login_user', '-')}\n"
-                f"[dim]State:[/dim] [dim]N/A (shared by the team)[/dim]\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
+            return Content.assemble(
+                title("Team server"),
+                line("Team", field('team_name', '-')),
+                line("Host", public_ip),
+                line("Port", str(self._instance.get('port') or 22)),
+                line("Team login", field('login_user', '-')),
+                line("State", Content.styled("N/A (shared by the team)", "dim")),
+                "\n",
+                credential_line,
+                connection(direct, public_ip),
             )
 
         if self._instance.get('is_ovh'):
-            provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
-            region = field('region', '-')
-            state = self._instance.get('state', 'unknown')
-            instance_id = field('id', 'unknown')
-            private_ip = field('private_ip', 'N/A')
-            server_type = field('type', '-')
-            os_label = field('os', '-')
-            ram = field('ram_gb', '-')
+            provider_type = str(self._instance.get('provider_type', 'unknown'))
             reverse_dns = self._display_reverse_dns()
-            rdns_line = (
-                f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
-            )
-            return (
-                f"[bold $text-accent]OVH Server: {name}[/bold $text-accent]\n\n"
-                f"{account_line}"
-                f"[dim]ID:[/dim] {instance_id}\n"
-                f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
-                f"[dim]Public IP:[/dim] {public_ip}\n"
-                f"{rdns_line}"
-                f"[dim]Private IP:[/dim] {private_ip}\n"
-                f"[dim]Region:[/dim] {region}\n"
-                f"[dim]State:[/dim] {self._colorize_state(state)}\n"
-                f"[dim]OS:[/dim] {os_label}\n"
-                f"[dim]RAM:[/dim] {ram} GB\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
+            rdns_line = line("Reverse DNS", reverse_dns) if reverse_dns else Content("")
+            return Content.assemble(
+                title("OVH Server"),
+                account_line,
+                line("ID", field('id', 'unknown')),
+                line("Type", f"{provider_type.upper()} — {field('type', '-')}"),
+                line("Public IP", public_ip),
+                rdns_line,
+                line("Private IP", field('private_ip', 'N/A')),
+                line("Region", field('region', '-')),
+                line("State", self._colorize_state(self._instance.get('state', 'unknown'))),
+                line("OS", field('os', '-')),
+                line("RAM", f"{field('ram_gb', '-')} GB"),
+                "\n",
+                credential_line,
+                connection(direct, public_ip),
             )
 
         if self._instance.get('is_custom'):
-            provider = field('provider', 'custom')
-            group = field('group', '-')
-            port = escape(str(self._instance.get('port', 22)))
-            username = field('username', 'root')
-            return (
-                f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
-                f"[dim]Host:[/dim] {public_ip}\n"
-                f"[dim]Port:[/dim] {port}\n"
-                f"[dim]Username:[/dim] {username}\n"
-                f"[dim]Provider:[/dim] {provider}\n"
-                f"[dim]Group:[/dim] {group}\n"
-                f"[dim]State:[/dim] [dim]N/A (custom server)[/dim]\n\n"
-                f"{credential_line}"
-                f"[$text-accent]Direct Connection[/$text-accent]\n"
-                f"[dim]Target:[/dim] {public_ip}"
+            return Content.assemble(
+                title("Server"),
+                line("Host", public_ip),
+                line("Port", str(self._instance.get('port', 22))),
+                line("Username", field('username', 'root')),
+                line("Provider", field('provider', 'custom')),
+                line("Group", field('group', '-')),
+                line("State", Content.styled("N/A (custom server)", "dim")),
+                "\n",
+                credential_line,
+                connection(direct, public_ip),
             )
 
-        instance_id = field('id', 'unknown')
         private_ip = field('private_ip', 'N/A')
-        region = field('region', 'unknown')
-        state = self._instance.get('state', 'unknown')
 
         # Resolve connection method for AWS instances. Connection rules match
         # the real record (names, tags); the bastion is shown redacted.
@@ -1068,35 +1070,37 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             bastion = str(profile.bastion_host)
             if self.app.demo_mode and self.app.redaction_service:
                 bastion = self.app.redaction_service.redact_host(bastion)
-            connection_info = f"[$text-accent]via Bastion:[/$text-accent] {escape(bastion)}"
+            connection_info = Content.assemble(
+                Content.styled("via Bastion:", "$text-accent"), " ", literal(bastion),
+            )
             target_ip = private_ip
         else:
-            connection_info = "[$text-accent]Direct Connection[/$text-accent]"
+            connection_info = direct
             target_ip = public_ip
 
-        return (
-            f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
-            f"{account_line}"
-            f"[dim]Instance ID:[/dim] {instance_id}\n"
-            f"[dim]Public IP:[/dim] {public_ip}\n"
-            f"[dim]Private IP:[/dim] {private_ip}\n"
-            f"[dim]Region:[/dim] {region}\n"
-            f"[dim]State:[/dim] {self._colorize_state(state)}\n\n"
-            f"{credential_line}"
-            f"{connection_info}\n"
-            f"[dim]Target:[/dim] {target_ip}"
+        return Content.assemble(
+            title("Server"),
+            account_line,
+            line("Instance ID", field('id', 'unknown')),
+            line("Public IP", public_ip),
+            line("Private IP", private_ip),
+            line("Region", field('region', 'unknown')),
+            line("State", self._colorize_state(self._instance.get('state', 'unknown'))),
+            "\n",
+            credential_line,
+            connection(connection_info, target_ip),
         )
 
-    def _shared_with_line(self) -> str:
+    def _shared_with_line(self) -> Content:
         """``Also shared with: team …`` for one of the user's own servers a team shares too."""
         teams = [
             str(row.get("team_name") or row["team_slug"])
             for row in self._sharing_teams()
         ]
         if not teams:
-            return ""
-        label = escape(scrub_for_display(self.app, ", ".join(teams)))
-        return f"[dim]Also shared with:[/dim] {label}\n"
+            return Content("")
+        label = scrub_for_display(self.app, ", ".join(teams))
+        return Content.assemble(Content.styled("Also shared with:", "dim"), " ", literal(label), "\n")
 
     def _sharing_teams(self) -> list[dict[str, Any]]:
         """The real shared row for each team also sharing this own server."""
@@ -1112,7 +1116,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 teams.setdefault(slug, row)
         return list(teams.values())
 
-    def _credential_source_line(self) -> str:
+    def _credential_source_line(self) -> Content:
         """Describe the configured SSH credential without exposing its reference."""
         label = credential_source_label(self._binding_source()) or "Automatic resolution"
         if self._binding_source() == _VAULT_SOURCE:
@@ -1126,7 +1130,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             if isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE:
                 scope = scrub_for_display(self.app, _team_key_label(row))
                 label += f"; {scope} (Servonaut Vault)"
-        return f"[dim]SSH credential:[/dim] {escape(label)}\n"
+        return Content.assemble(Content.styled("SSH credential:", "dim"), " ", literal(label), "\n")
 
     def _binding_source(self) -> Optional[str]:
         """The credential source this screen bound or looked up, else the row's (team servers)."""
@@ -1179,23 +1183,23 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if self.is_mounted:
             self._render_server_info()
 
-    def _colorize_state(self, state: str) -> str:
-        """Add color markup to instance state.
+    def _colorize_state(self, state: str) -> Content:
+        """Instance state, colored when it is one the pane knows.
 
         Args:
             state: Instance state string.
 
         Returns:
-            Colorized state string with markup.
+            The state as styled content.
         """
-        state_colors = {
-            'running': '[$text-success]running[/$text-success]',
-            'stopped': '[$text-error]stopped[/$text-error]',
-            'stopping': '[$text-warning]stopping[/$text-warning]',
-            'pending': '[$text-accent]pending[/$text-accent]',
-            'terminated': '[dim]terminated[/dim]',
+        state_styles = {
+            'running': '$text-success',
+            'stopped': '$text-error',
+            'stopping': '$text-warning',
+            'pending': '$text-accent',
+            'terminated': 'dim',
         }
-        return state_colors.get(state, escape(str(state)))
+        return literal(str(state), state_styles.get(state, ""))
 
     async def _fetch_rdns(self) -> None:
         """Fetch the VPS's reverse DNS and show it in the server info pane.
@@ -1314,7 +1318,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # the probed server — scrub before rendering, same posture as the
         # Memory screen and log viewer.
         if self.app.demo_mode and getattr(self.app, "redaction_service", None):
-            text = self.app.redaction_service.scrub_stream(text)
+            text = scrub(text, self.app.redaction_service.scrub_stream)
         panel.update(text)
 
     # ------------------------------------------------------------------

@@ -1,21 +1,23 @@
 """Compact renderer for the cached server-memory snapshot.
 
 Turns the ``{module: {observed: {...}, probed_at: ..., partial: ...}}`` dict
-returned by ``MemoryService.get_all_modules`` into a few human-readable Rich
-markup lines for the server actions detail pane.  Pure and side-effect free so
+returned by ``MemoryService.get_all_modules`` into a few human-readable
+styled lines for the server actions detail pane.  Pure and side-effect free so
 it can be unit-tested without a live store.
 
-Every observed value interpolated into markup is escaped via
-``rich.markup.escape`` (cloud-supplied strings can contain ``[`` sequences).
+Every observed value is built as ``Content`` and never parsed as markup
+(probed strings can contain ``[`` sequences).
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from rich.markup import escape
+from textual.content import Content
+
+from servonaut.utils.markup import literal
 
 # Runtimes the panel lists, in order, with the name it shows for each.
 _RUNTIME_NAMES = (
@@ -87,34 +89,50 @@ def _newest_probed_at(modules: Dict[str, Dict[str, Any]]) -> str:
     return max(stamps) if stamps else ""
 
 
-def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
-    """Render the cached-memory snapshot as Rich markup.
+def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> Content:
+    """Render the cached-memory snapshot as styled content.
 
     Args:
         modules: Mapping returned by ``MemoryService.get_all_modules``.
 
     Returns:
-        Rich markup string.  Empty modules → a build call-to-action.
+        Content in which every probed value is shown literally. Empty
+        modules give a build call-to-action.
     """
     if not modules:
-        return (
-            "[bold]Server Memory[/bold]\n\n"
-            "[dim]No memory cached yet.[/dim]\n"
-            "[dim]Press [b]M[/b] to build an AI-queryable fact cache "
-            "(OS, disk, services, web stack…).[/dim]"
+        return Content.assemble(
+            Content.styled("Server Memory", "bold"),
+            "\n\n",
+            Content.styled("No memory cached yet.", "dim"),
+            "\n",
+            Content.assemble(
+                Content.styled("Press ", "dim"),
+                Content.styled("M", "bold dim"),
+                Content.styled(
+                    " to build an AI-queryable fact cache (OS, disk, services, web stack…).",
+                    "dim",
+                ),
+            ),
         )
 
     age = human_age(_newest_probed_at(modules))
     partial = any(data.get("partial") for data in modules.values())
-    header = f"[bold]Server Memory[/bold]  [dim]· {escape(age)}[/dim]"
+    header = Content.assemble(
+        Content.styled("Server Memory", "bold"),
+        "  ",
+        literal(f"· {age}", "dim"),
+    )
     if partial:
-        header += "  [$text-warning]⚠ partial[/$text-warning]"
+        header = Content.assemble(header, "  ", Content.styled("⚠ partial", "$text-warning"))
 
-    rows: List[str] = []
+    rows: List[Content] = []
+
+    def row(label: str, *value: Union[str, Content]) -> None:
+        rows.append(Content.assemble("  ", Content.styled(f"{label:<10}", "dim"), " ", *value))
 
     def add(label: str, value: Optional[str]) -> None:
         if value:
-            rows.append(f"  [dim]{label:<10}[/dim] {escape(value)}")
+            row(label, literal(value))
 
     def obs(module: str) -> Dict[str, Any]:
         return modules.get(module, {}).get("observed", {}) or {}
@@ -129,17 +147,17 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
     pct = _val(disk_o, "pct_used")
     mount = _val(disk_o, "mount") or "/"
     if pct:
-        rows.append(f"  [dim]{'Disk':<10}[/dim] {escape(pct)} used [dim]({escape(mount)})[/dim]")
+        row("Disk", literal(pct), " used ", literal(f"({mount})", "dim"))
 
     # Web stack
     web_o = obs("web_stack")
-    web_bits = []
-    if _val(web_o, "nginx"):
-        web_bits.append(f"nginx {escape(_val(web_o, 'nginx'))}")
-    if _val(web_o, "apache"):
-        web_bits.append(f"apache {escape(_val(web_o, 'apache'))}")
+    web_bits = [
+        literal(f"{name} {_val(web_o, name)}")
+        for name in ("nginx", "apache")
+        if _val(web_o, name)
+    ]
     if web_bits:
-        rows.append(f"  [dim]{'Web':<10}[/dim] " + " · ".join(web_bits))
+        row("Web", _joined(web_bits))
 
     # Databases
     db_o = obs("databases")
@@ -149,29 +167,35 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
                         ("mongodb", "mongodb_version")):
         v = _val(db_o, key)
         if v:
-            db_bits.append(f"{engine} {escape(v)}")
+            db_bits.append(literal(f"{engine} {v}"))
     if db_bits:
-        rows.append(f"  [dim]{'DB':<10}[/dim] " + " · ".join(db_bits))
+        row("DB", _joined(db_bits))
 
     # Runtimes
     rt_o = obs("runtimes")
     rt_bits = [
-        escape(format_runtime(name, _val(rt_o, name)))
+        literal(format_runtime(name, _val(rt_o, name)))
         for name, _label in _RUNTIME_NAMES
         if _val(rt_o, name)
     ]
     if rt_bits:
-        rows.append(f"  [dim]{'Runtime':<10}[/dim] " + " · ".join(rt_bits))
+        row("Runtime", _joined(rt_bits))
 
     # Containers
     ct_o = obs("containers")
     dv = _val(ct_o, "docker_version")
     if dv:
         running = _val(ct_o, "docker_running")
-        suffix = f" [dim]({escape(running)} running)[/dim]" if running else ""
-        rows.append(f"  [dim]{'Docker':<10}[/dim] {escape(dv)}{suffix}")
+        suffix = literal(f" ({running} running)", "dim") if running else ""
+        row("Docker", literal(dv), suffix)
 
     if not rows:
-        rows.append("  [dim]No structured facts parsed (modules may be partial).[/dim]")
+        rows.append(Content.styled(
+            "  No structured facts parsed (modules may be partial).", "dim",
+        ))
 
-    return header + "\n\n" + "\n".join(rows)
+    return Content.assemble(header, "\n\n", Content("\n").join(rows))
+
+
+def _joined(parts: List[Content]) -> Content:
+    return Content(" · ").join(parts)

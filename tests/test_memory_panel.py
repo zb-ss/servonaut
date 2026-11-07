@@ -66,27 +66,27 @@ class TestFormatRuntime:
                 "probed_at": _iso_ago(minutes=10),
             },
         }
-        out = render_memory_panel(modules)
+        out = render_memory_panel(modules).plain
         runtime_line = next(line for line in out.splitlines() if "Runtime" in line)
         assert runtime_line.endswith(
             "Python 3.11.2 · Node 20.11.1 · PHP 8.2.7 · Go 1.22.1 · Ruby 3.2.2"
         )
 
-    def test_markup_in_a_version_is_escaped(self):
+    def test_markup_in_a_version_is_shown_literally(self):
         modules = {
             "runtimes": {
                 "observed": {"python": "Python [bold]3[/bold]"},
                 "probed_at": _iso_ago(minutes=1),
             },
         }
-        assert "Python \\[bold]3\\[/bold]" in render_memory_panel(modules)
+        assert "Python [bold]3[/bold]" in render_memory_panel(modules).plain
 
 
 class TestRenderMemoryPanel:
     def test_empty_shows_build_cta(self):
-        out = render_memory_panel({})
+        out = render_memory_panel({}).plain
         assert "No memory cached" in out
-        assert "[b]M[/b]" in out
+        assert "Press M to build" in out
 
     def test_renders_os_and_disk(self):
         modules = {
@@ -99,7 +99,7 @@ class TestRenderMemoryPanel:
                 "probed_at": _iso_ago(hours=2),
             },
         }
-        out = render_memory_panel(modules)
+        out = render_memory_panel(modules).plain
         assert "Ubuntu 24.04 LTS" in out
         assert "6.8.0-31-generic" in out
         assert "61%" in out
@@ -109,7 +109,7 @@ class TestRenderMemoryPanel:
         modules = {
             "os": {"observed": {"pretty_name": "Debian 12"}, "probed_at": _iso_ago(minutes=1), "partial": True},
         }
-        out = render_memory_panel(modules)
+        out = render_memory_panel(modules).plain
         assert "partial" in out
 
     def test_web_db_runtime_containers(self):
@@ -119,7 +119,7 @@ class TestRenderMemoryPanel:
             "runtimes": {"observed": {"python": "3.12.3", "node": "20.11"}, "probed_at": _iso_ago(minutes=10)},
             "containers": {"observed": {"docker_version": "26.0.0", "docker_running": "6"}, "probed_at": _iso_ago(minutes=10)},
         }
-        out = render_memory_panel(modules)
+        out = render_memory_panel(modules).plain
         assert "nginx 1.24.0" in out
         assert "postgres 16.2" in out
         assert "Python 3.12.3" in out
@@ -127,19 +127,18 @@ class TestRenderMemoryPanel:
         assert "26.0.0" in out
         assert "6 running" in out
 
-    def test_rich_markup_in_observed_value_is_escaped(self):
+    def test_markup_in_observed_value_is_shown_literally(self):
         # A server name / value containing markup must not break rendering.
         modules = {
             "os": {"observed": {"pretty_name": "Evil [bold]OS[/bold]"}, "probed_at": _iso_ago(minutes=1)},
         }
-        out = render_memory_panel(modules)
-        # The raw markup should be escaped, not passed through verbatim.
-        assert "Evil \\[bold]OS\\[/bold]" in out
+        out = render_memory_panel(modules).plain
+        assert "Evil [bold]OS[/bold]" in out
 
     def test_modules_present_but_no_known_facts(self):
         modules = {
             "logs": {"observed": {"some_unknown_key": "x"}, "probed_at": _iso_ago(minutes=1)},
         }
-        out = render_memory_panel(modules)
+        out = render_memory_panel(modules).plain
         assert "Server Memory" in out
         assert "No structured facts" in out
