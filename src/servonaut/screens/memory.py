@@ -36,6 +36,7 @@ from servonaut.services.memory.shared_view import (
     merge_shared,
     share_candidates,
     shared_source_text,
+    shared_with_text,
 )
 from servonaut.screens.memory_authored import (
     AUTHORED_MODULES,
@@ -498,6 +499,7 @@ class MemoryScreen(Screen):
                     id="memory-local-status",
                 ),
                 Static("", id="memory-shared-source", classes="hidden"),
+                Static("", id="memory-share-state", classes="hidden"),
                 Static(
                     "[$text-warning]Memory disabled for this server.[/$text-warning]",
                     id="memory-opt-out-banner",
@@ -616,6 +618,7 @@ class MemoryScreen(Screen):
         self._render_table()
         self._apply_read_only()
         self._request_shared()
+        self._request_own_shares()
         self._refresh_sync_status()
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
@@ -960,6 +963,53 @@ class MemoryScreen(Screen):
         if combined is not None:
             self._shared = combined
             self._render_table()
+
+    def _request_own_shares(self) -> None:
+        """Once per screen, find the teams the user shares this server's memory with.
+
+        Only for a server of the user's own, on a plan with team sharing; the
+        team lists are reused for ``memory.team_memory_cache_seconds``.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        team = getattr(self.app, "team_memory_service", None)
+        auth = getattr(self.app, "auth_service", None)
+        if reader is None or team is None or self._read_only:
+            return
+        if auth is None or not auth.has_feature("memory_team_share"):
+            return
+        self.run_worker(
+            self._load_own_shares(reader, team),
+            group="memory_own_shares",
+            name="memory_own_shares",
+            exclusive=True,
+        )
+
+    async def _load_own_shares(self, reader: Any, team: Any) -> None:
+        try:
+            await reader.prefetch_all()
+            caller = team.caller_user_id()
+        except Exception as exc:  # noqa: BLE001 — the line is optional
+            logger.debug("Own shares not listed: %s", type(exc).__name__)
+            return
+        target = self._target
+        ids = {str(target.get("id") or target.get("name") or ""), str(target.get("instance_id") or "")}
+        self._show_own_shares(reader.shared_by(caller, ids))
+
+    def _show_own_shares(self, listings: List[Any]) -> None:
+        """Say which teams the user shares this server with (nothing when none)."""
+        if not self.is_mounted:
+            return  # closed while the lists were read
+        label = self.query_one("#memory-share-state", Static)
+        redaction = getattr(self.app, "redaction_service", None)
+        demo = getattr(self.app, "demo_mode", False) and redaction is not None
+        text = shared_with_text(listings, redaction.redact_name if demo else (lambda name: name))
+        if not text:
+            label.add_class("hidden")
+            return
+        label.update(Text.assemble(
+            (text, "blue"), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
+        ))
+        label.remove_class("hidden")
 
     def _apply_read_only(self) -> None:
         """Turn off what needs a host when the server only has shared memory."""
