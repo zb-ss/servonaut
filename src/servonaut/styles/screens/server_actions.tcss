@@ -45,6 +45,11 @@
     height: auto;
 }
 
+/* Back is set apart from the last category so it never reads as one of its actions */
+#action_buttons .sa-group:last-child {
+    margin-top: 1;
+}
+
 #action_buttons .sa-group-actions {
     width: 1fr;
     height: auto;
@@ -68,6 +73,10 @@
     color: $text;
     text-align: left;
     content-align: left middle;
+    /* A button's content box can be exactly 2 cells wide while its line pad is 1,
+       so the text would be wrapped at width 0 and the app would crash. Truncating
+       instead of wrapping can never reach that path (e.g. while the chat panel
+       is still squeezing this column during a resize). */
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
@@ -164,7 +173,7 @@ ServerActionsScreen.-content-narrow #action_buttons .section_label {
 
 ServerActionsScreen.-narrow #action_buttons,
 ServerActionsScreen.-content-narrow #action_buttons {
-    padding-bottom: 0;
+    padding: 0 1 0 1;
 }
 
 /* Main detail workspace (overview + inline tools) */

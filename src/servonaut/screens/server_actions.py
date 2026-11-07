@@ -128,7 +128,7 @@ def _action_group(label: str, *buttons: Button) -> Horizontal:
     another category's button and every group starts on the same left edge.
     """
     return Horizontal(
-        Static(label, classes="section_label"),
+        Static(label, classes="section_label", markup=False),
         Grid(*buttons, classes="sa-group-actions"),
         classes="sa-group",
     )
