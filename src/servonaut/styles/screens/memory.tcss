@@ -3,6 +3,11 @@
    upsell modals, passphrase enrol.
    =================================================================== */
 
+/* Which teams the server is shared with takes the accent, as a status line. */
+MemoryScreen #memory-share-state {
+    color: $text-accent;
+}
+
 /* Full memory views keep records and decisions close to their context. */
 MemoryDriftScreen .memory-secondary-heading,
 MemoryExportScreen .memory-secondary-heading,

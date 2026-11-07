@@ -1079,7 +1079,9 @@ class MemoryScreen(WorkspaceScreen):
 
     def _show_own_shares(self, listings: List[Any]) -> None:
         """Say which teams the user shares this server with (nothing when none)."""
-        if not self.is_mounted:
+        # Cached team lists answer before the screen's own mount finishes, so
+        # being attached (not yet "mounted") is what says it is still open.
+        if not self.is_attached:
             return  # closed while the lists were read
         label = self.query_one("#memory-share-state", Static)
         redaction = getattr(self.app, "redaction_service", None)
@@ -1089,7 +1091,7 @@ class MemoryScreen(WorkspaceScreen):
             label.add_class("hidden")
             return
         label.update(Text.assemble(
-            (text, "blue"), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
+            (text, ""), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
         ))
         label.remove_class("hidden")
 
