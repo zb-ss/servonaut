@@ -136,7 +136,7 @@ async def test_ovh_group_follows_the_label_rule_and_precedes_back(size) -> None:
         _assert_prefix_matches_binding(screen)
         _assert_action_geometry(screen)
         groups = list(screen.query("#action_buttons .sa-group"))
-        assert groups[-2].query_one(".section_label").content.plain == "OVH"
+        assert str(groups[-2].query_one(".section_label").content) == "OVH"
         assert groups[-1].query_one(Button).id == "btn_back"
 
 
