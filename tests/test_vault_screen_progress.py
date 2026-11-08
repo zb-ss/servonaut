@@ -396,6 +396,7 @@ async def test_approving_a_device_can_be_stopped_while_it_waits_for_the_new_devi
     async with app.run_test(size=(160, 50)):
         screen = await _settled(app, "Identity fingerprint")
         screen._devices = [{"device_id": "d-2", "status": "pending"}]
+        screen._table_mode = "devices"
         screen._render_devices()
         screen.action_approve()
         await wait_until(lambda: _busy(screen) is not None and approvals == ["d-2"])
