@@ -11,6 +11,7 @@ files that are fine still load, so a broken theme cannot stop the app.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
@@ -81,6 +82,7 @@ VARIABLE_KEYS = VARIABLE_COLOUR_KEYS + (TEXT_STYLE_KEY,)
 ANSI_SLOTS = 8
 ANSI_KEYS = ("normal", "bright")
 
+_SHOWN_MAX = 40
 _PERCENT = re.compile(r"^(?P<colour>.+?)\s+(?P<percent>\d{1,3})%$")
 _TOML_LINE = re.compile(r"line (\d+)")
 
@@ -118,6 +120,12 @@ class _FileProblem(Exception):
         super().__init__(message)
         self.message = message
         self.line = line
+
+
+def _shown(value: object) -> str:
+    """*value* as it appears in a message: quoted, and short even for a huge entry."""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= _SHOWN_MAX else text[: _SHOWN_MAX - 1] + "…"
 
 
 def themes_dir(home: Optional[Path] = None) -> Path:
@@ -215,7 +223,7 @@ def _read_ansi(table: Mapping[str, Any], theme: Theme) -> Tuple[TerminalTheme, L
     problems: List[str] = []
     for key in table:
         if key not in ANSI_KEYS:
-            problems.append(f'[ansi] has an unknown key "{key}"; use "normal" and "bright"')
+            problems.append(f'[ansi] has an unknown key {_shown(key)}; use "normal" and "bright"')
     palettes: Dict[str, List[Color]] = {}
     for key in ANSI_KEYS:
         palette = _read_ansi_list(key, table.get(key), problems)
@@ -245,7 +253,7 @@ def _read_ansi_list(key: str, value: object, problems: List[str]) -> Optional[Li
     colours = [parse_colour(item) for item in value]
     for index, colour in enumerate(colours):
         if colour is None:
-            problems.append(f'[ansi] "{key}" entry {index + 1} is not a colour ({value[index]!r})')
+            problems.append(f'[ansi] "{key}" entry {index + 1} is not a colour ({_shown(value[index])})')
     return None if None in colours else colours  # type: ignore[return-value]
 
 
@@ -306,7 +314,7 @@ def _check_keys(data: Mapping[str, Any], source: str, problems: List[_FileProble
     known = {_NAME_KEY, _DARK_KEY, *COLOUR_KEYS, *_TABLE_KEYS}
     for key in data:
         if key not in known:
-            problems.append(_FileProblem(f'Unknown key "{key}"', _find_line(source, key)))
+            problems.append(_FileProblem(f"Unknown key {_shown(key)}", _find_line(source, key)))
 
 
 def _read_colours(data: Mapping[str, Any], source: str, problems: List[_FileProblem]) -> Dict[str, str]:
@@ -319,7 +327,7 @@ def _read_colours(data: Mapping[str, Any], source: str, problems: List[_FileProb
         colour = parse_colour(data[key])
         if colour is None:
             problems.append(_FileProblem(
-                f'"{key}" is not a colour ({data[key]!r})', _find_line(source, key),
+                f'"{key}" is not a colour ({_shown(data[key])})', _find_line(source, key),
             ))
             continue
         colours[key] = colour.hex
@@ -335,7 +343,7 @@ def _read_variables(data: Mapping[str, Any], source: str, problems: List[_FilePr
     for key, value in table.items():
         line = _find_line(source, key)
         if key not in VARIABLE_KEYS:
-            problems.append(_FileProblem(f'[variables] has an unknown key "{key}"', line))
+            problems.append(_FileProblem(f"[variables] has an unknown key {_shown(key)}", line))
         elif key == TEXT_STYLE_KEY:
             style = _read_text_style(value)
             if style is None:
@@ -347,7 +355,7 @@ def _read_variables(data: Mapping[str, Any], source: str, problems: List[_FilePr
         else:
             colour = _parse_variable_colour(value)
             if colour is None:
-                problems.append(_FileProblem(f'"{key}" is not a colour ({value!r})', line))
+                problems.append(_FileProblem(f'"{key}" is not a colour ({_shown(value)})', line))
             else:
                 variables[key] = colour
     return variables

@@ -1695,6 +1695,10 @@ def _main() -> None:
     from servonaut.cli.db import add_db_parser
     add_db_parser(subparsers)
 
+    # ---- theme subcommand (list, export and check colour themes) ----
+    from servonaut.cli.theme import add_theme_parser, handle_theme_command
+    add_theme_parser(subparsers)
+
     # ---- login / logout subcommands (headless device-flow sign-in) ----
     from servonaut.cli.login import add_login_parser, add_logout_parser
     add_login_parser(subparsers)
@@ -1747,6 +1751,10 @@ def _main() -> None:
         _setup_logging(debug=args.debug)
         from servonaut.cli.db import handle_db_command
         sys.exit(handle_db_command(args))
+
+    if getattr(args, 'subcommand', None) == 'theme':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_theme_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)
