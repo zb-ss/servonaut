@@ -133,7 +133,7 @@ async def test_member_approval_dialog_is_clean() -> None:
 
     class Service(FakeVaultService):
         async def process_grants(self, *, vault_id: str, approval: Any, **kw: Any) -> list:
-            await approval({"user_id": "u-2", "display_name": HOSTILE, "email": f"x{CSI}@example.invalid",
+            await approval({"user_id": "u-2", "display_name": HOSTILE, "email": f"x{CSI}-mail",
                             "role": HOSTILE}, "11111 22222 33333", False)
             return []
 
