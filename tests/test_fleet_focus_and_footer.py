@@ -21,10 +21,7 @@ from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 
 # The single-letter fleet shortcuts (``/`` itself moves to the search box).
-_SHORTCUT_KEYS = {"r", "f", "p", "o", "s", "b", "c", "t", "l", "a", "m", "D", "k", "v", "y"}
-
-# Wide enough for every shortcut to have its footer entry.
-_FOOTER_WIDTH = (220, 40)
+_SHORTCUT_KEYS = {"r", "o", "s", "b", "c", "t", "l", "a", "m", "D", "k", "v", "y"}
 
 
 def _row(name: str) -> dict:
@@ -89,7 +86,7 @@ async def test_the_fleet_screen_opens_with_the_table_focused() -> None:
 @pytest.mark.asyncio
 async def test_the_table_takes_the_arrow_keys_and_shortcuts_at_once() -> None:
     app = _FleetHost()
-    async with app.run_test(size=_FOOTER_WIDTH) as pilot:
+    async with app.run_test(size=(160, 40)) as pilot:
         screen = await _open_fleet(pilot)
         table = screen.query_one(InstanceTable)
         await pilot.press("down")
@@ -99,9 +96,20 @@ async def test_the_table_takes_the_arrow_keys_and_shortcuts_at_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_footer_at_160_columns_still_lists_verify_and_copy() -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(160, 40)) as pilot:
+        screen = await _open_fleet(pilot)
+        footer = _footer_keys(screen)
+        assert {"v", "y"} <= footer.keys()
+        # The filter keys are documented by the chips and the help screen.
+        assert not {"f", "p"} & footer.keys()
+
+
+@pytest.mark.asyncio
 async def test_the_footer_keeps_the_shortcuts_greyed_while_searching() -> None:
     app = _FleetHost()
-    async with app.run_test(size=_FOOTER_WIDTH) as pilot:
+    async with app.run_test(size=(160, 40)) as pilot:
         screen = await _open_fleet(pilot)
         await pilot.press("slash")
         assert isinstance(app.focused, FleetSearchInput)

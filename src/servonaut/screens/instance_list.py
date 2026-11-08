@@ -83,8 +83,10 @@ class FleetChip(Button):
     """A quick-filter chip: one state or provider choice, with its live count."""
 
     def __init__(self, group: str, value: str, label: str) -> None:
+        key = "f" if group == "state" else "p"
         super().__init__(
             label, id=f"chip_{group}_{value}", classes="fleet-chip", compact=True,
+            tooltip=f"Filter the list; press {key} to cycle these choices",
         )
         self.group = group
         self.value = value
@@ -124,9 +126,11 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Fetch the fleet again from every provider"),
         Binding("/", "focus_search", "Search", show=True,
                 tooltip="Search instances and keyword scan results"),
-        Binding("f", "filter_state", "State", show=True,
+        # Not in the footer (it is full at common widths): the chips carry the
+        # keys in their tooltips and the help screen lists them.
+        Binding("f", "filter_state", "State", show=False,
                 tooltip="Cycle the state filter: all, running, stopped, other"),
-        Binding("p", "filter_provider", "Provider", show=True,
+        Binding("p", "filter_provider", "Provider", show=False,
                 tooltip="Cycle the provider filter: all, then each provider in the list"),
         Binding("enter", "select_instance", "Actions", show=True,
                 tooltip="Open the selected server's actions"),
@@ -180,8 +184,6 @@ class InstanceListScreen(WorkspaceScreen):
         "open_memory",
         "scp_transfer",
         "refresh",
-        "filter_state",
-        "filter_provider",
         "ai_analysis",
         "copy_row",
         "verify_ssh",
