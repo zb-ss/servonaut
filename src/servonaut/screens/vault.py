@@ -1578,11 +1578,11 @@ class VaultScreen(Screen):
         return names, None
 
     def _selected_item(self) -> Optional[dict[str, Any]]:
-        table = self.query_one("#vault_table", DataTable)
-        row = table.cursor_row
-        if 0 <= row < len(self._items):
-            return self._items[row]
-        return None
+        """The highlighted item, only while the items table is the one shown."""
+        if self._table_mode != "items":
+            return None
+        row = self.query_one("#vault_table", DataTable).cursor_row
+        return self._items[row] if 0 <= row < len(self._items) else None
 
     def action_reveal(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1960,6 +1960,9 @@ class VaultScreen(Screen):
         self._status(f"{len(self._exposures)} open exposure{'s' if len(self._exposures) != 1 else ''} for this vault.")
 
     def _selected_exposure(self) -> Optional[dict[str, Any]]:
+        """The highlighted exposure, only while the exposures table is the one shown."""
+        if self._table_mode != "exposures":
+            return None
         row = self.query_one("#vault_table", DataTable).cursor_row
         return self._exposures[row] if 0 <= row < len(self._exposures) else None
 
@@ -2152,9 +2155,8 @@ class VaultScreen(Screen):
     def action_approve(self) -> None:
         if not self._allows_identity_action("ready"):
             return
-        table = self.query_one("#vault_table", DataTable)
-        row = table.cursor_row
-        if not (0 <= row < len(self._devices)):
+        row = self.query_one("#vault_table", DataTable).cursor_row
+        if self._table_mode != "devices" or not (0 <= row < len(self._devices)):
             self.app.notify("Load devices and select a pending device first.", severity="warning", markup=False)
             return
         device_id = str(self._devices[row].get("device_id") or "")
