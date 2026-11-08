@@ -1556,24 +1556,42 @@ class VaultScreen(Screen):
         if self._refuse_without_access(selected):
             return
         self._selected_vault_id = str(selected.get("vault_id") or "")
-        self.run_worker(self._load_items(), group="vault", exclusive=True)
+        self.run_worker(self._load_items(self._selected_vault_id), group="vault", exclusive=True)
 
-    async def _load_items(self) -> None:
-        if not self._selected_vault_id:
+    def _load_is_current(self, vault_id: str) -> bool:
+        """Whether a finished load still belongs to what the user has selected.
+
+        The vault list stays interactive while a view loads. If the user moved
+        to another vault meanwhile, the records that arrived belong to a vault
+        that is no longer the target, so they are dropped rather than shown
+        next to another vault's selection.
+        """
+        if self._table_mode == "vaults" and self._selected_vault_id != vault_id:
+            self._status("The selection changed while loading. Choose the view again for the vault you want.")
+            return False
+        return True
+
+    async def _load_items(self, vault_id: Optional[str] = None) -> None:
+        """Load a vault's items (the selected vault when none is given)."""
+        vault_id = vault_id or self._selected_vault_id
+        if not vault_id:
             return
         service = self._service()
         if service is None:
             return
         try:
             async with self._busy("Loading the vault's items…"):
-                response = await _invoke(service, "list_items", vault_id=self._selected_vault_id)
-                names, name_failure = await self._read_key_names(service)
+                response = await _invoke(service, "list_items", vault_id=vault_id)
+                names, name_failure = await self._read_key_names(service, vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load item metadata ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        if not self._load_is_current(vault_id):
             return
         rows = response.get("data", []) if isinstance(response, Mapping) else response
         self._items = [dict(row) for row in rows or []]
         self._key_names = names
+        self._selected_vault_id = vault_id
         self._table_mode = "items"
         self._render_items()
         if name_failure is not None:
@@ -1581,9 +1599,9 @@ class VaultScreen(Screen):
         else:
             self._status("Items loaded. Use Rename key, Delete key or Delete multiple on SSH keys; press V to reveal.")
 
-    async def _read_key_names(self, service: Any) -> tuple[dict[str, Optional[str]], Optional[str]]:
+    async def _read_key_names(self, service: Any, vault_id: str) -> tuple[dict[str, Optional[str]], Optional[str]]:
         try:
-            choices = await _invoke(service, "ssh_key_choices", vault_id=self._selected_vault_id, name_limit=None)
+            choices = await _invoke(service, "ssh_key_choices", vault_id=vault_id, name_limit=None)
         except Exception as exc:
             return {}, vault_failure_reason(exc)
         names: dict[str, Optional[str]] = {}
@@ -1954,23 +1972,32 @@ class VaultScreen(Screen):
     def action_exposures(self) -> None:
         if not self._allows_identity_action("ready"):
             return
-        if not self._selected_vault_id:
+        selected = self._selected_vault()
+        if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
-        self.run_worker(self._load_exposures(), group="vault", exclusive=True)
+        if self._refuse_without_access(selected):
+            return
+        self._selected_vault_id = str(selected.get("vault_id") or "") or None
+        self.run_worker(self._load_exposures(self._selected_vault_id or ""), group="vault", exclusive=True)
 
-    async def _load_exposures(self) -> None:
+    async def _load_exposures(self, vault_id: Optional[str] = None) -> None:
+        """Load a vault's open exposures (the selected vault when none is given)."""
+        vault_id = vault_id or self._selected_vault_id
         service = self._service()
-        if service is None or not self._selected_vault_id:
+        if service is None or not vault_id:
             return
         try:
             async with self._busy('Loading exposures…'):
-                exposures = await _invoke(service, "list_exposures", vault_id=self._selected_vault_id)
+                exposures = await _invoke(service, "list_exposures", vault_id=vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load exposures ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
+        if not self._load_is_current(vault_id):
+            return
         rows = exposures.get("data", exposures) if isinstance(exposures, Mapping) else exposures or []
         self._exposures = [dict(row) for row in rows if isinstance(row, Mapping)]
+        self._selected_vault_id = vault_id
         self._table_mode = "exposures"
         self._render_exposures()
         self._status(f"{len(self._exposures)} open exposure{'s' if len(self._exposures) != 1 else ''} for this vault.")
@@ -2520,8 +2547,11 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Could not load vault roster ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
+        if not self._load_is_current(vault_id):
+            return
         roster = vault.get("roster", []) if isinstance(vault, Mapping) else []
         self._roster = [dict(member) for member in roster if isinstance(member, Mapping)]
+        self._selected_vault_id = vault_id
         self._table_mode = "roster"
         self._render_roster()
         self._status("Roster loaded. Compare safety numbers before approving a changed identity.")
