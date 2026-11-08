@@ -26,9 +26,10 @@ account the selected row belongs to.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Union
 
 from textual.app import ComposeResult
+from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
@@ -36,6 +37,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -589,10 +591,9 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete OVH Cloud Instance",
-                description=(
-                    f"Delete [bold]{escape(label)}[/bold] "
-                    f"([bold]{escape(str(inst.get('type', '')))}[/bold]) in project "
-                    f"[bold]{escape(project_label)}[/bold]?"
+                description=with_bold_values(
+                    "Delete {} ({}) in project {}?",
+                    label, inst.get('type', ''), project_label,
                 ),
                 consequences=[
                     "All data on the instance will be permanently destroyed",
@@ -697,7 +698,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return "Provider request failed. See logs for details."
         return self._short_err(error)
 
-    def _set_status(self, text: str) -> None:
+    def _set_status(self, text: Union[str, Content]) -> None:
         # Provider errors quote real ids and names: demo mode shows stand-ins.
         text = display_text(self.app, text)
         try:

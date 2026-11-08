@@ -181,34 +181,35 @@ class TestResetPromptsCommand:
 # ---------------------------------------------------------------------------
 
 
-class TestMarkupEscape:
-    """Hostile instance names must be escaped before rendering to Rich markup."""
+class TestLiteralName:
+    """The server's name is shown as typed, never read as markup."""
 
-    def test_hostile_name_is_escaped(self) -> None:
-        from rich.markup import escape as rich_escape
-
-        hostile = "[red]inject[/red]"
+    def test_hostile_name_is_shown_literally(self) -> None:
+        hostile = "[red]inject[/red] [ @click=app.bell]x [/"
         prompt = MemoryPrompt({"id": "i-x", "name": hostile})
-        rendered = prompt._label_markup()
+        rendered = prompt._label_content()
 
-        # Raw hostile tag must not appear unescaped.
-        assert "[red]inject[/red]" not in rendered
-        # Escaped form must be present.
-        assert rich_escape(hostile) in rendered
+        assert hostile in rendered.plain
+        # Only the app's own words and the name itself carry styles.
+        name_start = rendered.plain.index(hostile)
+        name_end = name_start + len(hostile)
+        for span in rendered.spans:
+            assert "@click" not in str(span.style)
+            if span.start < name_end and span.end > name_start:
+                assert (span.start, span.end) == (name_start, name_end)
 
     def test_plain_name_passes_through(self) -> None:
         prompt = MemoryPrompt({"id": "i-ok", "name": "prod-web-01"})
-        rendered = prompt._label_markup()
-        assert "prod-web-01" in rendered
+        assert "prod-web-01" in prompt._label_content().plain
 
     def test_falls_back_to_id_when_no_name(self) -> None:
         prompt = MemoryPrompt({"id": "i-noname"})
-        assert "i-noname" in prompt._label_markup()
+        assert "i-noname" in prompt._label_content().plain
 
     def test_empty_instance_uses_default(self) -> None:
         prompt = MemoryPrompt({})
         # Falls back to the literal "server" string.
-        assert "server" in prompt._label_markup()
+        assert "server" in prompt._label_content().plain
 
 
 # ---------------------------------------------------------------------------

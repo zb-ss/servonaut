@@ -2426,16 +2426,17 @@ class TestServerActionsRdnsDemoMode:
 
     def test_rdns_hostname_scrubbed_in_demo_mode(self) -> None:
         _, rendered, shown = self._run(demo=True)
-        assert self.RDNS not in rendered
-        assert "Reverse DNS" in rendered
+        text = rendered.plain
+        assert self.RDNS not in text
+        assert "Reverse DNS" in text
         for real in (self.REAL["id"], self.REAL["public_ip"], self.REAL["name"]):
-            assert real not in rendered
-        assert shown["public_ip"] in rendered
+            assert real not in text
+        assert shown["public_ip"] in text
 
     def test_rdns_hostname_not_scrubbed_without_demo(self) -> None:
         asked, rendered, _ = self._run(demo=False)
         assert asked == [(self.REAL["id"], self.REAL["public_ip"])]
-        assert f"Reverse DNS:[/dim] {self.RDNS}" in rendered
+        assert f"Reverse DNS: {self.RDNS}" in rendered.plain
 
 
 # ---------------------------------------------------------------------------

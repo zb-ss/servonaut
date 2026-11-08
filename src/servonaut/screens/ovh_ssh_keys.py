@@ -30,6 +30,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -442,9 +443,8 @@ class OVHSSHKeysScreen(Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete SSH Key",
-                description=(
-                    f"Remove [bold]{key_name}[/bold] from project "
-                    f"[bold]{self._display_project_id()}[/bold]."
+                description=with_bold_values(
+                    "Remove {} from project {}.", key_name, self._display_project_id(),
                 ),
                 consequences=[
                     "The key is removed from this OVH project's registry",

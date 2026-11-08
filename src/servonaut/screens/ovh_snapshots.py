@@ -12,6 +12,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
@@ -382,9 +383,8 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Restore Snapshot",
-                description=(
-                    f"Restore [bold]{escape(instance_name)}[/bold] from snapshot "
-                    f"[bold]{escape(snap_name)}[/bold]."
+                description=with_bold_values(
+                    "Restore {} from snapshot {}.", instance_name, snap_name,
                 ),
                 consequences=[
                     "The instance will be reverted to the snapshot state",
@@ -456,7 +456,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete Snapshot",
-                description=f"Delete snapshot [bold]{escape(snap_name)}[/bold].",
+                description=with_bold_values("Delete snapshot {}.", snap_name),
                 consequences=[
                     "The snapshot will be permanently deleted",
                     "This cannot be undone",

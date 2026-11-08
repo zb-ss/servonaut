@@ -9,6 +9,7 @@ from . import _home_isolation
 _HOME_ISOLATION = _home_isolation.isolate()
 
 import os  # noqa: E402
+import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
@@ -113,6 +114,34 @@ def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(team_policy_keys, "TEAM_POLICY_KEYS", team_policy_keys.TEAM_POLICY_KEYS)
     state_path = tmp_path / "team_policy_state" / team_policy.STATE_FILENAME
     monkeypatch.setattr(team_policy, "default_state_path", lambda: state_path)
+
+
+_NO_CLASS_APP = object()
+
+
+def _chat_panel_class():
+    module = sys.modules.get("servonaut.widgets.chat_panel")
+    return module.ChatPanel if module is not None else None
+
+
+@pytest.fixture(autouse=True)
+def _restore_chat_panel_app():
+    """Undo a test pointing ``ChatPanel.app`` at a mock app for the whole class.
+
+    Several unmounted-panel tests set ``type(panel).app`` to reach a mock app.
+    Left in place, it makes every later mounted chat panel render from that
+    mock, so it is put back after each test.
+    """
+    panel_class = _chat_panel_class()
+    saved = panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
+    yield
+    panel_class = _chat_panel_class()
+    if panel_class is None:
+        return
+    if saved is not _NO_CLASS_APP:
+        panel_class.app = saved
+    elif "app" in panel_class.__dict__:
+        delattr(panel_class, "app")
 
 
 # ---------------------------------------------------------------------------

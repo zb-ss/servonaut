@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Union
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 
 
@@ -87,7 +89,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
     def __init__(
         self,
         title: str,
-        description: str,
+        description: Union[str, Content],
         consequences: List[str],
         confirm_text: str,
         action_label: str,
@@ -97,7 +99,10 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
         Args:
             title: Dialog title, e.g. "Reinstall VPS".
-            description: Rich markup string explaining the operation.
+            description: Text explaining the operation. A plain string is read
+                as markup, so anything that carries a name or value from
+                outside the app must be passed as ``Content`` (see
+                :func:`servonaut.utils.markup.literal`).
             consequences: List of consequences shown as bullet points.
             confirm_text: Exact text the user must type to enable confirm button.
             action_label: Label for the confirm button.
@@ -141,11 +146,13 @@ class ConfirmActionScreen(ModalScreen[bool]):
             Static("This will:", id="consequences_label"),
             *consequence_widgets,
             Static(
-                f"[bold {title_color}]{severity_text}[/bold {title_color}]",
+                Content.styled(severity_text, f"bold {title_color}"),
                 id="severity_message",
             ),
             Static(
-                f'Type "[bold]{self._confirm_text}[/bold]" to confirm:',
+                Content.assemble(
+                    'Type "', literal(self._confirm_text, "bold"), '" to confirm:',
+                ),
                 id="confirm_prompt",
             ),
             Input(placeholder=self._confirm_text, id="confirm_input"),

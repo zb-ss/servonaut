@@ -10,48 +10,80 @@ Two ModalScreen flavours, sized by the tool's ``guard_level``:
 Per the "ModalScreen vs Screen" convention: both fit the
 "brief blocking choice" pattern (small surface, single decision, dim
 background returns to chat). All user-influenced strings (tool names,
-arg values from the model) are passed through ``rich.markup.escape``
-before interpolation — the model output can contain rich-markup
-metacharacters and we don't want a malformed brace to corrupt the row.
+arg values from the model) are built as ``Content`` and never parsed as
+markup, so what the user approves is exactly what the model sent.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 
 logger = logging.getLogger(__name__)
 
 
-# Maximum displayed length per arg value before we truncate. Models
-# can dump multi-KB blobs into args (e.g. file content for transfer);
-# long values blow out the modal layout.
-_MAX_ARG_VALUE_LEN = 200
+# How to reach the rest, per modal: the standard modal starts with the box
+# focused, in the dangerous one the typed-confirm input has the focus first.
+_CUE_HOW = {
+    "tool": "scroll with the arrow keys or the mouse.",
+    "dangerous": "Shift+Tab, then the arrow keys, or the mouse.",
+}
+
+
+def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
+    """Say how much of the arguments is still below the box.
+
+    What the user approves must be readable in full: a cut with no sign of it
+    would let a long value hide its tail. The line keeps its row while the
+    text is longer than the box, so scrolling never moves the layout.
+    """
+    try:
+        scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+        cue = screen.query_one(f"#{prefix}_confirm_more", Static)
+    except Exception:  # pragma: no cover - modal closed meanwhile
+        return
+    cue.display = scroll.max_scroll_y > 0
+    remaining = math.ceil(scroll.max_scroll_y - scroll.scroll_y)
+    if remaining > 0:
+        cue.update(f"{remaining} more lines below: {_CUE_HOW[prefix]}")
+    else:
+        cue.update("End of the text.")
+
+
+def _follow_scroll(screen: ModalScreen, prefix: str) -> None:
+    """Keep the cue in step with the scroll position (keys, wheel, scrollbar)."""
+    scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+    screen.watch(scroll, "scroll_y", lambda _old, _new: _show_overflow_cue(screen, prefix))
+    screen.call_after_refresh(_show_overflow_cue, screen, prefix)
+
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
 # anything else returns False.
 _DANGEROUS_CONFIRM_WORD = "RUN"
 
 
-def _format_args(args: Dict[str, Any]) -> str:
-    """Render an args dict as escaped ``key: value`` pairs, one per line.
+def _format_args(args: Dict[str, Any]) -> Content:
+    """Render an args dict as ``key: value`` lines, one per argument.
 
-    Long values are truncated with an ellipsis. Non-string values are
-    JSON-serialised for compact display so a list of paths shows up
-    without Python's repr noise.
+    Every value is shown in full: the user approves what is displayed, so
+    nothing may be cut or hidden. The argument area scrolls. Non-string
+    values are JSON-serialised for compact display so a list of paths shows
+    up without Python's repr noise.
     """
     if not args:
-        return "[dim]<no arguments>[/dim]"
+        return Content.styled("<no arguments>", "dim")
     lines = []
     for key, value in args.items():
         if isinstance(value, str):
@@ -61,10 +93,8 @@ def _format_args(args: Dict[str, Any]) -> str:
                 display = json.dumps(value, default=str)
             except (TypeError, ValueError):
                 display = str(value)
-        if len(display) > _MAX_ARG_VALUE_LEN:
-            display = display[: _MAX_ARG_VALUE_LEN - 3] + "..."
-        lines.append(f"[dim]{escape(str(key))}:[/dim] {escape(display)}")
-    return "\n".join(lines)
+        lines.append(Content.assemble(literal(f"{key}:", "dim"), " ", literal(display)))
+    return Content("\n").join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +138,17 @@ class ToolConfirmModal(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
-    ToolConfirmModal #tool_confirm_args {
-        margin-bottom: 1;
+    ToolConfirmModal #tool_confirm_scroll {
+        height: auto;
         max-height: 12;
-        overflow-y: auto;
+        margin-bottom: 0;
+    }
+
+    ToolConfirmModal #tool_confirm_more {
+        color: $text-warning;
+        height: 1;
+        margin-bottom: 1;
+        display: none;
     }
 
     ToolConfirmModal #tool_confirm_buttons {
@@ -133,7 +170,7 @@ class ToolConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Container(
             Static(
-                f"[bold]{escape(self._tool)}[/bold]",
+                literal(self._tool, "bold"),
                 id="tool_confirm_title",
             ),
             Static(
@@ -141,10 +178,11 @@ class ToolConfirmModal(ModalScreen[bool]):
                 "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
                 id="tool_confirm_body",
             ),
-            Static(
-                _format_args(self._args),
-                id="tool_confirm_args",
+            VerticalScroll(
+                Static(_format_args(self._args), id="tool_confirm_args"),
+                id="tool_confirm_scroll",
             ),
+            Static("", id="tool_confirm_more"),
             Horizontal(
                 Button("Confirm", id="btn_tool_confirm", variant="primary"),
                 Button("Cancel", id="btn_tool_cancel", variant="default"),
@@ -153,6 +191,12 @@ class ToolConfirmModal(ModalScreen[bool]):
             id="tool_confirm_container",
         )
         yield Footer()
+
+    def on_mount(self) -> None:
+        _follow_scroll(self, "tool")
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "tool")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_tool_confirm":
@@ -209,10 +253,17 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
-    DangerousToolConfirmModal #dangerous_confirm_args {
-        margin-bottom: 1;
+    DangerousToolConfirmModal #dangerous_confirm_scroll {
+        height: auto;
         max-height: 10;
-        overflow-y: auto;
+        margin-bottom: 0;
+    }
+
+    DangerousToolConfirmModal #dangerous_confirm_more {
+        color: $text-warning;
+        height: 1;
+        margin-bottom: 1;
+        display: none;
     }
 
     DangerousToolConfirmModal #dangerous_confirm_input {
@@ -248,7 +299,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Container(
             Static(
-                f"[bold]Dangerous tool:[/bold] [bold]{escape(self._tool)}[/bold]",
+                Content.assemble(
+                    Content.styled("Dangerous tool:", "bold"),
+                    " ",
+                    literal(self._tool, "bold"),
+                ),
                 id="dangerous_confirm_title",
             ),
             Static(
@@ -256,10 +311,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
                 f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
                 id="dangerous_confirm_body",
             ),
-            Static(
-                _format_args(self._args),
-                id="dangerous_confirm_args",
+            VerticalScroll(
+                Static(_format_args(self._args), id="dangerous_confirm_args"),
+                id="dangerous_confirm_scroll",
             ),
+            Static("", id="dangerous_confirm_more"),
             Input(
                 placeholder=f"Type {_DANGEROUS_CONFIRM_WORD} to confirm",
                 id="dangerous_confirm_input",
@@ -274,7 +330,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         )
         yield Footer()
 
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "dangerous")
+
     def on_mount(self) -> None:
+        _follow_scroll(self, "dangerous")
         # Focus the input so the user can type immediately.
         try:
             self.query_one("#dangerous_confirm_input", Input).focus()
