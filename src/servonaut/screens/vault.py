@@ -1134,6 +1134,16 @@ class VaultScreen(Screen):
                 str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
                 markup_literal(self.scrub_for_display(row.get("vault_id") or "")),
             )
+        self._place_vault_cursor(table)
+
+    def _place_vault_cursor(self, table: DataTable) -> None:
+        """Put the cursor on the selected vault's row, so the list shows what actions use."""
+        row = next(
+            (index for index, vault in enumerate(self._vaults) if vault.get("vault_id") == self._selected_vault_id),
+            None,
+        )
+        if row is not None:
+            table.move_cursor(row=row)
 
     def _item_name_cell(self, row: Mapping[str, Any]) -> str:
         if row.get("type") != "ssh_key":
@@ -1346,11 +1356,25 @@ class VaultScreen(Screen):
         return True
 
     def _selected_vault(self) -> Optional[dict[str, Any]]:
-        table = self.query_one("#vault_table", DataTable)
-        row = table.cursor_row
-        if 0 <= row < len(self._vaults):
-            return self._vaults[row]
-        return None
+        """The vault the user is looking at.
+
+        The cursor picks a vault only while the vault list is shown. In any
+        other view the table holds items, devices or members, so its cursor
+        says nothing about vaults: the vault whose records are open is used.
+        """
+        if self._table_mode == "vaults":
+            row = self.query_one("#vault_table", DataTable).cursor_row
+            return self._vaults[row] if 0 <= row < len(self._vaults) else None
+        if not self._selected_vault_id:
+            return None
+        return next((v for v in self._vaults if v.get("vault_id") == self._selected_vault_id), None)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Keep the selected vault in step with the highlighted row of the vault list."""
+        if self._table_mode != "vaults" or event.data_table.id != "vault_table":
+            return
+        if 0 <= event.cursor_row < len(self._vaults):
+            self._selected_vault_id = str(self._vaults[event.cursor_row].get("vault_id") or "") or None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {
@@ -2464,6 +2488,7 @@ class VaultScreen(Screen):
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
+        self._selected_vault_id = str(selected.get("vault_id") or "") or None
         self.run_worker(self._load_roster(str(selected.get("vault_id") or "")), group="vault", exclusive=True)
 
     async def _load_roster(self, vault_id: str) -> None:
