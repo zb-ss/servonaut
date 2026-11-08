@@ -329,6 +329,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_finding_suppress",
         "btn_findings",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_banner_scan",      # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
         "btn_empty_scan",       # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
         "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss

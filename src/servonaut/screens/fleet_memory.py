@@ -29,6 +29,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
@@ -43,6 +44,7 @@ from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.markup import literal
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -98,6 +100,16 @@ _EMPTY_TEXT = (
     "panel and MCP clients can answer without a live SSH round-trip."
 )
 _NO_SERVERS_TEXT = "Add a server first; Fleet Memory then scans it from here."
+_BANNER_TEXT = (
+    "No server memory cached yet. Fleet Memory keeps facts about each server "
+    "so the chat panel and MCP clients can answer without a live SSH round-trip."
+)
+# Actions that act on the selected row; with no row there is nothing to act on.
+_ROW_ACTIONS = frozenset({
+    "open_selected", "share_selected", "clear_selected", "toggle_mark", "mark_all",
+})
+_ROW_BUTTONS = ("btn_open", "btn_share", "btn_clear")
+_MAX_WRAPPED_LINES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +283,29 @@ class FleetScanSummaryModal(ModalScreen[None]):
 # ---------------------------------------------------------------------------
 
 
+class _FleetActionRow(ActionRow):
+    """An action row whose wrapped lines are sized to the widest label.
+
+    The shared row wraps into a fixed number of equal columns, which can be
+    narrower than a label and cut it short. Here the columns follow the
+    measured widths, and key hints stay while the wrapped lines remain few.
+    """
+
+    def _apply(self, buttons: List[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
+        if wrap:
+            hint = self._lines(buttons, True) <= _MAX_WRAPPED_LINES
+        super()._apply(buttons, short=short, hint=hint, wrap=wrap)
+        self.styles.grid_size_columns = self._columns(buttons, hint) if wrap else None
+
+    def _columns(self, buttons: List[ActionButton], hint: bool) -> int:
+        widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
+        # Each column holds the widest label; one cell separates two columns.
+        return max(1, (self.content_size.width + 1) // (widest + 1))
+
+    def _lines(self, buttons: List[ActionButton], hint: bool) -> int:
+        return -(-len(buttons) // self._columns(buttons, hint))
+
+
 class FleetMemoryScreen(WorkspaceScreen):
     """Fleet-wide view of memory status + bulk memory operations.
 
@@ -318,6 +353,8 @@ class FleetMemoryScreen(WorkspaceScreen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in _ROW_ACTIONS and not getattr(self, "_rows", None):
+            return False
         if self.navigation_focused:
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
@@ -354,6 +391,7 @@ class FleetMemoryScreen(WorkspaceScreen):
                 # it never competes with the status summary above.
                 Static("", id="fleet-memory-progress", classes="hidden"),
                 self._toolbar(),
+                self._banner(),
                 # The table's card also holds the empty state, so the space
                 # the table would take is never left blank.
                 Container(
@@ -369,7 +407,7 @@ class FleetMemoryScreen(WorkspaceScreen):
     @staticmethod
     def _toolbar() -> ActionRow:
         """Every fleet action in one row that shortens itself instead of clipping."""
-        return ActionRow(
+        return _FleetActionRow(
             ActionButton("Scan all servers", "s", short="Scan all", role="primary", id="btn_scan_all"),
             ActionButton("Refresh stale", "f", short="Stale", id="btn_refresh_stale"),
             ActionButton("Auto-scan: off", "a", short="Auto: off", id="btn_toggle_auto_scan"),
@@ -382,12 +420,23 @@ class FleetMemoryScreen(WorkspaceScreen):
 
     @staticmethod
     def _empty_state() -> Vertical:
-        """What Fleet Memory is, shown in place of a table with no rows."""
+        """What Fleet Memory is, in place of a table with no rows (hidden until loaded)."""
         return Vertical(
             Static("No server memory cached yet", id="fleet-empty-title"),
             Static(_EMPTY_TEXT, id="fleet-empty-text"),
             ActionButton("Scan all servers now", role="primary", id="btn_empty_scan"),
             id="fleet-memory-empty",
+            classes="hidden",
+        )
+
+    @staticmethod
+    def _banner() -> Horizontal:
+        """The same offer above a table whose servers have no memory yet (hidden until loaded)."""
+        return Horizontal(
+            Static(_BANNER_TEXT, id="fleet-banner-text"),
+            ActionButton("Scan all servers now", role="primary", id="btn_banner_scan"),
+            id="fleet-memory-banner",
+            classes="hidden",
         )
 
     def on_mount(self) -> None:
@@ -426,7 +475,10 @@ class FleetMemoryScreen(WorkspaceScreen):
         # going in the background and routes progress here while mounted.
         if getattr(self.app, "_fleet_manual_scan_in_progress", False):
             self._scanning = True
-            self._set_progress("[$text-accent]Fleet scan in progress…[/$text-accent]")
+            self._set_progress(
+                "[$text-accent]Fleet scan in progress…[/$text-accent]",
+                note="Fleet scan in progress…",
+            )
         table.focus(scroll_visible=False)
 
     # ------------------------------------------------------------------
@@ -792,38 +844,89 @@ class FleetMemoryScreen(WorkspaceScreen):
     # False until the first fill, so a fleet still loading is never shown as empty.
     _loaded = False
 
+    # What the onboarding offer last showed ("card", "banner" or None), and
+    # the progress of a running scan; both read before the first fill.
+    _shown_kind: Optional[str] = None
+    _scan_note = ""
+
     def _sync_chrome(self) -> None:
-        """Bring the toolbar and the empty state in line with the rows."""
+        """Bring the toolbar, the onboarding offer and the row actions in line with the rows."""
         count = len(self._eligible_instances(False, getattr(self.app, "memory_service", None)))
         self._set_scan_labels(count)
-        empty = self._loaded and self._nothing_cached(count)
-        self.query_one("#fleet-memory-table", DataTable).display = not empty
-        self.query_one("#fleet-memory-empty").display = empty
-        self.query_one("#fleet-empty-text", Static).update(
-            _EMPTY_TEXT if count else _NO_SERVERS_TEXT
-        )
-        self.query_one("#btn_empty_scan").display = bool(count)
+        kind = self._onboarding_kind(count)
+        self._shown_kind = kind
+        self.query_one("#fleet-memory-empty").set_class(kind != "card", "hidden")
+        self.query_one("#fleet-memory-banner").set_class(kind != "banner", "hidden")
+        self.query_one("#fleet-memory-table", DataTable).set_class(kind == "card", "hidden")
+        self._sync_onboarding_text(kind, count)
+        self._sync_row_actions()
+        self._after_layout(self._sync_focus, kind)
 
-    def _nothing_cached(self, scannable: int) -> bool:
-        """True when there is no server, or servers a scan could probe but no memory yet.
+    def _onboarding_kind(self, scannable: int) -> Optional[str]:
+        """Which offer to show: a card with no rows, a banner over rows with no memory.
 
-        Servers whose memory is switched off are not scannable; a fleet made
-        only of those keeps its table, where their state is shown.
+        A banner already showing stays while a scan runs, so it does not flip
+        away as the first servers finish; rows are never hidden.
         """
+        if not self._loaded:
+            return None
         if not self._rows:
-            return True
+            return "card"
         cached = (STATUS_FRESH, STATUS_STALE, STATUS_SHARED)
-        return scannable > 0 and not any(row.get("status") in cached for row in self._rows)
+        nothing_cached = scannable > 0 and not any(r.get("status") in cached for r in self._rows)
+        if nothing_cached or (self._scanning and self._shown_kind is not None):
+            return "banner"
+        return None
+
+    def _sync_onboarding_text(self, kind: Optional[str], count: int) -> None:
+        """The offer's words: the scan's progress while one runs, else what the screen is."""
+        scanning = self._scanning and bool(self._scan_note)
+        default = _NO_SERVERS_TEXT if (kind == "card" and not count) else (
+            _EMPTY_TEXT if kind == "card" else _BANNER_TEXT)
+        text = self._scan_note if scanning else default
+        self.query_one("#fleet-empty-text", Static).update(text)
+        self.query_one("#fleet-banner-text", Static).update(text)
+        self.query_one("#btn_empty_scan").display = bool(count)
+        for button_id in ("btn_empty_scan", "btn_banner_scan"):
+            self.query_one(f"#{button_id}", ActionButton).disabled = self._scanning
+
+    def _sync_row_actions(self) -> None:
+        """Enable the row buttons only while there are rows, saying why when not.
+
+        With rows the table always has a selected one, so rows are all it takes.
+        """
+        enabled = bool(self._rows)
+        reason = None if enabled else "No servers have memory yet: scan the fleet first."
+        for button_id in _ROW_BUTTONS:
+            button = self.query_one(f"#{button_id}", ActionButton)
+            button.disabled = not enabled
+            button.tooltip = reason
+
+    def _after_layout(self, callback: Any, *args: Any) -> None:
+        """Run *callback* once the next layout is done, if the screen is running."""
+        if getattr(self, "_running", False):
+            self.call_after_refresh(callback, *args)
+
+    def _sync_focus(self, kind: Optional[str]) -> None:
+        """Focus the card's button while it is the only thing to do; leave it when it goes."""
+        try:
+            offer = self.query_one("#btn_empty_scan", ActionButton)
+            table = self.query_one("#fleet-memory-table", DataTable)
+        except Exception:  # noqa: BLE001 — the screen was left meanwhile
+            return
+        if kind == "card" and offer.display and not offer.disabled:
+            offer.focus()
+        elif kind != "card" and self.focused in (offer, None):
+            table.focus(scroll_visible=False)
 
     def _set_scan_labels(self, count: int) -> None:
-        """Show how many servers a scan would probe on both scan buttons."""
+        """Show how many servers a scan would probe, on the toolbar's scan button."""
         suffix = f" ({count})" if count else ""
         self.query_one("#btn_scan_all", ActionButton).set_text(
             f"Scan all servers{suffix}", short=f"Scan all{suffix}"
         )
-        self.query_one("#btn_empty_scan", ActionButton).set_text(
-            f"Scan all {count} server{'s' if count != 1 else ''} now"
-        )
+        # A longer label may need another layout of the row.
+        self._after_layout(self.query_one("#memory-actions", ActionRow).fit)
 
     # Set when a share form opens: coming back, what is shared may have changed.
     _reread_shares = False
@@ -1202,6 +1305,21 @@ class FleetMemoryScreen(WorkspaceScreen):
         if row.get("memory_only"):
             self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
+        from servonaut.screens.memory import SimpleConfirmModal
+
+        question = Content.assemble(
+            "Clear the cached memory and notes for ",
+            literal(str(row["name"]), "bold"),
+            "? This cannot be undone.",
+        )
+        self.app.push_screen(
+            SimpleConfirmModal(question), lambda yes: self._clear_confirmed(yes, row)
+        )
+
+    def _clear_confirmed(self, confirmed: Optional[bool], row: Dict[str, Any]) -> None:
+        """Delete *row*'s cached memory once the user has said yes."""
+        if not confirmed:
+            return
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory subsystem not wired.", severity="error")
@@ -1228,6 +1346,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             "btn_open": self.action_open_selected,
             "btn_share": self.action_share_selected,
             "btn_empty_scan": self.action_scan_all,
+            "btn_banner_scan": self.action_scan_all,
             "btn_clear": self.action_clear_selected,
             "btn_toggle_auto_scan": self.action_toggle_auto_scan,
         }
@@ -1312,7 +1431,8 @@ class FleetMemoryScreen(WorkspaceScreen):
 
         self._set_progress(
             f"[$text-accent]Scanning 0 / {len(instances)}[/$text-accent]  "
-            f"[dim](parallel: {_MAX_PARALLEL_FLEET_PROBES})[/dim]"
+            f"[dim](parallel: {_MAX_PARALLEL_FLEET_PROBES})[/dim]",
+            note=f"Scanning 0 of {len(instances)}…",
         )
         logger.info("Fleet scan launched: %d instance(s), stale_only=%s",
                     len(instances), stale_only)
@@ -1328,13 +1448,21 @@ class FleetMemoryScreen(WorkspaceScreen):
             self.app.notify("A fleet scan is already in progress.", severity="warning")
             return
         self._scanning = True
+        if self._loaded:
+            self._sync_chrome()
         self.app.notify(
             f"Scanning {len(instances)} instance(s) in the background — "
             "you can leave this panel and it will finish."
         )
 
-    def _set_progress(self, markup: str) -> None:
-        """Update the in-screen progress line; empty markup hides the row."""
+    def _set_progress(self, markup: str, note: str = "") -> None:
+        """Update the in-screen progress line; empty markup hides the row.
+
+        *note* is the same progress in plain words, shown in the onboarding offer.
+        """
+        self._scan_note = note
+        if self._loaded:
+            self._sync_chrome()
         try:
             widget = self.query_one("#fleet-memory-progress", Static)
         except Exception:
@@ -1367,7 +1495,8 @@ class FleetMemoryScreen(WorkspaceScreen):
         self._set_progress(
             f"[$text-accent]Scanning {progress.completed} / {progress.total}[/$text-accent]  "
             f"·  [{colour}]last: {escape(name)} "
-            f"{'✓' if progress.succeeded else '✗'}[/{colour}]"
+            f"{'✓' if progress.succeeded else '✗'}[/{colour}]",
+            note=f"Scanning {progress.completed} of {progress.total}…",
         )
         # Live row update — flip Memory/Modules/Age cells for the just-probed
         # instance without waiting for the full scan to complete.

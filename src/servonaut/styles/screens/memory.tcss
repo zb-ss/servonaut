@@ -724,9 +724,19 @@ FleetMemoryScreen #fleet-memory-table-card {
     align: center middle;
 }
 
-/* The one-row buttons of a narrow layout fit four to a line. */
-FleetMemoryScreen #memory-actions.-wrap {
-    grid-size: 4;
+FleetMemoryScreen #fleet-memory-banner {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+FleetMemoryScreen #fleet-banner-text {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
 }
 
 FleetMemoryScreen #fleet-empty-title {

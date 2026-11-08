@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
+from textual.content import Content
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
@@ -308,7 +309,7 @@ class SimpleConfirmModal(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, message: str | Text) -> None:
+    def __init__(self, message: str | Text | Content) -> None:
         super().__init__()
         self._message = message
 
