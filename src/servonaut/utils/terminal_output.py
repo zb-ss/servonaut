@@ -32,10 +32,15 @@ from servonaut.utils.markup import inert_text
 # C1 controls (0x9b is a one-byte CSI), and the bidirectional controls that
 # reorder what is shown.
 _UNSAFE = re.compile(
-    "[\x00-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]"
+    "[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
 )
 
 _ORIGINAL_ATTR = "_servonaut_original_render"
+
+
+def has_controls(text: str) -> bool:
+    """Whether *text* holds a character a terminal would act on."""
+    return _UNSAFE.search(text) is not None
 
 
 def strip_controls(text: str) -> str:
@@ -124,4 +129,4 @@ def protect_cli_output() -> None:
             setattr(sys, name, _InertStream(stream))
 
 
-__all__ = ["install", "uninstall", "strip_controls", "protect_cli_output"]
+__all__ = ["install", "uninstall", "strip_controls", "has_controls", "protect_cli_output"]

@@ -1811,7 +1811,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     markup=True,
                 )
             else:
-                self.app.notify("Could not launch the terminal.", severity="error", markup=False)
+                terminal_error = getattr(self.app.terminal_service, "last_error", None)
+                self.app.notify(
+                    terminal_error
+                    if isinstance(terminal_error, str) and terminal_error
+                    else "Could not launch the terminal.",
+                    severity="error",
+                    markup=False,
+                )
             return
 
         if source in ("personal", "team"):

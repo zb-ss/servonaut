@@ -14,7 +14,9 @@ from pathlib import Path, PureWindowsPath
 from typing import Final, Optional
 
 from servonaut.services.interfaces import TerminalServiceInterface
+from servonaut.utils.markup import inert_text
 from servonaut.utils.platform_utils import get_os
+from servonaut.utils.terminal_output import has_controls
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,30 @@ def _validate_wrapper_argument(argument: str) -> None:
     """Reject values that no line-oriented shell wrapper can represent."""
     if not isinstance(argument, str):
         raise ValueError("SSH command arguments must be strings.")
-    if "\x00" in argument or "\r" in argument or "\n" in argument:
+    if has_controls(argument):
         raise ValueError("SSH command contains an unsupported control character.")
+
+
+def _describe_refused_argument(command: Sequence[str], index: int) -> str:
+    """Say which part of the SSH command holds a control character.
+
+    The value is shown with the characters written out, never as is: it may
+    come from a server list that someone else controls.
+    """
+    argument = command[index]
+    if "@" in argument:
+        field = "user or host name"
+    elif index > 0 and command[index - 1] == "-i":
+        field = "key file path"
+    else:
+        field = f"argument {index}"
+    shown = inert_text(argument)
+    if len(shown) > 60:
+        shown = shown[:60] + "..."
+    return (
+        f"Not connecting: the {field} contains a control character ({shown}). "
+        "Check the server's details."
+    )
 
 
 class TerminalService(TerminalServiceInterface):
@@ -184,8 +208,14 @@ class TerminalService(TerminalServiceInterface):
             return None
         try:
             command = list(ssh_command)
-            for argument in command:
-                _validate_wrapper_argument(argument)
+            for index, argument in enumerate(command):
+                try:
+                    _validate_wrapper_argument(argument)
+                except ValueError:
+                    if isinstance(argument, str):
+                        self._last_error = _describe_refused_argument(command, index)
+                        return None
+                    raise
         except ValueError as exc:
             self._last_error = str(exc)
             return None
@@ -213,7 +243,7 @@ class TerminalService(TerminalServiceInterface):
         """Create the existing executable bash wrapper for POSIX terminals."""
         self._prepare_wrapper_directory()
         command_line = shlex.join(ssh_command)
-        display_line = shlex.quote(command_line)
+        display_line = shlex.quote(inert_text(command_line))
         content = f"""#!/bin/bash
 printf '%s\\n' 'Connecting:'
 printf '%s\\n' {display_line}
