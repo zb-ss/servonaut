@@ -43,6 +43,12 @@ def has_controls(text: str) -> bool:
     return _UNSAFE.search(text) is not None
 
 
+def first_control_index(text: str) -> int:
+    """Position of the first terminal-acting character in *text*, or -1."""
+    match = _UNSAFE.search(text)
+    return match.start() if match else -1
+
+
 def strip_controls(text: str) -> str:
     """*text* without terminal-acting characters."""
     return _UNSAFE.sub("", text)
@@ -129,4 +135,4 @@ def protect_cli_output() -> None:
             setattr(sys, name, _InertStream(stream))
 
 
-__all__ = ["install", "uninstall", "strip_controls", "has_controls", "protect_cli_output"]
+__all__ = ["install", "uninstall", "strip_controls", "has_controls", "first_control_index", "protect_cli_output"]

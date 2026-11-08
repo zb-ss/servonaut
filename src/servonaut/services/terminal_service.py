@@ -16,7 +16,7 @@ from typing import Final, Optional
 from servonaut.services.interfaces import TerminalServiceInterface
 from servonaut.utils.markup import inert_text
 from servonaut.utils.platform_utils import get_os
-from servonaut.utils.terminal_output import has_controls
+from servonaut.utils.terminal_output import first_control_index, has_controls
 
 logger = logging.getLogger(__name__)
 
@@ -81,24 +81,46 @@ def _validate_wrapper_argument(argument: str) -> None:
         raise ValueError("SSH command contains an unsupported control character.")
 
 
+_EXCERPT_RADIUS = 30
+
+
+def _refused_field(command: Sequence[str], index: int) -> str:
+    argument = command[index]
+    previous = command[index - 1] if index > 0 else ""
+    if argument.lower().startswith(("proxycommand=", "-oproxycommand=")) or (
+        previous == "-o" and argument.lower().startswith("proxycommand")
+    ):
+        return "proxy command"
+    if previous == "-J" or argument.startswith("-J"):
+        return "jump host"
+    if "@" in argument:
+        return "user or host name"
+    if previous == "-i":
+        return "key file path"
+    return f"argument {index}"
+
+
+def _excerpt_around_control(argument: str) -> str:
+    """The part of *argument* around its first control character, written out.
+
+    Tabs and newlines are written out too, so the culprit can be seen.
+    """
+    at = max(first_control_index(argument), 0)
+    start = max(0, at - _EXCERPT_RADIUS)
+    end = at + _EXCERPT_RADIUS
+    shown = inert_text(argument[start:end]).replace("\t", "\\t").replace("\n", "\\n")
+    return ("..." if start else "") + shown + ("..." if end < len(argument) else "")
+
+
 def _describe_refused_argument(command: Sequence[str], index: int) -> str:
     """Say which part of the SSH command holds a control character.
 
     The value is shown with the characters written out, never as is: it may
     come from a server list that someone else controls.
     """
-    argument = command[index]
-    if "@" in argument:
-        field = "user or host name"
-    elif index > 0 and command[index - 1] == "-i":
-        field = "key file path"
-    else:
-        field = f"argument {index}"
-    shown = inert_text(argument)
-    if len(shown) > 60:
-        shown = shown[:60] + "..."
     return (
-        f"Not connecting: the {field} contains a control character ({shown}). "
+        f"Not connecting: the {_refused_field(command, index)} contains a control "
+        f"character ({_excerpt_around_control(command[index])}). "
         "Check the server's details."
     )
 

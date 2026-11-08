@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from servonaut import main as main_module
+from servonaut.utils.terminal_output import _InertStream, protect_cli_output
 
 HOSTILE = "web\x1b]52;c;aGVsbG8=\x07\x1b[2J\x9b31m\u202e-1"
 
@@ -80,8 +81,32 @@ def test_streams_are_restored_after_the_command(monkeypatch: pytest.MonkeyPatch)
     assert (sys.stdout, sys.stderr) == before
 
 
-def test_the_mcp_path_keeps_the_raw_streams() -> None:
-    assert "mcp" not in main_module._TEXT_SUBCOMMANDS
+def _assert_streams_are_raw() -> None:
+    assert not isinstance(sys.stdout, _InertStream)
+    assert not isinstance(sys.stderr, _InertStream)
+
+
+def test_the_mcp_entry_keeps_the_raw_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--mcp`` speaks a protocol on stdout, so nothing may wrap it."""
+    seen: list[bool] = []
+
+    async def run_server() -> None:
+        _assert_streams_are_raw()
+        seen.append(True)
+
+    monkeypatch.setattr("servonaut.mcp.server.run_server", run_server)
+    _run(monkeypatch, "--mcp")
+    assert seen == [True]
+
+
+def test_the_raw_stream_check_trips_when_the_streams_are_wrapped() -> None:
+    before = (sys.stdout, sys.stderr)
+    try:
+        protect_cli_output()
+        with pytest.raises(AssertionError):
+            _assert_streams_are_raw()
+    finally:
+        sys.stdout, sys.stderr = before
 
 
 def test_foreground_connect_prints_relay_ids_as_text(

@@ -103,3 +103,38 @@ def test_echoed_command_line_is_inert_even_if_validation_is_bypassed(tmp_path: P
     display_line = content.splitlines()[2]
     assert "\x1b" not in display_line and "\x07" not in display_line
     assert "\\x1b" in display_line
+
+
+def test_a_tab_in_the_target_is_written_out_in_the_message(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _launch(service, ["ssh", _target("admin", "web\t1\n" + HOST)])
+    message = service.last_error or ""
+    assert "\t" not in message and "\n" not in message
+    assert "web\\t1\\n" in message
+
+
+@pytest.mark.parametrize(
+    ("command", "field"),
+    [
+        (["ssh", "-J", _target("jump", "bast\x1bion"), _target("a", "b")], "jump host"),
+        (["ssh", "-o", "ProxyCommand=ssh -W %h:%p " + _target("jump", "bast\x07ion")], "proxy command"),
+    ],
+    ids=["jump", "proxy"],
+)
+def test_bastion_and_proxy_values_are_named_and_stay_visible(
+    tmp_path: Path, command: list[str], field: str
+) -> None:
+    service = _service(tmp_path)
+    launched, _ = _launch(service, command)
+    message = service.last_error or ""
+    assert launched is False
+    assert f"the {field} contains" in message
+    assert "bast\\x" in message
+
+
+def test_a_long_value_is_cut_around_the_control_character(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _launch(service, ["ssh", _target("admin", "a" * 200 + "\x1b" + "b" * 200)])
+    message = service.last_error or ""
+    assert "\\x1b" in message
+    assert len(message) < 200
