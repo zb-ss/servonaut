@@ -701,3 +701,43 @@ MemoryScreen #memory-empty-state {
     align: right middle;
     padding: 1 0;
 }
+
+/* Fleet Memory: one action row above the records; an empty fleet shows a card. */
+FleetMemoryScreen #memory-actions {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+FleetMemoryScreen #fleet-memory-empty {
+    width: 64;
+    max-width: 90%;
+    height: auto;
+    margin: 0;
+    padding: 0 2;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+FleetMemoryScreen #fleet-memory-table-card {
+    align: center middle;
+}
+
+/* The one-row buttons of a narrow layout fit four to a line. */
+FleetMemoryScreen #memory-actions.-wrap {
+    grid-size: 4;
+}
+
+FleetMemoryScreen #fleet-empty-title {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-accent;
+    text-style: bold;
+}
+
+FleetMemoryScreen #fleet-empty-text {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}

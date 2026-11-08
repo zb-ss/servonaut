@@ -28,13 +28,14 @@ from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.dialogs import DialogActions, DialogFrame, DialogNotificationSpace
@@ -90,6 +91,13 @@ _SOURCE_CELL: Dict[str, str] = {
 # own SSH session, so we keep the ceiling well below the per-instance
 # semaphore (8) in MemoryService to avoid hammering shared bastions.
 _MAX_PARALLEL_FLEET_PROBES = 4
+
+_EMPTY_TEXT = (
+    "Fleet Memory keeps a cached set of facts about each server (operating "
+    "system, services, containers, web stack and log paths), so the chat "
+    "panel and MCP clients can answer without a live SSH round-trip."
+)
+_NO_SERVERS_TEXT = "Add a server first; Fleet Memory then scans it from here."
 
 
 # ---------------------------------------------------------------------------
@@ -345,52 +353,42 @@ class FleetMemoryScreen(WorkspaceScreen):
                 # Live progress line for bulk scans — hidden when idle so
                 # it never competes with the status summary above.
                 Static("", id="fleet-memory-progress", classes="hidden"),
-                Horizontal(
-                    Container(
-                        Static("Fleet scanning", classes="memory-panel-heading"),
-                        Container(
-                            Button("s. Scan All", id="btn_scan_all", variant="primary"),
-                            Button("f. Refresh Stale", id="btn_refresh_stale"),
-                            Button("r. Refresh", id="btn_refresh_view"),
-                            Button("a. Toggle Auto-scan", id="btn_toggle_auto_scan"),
-                            classes="fleet-memory-scan-buttons",
-                        ),
-                        classes="fleet-memory-action-group",
-                        id="fleet-memory-scan-actions",
-                    ),
-                    Container(
-                        Static("Selected server", classes="memory-panel-heading"),
-                        Horizontal(
-                            Button("enter. Open", id="btn_open"),
-                            Button("x. Clear", id="btn_clear", variant="error"),
-                            classes="fleet-memory-selection-buttons",
-                        ),
-                        classes="fleet-memory-action-group",
-                        id="fleet-memory-selection-actions",
-                    ),
-                    id="memory-actions",
-                ),
-                # Wrap the table in a sub-container so the rounded card
-                # treatment can be applied via CSS without affecting the
-                # DataTable's own selection styling.
+                self._toolbar(),
+                # The table's card also holds the empty state, so the space
+                # the table would take is never left blank.
                 Container(
-                    Static("Server records", classes="memory-panel-heading"),
                     DataTable(id="fleet-memory-table"),
+                    self._empty_state(),
                     id="fleet-memory-table-card",
-                ),
-                Static(
-                    "[dim]Memory stores OS / runtime / service / log facts for "
-                    "each server so the chat agent and MCP clients can answer "
-                    "questions instantly without an SSH round-trip. Pick a "
-                    "row and press [b]enter[/b] to inspect, [b]s[/b] to scan "
-                    "every server, or [b]f[/b] to refresh only stale "
-                    "modules.[/dim]",
-                    id="fleet-memory-help",
                 ),
                 id="memory-container",
                 classes="workspace-content",
             )
         yield Footer()
+
+    @staticmethod
+    def _toolbar() -> ActionRow:
+        """Every fleet action in one row that shortens itself instead of clipping."""
+        return ActionRow(
+            ActionButton("Scan all servers", "s", short="Scan all", role="primary", id="btn_scan_all"),
+            ActionButton("Refresh stale", "f", short="Stale", id="btn_refresh_stale"),
+            ActionButton("Auto-scan: off", "a", short="Auto: off", id="btn_toggle_auto_scan"),
+            ActionButton("Refresh view", "r", short="Refresh", id="btn_refresh_view"),
+            ActionButton("Open", "enter", id="btn_open"),
+            ActionButton("Share", "S", id="btn_share"),
+            ActionButton("Clear", "x", role="error", id="btn_clear"),
+            id="memory-actions",
+        )
+
+    @staticmethod
+    def _empty_state() -> Vertical:
+        """What Fleet Memory is, shown in place of a table with no rows."""
+        return Vertical(
+            Static("No server memory cached yet", id="fleet-empty-title"),
+            Static(_EMPTY_TEXT, id="fleet-empty-text"),
+            ActionButton("Scan all servers now", role="primary", id="btn_empty_scan"),
+            id="fleet-memory-empty",
+        )
 
     def on_mount(self) -> None:
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -406,6 +404,8 @@ class FleetMemoryScreen(WorkspaceScreen):
         table.add_column("Last probed", key="age", width=14)
         table.add_column("Last scan", key="reason", width=20)
         self._refresh_auto_scan_status()
+        self._sync_compact_buttons()
+        self.call_after_refresh(self._sync_compact_buttons)
         self._launch_populate()
         # Memory Sync unlock is offered HERE (on entering a memory section),
         # not on app boot — a passphrase modal on startup is too intrusive.
@@ -602,6 +602,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             if self._rows and cursor is not None:
                 table.move_cursor(row=min(cursor, len(self._rows) - 1))
             self.query_one("#fleet-memory-status", Static).update(self._status_line())
+            self._sync_chrome()
         except Exception:  # noqa: BLE001 — the screen was left meanwhile
             return
 
@@ -772,7 +773,57 @@ class FleetMemoryScreen(WorkspaceScreen):
             table.add_row(*self._row_cells(row))
 
         self.query_one("#fleet-memory-status", Static).update(self._status_line())
+        self._loaded = True
+        self._sync_chrome()
         self._start_shared_prefetch()
+
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        self._sync_compact_buttons()
+
+    def _sync_compact_buttons(self) -> None:
+        """One-row borderless buttons whenever the layout is narrow."""
+        compact = self.has_class("-narrow") or self.has_class("-content-narrow")
+        for button in self.query(ActionButton):
+            button.compact = compact
+        for row in self.query(ActionRow):
+            row.fit()
+
+    # False until the first fill, so a fleet still loading is never shown as empty.
+    _loaded = False
+
+    def _sync_chrome(self) -> None:
+        """Bring the toolbar and the empty state in line with the rows."""
+        count = len(self._eligible_instances(False, getattr(self.app, "memory_service", None)))
+        self._set_scan_labels(count)
+        empty = self._loaded and self._nothing_cached(count)
+        self.query_one("#fleet-memory-table", DataTable).display = not empty
+        self.query_one("#fleet-memory-empty").display = empty
+        self.query_one("#fleet-empty-text", Static).update(
+            _EMPTY_TEXT if count else _NO_SERVERS_TEXT
+        )
+        self.query_one("#btn_empty_scan").display = bool(count)
+
+    def _nothing_cached(self, scannable: int) -> bool:
+        """True when there is no server, or servers a scan could probe but no memory yet.
+
+        Servers whose memory is switched off are not scannable; a fleet made
+        only of those keeps its table, where their state is shown.
+        """
+        if not self._rows:
+            return True
+        cached = (STATUS_FRESH, STATUS_STALE, STATUS_SHARED)
+        return scannable > 0 and not any(row.get("status") in cached for row in self._rows)
+
+    def _set_scan_labels(self, count: int) -> None:
+        """Show how many servers a scan would probe on both scan buttons."""
+        suffix = f" ({count})" if count else ""
+        self.query_one("#btn_scan_all", ActionButton).set_text(
+            f"Scan all servers{suffix}", short=f"Scan all{suffix}"
+        )
+        self.query_one("#btn_empty_scan", ActionButton).set_text(
+            f"Scan all {count} server{'s' if count != 1 else ''} now"
+        )
 
     # Set when a share form opens: coming back, what is shared may have changed.
     _reread_shares = False
@@ -847,6 +898,8 @@ class FleetMemoryScreen(WorkspaceScreen):
 
         # Status footer — one glance tells the operator where to act.
         self.query_one("#fleet-memory-status", Static).update(self._status_line())
+        self._loaded = True
+        self._sync_chrome()
         self._start_shared_prefetch()
 
     # ------------------------------------------------------------------
@@ -1173,6 +1226,8 @@ class FleetMemoryScreen(WorkspaceScreen):
             "btn_refresh_stale": self.action_refresh_stale,
             "btn_refresh_view": self.action_refresh_view,
             "btn_open": self.action_open_selected,
+            "btn_share": self.action_share_selected,
+            "btn_empty_scan": self.action_scan_all,
             "btn_clear": self.action_clear_selected,
             "btn_toggle_auto_scan": self.action_toggle_auto_scan,
         }
@@ -1535,6 +1590,18 @@ class FleetMemoryScreen(WorkspaceScreen):
         except Exception:
             return
         widget.update(self._auto_scan_status_text())
+        state = "on" if self._auto_scan_enabled() else "off"
+        self.query_one("#btn_toggle_auto_scan", ActionButton).set_text(
+            f"Auto-scan: {state}", short=f"Auto: {state}"
+        )
+
+    def _auto_scan_enabled(self) -> bool:
+        """Whether the background fleet scan is switched on."""
+        config_manager = getattr(self.app, "config_manager", None)
+        if config_manager is None:
+            return False
+        memory_cfg = getattr(config_manager.get(), "memory", None)
+        return bool(memory_cfg and memory_cfg.enabled and memory_cfg.auto_scan_enabled)
 
     def action_toggle_auto_scan(self) -> None:
         """Flip ``config.memory.auto_scan_enabled`` and persist.
