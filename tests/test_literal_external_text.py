@@ -117,6 +117,7 @@ class _Host(App):
 
 async def _click(pilot: Any, widget: Static, needle: str = "web-1") -> None:
     """Click on *needle* inside *widget*'s text, where an injected link would sit."""
+    await pilot.pause(0.1)
     plain = widget.visual.plain
     index = plain.index(needle) + 1
     line = plain.count("\n", 0, index)
