@@ -223,12 +223,12 @@ async def test_copy_actions_copy_what_is_displayed() -> None:
         assert str(app.instances[0]["id"]) in copied[1] and "Identity" in copied[1]
 
 
-def _vault_service(binding, delay: float = 0.0):
-    import asyncio
+def _vault_service(binding, gate=None):
     from unittest.mock import AsyncMock, MagicMock
 
     async def personal_binding(instance):
-        await asyncio.sleep(delay)
+        if gate is not None:
+            await gate.wait()
         return binding
 
     service = MagicMock()
@@ -239,12 +239,16 @@ def _vault_service(binding, delay: float = 0.0):
 
 @pytest.mark.asyncio
 async def test_vault_key_is_primary_until_a_binding_is_found() -> None:
+    import asyncio
+
     app = _LayoutHost()
-    app.vault_command_service = _vault_service({"source": "servonaut_vault"}, delay=1.5)
+    gate = asyncio.Event()
+    app.vault_command_service = _vault_service({"source": "servonaut_vault"}, gate)
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
         button = screen.query_one("#btn_use_vault_key", ActionButton)
         assert button.has_class("-primary"), "nothing bound yet: the next step"
+        gate.set()
         await wait_until(lambda: not button.has_class("-primary"))
 
 

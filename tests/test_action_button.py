@@ -6,7 +6,7 @@ import pytest
 from textual.app import App, ComposeResult
 
 from servonaut.styles import CSS_FILES
-from servonaut.widgets.action_button import ActionButton, action_label
+from servonaut.widgets.action_button import ActionButton, ActionRow, action_label
 
 
 class _Host(App[None]):
@@ -85,3 +85,33 @@ async def test_hostile_label_renders_literally() -> None:
             for y in range(button.region.y, button.region.bottom)
         )
         assert "[b]bold[/b]" in text
+
+
+class _RowHost(App[None]):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        with ActionRow(id="row"):
+            yield ActionButton("Use vault key", "u", short="Vault key", id="a")
+            yield ActionButton("Verify SSH", "v", id="b")
+            yield ActionButton("Scan results", "5", short="Scan", id="c")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width,labels,wrapped", [
+    (80, ["Use vault key  u", "Verify SSH  v", "Scan results  5"], False),
+    (56, ["Vault key  u", "Verify SSH  v", "Scan  5"], False),
+    (46, ["Vault key", "Verify SSH", "Scan"], False),
+    (30, ["Vault key", "Verify SSH", "Scan"], True),
+])
+async def test_row_saves_space_in_order_and_never_clips(width, labels, wrapped) -> None:
+    app = _RowHost()
+    async with app.run_test(size=(width, 20)) as pilot:
+        row = app.query_one("#row", ActionRow)
+        for _ in range(6):
+            await pilot.pause()
+        assert [b.label.plain for b in row.query(ActionButton)] == labels
+        assert row.has_class("-wrap") is wrapped
+        for button in row.query(ActionButton):
+            assert row.region.contains_region(button.region), button.id
+            assert button.content_size.width >= button.label.cell_length

@@ -60,6 +60,7 @@ class ActionButton(Button):
         self._key = key
         self._short = short
         self._hint = True
+        self._use_short = False
         super().__init__(
             self._label(compact, True),
             variant=role,
@@ -70,8 +71,9 @@ class ActionButton(Button):
             compact=compact,
         )
 
-    def _label(self, compact: bool, hint: bool) -> Content:
-        words = self._short if compact and self._short else self._text
+    def _label(self, compact: bool, hint: bool, use_short: bool | None = None) -> Content:
+        shorter = self._use_short if use_short is None else use_short
+        words = self._short if (compact or shorter) and self._short else self._text
         gap = _COMPACT_KEY_GAP if compact else _KEY_GAP
         return action_label(words, self._key if hint else None, gap)
 
@@ -92,45 +94,54 @@ class ActionButton(Button):
         self._key = key if key is not None else self._key
         self._refresh_label()
 
-    def set_hint_visible(self, visible: bool) -> None:
-        """Show or drop the key hint (it is the first thing to go when space is short)."""
-        self._hint = visible
+    def set_fit(self, *, short: bool, hint: bool) -> None:
+        """Choose the short words and the key hint (the ways a row saves space)."""
+        if (short, hint) == (self._use_short, self._hint):
+            return
+        self._use_short, self._hint = short, hint
         self._refresh_label()
 
     def set_role(self, role: ActionRole) -> None:
         """Change how prominent the action looks."""
         self.variant = role
 
-    def natural_width(self, hint: bool) -> int:
-        """Cells this button needs, margin included, with or without its key hint."""
+    def natural_width(self, *, short: bool, hint: bool) -> int:
+        """Cells this button needs, margin included, for the given words and hint."""
         chrome = _COMPACT_CHROME if self.compact else _FULL_CHROME
-        return self._label(self.compact, hint).cell_length + chrome + _MARGIN
+        return self._label(self.compact, hint, short).cell_length + chrome + _MARGIN
 
 
 class ActionRow(Horizontal):
     """A row of actions that never clips one.
 
-    When the buttons do not fit, the key hints go first; when they still do
-    not fit, the row wraps onto further lines (class ``-wrap``).
+    When the buttons do not fit it saves space in this order: shorter words,
+    then no key hints, then it wraps onto further lines (class ``-wrap``).
     """
 
     def on_resize(self, event: Resize) -> None:
         self.fit()
 
     def fit(self) -> None:
-        """Choose hints and wrapping for the width the row has now."""
+        """Choose words, hints and wrapping for the width the row has now."""
         width = self.content_size.width
         buttons = list(self.query(ActionButton))
         if width <= 0 or not buttons:
             return
-        for hint in (True, False):
-            if sum(button.natural_width(hint) for button in buttons) <= width:
-                self._apply(buttons, hint=hint, wrap=False)
+        for short, hint in ((False, True), (True, True), (True, False)):
+            if sum(b.natural_width(short=short, hint=hint) for b in buttons) <= width:
+                self._apply(buttons, short=short, hint=hint, wrap=False)
                 return
-        self._apply(buttons, hint=False, wrap=True)
+        self._apply(buttons, short=True, hint=False, wrap=True)
 
-    def _apply(self, buttons: list[ActionButton], *, hint: bool, wrap: bool) -> None:
+    def _apply(self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
         for button in buttons:
-            if button._hint != hint:
-                button.set_hint_visible(hint)
+            button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
+        # Widths are measured from the labels, which changed during a layout
+        # pass: ask for another pass once this one is done.
+        self.call_after_refresh(self._remeasure)
+
+    def _remeasure(self) -> None:
+        for button in self.query(ActionButton):
+            button.refresh(layout=True)
+        self.refresh(layout=True)
