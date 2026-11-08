@@ -36,7 +36,7 @@ from servonaut.services.vault.auto_bind import (
     fetch_host_keys_for_rows,
     plan_auto_bind,
 )
-from servonaut.services.vault.display import terminal_safe
+from servonaut.services.vault.display import strip_terminal_controls, terminal_safe
 from servonaut.services.vault.ec2_host_keys import key_family_from_public_key
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -315,7 +315,7 @@ class VaultAutoBindScreen(WorkspaceScreen):
 
     def scrub_for_display(self, value: object) -> str:
         """Demo-safe text: key names, logins and addresses are hidden in demo mode."""
-        text = str(value)
+        text = strip_terminal_controls(value)
         if not getattr(self.app, "demo_mode", False):
             return text
         return display_text(self.app, text)

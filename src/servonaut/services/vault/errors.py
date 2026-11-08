@@ -14,7 +14,7 @@ from typing import Any
 
 from servonaut.services.api_client import APIError
 
-from .display import terminal_safe
+from .display import strip_terminal_controls, terminal_safe
 
 _SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SAFE_FIELD = re.compile(r"[a-z][a-z0-9_.-]{0,127}")
@@ -197,14 +197,19 @@ def is_feature_disabled(exc: BaseException, feature: str) -> bool:
 
 
 def vault_failure_reason(exc: BaseException) -> str:
-    """Return the short reason shown after "... failed" for *exc*.
+    """Return the short reason shown after "... failed" for *exc*, without control characters."""
+    return strip_terminal_controls(_failure_reason(exc))
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """The short reason shown after "... failed" for *exc*.
 
     A generic wrapper (for example the SSH resolver's) is looked through when
     it was raised from a user-safe error or an API refusal.
     """
     cause = exc.__cause__
     if not isinstance(exc, (VaultUserError, APIError)) and isinstance(cause, (VaultUserError, APIError)):
-        return vault_failure_reason(cause)
+        return _failure_reason(cause)
     if isinstance(exc, VaultUserError):
         return str(exc)
     if isinstance(exc, APIError) and exc.code == "device_not_active":

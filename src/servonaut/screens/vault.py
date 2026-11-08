@@ -29,6 +29,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionL
 from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
+from servonaut.utils.markup import literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
@@ -37,7 +38,7 @@ from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.vault import onboarding
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, member_approval_lines, ssh_rotation_failure,
-    terminal_safe,
+    strip_terminal_controls, terminal_safe,
 )
 from servonaut.services.vault.errors import (
     VaultKeyInUse, VaultRecoveryNotConfirmed, vault_failure_reason,
@@ -105,8 +106,13 @@ async def _invoke(service: Any, method: str, /, **kwargs: Any) -> Any:
 
 
 def scrub_for_demo(app: Any, value: object) -> str:
-    """Redact rendered server/user metadata in demo mode; values stay real."""
-    text = str(value)
+    """Redact rendered server/user metadata in demo mode; values stay real.
+
+    Terminal control characters are removed from everything shown, so text
+    from the service or a teammate cannot send escape sequences to the
+    terminal; line breaks and tabs stay.
+    """
+    text = strip_terminal_controls(value)
     redactor = getattr(app, "redaction_service", None)
     if getattr(app, "demo_mode", False) and redactor is not None:
         return str(redactor.scrub_stream(text))
@@ -143,7 +149,7 @@ class VaultRevealModal(ModalScreen[None]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static("[bold]Revealed vault item[/bold]"),
-            body=DialogBody(Static(markup_literal(str(value)), id="vault_revealed_value")),
+            body=DialogBody(Static(markup_literal(strip_terminal_controls(str(value))), id="vault_revealed_value")),
             actions=DialogActions(Button("Close", id="vault_reveal_close")),
             size="large", id="vault_reveal_modal",
         )
@@ -262,7 +268,7 @@ class VaultSasConfirmModal(ModalScreen[bool]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static("[bold]Compare this safety number on both devices[/bold]"),
-            body=DialogBody(Static(markup_literal(self._sas), id="vault_sas")),
+            body=DialogBody(Static(markup_literal(strip_terminal_controls(self._sas)), id="vault_sas")),
             actions=DialogActions(
                 Button("Mismatch", id="vault_sas_no"),
                 Button("Matches", id="vault_sas_yes"),
@@ -281,8 +287,11 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "skip", "Skip", show=False)]
 
-    def __init__(self, entry: Mapping[str, Any], safety_number: str, changed: bool) -> None:
+    def __init__(
+        self, entry: Mapping[str, Any], safety_number: str, changed: bool, vault_name: str = "",
+    ) -> None:
         super().__init__()
+        self._vault_name = vault_name
         self._lines = member_approval_lines(entry, safety_number, changed)
         self._safety_number = safety_number
         self._changed = changed
@@ -295,10 +304,11 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
             Static(Text(scrub_for_demo(self.app, line)))
             for line in self._lines if not line.startswith("Safety number:")
         ]
+        named = [Static(literal(f"Vault: {self._vault_name}"))] if self._vault_name else []
         yield DialogFrame(
             heading=Static(f"[bold]{title}[/bold]"),
-            body=DialogBody(*body[:-1]),
-            status=Vertical(Static(Text(self._safety_number), id="vault_member_sas"), body[-1]),
+            body=DialogBody(*named, *body[:-1]),
+            status=Vertical(Static(Text(strip_terminal_controls(self._safety_number)), id="vault_member_sas"), body[-1]),
             actions=DialogActions(
                 Button("Skip", id="vault_member_skip"),
                 Button("Approve", id="vault_member_approve", variant="warning" if self._changed else "primary"),
@@ -333,7 +343,7 @@ class VaultPendingDeviceModal(ModalScreen[bool]):
         yield DialogFrame(
             heading=Static("[bold]A device is waiting for vault approval[/bold]"),
             body=DialogBody(
-                Static(markup_literal(f"{name} · {platform}")),
+                Static(markup_literal(f"{terminal_safe(name)} · {terminal_safe(platform)}")),
                 Static("Review the device and compare its safety number before approving."),
             ),
             actions=DialogActions(
@@ -875,7 +885,7 @@ class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
                 id="vault_create_text",
             )),
             status=Select(
-                [(markup_literal(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
+                [(markup_literal(terminal_safe(option.get("label") or "")), index) for index, option in enumerate(self._options)],
                 value=0, allow_blank=False, id="vault_create_target",
             ),
             actions=DialogActions(
@@ -1856,18 +1866,23 @@ class VaultScreen(WorkspaceScreen):
         self._status(onboarding.AWAITING_ACCESS.message)
         return True
 
-    def _selected_vault(self) -> Optional[dict[str, Any]]:
-        """The vault being looked at: the highlighted row of the vault list, else the one whose records are open.
+    def _vault_label(self, vault: Mapping[str, Any]) -> str:
+        """A vault's name as the dialogs show it (inert, hidden in demo mode)."""
+        return self.scrub_for_display(terminal_safe(vault.get("name") or "Unnamed vault"))
 
-        Another table's cursor row says nothing about which vault is meant.
+    def _selected_vault(self) -> Optional[dict[str, Any]]:
+        """The vault the user is looking at.
+
+        The cursor picks a vault only while the vault list is shown. In any
+        other view the table holds items, devices or members, so its cursor
+        says nothing about vaults: the vault whose records are open is used.
         """
-        if self._table_mode != "vaults":
-            return next((row for row in self._vaults if row.get("vault_id") == self._selected_vault_id), None) if self._selected_vault_id else None
-        table = self.query_one("#vault_table", DataTable)
-        row = table.cursor_row
-        if 0 <= row < len(self._vaults):
-            return self._vaults[row]
-        return None
+        if self._table_mode == "vaults":
+            row = self.query_one("#vault_table", DataTable).cursor_row
+            return self._vaults[row] if 0 <= row < len(self._vaults) else None
+        if not self._selected_vault_id:
+            return None
+        return next((v for v in self._vaults if v.get("vault_id") == self._selected_vault_id), None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {
@@ -2052,24 +2067,42 @@ class VaultScreen(WorkspaceScreen):
         if self._refuse_without_access(selected):
             return
         self._selected_vault_id = str(selected.get("vault_id") or "")
-        self.run_worker(self._load_items(), group="vault", exclusive=True)
+        self.run_worker(self._load_items(self._selected_vault_id), group="vault", exclusive=True)
 
-    async def _load_items(self) -> None:
-        if not self._selected_vault_id:
+    def _load_is_current(self, vault_id: str) -> bool:
+        """Whether a finished load still belongs to what the user has selected.
+
+        The vault list stays interactive while a view loads. If the user moved
+        to another vault meanwhile, the records that arrived belong to a vault
+        that is no longer the target, so they are dropped rather than shown
+        next to another vault's selection.
+        """
+        if self._table_mode == "vaults" and self._selected_vault_id != vault_id:
+            self._status("The selection changed while loading. Choose the view again for the vault you want.")
+            return False
+        return True
+
+    async def _load_items(self, vault_id: Optional[str] = None) -> None:
+        """Load a vault's items (the selected vault when none is given)."""
+        vault_id = vault_id or self._selected_vault_id
+        if not vault_id:
             return
         service = self._service()
         if service is None:
             return
         try:
             async with self._busy("Loading the vault's items…"):
-                response = await _invoke(service, "list_items", vault_id=self._selected_vault_id)
-                names, name_failure = await self._read_key_names(service)
+                response = await _invoke(service, "list_items", vault_id=vault_id)
+                names, name_failure = await self._read_key_names(service, vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load item metadata ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        if not self._load_is_current(vault_id):
             return
         rows = response.get("data", []) if isinstance(response, Mapping) else response
         self._items = [dict(row) for row in rows or []]
         self._key_names = names
+        self._selected_vault_id = vault_id
         self._table_mode = "items"
         self._render_items()
         if name_failure is not None:
@@ -2077,9 +2110,9 @@ class VaultScreen(WorkspaceScreen):
         else:
             self._status("Items loaded. Use Rename key, Delete key or Delete multiple on SSH keys; press V to reveal.")
 
-    async def _read_key_names(self, service: Any) -> tuple[dict[str, Optional[str]], Optional[str]]:
+    async def _read_key_names(self, service: Any, vault_id: str) -> tuple[dict[str, Optional[str]], Optional[str]]:
         try:
-            choices = await _invoke(service, "ssh_key_choices", vault_id=self._selected_vault_id, name_limit=None)
+            choices = await _invoke(service, "ssh_key_choices", vault_id=vault_id, name_limit=None)
         except Exception as exc:
             return {}, vault_failure_reason(exc)
         names: dict[str, Optional[str]] = {}
@@ -2090,13 +2123,11 @@ class VaultScreen(WorkspaceScreen):
         return names, None
 
     def _selected_item(self) -> Optional[dict[str, Any]]:
+        """The highlighted item, only while the items table is the one shown."""
         if self._table_mode != "items":
             return None
-        table = self.query_one("#vault_table", DataTable)
-        row = table.cursor_row
-        if 0 <= row < len(self._items):
-            return self._items[row]
-        return None
+        row = self.query_one("#vault_table", DataTable).cursor_row
+        return self._items[row] if 0 <= row < len(self._items) else None
 
     def action_reveal(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -2458,26 +2489,32 @@ class VaultScreen(WorkspaceScreen):
             return
         if self._refuse_without_access(selected):
             return
-        self._selected_vault_id = str(selected.get("vault_id") or "")
-        self.run_worker(self._load_exposures(), group="vault", exclusive=True)
+        self._selected_vault_id = str(selected.get("vault_id") or "") or None
+        self.run_worker(self._load_exposures(self._selected_vault_id or ""), group="vault", exclusive=True)
 
-    async def _load_exposures(self) -> None:
+    async def _load_exposures(self, vault_id: Optional[str] = None) -> None:
+        """Load a vault's open exposures (the selected vault when none is given)."""
+        vault_id = vault_id or self._selected_vault_id
         service = self._service()
-        if service is None or not self._selected_vault_id:
+        if service is None or not vault_id:
             return
         try:
             async with self._busy('Loading exposures…'):
-                exposures = await _invoke(service, "list_exposures", vault_id=self._selected_vault_id)
+                exposures = await _invoke(service, "list_exposures", vault_id=vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load exposures ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
+        if not self._load_is_current(vault_id):
+            return
         rows = exposures.get("data", exposures) if isinstance(exposures, Mapping) else exposures or []
         self._exposures = [dict(row) for row in rows if isinstance(row, Mapping)]
+        self._selected_vault_id = vault_id
         self._table_mode = "exposures"
         self._render_exposures()
         self._status(f"{len(self._exposures)} open exposure{'s' if len(self._exposures) != 1 else ''} for this vault.")
 
     def _selected_exposure(self) -> Optional[dict[str, Any]]:
+        """The highlighted exposure, only while the exposures table is the one shown."""
         if self._table_mode != "exposures":
             return None
         row = self.query_one("#vault_table", DataTable).cursor_row
@@ -2826,6 +2863,7 @@ class VaultScreen(WorkspaceScreen):
                 service,
                 vault_id,
                 session_service=getattr(self.app, "bw_session_service", None),
+                vault_name=self._vault_label(selected),
             ),
             imported,
         )
@@ -3010,8 +3048,8 @@ class VaultScreen(WorkspaceScreen):
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
-        self._selected_vault_id = str(selected.get("vault_id") or "")
-        self.run_worker(self._load_roster(self._selected_vault_id), group="vault", exclusive=True)
+        self._selected_vault_id = str(selected.get("vault_id") or "") or None
+        self.run_worker(self._load_roster(self._selected_vault_id or ""), group="vault", exclusive=True)
 
     async def _load_roster(self, vault_id: str) -> None:
         service = self._service()
@@ -3023,8 +3061,11 @@ class VaultScreen(WorkspaceScreen):
         except Exception as exc:
             self.app.notify(f"Could not load vault roster ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
+        if not self._load_is_current(vault_id):
+            return
         roster = vault.get("roster", []) if isinstance(vault, Mapping) else []
         self._roster = [dict(member) for member in roster if isinstance(member, Mapping)]
+        self._selected_vault_id = vault_id
         self._table_mode = "roster"
         self._render_roster()
         self._status("Roster loaded. Compare safety numbers before approving a changed identity.")
@@ -3036,15 +3077,20 @@ class VaultScreen(WorkspaceScreen):
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
-        self.run_worker(self._process_grants(str(selected.get("vault_id") or "")), group="vault", exclusive=True)
+        self.run_worker(
+            self._process_grants(str(selected.get("vault_id") or ""), self._vault_label(selected)),
+            group="vault", exclusive=True,
+        )
 
-    async def _process_grants(self, vault_id: str) -> None:
+    async def _process_grants(self, vault_id: str, vault_name: str = "") -> None:
         service = self._service()
         if service is None:
             return
 
         async def approve(entry: Mapping[str, Any], safety_number: str, changed: bool) -> bool:
-            return bool(await self.app.push_screen_wait(VaultMemberApprovalModal(entry, safety_number, changed)))
+            return bool(await self.app.push_screen_wait(
+                VaultMemberApprovalModal(entry, safety_number, changed, vault_name)
+            ))
 
         try:
             async with self._busy('Processing access requests…', holds_screen=True):
@@ -3070,7 +3116,10 @@ class VaultScreen(WorkspaceScreen):
         self.app.push_screen(
             ConfirmActionScreen(
                 "Rotate vault key",
-                "A new vault key version will replace every current grant.",
+                Content.assemble(
+                    literal(f"Vault: {self._vault_label(selected)}"), "\n",
+                    "A new vault key version will replace every current grant.",
+                ),
                 ["Pending members may remain ungranted until verified.", "Open exposures remain until their deployed keys are changed."],
                 "ROTATE",
                 "Rotate",
