@@ -319,3 +319,24 @@ async def test_no_button_is_stretched_past_its_label(size) -> None:
         for button in screen.query(ActionButton):
             widest = button.label.cell_length + (4 if button.compact else 6)
             assert button.region.width <= widest, (button.id, button.region.width, widest)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["down", "up"])
+async def test_arrow_keys_walk_the_actions_and_keep_focus_in_view(key) -> None:
+    app = _LayoutHost()
+    app.instances[0].update(is_ovh=True, provider_type="vps")
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
+        await pilot.pause()
+        overview = screen.query_one("#sa-overview")
+        order = [b for b in screen.query(ActionButton) if b.display]
+        for _ in range(len(order) + 1):
+            before = screen.focused
+            await pilot.press(key)
+            await pilot.pause()
+            step = 1 if key == "down" else -1
+            assert screen.focused is order[(order.index(before) + step) % len(order)]
+            if screen.focused in overview.query(ActionButton):
+                assert overview.region.contains_region(screen.focused.region), screen.focused.id

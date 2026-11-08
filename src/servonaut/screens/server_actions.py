@@ -954,6 +954,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             else:
                 next_idx = (idx - 1) % len(buttons)
             buttons[next_idx].focus()
+            # The overview's own scroll bindings must not also move the view.
+            event.stop()
+            event.prevent_default()
+            self.call_after_refresh(buttons[next_idx].scroll_visible, animate=False)
 
     def compose(self) -> ComposeResult:
         """Compose the server actions UI (context header + action toolbar + detail workspace)."""
