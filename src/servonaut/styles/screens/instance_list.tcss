@@ -102,6 +102,9 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
 #fleet_summary {
     width: 1fr;
     color: $text-muted;
+    /* One row at any width: a long summary is cut, not wrapped. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #fleet_updated {

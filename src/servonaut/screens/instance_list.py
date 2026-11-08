@@ -865,6 +865,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._update_table()
         self._update_status_bar()
         self._update_detail_panel()
+        self._render_load()
 
     def _update_table(self) -> None:
         """Update instance table with current data, preserving active filter."""
