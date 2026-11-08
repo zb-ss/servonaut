@@ -1,12 +1,13 @@
 """A fake vault service and a host app for driving the Vault screen headlessly.
 
 Three vaults are listed: a personal one, a team the user administers and a
-team the user has no key for yet. Every service call is recorded so a test
+team that is awaiting access when the service is built with ``awaiting_c``. Every service call is recorded so a test
 can say which vault an action reached.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from textual.app import App
@@ -28,7 +29,11 @@ def short(vault_id: Optional[str]) -> str:
 class FakeVaultService:
     def __init__(self, *, names: Optional[dict] = None, members: Optional[list] = None,
                  device_names: Optional[list] = None, exposure_subject: str = "Deploy key",
-                 item_fingerprint: str = "SHA256:fp", platform: str = "linux") -> None:
+                 item_fingerprint: str = "SHA256:fp", platform: str = "linux",
+                 awaiting_c: bool = False, vaults_listed: bool = True) -> None:
+        self.awaiting_c = awaiting_c
+        self.vaults_listed = vaults_listed
+        self.gate: Optional[asyncio.Event] = None
         self.exposure_subject = exposure_subject
         self.item_fingerprint = item_fingerprint
         self.platform = platform
@@ -58,11 +63,18 @@ class FakeVaultService:
     def can_create_personal_vault(self) -> bool:
         return False
 
+    async def _wait_for_gate(self) -> None:
+        """Hold a load until the test releases it (to move the selection meanwhile)."""
+        if self.gate is not None:
+            await self.gate.wait()
+
     async def list_vaults(self) -> list:
+        if not self.vaults_listed:
+            return []
         rows = [
             ("A", VAULT_A, "personal", "Personal", {"version": 1}, 2),
             ("B", VAULT_B, "team", "Platform team", {"version": 1}, 3),
-            ("C", VAULT_C, "team", "Waiting team", {"version": 1}, 0),
+            ("C", VAULT_C, "team", "Waiting team", None if self.awaiting_c else {"version": 1}, 0),
         ]
         return [
             {"vault_id": vid, "kind": kind, "name": self.names.get(key, name), "my_role": "admin",
@@ -72,6 +84,7 @@ class FakeVaultService:
 
     async def list_items(self, *, vault_id: str, **kw: Any) -> dict:
         self._rec("list_items", vault_id=vault_id)
+        await self._wait_for_gate()
         return {"data": [
             {"item_id": f"{vault_id[:2]}-k{n}", "type": "ssh_key", "revision": 1,
              "public_fingerprint": f"{self.item_fingerprint}{n}"} for n in (1, 2, 3)
@@ -90,6 +103,7 @@ class FakeVaultService:
 
     async def get_vault(self, *, vault_id: str, **kw: Any) -> dict:
         self._rec("get_vault", vault_id=vault_id)
+        await self._wait_for_gate()
         return {"roster": self.members or [
             {"user_id": "u-1", "display_name": f"Owner of {vault_id[:2]}", "role": "owner",
              "status": "active", "identity": {"fingerprint": "SHA256:o"}},
@@ -99,6 +113,7 @@ class FakeVaultService:
 
     async def list_exposures(self, *, vault_id: str, **kw: Any) -> dict:
         self._rec("list_exposures", vault_id=vault_id)
+        await self._wait_for_gate()
         return {"data": [
             {"exposure_id": "e-1", "item_id": f"{vault_id[:2]}-k1", "subject": self.exposure_subject, "reason": self.exposure_subject},
             {"exposure_id": "e-2", "item_id": f"{vault_id[:2]}-k2", "subject": "Spare key", "reason": "shared"},
