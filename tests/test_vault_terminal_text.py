@@ -294,5 +294,5 @@ async def test_the_create_vault_choices_are_clean() -> None:
         await _drawn(app, "osc", "tail")
         _assert_clean(app)
         await pilot.press("enter")  # open the choices
-        await _drawn(app, "second osc")
+        await _drawn(app, "second", "osc")  # the dialog's width may wrap the label
         _assert_clean(app)
