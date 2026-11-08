@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from textual.app import App
+from rich.text import Text
 from textual.content import Content
 from textual.geometry import Region
 from textual.widgets import Static
@@ -175,3 +176,80 @@ def test_a_saved_row_is_plain_text_for_a_release_that_reads_markup() -> None:
     row = {"kind": "skipped", "tool": "x [/", "reason": "[/] [old="}
     stored = json.dumps(row).replace("[", "\\u005b")
     assert Content.from_markup(stored).plain == stored
+
+
+# ---------------------------------------------------------------------------
+# Refused actions in tuple form (links written in Rich markup)
+# ---------------------------------------------------------------------------
+
+
+def _probe_app() -> App:
+    from servonaut.app import ServonautApp
+    from textual.widgets import Input
+
+    class Probe(ServonautApp):
+        def __init__(self) -> None:
+            App.__init__(self)
+            self.flag = False
+
+        def compose(self):
+            yield Input(password=True, id="pw")
+            yield Static(Text.from_markup("[@click=screen.toggle('flag')]link[/]"), id="link")
+            yield Static(Text.from_markup("[@click=screen.notify('forged')]note[/]"), id="note")
+
+        def on_mount(self, event) -> None:
+            event.prevent_default()
+
+    return Probe()
+
+
+REFUSED_TUPLES = [
+    ("simulate_key", ("x",)), ("toggle", ("flag",)), ("add_class", ("Screen", "x")),
+    ("remove_class", ("Screen", "x")), ("toggle_class", ("Screen", "x")),
+    ("suspend_process", ()), ("notify", ("forged",)), ("push_screen", ("x",)),
+    ("switch_screen", ("x",)), ("switch_mode", ("x",)),
+    ("screenshot", ()), ("screenshot", ("chosen.svg", ".")),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("namespace", ["app", "screen", "focused", ""])
+@pytest.mark.parametrize("name,params", REFUSED_TUPLES)
+async def test_refused_actions_are_refused_in_tuple_form(namespace: str, name: str, params: tuple) -> None:
+    from textual.widgets import Input
+
+    app = _probe_app()
+    async with app.run_test(size=(80, 10)) as pilot:
+        app.screen.flag = False
+        app.query_one(Input).focus()
+        await pilot.pause()
+        assert await app.run_action((namespace, name, params)) is False
+        assert app.screen.flag is False
+        assert app.query_one(Input).password is True
+        assert len(app._notifications) == 0
+
+
+@pytest.mark.asyncio
+async def test_focused_toggle_of_a_password_field_is_refused() -> None:
+    from textual.widgets import Input
+
+    app = _probe_app()
+    async with app.run_test(size=(80, 10)) as pilot:
+        app.query_one(Input).focus()
+        await pilot.pause()
+        assert await app.run_action(("focused", "toggle", ("password",))) is False
+        assert await app.run_action("focused.toggle('password')") is False
+        assert app.query_one(Input).password is True
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_rich_markup_link_runs_no_refused_action() -> None:
+    app = _probe_app()
+    async with app.run_test(size=(80, 10)) as pilot:
+        app.screen.flag = False
+        await pilot.pause()
+        await pilot.click("#link", offset=(1, 0))
+        await pilot.click("#note", offset=(1, 0))
+        await pilot.pause(0.2)
+        assert app.screen.flag is False
+        assert len(app._notifications) == 0
