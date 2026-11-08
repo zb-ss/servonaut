@@ -47,7 +47,9 @@ def _button(spec: ActionSpec) -> ActionButton:
 def _group(label: str, specs: Sequence[ActionSpec], *, classes: str = "") -> Horizontal:
     return Horizontal(
         Static(label, classes="provider-manager-action-label", markup=False),
-        ActionRow(*(_button(spec) for spec in specs), classes="provider-manager-buttons"),
+        ActionRow(
+            *(_button(spec) for spec in specs), keep_hints=True, classes="provider-manager-buttons",
+        ),
         classes=f"provider-manager-action-group {classes}".strip(),
     )
 

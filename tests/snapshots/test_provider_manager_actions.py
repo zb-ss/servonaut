@@ -367,3 +367,17 @@ async def test_wide_layout_keeps_the_table_before_the_rail(manager: Manager) -> 
         table_panel = screen.query_one(".provider-manager-inventory")
         assert table_panel.region.x < rail.region.x
         assert screen.query_one(f"#{manager.prefix}_hint").display
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager", MANAGERS, ids=IDS)
+@pytest.mark.parametrize("size", SIZES)
+async def test_every_button_on_a_screen_is_in_the_same_hint_state(manager: Manager, size) -> None:
+    app = _harness.SnapshotApp()
+    async with app.run_test(size=size) as pilot:
+        screen = await _open(app, pilot, manager)
+        buttons = [b for b in screen.query(".provider-manager-rail ActionButton")]
+        has_hint = {b.id: bool(b._key) and b._hint for b in buttons if b._key}
+        assert len(set(has_hint.values())) == 1, has_hint
+        shown = {b.id: b.label.plain.endswith(b._key) for b in buttons if b._key}
+        assert len(set(shown.values())) == 1, shown
