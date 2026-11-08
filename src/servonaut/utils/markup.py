@@ -18,8 +18,11 @@ def escape_markup(text: str) -> str:
 
 
 # Characters a terminal acts on instead of drawing (C0 and C1 controls, DEL)
-# and bidirectional controls that reorder what is shown. Newline and tab stay.
-_UNSAFE_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+# and bidirectional controls that reorder what is shown. Also invisible
+# characters that Rich measures as zero cells wide but terminals draw one or
+# two cells wide (fillers, line and paragraph separators), which would push
+# the end of a line off screen. Newline and tab stay.
+_UNSAFE_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\u115f\u1160\u2028\u2029\u3164\uffa0]")
 
 
 def _visible_placeholder(match: "re.Match[str]") -> str:
