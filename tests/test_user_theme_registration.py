@@ -150,3 +150,53 @@ def test_fifty_hostile_files_still_start_the_app_in_bounded_time(themes_folder: 
 
     assert time.perf_counter() - started < 10
     assert len({error.file for error in app.user_theme_errors}) == 50
+
+
+# ------------------------------------------------------------------ Textual's own theme watcher
+
+
+# Servonaut re-applies the active theme after a reload by calling App._watch_theme,
+# which Textual does not offer publicly. The hash pins the version reviewed.
+_UPSTREAM_WATCH_THEME_SHA256 = "585f469c9ae8ca2d1aa23f4366c795e3b42db42fe79e51b401bf41ae0dc85f9e"
+
+
+def test_upstream_theme_watcher_is_the_one_a_reload_relies_on() -> None:
+    """A reload calls App._watch_theme to refresh the dark/light classes and notify listeners.
+
+    If a Textual release changes it, re-check ServonautApp._reapply_theme_after_reload.
+    """
+    import hashlib
+    import inspect
+    import textwrap
+
+    from textual.app import App
+
+    assert list(inspect.signature(App._watch_theme).parameters) == ["self", "theme_name"]
+    source = textwrap.dedent(inspect.getsource(App._watch_theme))
+    assert hashlib.sha256(source.encode("utf-8")).hexdigest() == _UPSTREAM_WATCH_THEME_SHA256, (
+        "Textual's App._watch_theme has changed. ServonautApp._reapply_theme_after_reload calls it "
+        "to re-apply a theme after its file was edited: check that it still does, then update "
+        "_UPSTREAM_WATCH_THEME_SHA256 in this file."
+    )
+
+
+@pytest.mark.asyncio
+async def test_editing_the_active_theme_from_dark_to_light_flips_the_mode_and_tells_listeners(
+    themes_folder: Path, tmp_path: Path,
+) -> None:
+    (themes_folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    app = _app(tmp_path)
+    heard: list[str] = []
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.theme = "ocean"
+        await pilot.pause()
+        assert app.has_class("-dark-mode")
+        app.theme_changed_signal.subscribe(app, lambda theme: heard.append(theme.name))
+
+        (themes_folder / "ocean.toml").write_text(OCEAN + "dark = false\n", encoding="utf-8")
+        app.reload_user_themes()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.has_class("-light-mode") and not app.has_class("-dark-mode")
+        assert heard == ["ocean"]
