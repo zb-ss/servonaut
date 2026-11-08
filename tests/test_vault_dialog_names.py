@@ -72,14 +72,26 @@ async def test_grant_dialog_names_the_vault_and_keeps_its_other_lines() -> None:
 
 
 async def test_clicking_a_hostile_vault_name_in_a_dialog_does_nothing() -> None:
-    async def steps(app: Any, pilot: Any) -> tuple:
+    """Click where the hostile text is drawn, on every line, and the dialog stays as it was."""
+    hostile = "[ @click=screen.dismiss(True)]B"
+
+    async def steps(app: Any, pilot: Any, service: FakeVaultService) -> tuple:
         await move_cursor(app, pilot, 1)
         await press(app, pilot, "vault_items")
         await press(app, pilot, "vault_rotate")
         await wait_until(lambda: isinstance(app.screen, ConfirmActionScreen))
         description = app.screen.query_one("#modal_description", Static)
-        await pilot.click(description, offset=(14, 0))
+        plain = description.visual.plain
+        assert hostile in plain, plain
+        column = plain.index(hostile)
+        for offset in range(column, column + len(hostile)):
+            await pilot.click(description, offset=(offset, 0))
+            await pilot.pause(0.1)
         await pilot.pause(0.2)
-        return isinstance(app.screen, ConfirmActionScreen), len(app._notifications)
+        return isinstance(app.screen, ConfirmActionScreen), service.targets("rotate"), len(app._notifications)
 
-    assert await _open({"B": "[ @click=screen.dismiss(True)]B"}, steps) == (True, 0)
+    service = FakeVaultService(names={"B": hostile})
+    app = VaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await ready(app, pilot)
+        assert await steps(app, pilot, service) == (True, [], 0)
