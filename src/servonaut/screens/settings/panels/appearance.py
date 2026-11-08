@@ -198,7 +198,9 @@ class AppearancePanel(SettingsPanel):
         height: auto;
         margin-bottom: 1;
     }
-    AppearancePanel #appearance_actions Button {
+    AppearancePanel #appearance_new,
+    AppearancePanel #appearance_open,
+    AppearancePanel #appearance_reload {
         width: auto;
         min-width: 10;
         margin: 0 1 0 0;
@@ -259,6 +261,8 @@ class AppearancePanel(SettingsPanel):
         background: transparent;
         margin-right: 1;
     }
+    AppearancePanel #appearance_preview_title,
+    AppearancePanel #appearance_readability_title,
     AppearancePanel .appearance-section-title {
         height: auto;
         color: $text-muted;

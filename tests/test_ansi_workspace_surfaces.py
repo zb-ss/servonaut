@@ -121,6 +121,9 @@ async def test_ansi_settings_covers_prior_fleet_but_confirmation_stays_transpare
         # A native dropdown opens over the panel; the prior screen stays hidden.
         settings.show_panel("aws")
         await wait_until(lambda: settings._current_panel() is not panel)
+        await wait_until(lambda: bool(settings.query("#aws_s3_region")))
+        aws_panel = settings._current_panel()
+        await wait_until(lambda: aws_panel._loaded and not aws_panel._settling)
         selector = settings.query_one("#aws_s3_region", Select)
         selector.focus()
         await pilot.press("enter")

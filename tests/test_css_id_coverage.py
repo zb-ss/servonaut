@@ -1036,6 +1036,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ai_provider_servonaut_status',
         'ai_provider_temperature',
         'ai_provider_upgrade',
+        'appearance',  # Reason: settings panel root; sized by .settings-panel
         'aws',
         'aws_audit_path',
         'aws_cache_path',
@@ -1095,7 +1096,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'general_cache_ttl',
         'general_default_key',
         'general_terminal',
-        'general_theme',
         'general_username',
         'hetzner',
         'hetzner_audit_path',
