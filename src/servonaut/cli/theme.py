@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from tabulate import tabulate
 from textual.theme import BUILTIN_THEMES, Theme
@@ -22,6 +22,7 @@ from servonaut.styles.user_themes import (
     LoadResult,
     ThemeError,
     check_theme_file,
+    is_valid_theme_name,
     errors_by_file,
     load_user_themes,
     problem_count,
@@ -46,6 +47,10 @@ def add_theme_parser(subparsers: Any) -> None:
         "export", help="Print any theme as a theme file, as a starting point for your own.",
     )
     export.add_argument("name", help="Name of a theme shown by `servonaut theme list`.")
+    export.add_argument(
+        "--as", dest="new_name", metavar="NAME", default=None,
+        help="Name for the new theme (default: <name>-custom). It must not be a name already in use.",
+    )
     export.add_argument("--output", metavar="PATH", default=None, help="Write the file here instead of printing it.")
     export.add_argument("--force", action="store_true", help="Replace the output file if it exists.")
     check = commands.add_parser("check", help="Check a theme file; exits 1 if it has problems.")
@@ -110,8 +115,11 @@ def _export(args: argparse.Namespace) -> int:
     if info is None:
         print(f'No theme named "{terminal_safe(args.name)}". Run `servonaut theme list` to see them.', file=sys.stderr)
         return _EXIT_USAGE
+    new_name = _export_name(args, infos)
+    if new_name is None:
+        return _EXIT_USAGE
     try:
-        text = render_theme_file(info)
+        text = render_theme_file(info, name=new_name)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return _EXIT_USAGE
@@ -119,6 +127,28 @@ def _export(args: argparse.Namespace) -> int:
         sys.stdout.write(text)
         return _EXIT_OK
     return _write_output(Path(args.output), text, args.force)
+
+
+def _export_name(args: argparse.Namespace, infos: Dict[str, ThemeInfo]) -> Optional[str]:
+    """The name the exported theme gets, or ``None`` after saying why *--as* cannot be used."""
+    if args.new_name is None:
+        return _free_name(f"{args.name}-custom", infos)
+    if not is_valid_theme_name(args.new_name):
+        print("A theme name is 1-40 lowercase letters, digits or dashes, starting with a letter or digit.", file=sys.stderr)
+        return None
+    if args.new_name in infos:
+        print(f'A theme named "{terminal_safe(args.new_name)}" already exists; choose another name.', file=sys.stderr)
+        return None
+    return args.new_name
+
+
+def _free_name(base: str, infos: Dict[str, ThemeInfo]) -> str:
+    name, number = base[:40], 2
+    while name in infos:
+        suffix = f"-{number}"
+        name = f"{base[:40 - len(suffix)]}{suffix}"
+        number += 1
+    return name
 
 
 def _write_output(path: Path, text: str, force: bool) -> int:

@@ -243,7 +243,7 @@ async def test_new_theme_from_current_writes_a_valid_file_and_lists_it(
 async def test_new_theme_refuses_to_overwrite_without_a_second_confirmation(
     manager: ConfigManager, folder: Path,
 ) -> None:
-    (folder / "mine.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "mine.toml").write_text(OCEAN.replace("#5EB1FF", "nope"), encoding="utf-8")
     app = _Host(manager)
     async with app.run_test(size=(160, 50)) as pilot:
         await _ready(app, pilot)
@@ -251,19 +251,19 @@ async def test_new_theme_refuses_to_overwrite_without_a_second_confirmation(
         await _enter_name(pilot, prompt, "mine")
         await _until(lambda: "already exists" in _text(prompt.query_one("#theme_name_error", Static)))
         assert isinstance(app.screen, ThemeNamePromptScreen)
-        assert (folder / "mine.toml").read_text(encoding="utf-8") == OCEAN
+        assert "nope" in (folder / "mine.toml").read_text(encoding="utf-8")
         assert str(prompt.query_one("#theme_name_save", Button).label) == "Replace"
 
         # A button ignores clicks while its press animation is still showing.
         await _until(lambda: not prompt.query_one("#theme_name_save", Button).has_class("-active"))
         await pilot.click("#theme_name_save")
         await _until(lambda: not isinstance(app.screen, ThemeNamePromptScreen))
-        await _until(lambda: (folder / "mine.toml").read_text(encoding="utf-8") != OCEAN)
+        await _until(lambda: "nope" not in (folder / "mine.toml").read_text(encoding="utf-8"))
 
 
 @pytest.mark.asyncio
 async def test_editing_the_name_cancels_a_pending_replace(manager: ConfigManager, folder: Path) -> None:
-    (folder / "mine.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "mine.toml").write_text('primary = "nope"\n', encoding="utf-8")
     app = _Host(manager)
     async with app.run_test(size=(160, 50)) as pilot:
         await _ready(app, pilot)
@@ -277,7 +277,8 @@ async def test_editing_the_name_cancels_a_pending_replace(manager: ConfigManager
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "message"),
-    [("Bad Name", "lowercase"), ("../escape", "lowercase"), ("nord", "already exists"), ("", "Enter a name")],
+    [("Bad Name", "lowercase"), ("../escape", "lowercase"), ("nord", "already exists"), ("", "Enter a name"),
+     ("servonaut-light", "already exists")],
 )
 async def test_new_theme_validates_the_name(
     manager: ConfigManager, folder: Path, name: str, message: str,
@@ -457,3 +458,36 @@ async def test_reload_reads_the_folder_in_a_worker_and_shows_it_is_busy(
         await _until(lambda: busy.is_active)
         await _until(lambda: not busy.is_active)
         assert seen == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_is_registered_is_refused_even_when_a_file_has_that_stem(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "nord.toml").write_text('primary = "#5EB1FF"\n', encoding="utf-8")  # clashes, so it is not loaded
+    (folder / "mine.toml").write_text(OCEAN, encoding="utf-8")  # loaded as "mine"
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _ready(app, pilot)
+        for name in ("nord", "mine"):
+            prompt = await _open_prompt(app, pilot)
+            await _enter_name(pilot, prompt, name)
+            await _until(lambda: "already exists" in _text(prompt.query_one("#theme_name_error", Static)))
+            assert str(prompt.query_one("#theme_name_save", Button).label) == "Create"
+            await pilot.press("escape")
+            await _until(lambda: isinstance(app.screen, SettingsScreen))
+
+
+@pytest.mark.asyncio
+async def test_new_theme_from_an_unregistered_current_theme_is_handled(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _ready(app, pilot)
+        app.set_reactive(ServonautApp.theme, "bogus")  # what TEXTUAL_THEME=bogus leaves behind
+        prompt = await _open_prompt(app, pilot)
+        await _enter_name(pilot, prompt, "mine")
+        await _until(lambda: isinstance(app.screen, SettingsScreen))
+        await _until(lambda: any("cannot be copied" in n.message for n in app._notifications))
+        assert list(folder.iterdir()) == [] and app._exception is None

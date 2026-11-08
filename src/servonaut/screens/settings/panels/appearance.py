@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -86,7 +87,7 @@ def swatch_strip(theme: Theme) -> Content:
 
 
 def _suggest_name(active: str, taken: frozenset[str]) -> str:
-    base = active[:30].strip("-") or "theme"
+    base = re.sub(r"[^a-z0-9-]+", "-", active.lower())[:30].strip("-") or "theme"
     candidate, number = f"{base}-copy", 2
     while candidate in taken:
         candidate = f"{base}-copy-{number}"
@@ -404,14 +405,16 @@ class AppearancePanel(SettingsPanel):
     def action_new_theme(self) -> None:
         app = self.app
         taken = frozenset(app.available_themes)
-        prompt = ThemeNamePromptScreen(_suggest_name(app.theme, taken), taken, self._existing_theme_files())
+        prompt = ThemeNamePromptScreen(_suggest_name(app.theme, taken), taken, self._replaceable_theme_files())
         app.push_screen(prompt, self._create_theme_file)
 
-    def _existing_theme_files(self) -> frozenset[str]:
+    def _replaceable_theme_files(self) -> frozenset[str]:
+        """Names of theme files that are not themes (they failed to load), so no theme owns the name."""
         try:
-            return frozenset(p.stem for p in themes_dir().glob(f"*{THEME_FILE_SUFFIX}"))
+            stems = frozenset(p.stem for p in themes_dir().glob(f"*{THEME_FILE_SUFFIX}"))
         except OSError:
             return frozenset()
+        return stems - frozenset(self.app.available_themes)
 
     def _create_theme_file(self, result: object) -> None:
         if not result:
@@ -419,7 +422,10 @@ class AppearancePanel(SettingsPanel):
         name, replace = result  # type: ignore[misc]
         app = self.app
         infos = describe_themes(app.available_themes, app.user_themes)
-        active = next(info for info in infos if info.name == app.theme)
+        active = next((info for info in infos if info.name == app.theme), None)
+        if active is None:
+            app.notify("The current theme is not a registered one and cannot be copied.", severity="error", markup=False)
+            return
         try:
             path = write_theme_file(name, render_theme_file(active, name=name), overwrite=replace)
         except (ThemeFileError, ValueError) as exc:

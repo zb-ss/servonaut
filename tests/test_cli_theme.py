@@ -61,12 +61,29 @@ def test_list_does_not_print_control_characters_from_a_file(folder: Path, capsys
     assert "\x1b" not in capsys.readouterr().out
 
 
-def test_export_prints_a_valid_theme_file(folder: Path, capsys, tmp_path: Path) -> None:
+def test_export_prints_a_theme_file_that_loads_as_it_is(folder: Path, capsys) -> None:
     assert _run("export", "servonaut") == 0
-    text = capsys.readouterr().out
-    path = tmp_path / "servonaut-copy.toml"
-    path.write_text(text.replace('name = "servonaut"', 'name = "servonaut-copy"'), encoding="utf-8")
+    path = folder / "servonaut-custom.toml"
+    path.write_text(capsys.readouterr().out, encoding="utf-8")
+    assert 'name = "servonaut-custom"' in path.read_text(encoding="utf-8")
     assert check_theme_file(path) == []
+
+
+def test_export_takes_a_new_name_with_as(folder: Path, capsys) -> None:
+    assert _run("export", "nord", "--as", "my-nord") == 0
+    assert 'name = "my-nord"' in capsys.readouterr().out
+
+
+def test_the_default_export_name_avoids_a_name_in_use(folder: Path, capsys) -> None:
+    (folder / "nord-custom.toml").write_text('primary = "#5EB1FF"\n', encoding="utf-8")
+    assert _run("export", "nord") == 0
+    assert 'name = "nord-custom-2"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["nord", "Bad Name", "../x", "servonaut"])
+def test_export_refuses_a_name_that_cannot_load(folder: Path, capsys, name: str) -> None:
+    assert _run("export", "dracula", "--as", name) == 2
+    assert capsys.readouterr().err
 
 
 def test_export_can_start_from_a_user_theme(folder: Path, capsys) -> None:

@@ -37,7 +37,9 @@ class ThemeNamePromptScreen(ModalScreen[Optional[Tuple[str, bool]]]):
     """
 
     def __init__(self, suggestion: str, taken: frozenset[str], existing_files: frozenset[str]) -> None:
-        """*taken* are theme names already in use; *existing_files* are file names without ``.toml``."""
+        """*taken* are the registered theme names, always refused; *existing_files* are file
+        names without ``.toml`` that may be replaced (files that are not themes, such as a
+        broken one)."""
         super().__init__(classes="dialog-screen")
         self._suggestion = suggestion
         self._taken = taken
@@ -89,7 +91,7 @@ class ThemeNamePromptScreen(ModalScreen[Optional[Tuple[str, bool]]]):
     def _problem(self, name: str) -> str:
         if not is_valid_theme_name(name):
             return f"Use {NAME_RULE}"
-        if name in self._taken and name not in self._existing_files:
+        if name in self._taken:
             return "A theme with this name already exists."
         return ""
 

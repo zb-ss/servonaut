@@ -25,8 +25,11 @@ of at most 64 KiB each.
 
 The quickest way to start is **New theme from current…** in Settings →
 Appearance. It writes `<name>.toml` from the theme you are using, with every
-colour spelled out, ready to edit. From a shell, `servonaut theme export nord`
-does the same for any theme (see [Commands](#commands)).
+colour spelled out, ready to edit. The name you give it must be free: a name
+already used by a built-in theme or by another theme is refused. From a shell,
+`servonaut theme export nord --output ~/.servonaut/themes/my-nord.toml` does the
+same for any theme and gives the file a free name (`nord-custom` unless you pick
+one with `--as`), so it loads as it is. See [Commands](#commands).
 
 ## A complete example
 
@@ -84,7 +87,9 @@ and the terminal's own ANSI colours are not accepted here.
 
 Variables fine-tune individual parts of the interface. Each one is optional and
 only the names below are accepted. A value is a colour, optionally followed by
-an opacity, as in `"#5EB1FF 35%"`.
+an opacity, as in `"#5EB1FF 35%"`. A colour with transparency written as
+`#RRGGBBAA` or `#RGBA` (some built-in themes use it) is read as that colour with
+the matching opacity.
 
 | Variable | What it colours |
 |----------|-----------------|
@@ -146,14 +151,17 @@ what to fix.
 
 ```
 servonaut theme list
-servonaut theme export <name> [--output PATH] [--force]
+servonaut theme export <name> [--as NEW_NAME] [--output PATH] [--force]
 servonaut theme check <file>
 ```
 
 - `list` shows every theme with its source (`built-in` or `user`) and its
   status: `ok`, a readability warning, or the error that stopped a file loading.
-- `export` prints any theme as a theme file, or writes it to `--output`. It
-  refuses to replace an existing file unless you add `--force`. The two themes
+- `export` prints any theme as a theme file, or writes it to `--output`. The new
+  file's `name` is `<name>-custom` (or `-custom-2`, … if that is taken), or the
+  name you give with `--as`; a name already in use is refused, because two themes
+  cannot share one. It refuses to replace an existing file unless you add
+  `--force`. The two themes
   that follow your terminal's own colours (`ansi-dark`, `ansi-light`) have no
   colour values to export.
 - `check` validates one file and lists every problem with its line number. It
@@ -164,7 +172,9 @@ servonaut theme check <file>
 
 A file that cannot be loaded never stops Servonaut from starting. It is skipped,
 and Settings → Appearance shows a card with the file name, the line and what is
-wrong, for example `Line 4: "accent" is not a colour ("#ff88")`. Fix the file and
+wrong, for example `Line 4: "accent" is not a colour ("#ff88"); write it like "#RRGGBB"`
+(`servonaut theme check` prints the same message as `<file>:4: ...`). A file with
+many problems shows its first three and counts the rest. Fix the file and
 choose **Reload themes**.
 
 A file is refused when it:
