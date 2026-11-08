@@ -219,6 +219,12 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._update_validation()
+        if self._mode == "enrol":
+            self.call_after_refresh(self._show_feedback)
+
+    def _show_feedback(self) -> None:
+        """Keep the reason Enrol is disabled in view while the user types."""
+        self.query_one("#enrol-mismatch", Static).scroll_visible(animate=False, immediate=True)
 
     def _update_validation(self) -> None:
         pass1 = self.query_one("#enrol-pass1", Input).value

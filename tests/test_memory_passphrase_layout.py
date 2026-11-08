@@ -411,3 +411,26 @@ async def test_enrol_opens_with_the_unrecoverable_warning_in_view(size, modal_po
         assert body.scroll_y == 0
         assert warning.region in body.region, (size, warning.region, body.region)
         assert app.focused.id == "enrol-pass1"
+
+
+@pytest.mark.parametrize("size", [(60, 20), (80, 24)], ids=lambda size: f"{size[0]}x{size[1]}")
+@pytest.mark.asyncio
+async def test_enrol_shows_why_it_is_disabled_without_scrolling(size, modal_policy, monkeypatch):
+    """The reason Enrol is disabled stays in view while the user types."""
+    from servonaut.services.memory import passphrase_store
+
+    monkeypatch.setattr(passphrase_store, "keyring_available", lambda: True)
+    app = _StyledEnrolApp(mode="enrol")
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _paste(pilot, PASSPHRASE)
+        await _tab(pilot, app, "enrol-pass2")
+        await _paste(pilot, "Different8!Pine")
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause()
+        body = app.screen.query_one("#enrol-body")
+        reason = app.screen.query_one("#enrol-mismatch", Static)
+        assert "do not match" in str(reason.content)
+        assert app.screen.query_one("#enrol-btn-confirm", Button).disabled
+        assert reason.region in body.region, (size, reason.region, body.region)
+        assert app.focused.region in body.region
