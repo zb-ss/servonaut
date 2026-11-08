@@ -83,18 +83,18 @@ def _note_memory_bootstrap_outcome(task: "asyncio.Future[None]") -> None:
 
 # Framework actions no Servonaut binding or link uses. They act on any widget,
 # class or screen by name, so they are refused rather than left reachable from
-# an action string.
+# an action string or link. ``screenshot`` is refused too: the palette saves
+# one by calling the app directly, and no binding or link uses the action.
 _GENERIC_FRAMEWORK_ACTIONS = frozenset({
     "simulate_key", "toggle", "add_class", "remove_class", "toggle_class",
     "suspend_process", "notify", "push_screen", "switch_screen", "switch_mode",
+    "screenshot",
 })
 
 
 def _is_generic_framework_action(action: str, parameters: tuple) -> bool:
     """True for an action the app refuses to run (see the set above)."""
-    if action in _GENERIC_FRAMEWORK_ACTIONS:
-        return True
-    return action == "screenshot" and bool(parameters)
+    return str(action).strip() in _GENERIC_FRAMEWORK_ACTIONS
 
 
 class ServonautApp(App):
@@ -2968,16 +2968,16 @@ class ServonautApp(App):
 
         Actions can be started by anything that reaches a widget's text, not
         only by key bindings, so the check covers every target (``app``,
-        ``screen``, ``focused`` or the widget itself), not just the app.
+        ``screen``, ``focused`` or the widget itself) and both forms an
+        action arrives in: a string, or the parsed tuple a Rich-markup link
+        produces.
         """
-        if isinstance(action, str) and self._is_generic_action_string(
-            action, default_namespace, namespaces,
-        ):
+        if self._is_generic_action(action, default_namespace, namespaces):
             return False
         return await super().run_action(action, default_namespace, namespaces)
 
-    def _is_generic_action_string(
-        self, action: str, default_namespace: Any, namespaces: Any,
+    def _is_generic_action(
+        self, action: Any, default_namespace: Any, namespaces: Any,
     ) -> bool:
         try:
             _target, name, params = self._parse_action(
@@ -2986,15 +2986,6 @@ class ServonautApp(App):
         except Exception:  # noqa: BLE001 - the framework reports malformed actions itself
             return False
         return _is_generic_framework_action(name, params)
-
-    def action_screenshot(self, filename: str | None = None, path: str | None = None) -> None:
-        """Save a screenshot to the default place; a name or folder is ignored.
-
-        The command palette calls this without arguments. Honouring a file
-        name or folder given in an action string would let text on screen
-        choose where a file is written.
-        """
-        super().action_screenshot()
 
     async def action_quit(self) -> None:
         if not self._refuse_navigation():

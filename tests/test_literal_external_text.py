@@ -658,25 +658,16 @@ async def test_the_app_still_runs_its_own_actions() -> None:
         assert app.flag is True
 
 
-def test_check_action_refuses_the_generic_actions_and_keeps_screenshot_without_arguments() -> None:
+def test_check_action_refuses_the_generic_actions_and_refuses_screenshot() -> None:
     from servonaut.app import _is_generic_framework_action
 
     for name in ("simulate_key", "toggle", "add_class", "remove_class", "toggle_class",
                  "suspend_process", "notify", "push_screen", "switch_screen", "switch_mode"):
         assert _is_generic_framework_action(name, ()) is True
     assert _is_generic_framework_action("screenshot", ("owned.svg", ".")) is True
-    assert _is_generic_framework_action("screenshot", ()) is False
+    assert _is_generic_framework_action("screenshot", ()) is True
     assert _is_generic_framework_action("quit", ()) is False
     assert _is_generic_framework_action("toggle_demo", ()) is False
-
-
-def test_screenshot_action_ignores_a_file_name_and_folder() -> None:
-    from servonaut.app import ServonautApp
-
-    app = ServonautApp.__new__(ServonautApp)
-    with patch("textual.app.App.action_screenshot") as base:
-        ServonautApp.action_screenshot(app, "config.json", ".servonaut")
-    base.assert_called_once_with()
 
 
 def _declared_actions() -> List[tuple]:
