@@ -1563,7 +1563,7 @@ class ChatPanel(Widget):
         """
         try:
             row = json.loads(stored)
-        except ValueError:
+        except (ValueError, RecursionError):
             row = None
         if isinstance(row, dict) and row.get("kind") == "result":
             return self._tool_result_content(
@@ -1577,7 +1577,7 @@ class ChatPanel(Widget):
             )
         try:
             stored = Content.from_markup(stored).plain
-        except MarkupError:
+        except (MarkupError, RecursionError):
             pass
         return literal(self._redacted(stored))
 

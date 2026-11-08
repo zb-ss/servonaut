@@ -469,3 +469,15 @@ async def test_escape_sequences_in_scan_output_are_not_drawn() -> None:
         cells = [str(cell) for cell in table.get_row_at(0)]
         assert cells[0] == "path:~/\\x1b]0;pwned\\x07"
         assert cells[1] == f"ls {OSC_SHOWN}"
+
+
+@pytest.mark.parametrize("stored", ["[" * 50000, "[b]" * 20000 + "x", "[/" * 30000])
+def test_a_deeply_nested_saved_row_still_opens(stored: str) -> None:
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ChatPanel, "_redacted", lambda self, text: text)
+        content = panel._stored_tool_row_content(stored)
+    assert isinstance(content, Content)
+    assert len(content.plain) >= 1
