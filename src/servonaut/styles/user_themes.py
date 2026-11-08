@@ -38,6 +38,8 @@ THEME_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 # Theme files are small; a cap keeps a stray large file from being read whole.
 MAX_THEME_FILE_BYTES = 64 * 1024
 MAX_THEME_FILES = 50
+# A file with more faults than this lists the first few and counts the rest.
+MAX_PROBLEMS_PER_FILE = 10
 
 # Keys that are not colours.
 _NAME_KEY = "name"
@@ -262,13 +264,21 @@ def _read_ansi_list(key: str, value: object, problems: List[str]) -> Optional[Li
 # ----------------------------------------------------------------------
 
 
-def _find_line(source: str, key: str) -> Optional[int]:
-    """The 1-based line that sets *key*, for pointing an error at it."""
-    pattern = re.compile(rf'^\s*(?:"?{re.escape(key)}"?\s*=|\[{re.escape(key)}\])')
+_KEY_LINE = re.compile(r'^\s*(?:"?(?P<key>[^"=\s\[\]]+)"?\s*=|\[(?P<table>[^\[\]]+)\])')
+
+
+def _line_index(source: str) -> Dict[str, int]:
+    """The 1-based line that first sets each key or opens each table, in one pass."""
+    index: Dict[str, int] = {}
     for number, text in enumerate(source.splitlines(), start=1):
-        if pattern.match(text):
-            return number
-    return None
+        found = _KEY_LINE.match(text)
+        if found:
+            index.setdefault(found.group("key") or found.group("table").strip(), number)
+    return index
+
+
+def _find_line(index: Mapping[str, int], key: str) -> Optional[int]:
+    return index.get(key)
 
 
 def _read_source(path: Path) -> str:
@@ -297,27 +307,29 @@ def _parse_toml(source: str) -> Dict[str, Any]:
     except tomllib.TOMLDecodeError as exc:
         found = _TOML_LINE.search(str(exc))
         raise _FileProblem(f"Is not valid TOML: {exc}", int(found.group(1)) if found else None) from exc
+    except RecursionError as exc:
+        raise _FileProblem("Is nested too deeply") from exc
 
 
-def _theme_name(data: Mapping[str, Any], path: Path, source: str) -> str:
+def _theme_name(data: Mapping[str, Any], path: Path, lines: Mapping[str, int]) -> str:
     name = data.get(_NAME_KEY, path.stem)
     if not is_valid_theme_name(name):
         raise _FileProblem(
             'The theme name must be 1-40 characters: lowercase letters, digits and "-", '
             "starting with a letter or digit",
-            _find_line(source, _NAME_KEY) if _NAME_KEY in data else None,
+            _find_line(lines, _NAME_KEY) if _NAME_KEY in data else None,
         )
     return str(name)
 
 
-def _check_keys(data: Mapping[str, Any], source: str, problems: List[_FileProblem]) -> None:
+def _check_keys(data: Mapping[str, Any], lines: Mapping[str, int], problems: List[_FileProblem]) -> None:
     known = {_NAME_KEY, _DARK_KEY, *COLOUR_KEYS, *_TABLE_KEYS}
     for key in data:
         if key not in known:
-            problems.append(_FileProblem(f"Unknown key {_shown(key)}", _find_line(source, key)))
+            problems.append(_FileProblem(f"Unknown key {_shown(key)}", _find_line(lines, key)))
 
 
-def _read_colours(data: Mapping[str, Any], source: str, problems: List[_FileProblem]) -> Dict[str, str]:
+def _read_colours(data: Mapping[str, Any], lines: Mapping[str, int], problems: List[_FileProblem]) -> Dict[str, str]:
     colours: Dict[str, str] = {}
     for key in COLOUR_KEYS:
         if key not in data:
@@ -327,21 +339,21 @@ def _read_colours(data: Mapping[str, Any], source: str, problems: List[_FileProb
         colour = parse_colour(data[key])
         if colour is None:
             problems.append(_FileProblem(
-                f'"{key}" is not a colour ({_shown(data[key])})', _find_line(source, key),
+                f'"{key}" is not a colour ({_shown(data[key])})', _find_line(lines, key),
             ))
             continue
         colours[key] = colour.hex
     return colours
 
 
-def _read_variables(data: Mapping[str, Any], source: str, problems: List[_FileProblem]) -> Dict[str, str]:
+def _read_variables(data: Mapping[str, Any], lines: Mapping[str, int], problems: List[_FileProblem]) -> Dict[str, str]:
     table = data.get("variables", {})
     if not isinstance(table, dict):
-        problems.append(_FileProblem('"variables" must be a table', _find_line(source, "variables")))
+        problems.append(_FileProblem('"variables" must be a table', _find_line(lines, "variables")))
         return {}
     variables: Dict[str, str] = {}
     for key, value in table.items():
-        line = _find_line(source, key)
+        line = _find_line(lines, key)
         if key not in VARIABLE_KEYS:
             problems.append(_FileProblem(f"[variables] has an unknown key {_shown(key)}", line))
         elif key == TEXT_STYLE_KEY:
@@ -370,11 +382,11 @@ def _read_text_style(value: object) -> Optional[str]:
     return " ".join(words)
 
 
-def _read_dark(data: Mapping[str, Any], source: str, problems: List[_FileProblem]) -> bool:
+def _read_dark(data: Mapping[str, Any], lines: Mapping[str, int], problems: List[_FileProblem]) -> bool:
     value = data.get(_DARK_KEY, True)
     if isinstance(value, bool):
         return value
-    problems.append(_FileProblem('"dark" must be true or false', _find_line(source, _DARK_KEY)))
+    problems.append(_FileProblem('"dark" must be true or false', _find_line(lines, _DARK_KEY)))
     return True
 
 
@@ -383,36 +395,45 @@ def _inspect(path: Path, taken: Iterable[str]) -> Tuple[Optional[UserTheme], Lis
     try:
         source = _read_source(path)
         data = _parse_toml(source)
-        name = _theme_name(data, path, source)
+        lines = _line_index(source)
+        name = _theme_name(data, path, lines)
         if name in set(taken):
-            raise _FileProblem(f'The theme name "{name}" is already used', _find_line(source, _NAME_KEY))
+            raise _FileProblem(f'The theme name "{name}" is already used', _find_line(lines, _NAME_KEY))
     except _FileProblem as problem:
         return None, [problem]
     problems: List[_FileProblem] = []
-    _check_keys(data, source, problems)
-    colours = _read_colours(data, source, problems)
-    variables = _read_variables(data, source, problems)
-    dark = _read_dark(data, source, problems)
+    _check_keys(data, lines, problems)
+    colours = _read_colours(data, lines, problems)
+    variables = _read_variables(data, lines, problems)
+    dark = _read_dark(data, lines, problems)
     ansi_table = data.get("ansi")
     if ansi_table is not None and not isinstance(ansi_table, dict):
-        problems.append(_FileProblem('"ansi" must be a table', _find_line(source, "ansi")))
+        problems.append(_FileProblem('"ansi" must be a table', _find_line(lines, "ansi")))
         ansi_table = None
     if problems:
-        return None, problems + _ansi_problems(ansi_table, source)
+        return None, _capped(problems + _ansi_problems(ansi_table, lines))
     theme = Theme(name=name, dark=dark, variables=variables, **colours)
     if ansi_table is None:
         return UserTheme(theme, derive_ansi_palette(theme), path), []
     palette, ansi_faults = _read_ansi(ansi_table, theme)
     if ansi_faults:
-        return None, _ansi_problems(ansi_table, source, theme)
+        return None, _capped(_ansi_problems(ansi_table, lines, theme))
     return UserTheme(theme, palette, path), []
 
 
-def _ansi_problems(table: Optional[Mapping[str, Any]], source: str, theme: Optional[Theme] = None) -> List[_FileProblem]:
+def _capped(problems: List[_FileProblem]) -> List[_FileProblem]:
+    """The first few faults, then a count of the rest, so a hostile file stays small."""
+    if len(problems) <= MAX_PROBLEMS_PER_FILE:
+        return problems
+    hidden = len(problems) - MAX_PROBLEMS_PER_FILE
+    return problems[:MAX_PROBLEMS_PER_FILE] + [_FileProblem(f"…and {hidden} more problems")]
+
+
+def _ansi_problems(table: Optional[Mapping[str, Any]], lines: Mapping[str, int], theme: Optional[Theme] = None) -> List[_FileProblem]:
     if table is None:
         return []
     _, faults = _read_ansi(table, theme or Theme(name="check", primary="#000000"))
-    line = _find_line(source, "ansi")
+    line = _find_line(lines, "ansi")
     return [_FileProblem(message, line) for message in faults]
 
 
@@ -465,6 +486,9 @@ def load_user_themes(reserved: Iterable[str] = (), folder: Optional[Path] = None
     for path in files:
         try:
             loaded, problems = _inspect(path, taken)
+        except RecursionError:
+            errors.append(ThemeError(path.name, None, "Is nested too deeply"))
+            continue
         except Exception:  # noqa: BLE001 - a theme file must never stop the app
             logger.exception("Theme file %s failed to load", path.name)
             errors.append(ThemeError(path.name, None, "Could not be loaded"))

@@ -228,3 +228,69 @@ def test_valid_names(name: str) -> None:
 @pytest.mark.parametrize("name", ["", "-lead", "Upper", "has space", "a/b", "a\\b", "x" * 41, "dot.dot", None, 5])
 def test_invalid_names(name: object) -> None:
     assert not is_valid_theme_name(name)
+
+
+# ---------------------------------------------------------------- hostile and oversized files
+
+
+def _flood(count: int = 0, header: str = "") -> str:
+    """Valid TOML made only of unknown keys, as large as a theme file may be."""
+    lines = [header] if header else []
+    size = len(header)
+    index = 0
+    while size < MAX_THEME_FILE_BYTES - 16 and (count == 0 or index < count):
+        line = f"k{index}=1\n"
+        lines.append(line)
+        size += len(line)
+        index += 1
+    return "".join(lines)
+
+
+def test_a_file_of_unknown_keys_scans_quickly_and_keeps_a_capped_list(tmp_path: Path) -> None:
+    import time
+    from servonaut.styles.user_themes import MAX_PROBLEMS_PER_FILE
+
+    _write(tmp_path, "flood.toml", _flood(header='primary = "#5EB1FF"\n'))
+    started = time.perf_counter()
+    result = load_user_themes((), tmp_path)
+    assert time.perf_counter() - started < 0.5
+    assert result.themes == ()
+    assert len(result.errors) == MAX_PROBLEMS_PER_FILE + 1
+    assert "more problems" in result.errors[-1].message
+    assert result.errors[0].line == 2
+
+
+def test_variables_full_of_unknown_keys_scan_quickly_too(tmp_path: Path) -> None:
+    import time
+
+    _write(tmp_path, "flood.toml", _flood(header='primary = "#5EB1FF"\n[variables]\n'))
+    started = time.perf_counter()
+    result = load_user_themes((), tmp_path)
+    assert time.perf_counter() - started < 0.5
+    assert len(result.errors) <= 11
+
+
+def test_the_most_files_of_the_largest_size_still_scan_in_bounded_time(tmp_path: Path) -> None:
+    import time
+
+    for index in range(MAX_THEME_FILES):
+        _write(tmp_path, f"f{index:02d}.toml", _flood(header='primary = "#5EB1FF"\n'))
+    started = time.perf_counter()
+    result = load_user_themes((), tmp_path)
+    assert time.perf_counter() - started < 5
+    assert len({e.file for e in result.errors}) == MAX_THEME_FILES
+
+
+def test_check_reports_a_capped_list_for_a_flood_file(tmp_path: Path) -> None:
+    path = _write(tmp_path, "flood.toml", _flood(header='primary = "#5EB1FF"\n'))
+    assert len(check_theme_file(path)) <= 11
+
+
+def test_a_deeply_nested_file_is_one_error_and_one_log_line(tmp_path: Path, caplog) -> None:
+    _write(tmp_path, "deep.toml", "x = " + "[" * 5000 + "]" * 5000 + "\n")
+    with caplog.at_level("DEBUG"):
+        result = load_user_themes((), tmp_path)
+        checked = check_theme_file(tmp_path / "deep.toml")
+    assert [e.message for e in result.errors] == ["Is nested too deeply"]
+    assert [e.message for e in checked] == ["Is nested too deeply"]
+    assert not any(record.exc_info for record in caplog.records)
