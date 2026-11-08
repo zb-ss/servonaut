@@ -554,3 +554,45 @@ async def test_no_action_is_clipped_across_a_width_sweep(chat) -> None:
             assert toolbar.region.contains_region(ssh.region), (width, ssh.region, toolbar.region)
             assert ssh.content_size.width >= ssh.label.cell_length, f"SSH clipped at {width}"
             _assert_rows_inside(screen)
+
+
+@pytest.mark.asyncio
+async def test_copy_toast_says_when_only_the_terminal_fallback_ran() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        notes: list[str] = []
+        with (
+            patch("servonaut.utils.platform_utils.copy_to_clipboard", lambda text: False),
+            patch.object(app, "copy_to_clipboard"),
+            patch.object(app, "notify", lambda message, **kw: notes.append(message)),
+        ):
+            screen.query_one("#btn_copy_id", Button).press()
+            await pilot.pause()
+        assert notes and "via terminal" in notes[0] and not notes[0].startswith("Copied")
+
+
+@pytest.mark.asyncio
+async def test_team_shared_servers_offer_no_instance_id_copy() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        app.instances[0].update(is_shared=True, team_name="ops", team_slug="ops", login_user="deploy")
+        screen = await _open_actions(app, pilot)
+        assert not screen.query_one("#btn_copy_id").display
+        assert screen.query_one("#btn_copy_summary").display
+
+
+@pytest.mark.asyncio
+async def test_buttons_truncate_instead_of_wrapping_even_when_squeezed() -> None:
+    """A button 4 cells wide once crashed the app when its label was wrapped."""
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        for button in screen.query(ActionButton):
+            assert str(button.styles.text_wrap) == "nowrap", button.id
+            assert str(button.styles.text_overflow) == "ellipsis", button.id
+        button = screen.query_one("#btn_ssh", ActionButton)
+        for width in (1, 2, 3, 4, 5, 6):
+            button.styles.width = width
+            await pilot.pause()
+        assert app._exception is None

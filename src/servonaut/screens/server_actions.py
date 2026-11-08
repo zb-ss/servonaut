@@ -915,6 +915,9 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 ),
                 before=self.query_one("#action_help"),
             )
+        # A team's shared server shows no instance ID, so there is nothing to copy.
+        if self._instance.get('is_shared') is True or not self._instance.get('id'):
+            self.query_one("#btn_copy_id").display = False
         self._sync_compact_buttons()
         self._sync_vault_button_role()
         self.call_after_refresh(self._sync_compact_buttons)
@@ -1498,9 +1501,12 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     def _copy_to_clipboard(self, text: str, what: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
 
-        if not copy_to_clipboard(text):
-            self.app.copy_to_clipboard(text)
-        self.app.notify(f"Copied {what} to the clipboard.", markup=False)
+        if copy_to_clipboard(text):
+            self.app.notify(f"Copied {what} to the clipboard.", markup=False)
+            return
+        # Only the terminal's clipboard sequence ran: nothing confirms it arrived.
+        self.app.copy_to_clipboard(text)
+        self.app.notify(f"Sent {what} to the terminal clipboard (via terminal).", markup=False)
 
     def action_copy_instance_id(self) -> None:
         """Copy the instance ID as displayed (so demo mode stays redacted)."""

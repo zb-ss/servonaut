@@ -71,10 +71,14 @@ ActionRow.-wrap {
     scrollbar-gutter: stable;
 }
 
+/* Two cards per row; the grid gives both cards the height of the taller one */
 #sa-facts,
 #sa-monitoring {
     height: auto;
-    align-vertical: top;
+    layout: grid;
+    grid-size: 2;
+    grid-rows: auto;
+    grid-gutter: 1 1;
 }
 
 #sa-detail .sa-section {
@@ -88,13 +92,16 @@ ActionRow.-wrap {
 /* Two cards per row, equal width; each card owns the actions that act on it */
 #sa-facts .sa-section,
 #sa-monitoring .sa-section {
-    width: 1fr;
-    height: auto;
+    width: 100%;
+    height: 100%;
+    margin-bottom: 0;
 }
 
 #card_identity,
-#card_live {
-    margin-right: 1;
+#card_network,
+#card_live,
+#card_memory {
+    layout: vertical;
 }
 
 #server_identity,
@@ -128,11 +135,12 @@ ServerActionsScreen.-content-narrow #sa-monitoring {
     layout: vertical;
 }
 
-ServerActionsScreen.-narrow #card_identity,
-ServerActionsScreen.-narrow #card_live,
-ServerActionsScreen.-content-narrow #card_identity,
-ServerActionsScreen.-content-narrow #card_live {
-    margin-right: 0;
+ServerActionsScreen.-narrow #sa-facts .sa-section,
+ServerActionsScreen.-narrow #sa-monitoring .sa-section,
+ServerActionsScreen.-content-narrow #sa-facts .sa-section,
+ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
+    height: auto;
+    margin-bottom: 1;
 }
 
 ServerActionsScreen.-narrow #sa-facts .sa-section,
@@ -223,5 +231,17 @@ ServerActionsScreen.-short #sa-detail .sa-section {
 /* One row of compact buttons has to fit the narrowest content column */
 ServerActionsScreen.-narrow #action_buttons,
 ServerActionsScreen.-content-narrow #action_buttons {
+    padding: 0;
+}
+
+/* Compact buttons draw no border but keep a one-cell line pad: shift the row so
+   its first label starts flush with the card text above it */
+ServerActionsScreen.-narrow .sa-card-actions,
+ServerActionsScreen.-content-narrow .sa-card-actions {
+    offset: -1 0;
+}
+
+ServerActionsScreen.-narrow .sa-card-actions ActionButton.-textual-compact,
+ServerActionsScreen.-content-narrow .sa-card-actions ActionButton.-textual-compact {
     padding: 0;
 }
