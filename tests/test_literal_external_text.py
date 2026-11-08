@@ -31,6 +31,7 @@ from servonaut.screens.tool_confirm_modal import (
 from servonaut.utils.markup import literal, with_bold_values
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.memory_prompt import MemoryPrompt
+from tests._async_bounds import wait_until
 
 HOSTILE = [
     "[ @click=app.bell]x",
@@ -455,7 +456,11 @@ def _chat_host(messages: list) -> App:
             yield VerticalScroll(id="chat-messages")
 
         def on_mount(self, event):
+            # The panel's own mount runs after its children are mounted; the
+            # app's mount can run before that on a slow machine.
             event.prevent_default()
+            self._session = ChatSession(id="s1", messages=messages)
+            self._refresh_messages()
 
         def _update_stats(self):
             pass
@@ -466,11 +471,6 @@ def _chat_host(messages: list) -> App:
 
         def compose(self):
             yield Trimmed()
-
-        def on_mount(self):
-            panel = self.query_one(Trimmed)
-            panel._session = ChatSession(id="s1", messages=messages)
-            panel._refresh_messages()
 
     return Host()
 
@@ -485,7 +485,8 @@ async def test_chat_bubbles_show_message_text_literally() -> None:
         ChatMessage(role="assistant", content=reply),
     ])
     async with app.run_test(size=(100, 20)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: app.query(".chat-message-user") and app.query(".chat-message-assistant"))
+        await pilot.pause()
         user = list(app.query(".chat-message-user"))[0]
         bot = list(app.query(".chat-message-assistant"))[0]
         assert "what runs on [PROD] db-9 [old=" in user.visual.plain
@@ -507,7 +508,8 @@ async def test_a_session_saved_before_the_change_opens_and_reads_as_before() -> 
     ]
     app = _chat_host([ChatMessage(role="tool", content=text) for text in stored])
     async with app.run_test(size=(100, 20)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: len(app.query(".chat-message-tool")) == len(stored))
+        await pilot.pause()
         rows = list(app.query(".chat-message-tool"))
         assert [row.visual.plain for row in rows[:3]] == [
             "Tool result tc_1 (ok)\nlisting [/",
