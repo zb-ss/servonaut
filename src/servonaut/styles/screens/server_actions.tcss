@@ -28,158 +28,19 @@
     padding: 0;
 }
 
-/* Grouped action toolbar above the overview:
-   each category is one row: a fixed-width heading beside its own 3-column
-   grid of actions, so columns line up across every group */
+/* Primary actions: one row, Back at the left and the rest at the right.
+   The buttons themselves are ActionButton (components/action_button.tcss). */
 #action_buttons {
     width: 100%;
     height: auto;
-    layout: vertical;
-    padding: 0 1 1 1;
+    layout: horizontal;
+    padding: 0 1;
     background: $surface;
-    border-bottom: solid $panel-lighten-2;
 }
 
-#action_buttons .sa-group {
-    width: 100%;
-    height: auto;
-}
-
-/* Back is set apart from the last category so it never reads as one of its actions */
-#action_buttons .sa-group:last-child {
-    margin-top: 1;
-}
-
-#action_buttons .sa-group-actions {
+#action_buttons .sa-toolbar-spacer {
     width: 1fr;
-    height: auto;
-    layout: grid;
-    grid-size: 3;
-    grid-columns: 1fr;
-    grid-rows: 1;
-    grid-gutter: 0 1;
-}
-
-#action_buttons Button {
-    width: 100%;
-    min-width: 0;
     height: 1;
-    min-height: 1;
-    margin: 0;
-    padding: 0 1;
-    border: none;
-    border-left: tall $surface-lighten-1;
-    background: transparent;
-    color: $text;
-    text-align: left;
-    content-align: left middle;
-    /* A button's content box can be exactly 2 cells wide while its line pad is 1,
-       so the text would be wrapped at width 0 and the app would crash. Truncating
-       instead of wrapping can never reach that path (e.g. while the chat panel
-       is still squeezing this column during a resize). */
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
-}
-
-#action_buttons Button.-primary {
-    border-left: tall $primary;
-    color: $text-accent;
-}
-
-#action_buttons Button.-warning {
-    border-left: tall $warning;
-    color: $text-warning;
-}
-
-#action_buttons Button.-error {
-    border-left: tall $error;
-    color: $text-error;
-}
-
-#action_buttons Button.-primary:ansi,
-#action_buttons Button.-warning:ansi,
-#action_buttons Button.-error:ansi {
-    color: $foreground;
-}
-
-#action_buttons Button:hover {
-    background: $panel-lighten-1;
-    color: $text-accent;
-    border-left: tall $accent;
-}
-
-#action_buttons Button:focus {
-    background: $panel-lighten-2;
-    color: $text;
-    border: none;
-    border-left: tall $accent;
-    text-style: bold;
-}
-
-#action_buttons .section_label {
-    width: 10;
-    color: $text-accent;
-    text-style: bold;
-    padding: 0 1;
-    margin: 0;
-    height: 1;
-}
-
-#action_buttons #btn_back {
-    background: transparent;
-    color: $text-muted;
-}
-
-#action_buttons #btn_back:hover {
-    background: $panel-lighten-1;
-    color: $text;
-}
-
-#action_buttons #btn_back:focus {
-    background: $panel-lighten-2;
-    color: $text;
-    border: none;
-    text-style: bold;
-}
-
-#action_buttons Button:ansi:hover,
-#action_buttons Button.-primary:ansi:hover,
-#action_buttons Button.-error:ansi:hover,
-#action_buttons #btn_back:ansi:hover {
-    background: $surface;
-    color: $foreground;
-    border: none;
-    border-left: tall $accent;
-    text-style: underline not bold;
-}
-
-#action_buttons Button:ansi:focus,
-#action_buttons Button.-primary:ansi:focus,
-#action_buttons Button.-error:ansi:focus,
-#action_buttons #btn_back:ansi:focus {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
-    border: none;
-    border-left: tall $warning;
-    text-style: not bold;
-}
-
-/* Narrow view reflow: drop the decorative headings (the rows stay grouped)
-   so the three columns get the full width and the overview keeps its height */
-ServerActionsScreen.-narrow #action_buttons .section_label,
-ServerActionsScreen.-content-narrow #action_buttons .section_label {
-    display: none;
-}
-
-/* Rows are scarce when narrow: Back keeps its own row but no spacer */
-ServerActionsScreen.-narrow #action_buttons .sa-group:last-child,
-ServerActionsScreen.-content-narrow #action_buttons .sa-group:last-child {
-    margin-top: 0;
-}
-
-ServerActionsScreen.-narrow #action_buttons,
-ServerActionsScreen.-content-narrow #action_buttons {
-    padding: 0 1 0 1;
 }
 
 /* Main detail workspace (overview + inline tools) */
@@ -202,22 +63,46 @@ ServerActionsScreen.-content-narrow #action_buttons {
 
 #sa-detail .sa-section {
     height: auto;
-    padding: 1 2;
+    padding: 0 2;
     margin-bottom: 1;
     border: round $border-blurred;
     background: transparent;
+}
+
+/* Two cards per row, equal width; each card owns the actions that act on it */
+#sa-facts .sa-section,
+#sa-monitoring .sa-section {
+    width: 1fr;
+    height: auto;
+}
+
+#card_identity,
+#card_live {
+    margin-right: 1;
 }
 
 #server_identity,
 #server_info,
 #live_stats,
 #memory_panel {
-    width: 1fr;
+    width: 100%;
+    height: auto;
 }
 
-#server_identity,
-#live_stats {
-    margin-right: 1;
+.sa-card-actions {
+    width: 100%;
+    height: auto;
+    padding: 0;
+}
+
+.sa-card-title {
+    width: 100%;
+    height: auto;
+}
+
+#sa-diagnostics .sa-card-actions,
+#sa-provider .sa-card-actions {
+    padding: 0;
 }
 
 ServerActionsScreen.-narrow #sa-facts,
@@ -227,11 +112,23 @@ ServerActionsScreen.-content-narrow #sa-monitoring {
     layout: vertical;
 }
 
-ServerActionsScreen.-narrow #server_identity,
-ServerActionsScreen.-narrow #live_stats,
-ServerActionsScreen.-content-narrow #server_identity,
-ServerActionsScreen.-content-narrow #live_stats {
+ServerActionsScreen.-narrow #card_identity,
+ServerActionsScreen.-narrow #card_live,
+ServerActionsScreen.-content-narrow #card_identity,
+ServerActionsScreen.-content-narrow #card_live {
     margin-right: 0;
+}
+
+ServerActionsScreen.-narrow #sa-facts .sa-section,
+ServerActionsScreen.-narrow #sa-monitoring .sa-section,
+ServerActionsScreen.-content-narrow #sa-facts .sa-section,
+ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
+    width: 100%;
+}
+
+ServerActionsScreen.-narrow .sa-card-actions,
+ServerActionsScreen.-content-narrow .sa-card-actions {
+    padding: 0;
 }
 
 #action_help {
@@ -304,14 +201,11 @@ ServerActionsScreen.-short #sa-detail {
 
 ServerActionsScreen.-short #sa-detail .sa-section {
     padding: 0 1;
+    margin-bottom: 0;
 }
 
-ServerActionsScreen.-short #action_buttons .section_label {
+/* One row of compact buttons has to fit the narrowest content column */
+ServerActionsScreen.-narrow #action_buttons,
+ServerActionsScreen.-content-narrow #action_buttons {
     padding: 0;
-}
-
-/* The overview cards carry their own rounded border, so on a short terminal
-   the toolbar's divider line would only cost the overview a row. */
-ServerActionsScreen.-short #action_buttons {
-    border-bottom: none;
 }

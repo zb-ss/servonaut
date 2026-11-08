@@ -13,6 +13,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -34,6 +35,7 @@ from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
+from servonaut.widgets.action_button import ActionButton
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.dialogs import (
@@ -76,6 +78,9 @@ _ACTION_HELP: dict[str, str] = {
     "btn_ovh_snapshots": "Create, restore, or delete snapshots.",
     "btn_ovh_firewall": "Manage VPS firewall rules.",
     "btn_back": "Return to the instance list.",
+    "btn_live": "Start or stop live CPU, memory and disk polling over SSH.",
+    "btn_copy_id": "Copy this server's instance ID to the clipboard.",
+    "btn_copy_summary": "Copy the identity and connection details shown here.",
 }
 
 logger = logging.getLogger(__name__)
@@ -121,17 +126,14 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
     return f"Team key for {row.get('team_name') or row.get('team_slug') or 'team'}"
 
 
-def _action_group(label: str, *buttons: Button) -> Horizontal:
-    """One labelled category: its heading beside a grid of its own actions.
+def _card_actions(*buttons: ActionButton) -> Horizontal:
+    """The row of actions that belong to one card."""
+    return Horizontal(*buttons, classes="sa-card-actions")
 
-    Each category owns its grid, so a button can never share a cell with
-    another category's button and every group starts on the same left edge.
-    """
-    return Horizontal(
-        Static(label, classes="section_label", markup=False),
-        Grid(*buttons, classes="sa-group-actions"),
-        classes="sa-group",
-    )
+
+def _card(card_id: str, body: Static, *buttons: ActionButton) -> Vertical:
+    """An overview card: its facts, then the actions that act on them."""
+    return Vertical(body, _card_actions(*buttons), id=card_id, classes="sa-section")
 
 
 class VaultBindingScopeModal(ModalScreen[Optional[str]]):
@@ -896,18 +898,25 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
             if self._instance.get('public_ip'):
                 self.run_worker(self._fetch_rdns(), exclusive=False)
-        # Dynamically add OVH action buttons for OVH instances
+        # Provider extras live in their own card, never in the main toolbar.
         if self._instance.get('is_ovh'):
-            self.query_one("#action_buttons").mount(
-                _action_group(
-                    "OVH",
-                    Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
-                    Button("Resize / Upgrade", id="btn_ovh_resize"),
-                    Button("Snapshots", id="btn_ovh_snapshots"),
-                    Button("Firewall", id="btn_ovh_firewall"),
+            self.query_one("#sa-overview").mount(
+                Vertical(
+                    Static("[bold]OVH[/bold]", classes="sa-card-title"),
+                    _card_actions(
+                        ActionButton("Reinstall OS", id="btn_ovh_reinstall", role="error"),
+                        ActionButton("Resize / upgrade", id="btn_ovh_resize"),
+                        ActionButton("Snapshots", id="btn_ovh_snapshots"),
+                        ActionButton("Firewall", id="btn_ovh_firewall"),
+                    ),
+                    id="sa-provider",
+                    classes="sa-section",
                 ),
-                before=self.query("#action_buttons .sa-group").last(),
+                before=self.query_one("#action_help"),
             )
+        self._sync_compact_buttons()
+        self._sync_vault_button_role()
+        self.call_after_refresh(self._sync_compact_buttons)
         # Populate the cached-memory snapshot pane.
         self._render_memory_panel()
 
@@ -929,10 +938,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             event: Key event.
         """
         if event.key in ("up", "down"):
-            # Only cycle the action rail when a rail button already has focus.
+            # Only cycle the actions when one of them already has focus.
             # When focus is inside the inline view (file tree) or elsewhere,
             # leave arrow keys alone so that widget can handle them.
-            buttons = list(self.query("#action_buttons Button"))
+            buttons = [button for button in self.query(ActionButton) if button.display]
             if not buttons:
                 return
             focused = self.focused
@@ -956,50 +965,60 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 self._server_info_text = "\n\n".join((heading, identity, connection))
                 # Full-width compact context banner
                 yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
-                # Grouped action toolbar above the overview
-                yield Vertical(
-                    _action_group(
-                        "CONNECT",
-                        Button("1. Browse Files", id="btn_browse", variant="primary"),
-                        Button("2. Run Command", id="btn_command", variant="primary"),
-                        Button("3. SSH Connect", id="btn_ssh", variant="primary"),
-                    ),
-                    _action_group(
-                        "INSPECT",
-                        # Memory leads: highest-leverage feature for AI / MCP workflows.
-                        Button("M. Memory", id="btn_memory"),
-                        Button("F. Monitoring", id="btn_findings"),
-                        Button("6. View Logs", id="btn_logs"),
-                        Button("5. Scan Results", id="btn_scan"),
-                        Button("D. Scan DB Creds", id="btn_db_creds"),
-                        Button("7. AI Analysis", id="btn_ai_analysis"),
-                    ),
-                    _action_group(
-                        "OPERATE",
-                        Button("4. SCP Transfer", id="btn_scp"),
-                        Button("8. Ban IP", id="btn_ban_ip", variant="warning"),
-                    ),
-                    _action_group(
-                        "MANAGE",
-                        Button("U. Use Vault Key", id="btn_use_vault_key"),
-                        Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
-                        Button("V. Verify SSH", id="btn_verify_ssh"),
-                    ),
-                    _action_group("", Button("9. Back", id="btn_back")),
+                # Toolbar: the primary actions, always one row
+                yield Horizontal(
+                    ActionButton("← Fleet", "9", short="← Fleet", id="btn_back"),
+                    Static("", classes="sa-toolbar-spacer"),
+                    ActionButton("Browse files", "1", short="Browse", id="btn_browse"),
+                    ActionButton("SCP transfer", "4", short="SCP", id="btn_scp"),
+                    ActionButton("Run command", "2", short="Command", id="btn_command"),
+                    ActionButton("SSH connect", "3", short="SSH", id="btn_ssh", role="primary"),
                     id="action_buttons",
                 )
                 # Main detail workspace
                 yield Vertical(
                     VerticalScroll(
                         Horizontal(
-                            Static(identity, id="server_identity", classes="sa-section"),
-                            Static(connection, id="server_info", classes="sa-section"),
+                            _card(
+                                "card_identity",
+                                Static(identity, id="server_identity"),
+                                ActionButton("Copy instance ID", id="btn_copy_id"),
+                                ActionButton("Copy summary", id="btn_copy_summary"),
+                            ),
+                            _card(
+                                "card_network",
+                                Static(connection, id="server_info"),
+                                ActionButton("Use vault key", "u", id="btn_use_vault_key"),
+                                ActionButton("SSH ref", "r", id="btn_manage_ssh_ref"),
+                                ActionButton("Verify SSH", "v", id="btn_verify_ssh"),
+                            ),
                             id="sa-facts",
                         ),
                         Horizontal(
-                            Static(self._live_stats_idle_text(), id="live_stats", classes="sa-section"),
-                            Static("[bold]Server Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel", classes="sa-section"),
+                            _card(
+                                "card_live",
+                                Static(self._live_stats_idle_text(), id="live_stats"),
+                                ActionButton("Live poll: off", "l", id="btn_live"),
+                            ),
+                            _card(
+                                "card_memory",
+                                Static("[bold]Server Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
+                                ActionButton("Server memory", "m", id="btn_memory"),
+                                ActionButton("Monitoring", "f", id="btn_findings"),
+                                ActionButton("Scan DB", "d", id="btn_db_creds"),
+                            ),
                             id="sa-monitoring",
+                        ),
+                        Vertical(
+                            Static("[bold]Diagnostics & security[/bold]", classes="sa-card-title"),
+                            _card_actions(
+                                ActionButton("Stream logs", "6", id="btn_logs"),
+                                ActionButton("AI log analysis", "7", id="btn_ai_analysis"),
+                                ActionButton("Keyword scan results", "5", id="btn_scan"),
+                                ActionButton("Ban IP", "8", id="btn_ban_ip", role="error"),
+                            ),
+                            id="sa-diagnostics",
+                            classes="sa-section",
                         ),
                         Static("", id="action_help"),
                         id="sa-overview",
@@ -1255,6 +1274,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self.query_one("#server_context", Static).update(heading)
         self.query_one("#server_identity", Static).update(identity)
         self.query_one("#server_info", Static).update(connection)
+        self._sync_vault_button_role()
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
@@ -1413,6 +1433,58 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # Live stats (opt-in, SSH-polled)
     # ------------------------------------------------------------------
 
+    def _sync_vault_button_role(self) -> None:
+        """Highlight Use vault key only while binding a key is the next step."""
+        try:
+            button = self.query_one("#btn_use_vault_key", ActionButton)
+        except NoMatches:
+            return
+        suggested = self._vault_runtime_for_lookup() is not None and self._vault_binding_source is None
+        button.set_role("primary" if suggested else "default")
+
+    def _sync_live_button(self) -> None:
+        """Show whether live polling is running on its button."""
+        try:
+            button = self.query_one("#btn_live", ActionButton)
+        except NoMatches:
+            return
+        button.set_text("Live poll: on" if self._live_on else "Live poll: off")
+
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        self._sync_compact_buttons()
+
+    def _sync_compact_buttons(self) -> None:
+        """One-row borderless buttons whenever the layout is narrow."""
+        compact = self.has_class("-narrow") or self.has_class("-content-narrow")
+        for button in self.query(ActionButton):
+            button.compact = compact
+
+    def _displayed_identity_lines(self) -> list[str]:
+        """The identity card as plain text, exactly as it is displayed."""
+        _, identity, _ = self._server_info_sections()
+        return Content.from_markup(identity).plain.splitlines()
+
+    def _copy_to_clipboard(self, text: str, what: str) -> None:
+        from servonaut.utils.platform_utils import copy_to_clipboard
+
+        if not copy_to_clipboard(text):
+            self.app.copy_to_clipboard(text)
+        self.app.notify(f"Copied {what} to the clipboard.", markup=False)
+
+    def action_copy_instance_id(self) -> None:
+        """Copy the instance ID as displayed (so demo mode stays redacted)."""
+        for line in self._displayed_identity_lines():
+            label, _, value = line.partition(":")
+            if label.strip() in ("Instance ID", "ID") and value.strip():
+                self._copy_to_clipboard(value.strip(), "the instance ID")
+                return
+        self.app.notify("This server has no instance ID to copy.", severity="warning", markup=False)
+
+    def action_copy_summary(self) -> None:
+        """Copy the identity and connection details shown on the cards."""
+        self._copy_to_clipboard(Content.from_markup(self._server_info_text).plain, "the server summary")
+
     def _live_stats_idle_text(self) -> str:
         """Text shown in the live-stats pane while polling is off."""
         return (
@@ -1438,6 +1510,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             return
 
         self._live_on = True
+        self._sync_live_button()
         try:
             self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press L to cancel.[/dim]")
         except Exception:  # noqa: BLE001
@@ -1451,6 +1524,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     def _stop_live_stats(self) -> None:
         """Stop the poller and reset the pane to its idle text."""
         self._live_on = False
+        self._sync_live_button()
         self.workers.cancel_group(self, "live_stats")
         try:
             self.query_one("#live_stats", Static).update(self._live_stats_idle_text())
@@ -1468,6 +1542,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         except LiveStatsError as exc:
             self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press L to retry.[/dim]")
             self._live_on = False
+            self._sync_live_button()
 
     def _set_live_text(self, markup: str) -> None:
         """Update the live-stats pane defensively (screen may be torn down)."""
@@ -1541,6 +1616,12 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             self.action_use_vault_key()
         elif button_id == "btn_verify_ssh":
             self.action_verify_ssh()
+        elif button_id == "btn_live":
+            self.action_toggle_live()
+        elif button_id == "btn_copy_id":
+            self.action_copy_instance_id()
+        elif button_id == "btn_copy_summary":
+            self.action_copy_summary()
         elif button_id == "btn_back":
             self.action_back()
 
