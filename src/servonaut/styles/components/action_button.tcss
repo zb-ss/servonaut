@@ -98,3 +98,17 @@ ActionButton.-textual-compact.-primary:ansi {
     color: $foreground;
     text-style: bold;
 }
+
+/* Declared after the idle rule above: it is more specific than the plain
+   :ansi:hover / :ansi:focus rules, so without these the compact primary
+   would look the same focused, hovered and idle. */
+ActionButton.-textual-compact.-primary:ansi:hover {
+    background: $surface;
+    text-style: bold underline;
+}
+
+ActionButton.-textual-compact.-primary:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: not bold;
+}

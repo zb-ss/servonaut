@@ -468,3 +468,42 @@ async def test_copy_in_demo_mode_copies_the_redacted_value(kind, when) -> None:
         everything = "\n".join(copied)
         for secret in (real["id"], real["name"], real["public_ip"], real["private_ip"], BASTION):
             assert secret not in everything, secret
+
+
+def _paint_signature(app, widget) -> set[tuple]:
+    """What the terminal would draw over *widget*: text and every style attribute."""
+    rows = app.screen._compositor.render_strips()
+    cells: set[tuple] = set()
+    for y in range(widget.region.y, widget.region.bottom):
+        for segment in rows[y].crop(widget.region.x, widget.region.right):
+            style = segment.style
+            cells.add((
+                segment.text,
+                str(getattr(style, "color", None)), str(getattr(style, "bgcolor", None)),
+                getattr(style, "bold", None), getattr(style, "underline", None),
+                getattr(style, "reverse", None),
+            ))
+    return cells
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+@pytest.mark.parametrize("button_id", ["btn_ssh", "btn_browse"])
+async def test_focus_and_hover_are_visible_on_compact_buttons(theme, button_id) -> None:
+    app = _LayoutHost()
+    app.theme = theme
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        button = screen.query_one(f"#{button_id}", ActionButton)
+        assert button.compact
+        screen.query_one("#btn_back", ActionButton).focus()
+        await pilot.hover(offset=(0, 0))
+        await pilot.pause()
+        idle = _paint_signature(app, button)
+        button.focus()
+        await pilot.pause()
+        assert _paint_signature(app, button) != idle, "focus is not visible"
+        screen.query_one("#btn_back", ActionButton).focus()
+        await pilot.hover(button)
+        await pilot.pause()
+        assert _paint_signature(app, button) != idle, "hover is not visible"
