@@ -27,7 +27,11 @@ def short(vault_id: Optional[str]) -> str:
 
 class FakeVaultService:
     def __init__(self, *, names: Optional[dict] = None, members: Optional[list] = None,
-                 device_names: Optional[list] = None) -> None:
+                 device_names: Optional[list] = None, exposure_subject: str = "Deploy key",
+                 item_fingerprint: str = "SHA256:fp", platform: str = "linux") -> None:
+        self.exposure_subject = exposure_subject
+        self.item_fingerprint = item_fingerprint
+        self.platform = platform
         self.calls: list[tuple[str, dict]] = []
         self.names = names or {}
         self.members = members
@@ -70,7 +74,7 @@ class FakeVaultService:
         self._rec("list_items", vault_id=vault_id)
         return {"data": [
             {"item_id": f"{vault_id[:2]}-k{n}", "type": "ssh_key", "revision": 1,
-             "public_fingerprint": f"SHA256:fp{n}"} for n in (1, 2, 3)
+             "public_fingerprint": f"{self.item_fingerprint}{n}"} for n in (1, 2, 3)
         ]}
 
     async def ssh_key_choices(self, *, vault_id: str, **kw: Any) -> list:
@@ -79,7 +83,7 @@ class FakeVaultService:
     async def list_devices(self) -> list:
         names = self.device_names or ["work laptop", "build box", "old box"]
         return [
-            {"device_id": "d-1", "name": names[0], "platform": "linux", "status": "active"},
+            {"device_id": "d-1", "name": names[0], "platform": self.platform, "status": "active"},
             {"device_id": "d-2", "name": names[1], "platform": "linux", "status": "pending"},
             {"device_id": "d-3", "name": names[2], "platform": "linux", "status": "revoked"},
         ]
@@ -96,7 +100,7 @@ class FakeVaultService:
     async def list_exposures(self, *, vault_id: str, **kw: Any) -> dict:
         self._rec("list_exposures", vault_id=vault_id)
         return {"data": [
-            {"exposure_id": "e-1", "item_id": f"{vault_id[:2]}-k1", "subject": "Deploy key", "reason": "shared"},
+            {"exposure_id": "e-1", "item_id": f"{vault_id[:2]}-k1", "subject": self.exposure_subject, "reason": self.exposure_subject},
             {"exposure_id": "e-2", "item_id": f"{vault_id[:2]}-k2", "subject": "Spare key", "reason": "shared"},
         ]}
 

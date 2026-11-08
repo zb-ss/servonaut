@@ -38,7 +38,7 @@ from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.vault import onboarding
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, member_approval_lines, ssh_rotation_failure,
-    terminal_safe,
+    strip_terminal_controls, terminal_safe,
 )
 from servonaut.services.vault.errors import VaultKeyInUse, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -67,8 +67,13 @@ async def _invoke(service: Any, method: str, /, **kwargs: Any) -> Any:
 
 
 def scrub_for_demo(app: Any, value: object) -> str:
-    """Redact rendered server/user metadata in demo mode; values stay real."""
-    text = str(value)
+    """Redact rendered server/user metadata in demo mode; values stay real.
+
+    Terminal control characters are removed from everything shown, so text
+    from the service or a teammate cannot send escape sequences to the
+    terminal; line breaks and tabs stay.
+    """
+    text = strip_terminal_controls(value)
     redactor = getattr(app, "redaction_service", None)
     if getattr(app, "demo_mode", False) and redactor is not None:
         return str(redactor.scrub_stream(text))
@@ -102,7 +107,7 @@ class VaultRevealModal(ModalScreen[None]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Revealed vault item[/bold]"),
-            Static(markup_literal(str(value)), id="vault_revealed_value"),
+            Static(markup_literal(strip_terminal_controls(value)), id="vault_revealed_value"),
             Button("Close", id="vault_reveal_close"),
             id="vault_reveal_modal",
         )
@@ -198,7 +203,7 @@ class VaultSasConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Compare this safety number on both devices[/bold]"),
-            Static(markup_literal(self._sas), id="vault_sas"),
+            Static(markup_literal(strip_terminal_controls(self._sas)), id="vault_sas"),
             Horizontal(Button("Mismatch", id="vault_sas_no"), Button("Matches", id="vault_sas_yes")),
             id="vault_sas_modal",
         )
@@ -235,7 +240,7 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
             Static(f"[bold]{title}[/bold]"),
             *named,
             *body[:-1],
-            Static(Text(self._safety_number), id="vault_member_sas"),
+            Static(Text(strip_terminal_controls(self._safety_number)), id="vault_member_sas"),
             body[-1],
             Horizontal(
                 Button("Skip", id="vault_member_skip"),
@@ -267,7 +272,7 @@ class VaultPendingDeviceModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]A device is waiting for vault approval[/bold]"),
-            Static(markup_literal(f"{name} · {platform}")),
+            Static(markup_literal(f"{terminal_safe(name)} · {terminal_safe(platform)}")),
             Static("Review the device and compare its safety number before approving."),
             Horizontal(Button("Later", id="vault_pending_device_later"), Button("Review devices", id="vault_pending_device_review")),
             id="vault_pending_device_modal",
@@ -782,7 +787,7 @@ class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
                 id="vault_create_text",
             ),
             Select(
-                [(markup_literal(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
+                [(markup_literal(terminal_safe(option.get("label") or "")), index) for index, option in enumerate(self._options)],
                 value=0, allow_blank=False, id="vault_create_target",
             ),
             Horizontal(Button("Cancel", id="vault_create_cancel"), Button("Create", id="vault_create_confirm")),
