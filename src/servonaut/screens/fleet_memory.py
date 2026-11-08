@@ -289,26 +289,15 @@ class FleetScanSummaryModal(ModalScreen[None]):
 
 
 class _FleetActionRow(ActionRow):
-    """An action row whose wrapped lines are sized to the widest label.
-
-    The shared row wraps into a fixed number of equal columns, which can be
-    narrower than a label and cut it short. Here the columns follow the
-    measured widths, and key hints stay while the wrapped lines remain few.
-    """
+    """An action row that keeps its key hints while the wrapped lines remain few."""
 
     def _apply(self, buttons: List[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
         if wrap:
             hint = self._lines(buttons, True) <= _MAX_WRAPPED_LINES
         super()._apply(buttons, short=short, hint=hint, wrap=wrap)
-        self.styles.grid_size_columns = self._columns(buttons, hint) if wrap else None
-
-    def _columns(self, buttons: List[ActionButton], hint: bool) -> int:
-        widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
-        # Each column holds the widest label; one cell separates two columns.
-        return max(1, (self.content_size.width + 1) // (widest + 1))
 
     def _lines(self, buttons: List[ActionButton], hint: bool) -> int:
-        return -(-len(buttons) // self._columns(buttons, hint))
+        return -(-len(buttons) // self.wrapped_columns(buttons, hint=hint))
 
 
 class FleetMemoryScreen(WorkspaceScreen):

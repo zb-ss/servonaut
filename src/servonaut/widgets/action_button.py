@@ -28,6 +28,8 @@ _COMPACT_KEY_GAP = "   "
 _COMPACT_CHROME = 4
 _FULL_CHROME = 6
 _MARGIN = 1
+# Cells between two columns of a wrapped row (grid-gutter of ActionRow.-wrap).
+_WRAP_GUTTER = 1
 
 
 def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
@@ -140,18 +142,20 @@ class ActionRow(Horizontal):
             if sum(b.natural_width(short=short, hint=hint) for b in buttons) <= width:
                 self._apply(buttons, short=short, hint=hint, wrap=False)
                 return
-        hint = self._keep_hints
-        self._apply(buttons, short=True, hint=hint, wrap=True)
-        # As many columns as the widest button allows, so none is squeezed.
+        self._apply(buttons, short=True, hint=self._keep_hints, wrap=True)
+
+    def wrapped_columns(self, buttons: list[ActionButton], *, hint: bool) -> int:
+        """Equal columns for a wrapped row, each wide enough for the widest button."""
         widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
-        self.styles.grid_size_columns = max(1, min(len(buttons), width // widest))
+        columns = (self.content_size.width + _WRAP_GUTTER) // (widest + _WRAP_GUTTER)
+        return max(1, min(len(buttons), columns))
 
     def _apply(self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
         for button in buttons:
             button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
-        if not wrap:
-            self.styles.grid_size_columns = None
+        # Columns follow the labels as they are now shown, so none is squeezed.
+        self.styles.grid_size_columns = self.wrapped_columns(buttons, hint=hint) if wrap else None
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.
         self.call_after_refresh(self._remeasure)
