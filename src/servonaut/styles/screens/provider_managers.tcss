@@ -80,7 +80,7 @@ OVHManagerScreen #ovh_mgr_status {
 }
 
 .provider-manager-content .provider-manager-rail {
-    width: 44;
+    width: 50;
     height: auto;
     margin-left: 1;
     padding: 0 1;
@@ -139,29 +139,51 @@ OVHManagerScreen .provider-manager-content #ovh_mgr_actions {
 }
 
 .provider-manager-content .provider-manager-buttons {
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: auto;
-    grid-gutter: 0 1;
     height: auto;
     width: 1fr;
 }
 
-.provider-manager-content .provider-manager-remove-buttons {
-    grid-size: 1;
-    grid-columns: 1fr;
+/* Destroying something is a group of its own, set apart from everyday actions.
+   The rule sits on the label, inside the group: a gutter on the group itself is
+   not counted when the button is scrolled into view. */
+.provider-manager-content .provider-manager-danger {
+    margin: 1 0 0 0;
 }
 
-AWSManagerScreen .provider-manager-content #aws_mgr_actions Button,
-HetznerManagerScreen .provider-manager-content #hetzner_mgr_actions Button,
-OVHManagerScreen .provider-manager-content #ovh_mgr_actions Button {
-    width: 1fr;
-    min-width: 0;
-    height: auto;
-    min-height: 3;
-    margin: 0;
-    padding: 0;
+.provider-manager-content .provider-manager-danger .provider-manager-action-label {
+    border-top: solid $error;
+    padding: 1 0 0 0;
+    color: $text-error;
+    text-style: bold;
+}
+
+/* An action that cannot be used right now is visibly muted */
+.provider-manager-content ActionButton:disabled {
+    border: round $border-blurred;
+    color: $text-muted;
+    text-style: none;
+    background: transparent;
+}
+
+/* A compact primary is filled; disabled, it must not be */
+.provider-manager-content ActionButton.-textual-compact:disabled {
+    color: $text-muted;
+    background: transparent;
+}
+
+/* Thin, quiet scrollbars */
+AWSManagerScreen #aws_mgr_container,
+HetznerManagerScreen #hetzner_mgr_container,
+OVHManagerScreen #ovh_mgr_container,
+AWSManagerScreen #aws_mgr_table,
+HetznerManagerScreen #hetzner_mgr_table,
+OVHManagerScreen #ovh_mgr_table {
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+    scrollbar-color: $border-blurred;
+    scrollbar-color-hover: $border;
+    scrollbar-background: transparent;
+    scrollbar-background-hover: transparent;
 }
 
 AWSManagerScreen.-content-narrow .provider-manager-body,
@@ -209,17 +231,47 @@ OVHManagerScreen.-content-narrow #ovh_mgr_status {
     margin: 0;
 }
 
-/* Narrow OVH actions keep their category beside the full native controls. */
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-group {
-    layout: horizontal;
+/* Narrow: the actions come first, so the intro (which they explain themselves
+   through their tooltips) and the selection's spacing give their rows back */
+AWSManagerScreen.-content-narrow #aws_mgr_hint,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_hint,
+OVHManagerScreen.-content-narrow #ovh_mgr_hint {
+    display: none;
+}
+
+.provider-manager-content .provider-manager-rail:first-child {
+    margin: 0 0 1 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-selection,
+HetznerManagerScreen.-content-narrow .provider-manager-selection,
+OVHManagerScreen.-content-narrow .provider-manager-selection {
     margin-bottom: 0;
 }
 
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-label {
-    width: 16;
+AWSManagerScreen.-content-narrow .provider-manager-selection-label,
+HetznerManagerScreen.-content-narrow .provider-manager-selection-label,
+OVHManagerScreen.-content-narrow .provider-manager-selection-label,
+AWSManagerScreen.-content-narrow .provider-manager-selection-name,
+HetznerManagerScreen.-content-narrow .provider-manager-selection-name,
+OVHManagerScreen.-content-narrow .provider-manager-selection-name {
+    margin: 0;
 }
 
-/* Two auto-row columns retain borders, line padding and a text cell each. */
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-buttons {
-    min-width: 11;
+AWSManagerScreen.-content-narrow .provider-manager-action-group,
+HetznerManagerScreen.-content-narrow .provider-manager-action-group,
+OVHManagerScreen.-content-narrow .provider-manager-action-group {
+    margin-bottom: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-danger,
+HetznerManagerScreen.-content-narrow .provider-manager-danger,
+OVHManagerScreen.-content-narrow .provider-manager-danger {
+    margin: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label,
+HetznerManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label,
+OVHManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label {
+    padding: 0;
 }

@@ -157,6 +157,19 @@ async def _power_prompt(pilot: Any) -> None:
     await _harness.wait_for_screen(pilot, "PowerActionConfirmModal")
 
 
+def _manager_of(nav_id: str, screen_name: str, table_id: str, rows: int, row: int) -> Scenario:
+    """A provider manager with the *row*-th server selected."""
+
+    async def scenario(pilot: Any) -> None:
+        screen = await _navigate(pilot, nav_id, screen_name)
+        table = screen.query_one(f"#{table_id}", DataTable)
+        await _harness.wait_until(pilot, lambda: table.row_count == rows, "the server table")
+        table.move_cursor(row=row)
+        await pilot.pause()
+
+    return scenario
+
+
 async def _dialog_over_fleet(pilot: Any) -> None:
     from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -433,3 +446,27 @@ def test_cloudwatch_empty(screen_snapshot, size: str) -> None:
 def test_cloudwatch_top_ips(screen_snapshot, size: str) -> None:
     """The CloudWatch browser after fetching WAF logs, Top IPs focused."""
     _capture(screen_snapshot, size, _cloudwatch_top_ips)
+
+
+@sizes
+def test_manager_aws(screen_snapshot, size: str) -> None:
+    """The EC2 manager with a stopped instance selected: Start is the live action."""
+    _capture(screen_snapshot, size, _manager_of(
+        "nav_aws_manage", "AWSManagerScreen", "aws_mgr_table", len(_harness.AWS_ROWS), 1,
+    ))
+
+
+@sizes
+def test_manager_ovh(screen_snapshot, size: str) -> None:
+    """The OVH manager with a running VPS selected (a VPS cannot be deleted here)."""
+    _capture(screen_snapshot, size, _manager_of(
+        "nav_ovh_manage", "OVHManagerScreen", "ovh_mgr_table", len(_harness.OVH_ROWS), 0,
+    ))
+
+
+@sizes
+def test_manager_hetzner(screen_snapshot, size: str) -> None:
+    """The Hetzner manager with a running server selected."""
+    _capture(screen_snapshot, size, _manager_of(
+        "nav_hetzner_manage", "HetznerManagerScreen", "hetzner_mgr_table", len(_harness.HETZNER_ROWS), 0,
+    ))

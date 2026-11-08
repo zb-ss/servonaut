@@ -16,6 +16,7 @@ from typing import Literal
 from textual.containers import Horizontal
 from textual.content import Content, ContentText
 from textual.events import Resize
+from textual.widget import Widget
 from textual.widgets import Button
 
 ActionRole = Literal["default", "primary", "warning", "error"]
@@ -116,7 +117,13 @@ class ActionRow(Horizontal):
 
     When the buttons do not fit it saves space in this order: shorter words,
     then no key hints, then it wraps onto further lines (class ``-wrap``).
+    A row with ``keep_hints`` never drops the hints: it wraps instead, so every
+    row of a screen shows the same hint state.
     """
+
+    def __init__(self, *children: Widget, keep_hints: bool = False, **kwargs) -> None:
+        super().__init__(*children, **kwargs)
+        self._keep_hints = keep_hints
 
     def on_resize(self, event: Resize) -> None:
         self.fit()
@@ -127,16 +134,23 @@ class ActionRow(Horizontal):
         buttons = list(self.query(ActionButton))
         if width <= 0 or not buttons:
             return
-        for short, hint in ((False, True), (True, True), (True, False)):
+        levels = ((False, True), (True, True)) + (() if self._keep_hints else ((True, False),))
+        for short, hint in levels:
             if sum(b.natural_width(short=short, hint=hint) for b in buttons) <= width:
                 self._apply(buttons, short=short, hint=hint, wrap=False)
                 return
-        self._apply(buttons, short=True, hint=False, wrap=True)
+        hint = self._keep_hints
+        self._apply(buttons, short=True, hint=hint, wrap=True)
+        # As many columns as the widest button allows, so none is squeezed.
+        widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
+        self.styles.grid_size_columns = max(1, min(len(buttons), width // widest))
 
     def _apply(self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
         for button in buttons:
             button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
+        if not wrap:
+            self.styles.grid_size_columns = None
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.
         self.call_after_refresh(self._remeasure)
