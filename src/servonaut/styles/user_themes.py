@@ -85,6 +85,8 @@ ANSI_SLOTS = 8
 ANSI_KEYS = ("normal", "bright")
 
 _SHOWN_MAX = 40
+# #RGBA and #RRGGBBAA: Textual's own themes write some variables this way.
+_HEX_WITH_ALPHA = re.compile(r"^#(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8})$")
 _PERCENT = re.compile(r"^(?P<colour>.+?)\s+(?P<percent>\d{1,3})%$")
 _TOML_LINE = re.compile(r"line (\d+)")
 
@@ -163,6 +165,8 @@ def _parse_variable_colour(value: object) -> Optional[str]:
     if not isinstance(value, str):
         return None
     text = value.strip()
+    if _HEX_WITH_ALPHA.match(text):
+        return _alpha_hex_as_opacity(text)
     percent = _PERCENT.match(text)
     colour = parse_colour(percent.group("colour") if percent else text)
     if colour is None:
@@ -172,6 +176,17 @@ def _parse_variable_colour(value: object) -> Optional[str]:
     if int(percent.group("percent")) > 100:
         return None
     return f"{colour.hex} {percent.group('percent')}%"
+
+
+def _alpha_hex_as_opacity(text: str) -> Optional[str]:
+    """``#RRGGBBAA`` as ``#RRGGBB NN%``, the form the stylesheet variables use."""
+    try:
+        colour = Color.parse(text)
+    except ColorParseError:
+        return None
+    opaque = Color(colour.r, colour.g, colour.b).hex
+    percent = round(colour.a * 100)
+    return opaque if percent >= 100 else f"{opaque} {percent}%"
 
 
 def _mix(first: Color, second: Color, amount: float) -> Color:
@@ -339,7 +354,7 @@ def _read_colours(data: Mapping[str, Any], lines: Mapping[str, int], problems: L
         colour = parse_colour(data[key])
         if colour is None:
             problems.append(_FileProblem(
-                f'"{key}" is not a colour ({_shown(data[key])})', _find_line(lines, key),
+                f'"{key}" is not a colour ({_shown(data[key])}); write it like "#RRGGBB"', _find_line(lines, key),
             ))
             continue
         colours[key] = colour.hex

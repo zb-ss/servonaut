@@ -294,3 +294,19 @@ def test_a_deeply_nested_file_is_one_error_and_one_log_line(tmp_path: Path, capl
     assert [e.message for e in result.errors] == ["Is nested too deeply"]
     assert [e.message for e in checked] == ["Is nested too deeply"]
     assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("written", "stored"),
+    [("#689d6a40", "#689D6A 25%"), ("#575b6190", "#575B61 56%"), ("#f008", "#FF0000 53%"), ("#ffffffff", "#FFFFFF")],
+)
+def test_a_variable_may_use_a_colour_with_alpha(tmp_path: Path, written: str, stored: str) -> None:
+    _write(tmp_path, "t.toml", VALID + f'[variables]\ninput-selection-background = "{written}"\n')
+    (loaded,) = load_user_themes((), tmp_path).themes
+    assert loaded.theme.variables["input-selection-background"] == stored
+
+
+def test_the_main_colours_still_refuse_alpha(tmp_path: Path) -> None:
+    _write(tmp_path, "t.toml", 'primary = "#5EB1FF"\naccent = "#689d6a40"\n')
+    (error,) = [e for e in load_user_themes((), tmp_path).errors if "accent" in e.message]
+    assert "#RRGGBB" in error.message

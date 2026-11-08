@@ -41,8 +41,10 @@ def test_describe_lists_servonaut_then_user_then_textual_themes(tmp_path: Path) 
     assert next(i for i in infos if i.name == "ocean").path == tmp_path / "ocean.toml"
 
 
-@pytest.mark.parametrize("theme", [SERVONAUT_DARK, SERVONAUT_LIGHT, BUILTIN_THEMES["nord"], BUILTIN_THEMES["textual-light"]],
-                         ids=lambda t: t.name)
+_EXPORTABLE = [theme for theme in _available().values() if not theme.ansi]
+
+
+@pytest.mark.parametrize("theme", _EXPORTABLE, ids=lambda t: t.name)
 def test_every_exported_theme_is_a_valid_theme_file_with_the_same_colours(theme: Theme, tmp_path: Path) -> None:
     info = describe_themes({theme.name: theme}, {})[0]
     path = tmp_path / "copy.toml"
