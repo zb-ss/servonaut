@@ -38,6 +38,9 @@ from textual.widgets import Button, DataTable, Footer, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_actions import (
+    ActionSpec, ProviderActionsMixin, action_rail, sync_actions, unless as _unless,
+)
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
     display_text,
@@ -113,7 +116,7 @@ _POWER_TEXT = {
 }
 
 
-class OVHManagerScreen(DemoRowsMixin, WorkspaceScreen):
+class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     """OVHcloud instance manager — list + lifecycle toolbar."""
 
     CHAT_REFLOW = True
@@ -181,40 +184,21 @@ class OVHManagerScreen(DemoRowsMixin, WorkspaceScreen):
                 ),
                 classes="provider-manager-selection",
             )
-            actions = Vertical(
-                Horizontal(
-                    Static("Inventory", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button("Refresh (F5)", id="btn_ovh_mgr_refresh"),
-                        Button("+ New Cloud (n)", variant="primary", id="btn_ovh_mgr_new"),
-                        classes="provider-manager-buttons provider-manager-inventory-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+            actions = action_rail(
+                "ovh_mgr_actions",
+                inventory=(
+                    ActionSpec("btn_ovh_mgr_refresh", "Refresh", "f5", disabled=False),
+                    ActionSpec("btn_ovh_mgr_new", "+ New cloud", "n", role="primary", short="+ New", disabled=False),
                 ),
-                selection,
-                Horizontal(
-                    Static("Selected server", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button("Start (s)", id="btn_ovh_mgr_start", disabled=True),
-                        Button("Stop (t)", id="btn_ovh_mgr_stop", disabled=True),
-                        Button("Reboot (b)", id="btn_ovh_mgr_reboot", disabled=True),
-                        classes="provider-manager-buttons provider-manager-power-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+                selection=selection,
+                power=(
+                    ActionSpec("btn_ovh_mgr_start", "Start", "s", role="primary"),
+                    ActionSpec("btn_ovh_mgr_stop", "Stop", "t"),
+                    ActionSpec("btn_ovh_mgr_reboot", "Reboot", "b"),
                 ),
-                Horizontal(
-                    Static("Remove", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button(
-                            "Delete (d)", variant="error",
-                            id="btn_ovh_mgr_delete", disabled=True,
-                        ),
-                        classes="provider-manager-buttons provider-manager-remove-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+                danger=(
+                    ActionSpec("btn_ovh_mgr_delete", "Delete", "d", role="error"),
                 ),
-                id="ovh_mgr_actions",
-                classes="provider-manager-actions",
             )
             actions.border_title = "Resource actions"
             rail = Vertical(actions, classes="provider-manager-rail")
@@ -251,6 +235,7 @@ class OVHManagerScreen(DemoRowsMixin, WorkspaceScreen):
         for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
                              ("State", 10), ("Public IP", 15), ("Region", 9), ("ID", 70)):
             table.add_column(label, width=width)
+        self.sync_compact_actions()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -474,21 +459,26 @@ class OVHManagerScreen(DemoRowsMixin, WorkspaceScreen):
         is_running = state in _RUNNING
         is_stopped = state in _STOPPED
 
-        for btn_id, enable in (
-            ("btn_ovh_mgr_start",
-             inst is not None and ptype in _SUPPORTS_START_STOP and is_stopped),
-            ("btn_ovh_mgr_stop",
-             inst is not None and ptype in _SUPPORTS_START_STOP and is_running),
-            ("btn_ovh_mgr_reboot",
-             inst is not None and ptype in _SUPPORTS_REBOOT
-             and (is_running or ptype == "dedicated")),
-            ("btn_ovh_mgr_delete",
-             inst is not None and ptype in _SUPPORTS_DELETE),
-        ):
-            try:
-                self.query_one(f"#{btn_id}", Button).disabled = not enable
-            except Exception:  # pragma: no cover - defensive
-                pass
+        has_row = inst is not None
+        sync_actions(self, {
+            "btn_ovh_mgr_start": _unless(
+                has_row, ptype in _SUPPORTS_START_STOP and is_stopped,
+                "Start needs a stopped VPS or cloud instance.",
+            ),
+            "btn_ovh_mgr_stop": _unless(
+                has_row, ptype in _SUPPORTS_START_STOP and is_running,
+                "Stop needs a running VPS or cloud instance.",
+            ),
+            "btn_ovh_mgr_reboot": _unless(
+                has_row,
+                ptype in _SUPPORTS_REBOOT and (is_running or ptype == "dedicated"),
+                "Reboot needs a running server.",
+            ),
+            "btn_ovh_mgr_delete": _unless(
+                has_row, ptype in _SUPPORTS_DELETE,
+                "Only cloud instances can be deleted here.",
+            ),
+        })
 
     # ------------------------------------------------------------------
     # Actions

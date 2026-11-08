@@ -111,10 +111,7 @@
     min-width: 14;
 }
 
-#hetzner_mgr_actions,
 #hetzner_ssh_keys_actions,
-#ovh_mgr_actions,
-#aws_mgr_actions,
 #bw_vault_mgr_actions,
 #s3_actions {
     layout: horizontal;
@@ -123,10 +120,7 @@
     align: left middle;
 }
 
-#hetzner_mgr_actions Button,
 #hetzner_ssh_keys_actions Button,
-#ovh_mgr_actions Button,
-#aws_mgr_actions Button,
 #bw_vault_mgr_actions Button,
 #s3_actions Button {
     margin: 0 1 0 0;
@@ -648,8 +642,6 @@ PassphraseModal Container#passphrase_container #passphrase_buttons {
 }
 
 /* Provider action rows reflow within the available workspace column. */
-AWSManagerScreen.-content-narrow #aws_mgr_actions,
-HetznerManagerScreen.-content-narrow #hetzner_mgr_actions,
 OVHDNSScreen.-content-narrow #dns_actions {
     layout: grid;
     grid-size: 3;
@@ -657,7 +649,6 @@ OVHDNSScreen.-content-narrow #dns_actions {
     grid-gutter: 0 1;
 }
 
-OVHManagerScreen.-content-narrow #ovh_mgr_actions,
 BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions {
     layout: grid;
     grid-size: 2;
@@ -677,9 +668,6 @@ ObjectStorageScreen.-content-narrow #s3_actions {
     grid-size: 3;
 }
 
-AWSManagerScreen.-content-narrow #aws_mgr_actions Button,
-HetznerManagerScreen.-content-narrow #hetzner_mgr_actions Button,
-OVHManagerScreen.-content-narrow #ovh_mgr_actions Button,
 BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions Button,
 OVHDNSScreen.-content-narrow #dns_actions Button,
 ObjectStorageScreen #s3_actions Button {

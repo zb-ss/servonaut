@@ -35,6 +35,9 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_actions import (
+    ActionSpec, ProviderActionsMixin, action_rail, sync_actions, unless as _unless,
+)
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
     display_text,
@@ -110,7 +113,7 @@ _POWER_TEXT = {
 }
 
 
-class HetznerManagerScreen(DemoRowsMixin, WorkspaceScreen):
+class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     """Hetzner Cloud server manager — list + lifecycle toolbar."""
 
     CHAT_REFLOW = True
@@ -175,41 +178,22 @@ class HetznerManagerScreen(DemoRowsMixin, WorkspaceScreen):
                 ),
                 classes="provider-manager-selection",
             )
-            actions = Vertical(
-                Horizontal(
-                    Static("Inventory", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button("Refresh (F5)", id="btn_hetzner_mgr_refresh"),
-                        Button("+ New (n)", variant="primary", id="btn_hetzner_mgr_new"),
-                        classes="provider-manager-buttons provider-manager-inventory-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+            actions = action_rail(
+                "hetzner_mgr_actions",
+                inventory=(
+                    ActionSpec("btn_hetzner_mgr_refresh", "Refresh", "f5", disabled=False),
+                    ActionSpec("btn_hetzner_mgr_new", "+ New", "n", role="primary", disabled=False),
                 ),
-                selection,
-                Horizontal(
-                    Static("Selected server", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button("Start (s)", id="btn_hetzner_mgr_power_on", disabled=True),
-                        Button("Shutdown (t)", id="btn_hetzner_mgr_shutdown", disabled=True),
-                        Button("Power off", id="btn_hetzner_mgr_power_off", disabled=True),
-                        Button("Reboot (b)", id="btn_hetzner_mgr_reboot", disabled=True),
-                        classes="provider-manager-buttons provider-manager-power-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+                selection=selection,
+                power=(
+                    ActionSpec("btn_hetzner_mgr_power_on", "Start", "s", role="primary"),
+                    ActionSpec("btn_hetzner_mgr_shutdown", "Shutdown", "t"),
+                    ActionSpec("btn_hetzner_mgr_power_off", "Power off", role="warning"),
+                    ActionSpec("btn_hetzner_mgr_reboot", "Reboot", "b"),
                 ),
-                Horizontal(
-                    Static("Remove", classes="provider-manager-action-label"),
-                    Horizontal(
-                        Button(
-                            "Delete (d)", variant="error",
-                            id="btn_hetzner_mgr_delete", disabled=True,
-                        ),
-                        classes="provider-manager-buttons provider-manager-remove-buttons",
-                    ),
-                    classes="provider-manager-action-group",
+                danger=(
+                    ActionSpec("btn_hetzner_mgr_delete", "Delete", "d", role="error"),
                 ),
-                id="hetzner_mgr_actions",
-                classes="provider-manager-actions",
             )
             actions.border_title = "Resource actions"
             rail = Vertical(actions, classes="provider-manager-rail")
@@ -246,6 +230,7 @@ class HetznerManagerScreen(DemoRowsMixin, WorkspaceScreen):
             "#", "Name", "ID", "Type", "State", "Public IP",
             "Region", "Created",
         )
+        self.sync_compact_actions()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -442,17 +427,14 @@ class HetznerManagerScreen(DemoRowsMixin, WorkspaceScreen):
         is_running = state in _RUNNING
         is_stopped = state in _STOPPED
 
-        for btn_id, enable in (
-            ("btn_hetzner_mgr_power_on", inst is not None and is_stopped),
-            ("btn_hetzner_mgr_shutdown", inst is not None and is_running),
-            ("btn_hetzner_mgr_power_off", inst is not None and is_running),
-            ("btn_hetzner_mgr_reboot", inst is not None and is_running),
-            ("btn_hetzner_mgr_delete", inst is not None),
-        ):
-            try:
-                self.query_one(f"#{btn_id}", Button).disabled = not enable
-            except Exception:  # pragma: no cover - defensive
-                pass
+        has_row = inst is not None
+        sync_actions(self, {
+            "btn_hetzner_mgr_power_on": _unless(has_row, is_stopped, "Start needs a stopped server."),
+            "btn_hetzner_mgr_shutdown": _unless(has_row, is_running, "Shutdown needs a running server."),
+            "btn_hetzner_mgr_power_off": _unless(has_row, is_running, "Power off needs a running server."),
+            "btn_hetzner_mgr_reboot": _unless(has_row, is_running, "Reboot needs a running server."),
+            "btn_hetzner_mgr_delete": _unless(has_row, True, ""),
+        })
 
     # ------------------------------------------------------------------
     # Actions

@@ -139,29 +139,43 @@ OVHManagerScreen .provider-manager-content #ovh_mgr_actions {
 }
 
 .provider-manager-content .provider-manager-buttons {
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: auto;
-    grid-gutter: 0 1;
     height: auto;
     width: 1fr;
 }
 
-.provider-manager-content .provider-manager-remove-buttons {
-    grid-size: 1;
-    grid-columns: 1fr;
+/* Destroying something is a group of its own, set apart from everyday actions */
+.provider-manager-content .provider-manager-danger {
+    margin: 1 0 0 0;
+    padding: 1 0 0 0;
+    border-top: solid $error;
 }
 
-AWSManagerScreen .provider-manager-content #aws_mgr_actions Button,
-HetznerManagerScreen .provider-manager-content #hetzner_mgr_actions Button,
-OVHManagerScreen .provider-manager-content #ovh_mgr_actions Button {
-    width: 1fr;
-    min-width: 0;
-    height: auto;
-    min-height: 3;
-    margin: 0;
-    padding: 0;
+.provider-manager-content .provider-manager-danger .provider-manager-action-label {
+    color: $text-error;
+    text-style: bold;
+}
+
+/* An action that cannot be used right now is visibly muted */
+.provider-manager-content ActionButton:disabled {
+    border: round $border-blurred;
+    color: $text-muted;
+    text-style: none;
+    background: transparent;
+}
+
+/* Thin, quiet scrollbars */
+AWSManagerScreen #aws_mgr_container,
+HetznerManagerScreen #hetzner_mgr_container,
+OVHManagerScreen #ovh_mgr_container,
+AWSManagerScreen #aws_mgr_table,
+HetznerManagerScreen #hetzner_mgr_table,
+OVHManagerScreen #ovh_mgr_table {
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+    scrollbar-color: $border-blurred;
+    scrollbar-color-hover: $border;
+    scrollbar-background: transparent;
+    scrollbar-background-hover: transparent;
 }
 
 AWSManagerScreen.-content-narrow .provider-manager-body,
@@ -207,19 +221,4 @@ AWSManagerScreen.-content-narrow #aws_mgr_status,
 HetznerManagerScreen.-content-narrow #hetzner_mgr_status,
 OVHManagerScreen.-content-narrow #ovh_mgr_status {
     margin: 0;
-}
-
-/* Narrow OVH actions keep their category beside the full native controls. */
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-group {
-    layout: horizontal;
-    margin-bottom: 0;
-}
-
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-action-label {
-    width: 16;
-}
-
-/* Two auto-row columns retain borders, line padding and a text cell each. */
-OVHManagerScreen.-content-narrow .provider-manager-content .provider-manager-buttons {
-    min-width: 11;
 }
