@@ -27,6 +27,7 @@ CARD_OF = {
     "btn_ai_analysis": "sa-diagnostics", "btn_scan": "sa-diagnostics",
     "btn_ban_ip": "sa-diagnostics",
 }
+OVH_CARD_OF = {f"btn_ovh_{name}": "sa-provider" for name in ("reinstall", "resize", "snapshots", "firewall")}
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,8 @@ def _assert_overview_geometry(screen: ServerActionsScreen) -> None:
         assert first.content_size.width >= first.label.cell_length, f"{first.id} label is clipped"
         for second in buttons[index + 1:]:
             assert not first.region.overlaps(second.region), (first.id, second.id)
-    for button_id, card_id in CARD_OF.items():
+    placed = {**CARD_OF, **(OVH_CARD_OF if screen.query("#sa-provider") else {})}
+    for button_id, card_id in placed.items():
         card = screen.query_one(f"#{card_id}")
         button = screen.query_one(f"#{button_id}")
         assert card.region.contains_region(button.region), (button_id, card_id)
@@ -68,6 +70,18 @@ async def test_geometry_has_no_overlap_clipping_or_stray_buttons(size) -> None:
     app = _LayoutHost()
     async with app.run_test(size=size) as pilot:
         screen = await _open_actions(app, pilot)
+        _assert_overview_geometry(screen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_geometry_with_the_provider_card(size) -> None:
+    app = _LayoutHost()
+    app.instances[0].update(is_ovh=True, provider_type="vps")
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
+        await pilot.pause()
         _assert_overview_geometry(screen)
 
 
@@ -124,17 +138,22 @@ async def test_buttons_are_compact_exactly_when_the_layout_is_narrow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ovh_extras_have_their_own_card_after_the_diagnostics() -> None:
+@pytest.mark.parametrize("size", SIZES)
+async def test_ovh_extras_have_their_own_card_after_the_diagnostics(size) -> None:
     app = _LayoutHost()
-    app.instances[0].update(is_ovh=True)
-    async with app.run_test(size=(160, 50)) as pilot:
+    app.instances[0].update(is_ovh=True, provider_type="vps")
+    async with app.run_test(size=size) as pilot:
         screen = await _open_actions(app, pilot)
         await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
         await pilot.pause()
         provider = screen.query_one("#sa-provider")
+        overview = screen.query_one("#sa-overview")
+        overview.scroll_to_widget(provider, animate=False)
+        await pilot.pause()
         assert provider.region.y >= screen.query_one("#sa-diagnostics").region.bottom
         for name in ("reinstall", "resize", "snapshots", "firewall"):
-            assert provider.region.contains_region(screen.query_one(f"#btn_ovh_{name}").region) or True
+            button = screen.query_one(f"#btn_ovh_{name}")
+            assert provider.region.contains_region(button.region), name
         assert screen.query_one("#btn_ovh_reinstall").has_class("-error")
         assert not screen.query("#action_buttons #btn_ovh_reinstall")
 
