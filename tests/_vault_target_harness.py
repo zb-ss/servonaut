@@ -111,7 +111,7 @@ class FakeVaultService:
     async def process_grants(self, *, vault_id: str, approval: Any, **kw: Any) -> list:
         self._rec("process_grants", vault_id=vault_id)
         approved = await approval(
-            {"user_id": "u-2", "display_name": f"Pending of {vault_id[:2]}", "email": "pat@example.invalid"},
+            {"user_id": "u-2", "display_name": f"Pending of {vault_id[:2]}", "email": ""},
             "11111 22222 33333", False,
         )
         self._rec("grant_decision", vault_id=vault_id, approved=approved)
