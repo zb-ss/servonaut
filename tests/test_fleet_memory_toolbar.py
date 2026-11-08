@@ -389,3 +389,14 @@ async def test_the_card_notices_servers_that_arrive_later(tmp_path):
         await pilot.pause()
         assert "Add a server" not in str(screen.query_one("#fleet-empty-text").render())
         assert screen.query_one("#btn_empty_scan").display is True
+
+
+async def test_the_banner_is_one_line_in_a_narrow_terminal(tmp_path):
+    app = _host(tmp_path, probed=())
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _ready(pilot)
+        await pilot.pause()
+        banner = screen.query_one("#fleet-memory-banner")
+        assert banner.region.height <= 3
+        assert "No memory cached yet" in str(screen.query_one("#fleet-banner-text").render())
+        assert screen.query_one("#fleet-memory-table", DataTable).size.height >= 8

@@ -104,6 +104,9 @@ _BANNER_TEXT = (
     "No server memory cached yet. Fleet Memory keeps facts about each server "
     "so the chat panel and MCP clients can answer without a live SSH round-trip."
 )
+_BANNER_SHORT_TEXT = "No memory cached yet"
+# Below this many columns the banner is one line, so the table keeps its rows.
+_BANNER_WIDE_COLUMNS = 140
 # Actions that act on the selected row; with no row there is nothing to act on.
 _ROW_ACTIONS = frozenset({
     "open_selected", "share_selected", "clear_selected", "toggle_mark", "mark_all",
@@ -835,6 +838,8 @@ class FleetMemoryScreen(WorkspaceScreen):
     def sync_workspace_controls(self) -> None:
         super().sync_workspace_controls()
         self._sync_compact_buttons()
+        if self._loaded:
+            self._sync_chrome()
 
     def _sync_compact_buttons(self) -> None:
         """One-row borderless buttons whenever the layout is narrow."""
@@ -884,14 +889,24 @@ class FleetMemoryScreen(WorkspaceScreen):
     def _sync_onboarding_text(self, kind: Optional[str], count: int) -> None:
         """The offer's words: the scan's progress while one runs, else what the screen is."""
         scanning = self._scanning and bool(self._scan_note)
-        default = _NO_SERVERS_TEXT if (kind == "card" and not count) else (
-            _EMPTY_TEXT if kind == "card" else _BANNER_TEXT)
+        default = {
+            "card": _EMPTY_TEXT if count else _NO_SERVERS_TEXT,
+            "banner": self._banner_text() if kind == "banner" else "",
+        }.get(kind or "", "")
         text = self._scan_note if scanning else default
         self.query_one("#fleet-empty-text", Static).update(text)
         self.query_one("#fleet-banner-text", Static).update(text)
         self.query_one("#btn_empty_scan").display = bool(count)
         for button_id in ("btn_empty_scan", "btn_banner_scan"):
             self.query_one(f"#{button_id}", ActionButton).disabled = self._scanning
+
+    def _banner_text(self) -> str:
+        """The banner's words: the full sentence when there is room, else a short line."""
+        try:
+            width = self.size.width
+        except AttributeError:  # not laid out yet: there is no width to be short of
+            return _BANNER_TEXT
+        return _BANNER_TEXT if width >= _BANNER_WIDE_COLUMNS else _BANNER_SHORT_TEXT
 
     def _sync_row_actions(self) -> None:
         """Enable the row buttons only while there are rows, saying why when not.
