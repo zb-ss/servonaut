@@ -104,8 +104,22 @@ class ProviderActionsMixin:
         super().sync_workspace_controls()
         self.sync_compact_actions()
 
+    def _place_rail(self, narrow: bool) -> None:
+        """Narrow: the rail comes before the table, so the actions are on the first screen."""
+        body = next(iter(self.query(".provider-manager-body")), None)
+        rail = next(iter(self.query(".provider-manager-rail")), None)
+        inventory = next(iter(self.query(".provider-manager-inventory")), None)
+        if body is None or rail is None or inventory is None:
+            return
+        first_is_rail = body.children[0] is rail
+        if narrow and not first_is_rail:
+            body.move_child(rail, before=inventory)
+        elif not narrow and first_is_rail:
+            body.move_child(rail, after=inventory)
+
     def sync_compact_actions(self) -> None:
         compact = self.has_class("-content-narrow")
+        self._place_rail(compact)
         for button in self.query(ActionButton):
             button.compact = compact
         for row in self.query(ActionRow):

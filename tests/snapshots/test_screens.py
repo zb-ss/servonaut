@@ -164,7 +164,6 @@ def _manager_of(nav_id: str, screen_name: str, table_id: str, rows: int, row: in
         screen = await _navigate(pilot, nav_id, screen_name)
         table = screen.query_one(f"#{table_id}", DataTable)
         await _harness.wait_until(pilot, lambda: table.row_count == rows, "the server table")
-        table.focus()
         table.move_cursor(row=row)
         await pilot.pause()
 

@@ -76,7 +76,6 @@ async def _open(app, pilot, manager: Manager, row: int | None = 0):
     table = screen.query_one(f"#{manager.table}", DataTable)
     await wait_until(lambda: table.row_count == manager.rows)
     if row is not None:
-        table.focus()
         table.move_cursor(row=row)
     await pilot.pause()
     await pilot.pause()
@@ -334,3 +333,37 @@ async def test_shortcuts_refuse_what_the_button_refuses(manager: Manager, name: 
                     assert notes == [button.tooltip], (changes, key, notes)
                 else:
                     assert started and not notes, (changes, key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager", MANAGERS, ids=IDS)
+async def test_narrow_layout_shows_every_action_without_scrolling(manager: Manager) -> None:
+    app = _harness.SnapshotApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open(app, pilot, manager)
+        container = screen.query_one(f"#{manager.prefix}_container")
+        buttons = [b for b in screen.query(".provider-manager-rail ActionButton")]
+        assert container.scroll_y == 0
+        for button in buttons:
+            assert container.region.contains_region(button.region), (button.id, button.region, container.region)
+        assert not screen.query_one(f"#{manager.prefix}_hint").display
+        rail = screen.query_one(".provider-manager-rail")
+        table_panel = screen.query_one(".provider-manager-inventory")
+        assert rail.region.y < table_panel.region.y
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager", MANAGERS, ids=IDS)
+async def test_wide_layout_keeps_the_table_before_the_rail(manager: Manager) -> None:
+    app = _harness.SnapshotApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, manager)
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        await pilot.resize_terminal(160, 50)
+        for _ in range(6):
+            await pilot.pause()
+        rail = screen.query_one(".provider-manager-rail")
+        table_panel = screen.query_one(".provider-manager-inventory")
+        assert table_panel.region.x < rail.region.x
+        assert screen.query_one(f"#{manager.prefix}_hint").display

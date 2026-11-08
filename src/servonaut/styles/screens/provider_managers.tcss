@@ -230,3 +230,48 @@ HetznerManagerScreen.-content-narrow #hetzner_mgr_status,
 OVHManagerScreen.-content-narrow #ovh_mgr_status {
     margin: 0;
 }
+
+/* Narrow: the actions come first, so the intro (which they explain themselves
+   through their tooltips) and the selection's spacing give their rows back */
+AWSManagerScreen.-content-narrow #aws_mgr_hint,
+HetznerManagerScreen.-content-narrow #hetzner_mgr_hint,
+OVHManagerScreen.-content-narrow #ovh_mgr_hint {
+    display: none;
+}
+
+.provider-manager-content .provider-manager-rail:first-child {
+    margin: 0 0 1 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-selection,
+HetznerManagerScreen.-content-narrow .provider-manager-selection,
+OVHManagerScreen.-content-narrow .provider-manager-selection {
+    margin-bottom: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-selection-label,
+HetznerManagerScreen.-content-narrow .provider-manager-selection-label,
+OVHManagerScreen.-content-narrow .provider-manager-selection-label,
+AWSManagerScreen.-content-narrow .provider-manager-selection-name,
+HetznerManagerScreen.-content-narrow .provider-manager-selection-name,
+OVHManagerScreen.-content-narrow .provider-manager-selection-name {
+    margin: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-action-group,
+HetznerManagerScreen.-content-narrow .provider-manager-action-group,
+OVHManagerScreen.-content-narrow .provider-manager-action-group {
+    margin-bottom: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-danger,
+HetznerManagerScreen.-content-narrow .provider-manager-danger,
+OVHManagerScreen.-content-narrow .provider-manager-danger {
+    margin: 0;
+}
+
+AWSManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label,
+HetznerManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label,
+OVHManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label {
+    padding: 0;
+}
