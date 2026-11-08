@@ -27,6 +27,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
+from textual.timer import Timer
 from textual.worker import Worker
 
 from servonaut.utils.markup import literal
@@ -74,6 +75,8 @@ _COUNT_KEY_FOR_HEADING = {
     "Members": "vault_roster", "Exposures": "vault_exposures",
 }
 # The app remembers the last view for the session, so reopening the screen returns to it.
+# Seconds the cursor rests before the inspector shows the new row.
+_FACTS_DELAY = 0.1
 _LAST_VIEW_ATTR = "vault_last_view"
 _LAST_VAULT_ATTR = "vault_last_vault"
 # The inspector's groups in their usual order; the group holding the suggested next step leads.
@@ -1106,6 +1109,7 @@ class VaultScreen(WorkspaceScreen):
         self._identity_action: Optional[str] = None
         self._primary: Optional[str] = None
         self._facts_heading = ""
+        self._facts_timer: Optional[Timer] = None
         self._restore_vault: Optional[str] = None
         # Rows loaded per view, shown in the view switch once a view has been opened.
         self._view_counts: dict[str, int] = {}
@@ -1182,11 +1186,12 @@ class VaultScreen(WorkspaceScreen):
                                 with Vertical(id="vault_danger_group", classes="vault_action_group"):
                                     yield Static("IRREVERSIBLE", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
-                                        yield ActionButton("Rotate vault key", short="Rotate", id="vault_rotate", role="error")
-                                        yield ActionButton("Reset identity", short="Reset", id="vault_reset", role="error")
+                                        yield ActionButton("Rotate vault key", short="Rotate vault", id="vault_rotate", role="error")
+                                        yield ActionButton("Reset identity", id="vault_reset", role="error")
                                     with ActionRow(classes="vault_group_buttons"):
-                                        yield ActionButton("Rotate recovery key", short="Recovery key", id="vault_recovery_rotate", role="error")
-                                        yield ActionButton("Delete multiple", short="Delete many", id="vault_delete_keys", role="error")
+                                        yield ActionButton("Rotate recovery key", short="Rotate recovery", id="vault_recovery_rotate", role="error")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Delete multiple", short="Delete keys", id="vault_delete_keys", role="error")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1487,12 +1492,20 @@ class VaultScreen(WorkspaceScreen):
             self.call_after_refresh(self._reveal_focused_action)
 
     def _reveal_summary_action(self, button: Button) -> None:
-        """Scroll an action into view inside the inspector."""
+        """Scroll the inspector so the button's group, heading first, is in view."""
         if not button.is_attached or not button.display:
             return
-        if self.query_one("#vault_action_scroll").region.contains_region(button.region):
+        shelf = self.query_one("#vault_action_scroll")
+        group = next((a for a in button.ancestors if a.has_class("vault_action_group")), None)
+        if group is None or not group.region.height:
+            button.scroll_visible(animate=False)
             return
-        button.scroll_visible(animate=False)
+        # The narrow layout pins the selection on the first row of the shelf.
+        pinned = 1 if self.has_class("-content-narrow") else 0
+        top = shelf.content_region.y + pinned
+        if top <= group.region.y and shelf.content_region.contains_region(button.region):
+            return
+        shelf.scroll_to(y=max(0, group.region.y - shelf.content_region.y + shelf.scroll_y - pinned), animate=False)
 
     @on(DataTable.RowHighlighted, "#vault_table")
     def _row_highlighted(self) -> None:
@@ -1552,22 +1565,32 @@ class VaultScreen(WorkspaceScreen):
 
     def _sync_facts(self) -> None:
         """Show the selected row; this is all a cursor move changes."""
+        if self._facts_timer is not None:
+            self._facts_timer.stop()
+            self._facts_timer = None
         heading, facts = self._inspector_facts()
         heading = heading.upper()
         if heading != self._facts_heading:
             self._facts_heading = heading
             self.query_one("#vault_inspector_heading", Static).update(heading)
-        # The panel has a fixed height, so the facts need no new layout.
-        self.query_one("#vault_inspector_facts", Static).update(facts, layout=False)
+        self.query_one("#vault_inspector_facts", Static).update(facts)
 
     def _selection_changed(self) -> None:
-        """Repaint the facts, and the roles only when the suggested step moved."""
-        try:
-            self._sync_facts()
-        except NoMatches:
-            return  # the screen is closing
+        """Repaint the facts once the cursor rests, and the roles when the suggested step moved.
+
+        Painting a second region on every key press of a held arrow made long
+        lists slower, so the facts wait for a short pause.
+        """
+        if self._facts_timer is not None:
+            self._facts_timer.stop()
+        self._facts_timer = self.set_timer(_FACTS_DELAY, self._repaint_facts)
         if self._primary_action() != self._primary:
             self._apply_roles()
+
+    def _repaint_facts(self) -> None:
+        self._facts_timer = None
+        with contextlib.suppress(NoMatches):  # the screen is closing
+            self._sync_facts()
 
     def _apply_roles(self) -> None:
         """Make the suggested next step primary; destructive actions keep their own role."""

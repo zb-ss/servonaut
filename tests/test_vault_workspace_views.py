@@ -14,6 +14,9 @@ from tests.test_vault_screen import _StyledVaultHost, _VaultHost, _VaultStatusSe
 
 _PERSONAL = "11111111-1111-4111-8111-111111111111"
 _TEAM = "22222222-2222-4222-8222-222222222222"
+# An OpenSSH SHA256 fingerprint is "SHA256:" and 43 characters; ids are UUIDs.
+_FINGERPRINT = "SHA256:" + "q" * 43
+_ITEM_1 = "9a3f1c52-7d4e-4b8a-9c11-2e5f60a7b8c9"
 _HOSTILE = "[bold red]Mallory[/bold red] [link=https://example.invalid]x"
 
 _VIEW_BUTTONS = ("vault_vaults", "vault_items", "vault_devices", "vault_roster", "vault_exposures")
@@ -52,13 +55,13 @@ class _Service:
     async def list_items(self, **_kwargs):
         self.calls.append("list_items")
         return {"data": [
-            {"item_id": "k1", "type": "ssh_key", "revision": 3, "public_fingerprint": "SHA256:abc"},
-            {"item_id": "k2", "type": "ssh_key", "revision": 1, "public_fingerprint": "SHA256:def"},
+            {"item_id": _ITEM_1, "type": "ssh_key", "revision": 3, "public_fingerprint": _FINGERPRINT},
+            {"item_id": "k2", "type": "ssh_key", "revision": 1, "public_fingerprint": "SHA256:" + "d" * 43},
         ]}
 
     async def ssh_key_choices(self, **_kwargs):
         return [
-            {"item_id": "k1", "name": _HOSTILE if self.hostile else "Deploy key for web-1"},
+            {"item_id": _ITEM_1, "name": _HOSTILE if self.hostile else "Deploy key for web-1"},
             {"item_id": "k2", "name": "Backup key"},
         ]
 
@@ -559,3 +562,37 @@ async def test_a_narrow_screen_still_names_the_selected_device_above_the_actions
         await wait_until(lambda: shelf.region.contains_region(facts.region) and facts.region.height == 1)
         approve = screen.query_one("#vault_approve")
         assert shelf.region.contains_region(approve.region) or approve.region.y >= facts.region.bottom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_a_real_length_fingerprint_and_item_id_are_never_cut(size) -> None:
+    app = _StyledVaultHost(_Service())
+    async with app.run_test(size=size):
+        screen = await _ready(app)
+        await _view(screen, screen.action_items, "items")
+        facts = screen.query_one("#vault_inspector_facts", Static)
+        await wait_until(lambda: _FINGERPRINT in facts.render().plain.replace("\n", ""))
+        assert _ITEM_1 in facts.render().plain
+        if size[0] > 110:
+            needed = facts.visual.get_height(facts.styles, facts.size.width)
+            await wait_until(lambda: facts.size.height >= needed)
+        else:
+            # Narrow: the pinned line is the name; the full facts are in the table row.
+            assert facts.size.height == 1
+
+
+@pytest.mark.asyncio
+async def test_the_narrow_device_view_keeps_the_group_heading_above_its_actions() -> None:
+    app = _StyledVaultHost(_Service())
+    async with app.run_test(size=(100, 30)):
+        screen = await _ready(app)
+        await _view(screen, screen.action_devices, "devices")
+        shelf = screen.query_one("#vault_action_scroll")
+        group = screen.query_one("#vault_identity_group")
+        heading = group.query_one(".vault_group_heading")
+        approve = screen.query_one("#vault_approve")
+        await wait_until(lambda: shelf.region.contains_region(heading.region)
+                         and shelf.region.contains_region(approve.region))
+        facts = screen.query_one("#vault_inspector_facts", Static)
+        assert heading.region.y >= facts.region.bottom

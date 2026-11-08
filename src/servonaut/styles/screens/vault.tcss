@@ -197,9 +197,8 @@ VaultScreen #vault_inspector_heading {
     height: auto;
 }
 
-/* A fixed height: moving the cursor swaps the facts without re-laying out the panel. */
 VaultScreen #vault_inspector_facts {
-    height: 5;
+    height: auto;
 }
 
 VaultScreen .vault_group_buttons {
@@ -334,17 +333,6 @@ VaultScreen.-content-narrow #vault_actions {
     margin-top: 1;
 }
 
-/* Long status text must not push the table off a short screen. */
-VaultScreen.-content-narrow #vault_status {
-    max-height: 2;
-    overflow: hidden;
-}
-
-/* Setup guidance is the content there, so it stays whole. */
-VaultScreen.-content-narrow.-identity-pending #vault_status {
-    max-height: initial;
-    overflow: initial;
-}
 
 VaultScreen.-content-narrow #vault_identity_panel {
     margin-bottom: 0;
