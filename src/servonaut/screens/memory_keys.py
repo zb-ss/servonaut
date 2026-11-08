@@ -224,8 +224,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             self.call_after_refresh(self._show_feedback)
 
     def _show_feedback(self) -> None:
-        """Keep the reason Enrol is disabled in view while the user types."""
+        """Keep the reason Enrol is disabled in view while the user types.
+
+        The field being typed in always stays in view, even when the reason
+        and the field cannot both fit.
+        """
         self.query_one("#enrol-mismatch", Static).scroll_visible(animate=False, immediate=True)
+        self._show_focused_control()
 
     def _update_validation(self) -> None:
         pass1 = self.query_one("#enrol-pass1", Input).value
