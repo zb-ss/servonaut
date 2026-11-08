@@ -429,13 +429,34 @@ def test_demo_mode_redacts_a_provider_failure_reason() -> None:
         pilot.app.redact_display_text = lambda text: (redacted.append(text) or real(text))
         screen.action_refresh()
         gates["aws"].release()
-        gates["hetzner"].release()
-        gates["ovh"].release(error="cannot reach vps-00000001.example.test")
+        gates["ovh"].release()
+        gates["hetzner"].release(error="cannot reach vps-00000001.example.test")
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
         text = screen.query_one("#fleet_load_status", Static).visual.plain
         assert any("vps-00000001.example.test" in item for item in redacted)
         assert "vps-00000001.example.test" not in text
+
+    _run(scenario, demo=True)
+
+
+def test_demo_mode_hides_ovh_failure_details_that_name_a_project() -> None:
+    project = "7f3a9c2b1d4e5f60718293a4b5c6d7e8"
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        gates = _harness.gate_providers(pilot.app)
+        screen.action_refresh()
+        gates["aws"].release()
+        gates["hetzner"].release()
+        gates["ovh"].release(
+            error=f"Could not list OVH Public Cloud project {project} (HTTP 403); none cached."
+        )
+        await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
+        await pilot.pause()
+        text = screen.query_one("#fleet_load_status", Static).visual.plain
+        assert project not in text
+        assert "OVH · stale: could not refresh" in text
 
     _run(scenario, demo=True)
 

@@ -1111,10 +1111,16 @@ class InstanceListScreen(WorkspaceScreen):
         self._render_load()
 
     def _load_error(self, key: str, worker: Worker) -> str:
+        """Why a provider's rows are not fresh, or "" when they are."""
         if worker.error:
-            return str(worker.error) or type(worker.error).__name__
-        reported = getattr(self.app.provider_inventory(key), "last_fetch_error", None)
-        return reported if isinstance(reported, str) else ""
+            reason = str(worker.error) or type(worker.error).__name__
+        else:
+            reported = getattr(self.app.provider_inventory(key), "last_fetch_error", None)
+            reason = reported if isinstance(reported, str) else ""
+        if reason and key == "ovh" and self.app.demo_mode:
+            # Like the refresh toast: OVH details name Public Cloud project ids.
+            return "could not refresh"
+        return reason
 
     def _render_load(self) -> None:
         """Show the load report above the list, or hide it when there is none."""
