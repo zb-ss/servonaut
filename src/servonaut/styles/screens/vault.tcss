@@ -107,13 +107,13 @@ VaultScreen .vault_view {
     margin: 0 1 0 0;
 }
 
-VaultScreen .vault_view.-active {
+VaultScreen .vault_view.-current-view {
     border: round $accent;
     color: $text-accent;
     text-style: bold;
 }
 
-VaultScreen .vault_view.-textual-compact.-active {
+VaultScreen .vault_view.-textual-compact.-current-view {
     background: $primary;
     color: $background;
 }
@@ -193,9 +193,13 @@ VaultScreen .vault_group_heading {
     text-style: bold;
 }
 
-VaultScreen #vault_inspector_heading,
-VaultScreen #vault_inspector_facts {
+VaultScreen #vault_inspector_heading {
     height: auto;
+}
+
+/* A fixed height: moving the cursor swaps the facts without re-laying out the panel. */
+VaultScreen #vault_inspector_facts {
+    height: 5;
 }
 
 VaultScreen .vault_group_buttons {
@@ -301,9 +305,8 @@ VaultScreen.-content-narrow #vault_records_panel {
 
 VaultScreen.-content-narrow #vault_action_scroll {
     width: 100%;
-    height: 10;
+    height: 1fr;
     min-height: 10;
-    max-height: 10;
     margin: 1 0 0 0;
 }
 
@@ -311,9 +314,36 @@ VaultScreen.-content-narrow .vault_group_heading {
     margin-bottom: 0;
 }
 
-/* The table row already shows the facts; the room goes to the actions. */
-VaultScreen.-content-narrow #vault_inspector {
+/* The table row shows the facts; only the name and state stay, so the actions have the room. */
+VaultScreen.-content-narrow #vault_inspector_heading {
     display: none;
+}
+
+VaultScreen.-content-narrow #vault_inspector_facts {
+    height: 1;
+}
+
+/* Pinned above the scrolling actions, so the selection stays named while they scroll. */
+VaultScreen.-content-narrow #vault_inspector {
+    dock: top;
+    height: 1;
+    margin-bottom: 0;
+}
+
+VaultScreen.-content-narrow #vault_actions {
+    margin-top: 1;
+}
+
+/* Long status text must not push the table off a short screen. */
+VaultScreen.-content-narrow #vault_status {
+    max-height: 2;
+    overflow: hidden;
+}
+
+/* Setup guidance is the content there, so it stays whole. */
+VaultScreen.-content-narrow.-identity-pending #vault_status {
+    max-height: initial;
+    overflow: initial;
 }
 
 VaultScreen.-content-narrow #vault_identity_panel {
@@ -327,6 +357,11 @@ VaultScreen.-content-narrow .vault_view {
 VaultScreen.-content-narrow.-records-empty #vault_workspace,
 VaultScreen.-content-narrow.-identity-pending #vault_workspace {
     min-height: 0;
+}
+
+VaultScreen.-content-narrow.-records-empty #vault_action_scroll {
+    height: 8;
+    min-height: 8;
 }
 
 VaultScreen.-content-narrow.-identity-pending #vault_action_scroll {

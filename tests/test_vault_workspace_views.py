@@ -18,7 +18,7 @@ _HOSTILE = "[bold red]Mallory[/bold red] [link=https://example.invalid]x"
 
 _VIEW_BUTTONS = ("vault_vaults", "vault_items", "vault_devices", "vault_roster", "vault_exposures")
 _DANGER_BUTTONS = (
-    "vault_rotate", "vault_recovery_rotate", "vault_reset", "vault_delete_key", "vault_delete_keys",
+    "vault_rotate", "vault_recovery_rotate", "vault_reset", "vault_delete_keys",
 )
 
 
@@ -111,7 +111,7 @@ def _facts(screen: VaultScreen) -> str:
 
 
 def _active(screen: VaultScreen) -> list[str]:
-    return [b.id for b in screen.query("#vault_views ActionButton") if b.has_class("-active")]
+    return [b.id for b in screen.query("#vault_views ActionButton") if b.has_class("-current-view")]
 
 
 @pytest.mark.asyncio
@@ -129,10 +129,12 @@ async def test_each_view_opens_by_click_and_by_key_with_the_same_handler(button_
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _ready(app)
         assert _active(screen) == ["vault_vaults"]
+        await _clickable(app, pilot, screen, button_id)
         assert await pilot.click(f"#{button_id}")
         await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
-        assert _active(screen) == [button_id]
+        await wait_until(lambda: _active(screen) == [button_id])
 
+        await _clickable(app, pilot, screen, "vault_vaults")
         assert await pilot.click("#vault_vaults")
         await wait_until(lambda: screen._table_mode == "vaults")
         assert _active(screen) == ["vault_vaults"]
@@ -231,6 +233,15 @@ async def test_switching_views_keeps_acting_on_the_vault_being_looked_at() -> No
         await wait_until(lambda: f"list_exposures:{_TEAM}" in service.calls)
 
 
+async def _clickable(app, pilot, screen: VaultScreen, button_id: str) -> None:
+    """Wait until layout and focus scrolling are done and the button is what a click would hit."""
+    button = screen.query_one(f"#{button_id}")
+    await wait_until(lambda: not screen._busy_work and button.region.width > 0
+                     and app.get_widget_at(*button.region.center)[0] is button)
+    # Queued focus reveals scroll once more; let them run before a click lands.
+    await pilot.pause()
+
+
 async def _view(screen: VaultScreen, action, mode: str) -> None:
     action()
     await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
@@ -318,16 +329,14 @@ async def test_the_inspector_follows_the_selected_row() -> None:
         assert heading.render().plain == "SELECTED VAULT"
         assert "Personal" in _facts(screen) and _PERSONAL in _facts(screen)
         screen.query_one("#vault_table", DataTable).move_cursor(row=1)
-        await pilot.pause()
-        assert "Platform team" in _facts(screen) and "team" in _facts(screen)
+        await wait_until(lambda: "Platform team" in _facts(screen) and "team" in _facts(screen))
 
         screen.action_devices()
         await wait_until(lambda: screen._table_mode == "devices" and not screen._busy_work)
         assert heading.render().plain == "SELECTED DEVICE"
         assert "build workstation" in _facts(screen) and "pending" in _facts(screen)
         screen.query_one("#vault_table", DataTable).move_cursor(row=0)
-        await pilot.pause()
-        assert "work laptop" in _facts(screen) and "d-1" in _facts(screen)
+        await wait_until(lambda: "work laptop" in _facts(screen) and "d-1" in _facts(screen))
 
 
 @pytest.mark.asyncio
@@ -342,8 +351,7 @@ async def test_names_from_the_service_and_teammates_are_shown_literally() -> Non
             action()
             await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
             screen.query_one("#vault_table", DataTable).move_cursor(row=0 if mode == "items" else 1)
-            await pilot.pause()
-            assert _HOSTILE in _facts(screen), mode
+            await wait_until(lambda: _HOSTILE in _facts(screen))
         assert app._exception is None
 
 
@@ -378,8 +386,7 @@ async def test_a_pending_device_makes_approve_the_primary_action() -> None:
         await wait_until(lambda: screen._table_mode == "devices" and not screen._busy_work)
         await wait_until(lambda: approve.variant == "primary")
         screen.query_one("#vault_table", DataTable).move_cursor(row=0)
-        await pilot.pause()
-        assert approve.variant == "default"
+        await wait_until(lambda: approve.variant == "default")
 
 
 @pytest.mark.asyncio
@@ -393,7 +400,7 @@ async def test_the_suggested_identity_step_is_primary_and_leads_the_inspector() 
         confirm = screen.query_one("#vault_confirm_identity", ActionButton)
         assert confirm.variant == "primary" and confirm.has_class("-next-action")
         groups = [child.id for child in screen.query_one("#vault_actions").children]
-        assert groups[:2] == ["vault_inspector", "vault_identity_group"]
+        assert groups[0] == "vault_identity_group"
 
 
 @pytest.mark.asyncio
@@ -405,6 +412,8 @@ async def test_destructive_actions_use_the_error_role_in_a_separate_group() -> N
         for button_id in _DANGER_BUTTONS:
             button = screen.query_one(f"#{button_id}", ActionButton)
             assert button.variant == "error" and group in button.ancestors, button_id
+        delete = screen.query_one("#vault_delete_key", ActionButton)
+        assert delete.variant == "error" and screen.query_one("#vault_keys_group") in delete.ancestors
         assert screen.query_one("#vault_rotate_exposure", ActionButton).variant == "warning"
         assert screen.query_one("#vault_cancel_wait", ActionButton).variant == "error"
         for button in screen.query(ActionButton):
@@ -498,3 +507,55 @@ async def test_terminal_escape_sequences_in_names_never_reach_the_terminal() -> 
             output = screen._compositor.render_update(full=True).render_segments(Console(width=160))
             assert "\x1b]" not in output and "example.invalid\x1b" not in output, mode
             assert "\x1b]8" not in _facts(screen) and "\x07" not in _facts(screen), mode
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_open_view_reloads_it_like_its_key() -> None:
+    service = _Service()
+    app = _StyledVaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(app)
+        await _view(screen, screen.action_devices, "devices")
+        before = service.calls.count("list_devices")
+        await _clickable(app, pilot, screen, "vault_devices")
+        assert await pilot.click("#vault_devices")
+        await wait_until(lambda: service.calls.count("list_devices") == before + 1)
+        assert _active(screen) == ["vault_devices"]
+
+
+@pytest.mark.asyncio
+async def test_the_pending_device_step_is_named_next_and_a_scoped_view_reopens_on_its_vault() -> None:
+    service = _Service()
+    app = _StyledVaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(app)
+        await _view(screen, screen.action_devices, "devices")
+        step = screen.query_one("#vault_next_step", Static)
+        await wait_until(lambda: step.has_class("-shown"))
+        assert step.render().plain == "Next: Approve device"
+
+        screen.action_vaults()
+        await wait_until(lambda: screen._table_mode == "vaults")
+        screen.query_one("#vault_table", DataTable).move_cursor(row=1)
+        await wait_until(lambda: screen._selected_vault_id == _TEAM)
+        await _view(screen, screen.action_items, "items")
+        app.pop_screen()
+        service.calls.clear()
+        reopened = VaultScreen()
+        await app.push_screen(reopened)
+        await wait_until(lambda: reopened._table_mode == "items" and not reopened._busy_work)
+        assert reopened._selected_vault_id == _TEAM
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_screen_still_names_the_selected_device_above_the_actions() -> None:
+    app = _StyledVaultHost(_Service())
+    async with app.run_test(size=(100, 30)):
+        screen = await _ready(app)
+        await _view(screen, screen.action_devices, "devices")
+        facts = screen.query_one("#vault_inspector_facts", Static)
+        shelf = screen.query_one("#vault_action_scroll")
+        await wait_until(lambda: "build workstation" in facts.render().plain)
+        await wait_until(lambda: shelf.region.contains_region(facts.region) and facts.region.height == 1)
+        approve = screen.query_one("#vault_approve")
+        assert shelf.region.contains_region(approve.region) or approve.region.y >= facts.region.bottom

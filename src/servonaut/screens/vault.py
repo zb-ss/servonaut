@@ -74,9 +74,10 @@ _COUNT_KEY_FOR_HEADING = {
 }
 # The app remembers the last view for the session, so reopening the screen returns to it.
 _LAST_VIEW_ATTR = "vault_last_view"
+_LAST_VAULT_ATTR = "vault_last_vault"
 # The inspector's groups in their usual order; the group holding the suggested next step leads.
 _GROUP_ORDER = (
-    "vault_inspector", "vault_onboarding_group", "vault_keys_group", "vault_identity_group",
+    "vault_onboarding_group", "vault_keys_group", "vault_identity_group",
     "vault_maintenance_group", "vault_danger_group",
 )
 # Actions whose role marks them as risky; the suggested next step never replaces it.
@@ -1091,6 +1092,11 @@ class VaultScreen(WorkspaceScreen):
         # The action the status line names, focused (and so scrolled into view) once work ends.
         self._next_action: Optional[str] = None
         self._last_summary_action: Optional[str] = None
+        # The identity step the status line names, and the action shown as primary.
+        self._identity_action: Optional[str] = None
+        self._primary: Optional[str] = None
+        self._facts_heading = ""
+        self._restore_vault: Optional[str] = None
         # Rows loaded per view, shown in the view switch once a view has been opened.
         self._view_counts: dict[str, int] = {}
         # The view this screen reopens once the vault is ready (the last one used).
@@ -1128,10 +1134,10 @@ class VaultScreen(WorkspaceScreen):
                             yield Static("", id="vault_records_empty", markup=False)
                             yield DataTable(id="vault_table", cursor_type="row", zebra_stripes=True)
                         with VerticalScroll(id="vault_action_scroll"):
+                            with Vertical(id="vault_inspector", classes="vault_action_group"):
+                                yield Static("SELECTED VAULT", id="vault_inspector_heading", classes="vault_group_heading")
+                                yield Static("", id="vault_inspector_facts")
                             with Vertical(id="vault_actions"):
-                                with Vertical(id="vault_inspector", classes="vault_action_group"):
-                                    yield Static("SELECTED VAULT", id="vault_inspector_heading", classes="vault_group_heading")
-                                    yield Static("", id="vault_inspector_facts")
                                 with Vertical(id="vault_onboarding_group", classes="vault_action_group"):
                                     yield Static("IDENTITY AND DEVICES", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
@@ -1147,14 +1153,16 @@ class VaultScreen(WorkspaceScreen):
                                         yield ActionButton("Reveal", "v", id="vault_reveal")
                                         yield ActionButton("Rename key", id="vault_rename_key")
                                     with ActionRow(classes="vault_group_buttons"):
-                                        yield ActionButton("Auto-bind keys", short="Auto-bind", id="vault_auto_bind")
+                                        yield ActionButton("Delete key", id="vault_delete_key", role="error")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Auto-bind keys", id="vault_auto_bind")
                                 with Vertical(id="vault_identity_group", classes="vault_action_group"):
                                     yield Static("IDENTITY AND ACCESS", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
-                                        yield ActionButton("Confirm identity", short="Confirm", id="vault_confirm_identity")
+                                        yield ActionButton("Confirm identity", short="Confirm ID", id="vault_confirm_identity")
                                         yield ActionButton("Approve device", short="Approve", id="vault_approve")
                                     with ActionRow(classes="vault_group_buttons"):
-                                        yield ActionButton("Process grants", "g", short="Grants", id="vault_grants")
+                                        yield ActionButton("Process grants", "g", id="vault_grants")
                                 with Vertical(id="vault_maintenance_group", classes="vault_action_group"):
                                     yield Static("EXPOSURES", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
@@ -1168,14 +1176,13 @@ class VaultScreen(WorkspaceScreen):
                                         yield ActionButton("Reset identity", short="Reset", id="vault_reset", role="error")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Rotate recovery key", short="Recovery key", id="vault_recovery_rotate", role="error")
-                                        yield ActionButton("Delete key", id="vault_delete_key", role="error")
-                                    with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Delete multiple", short="Delete many", id="vault_delete_keys", role="error")
         yield Footer()
 
     def on_mount(self) -> None:
         self._sync_compact_layout()
         self._restore_view = getattr(self.app, _LAST_VIEW_ATTR, None)
+        self._restore_vault = getattr(self.app, _LAST_VAULT_ATTR, None)
         table = self.query_one("#vault_table", DataTable)
         table.add_columns("Name", "Kind", "Items", "Open exposures", "Vault ID")
         self._sync_compact_buttons()
@@ -1200,10 +1207,16 @@ class VaultScreen(WorkspaceScreen):
     def _sync_compact_buttons(self) -> None:
         """One-row borderless buttons whenever the layout is narrow."""
         compact = self.has_class("-narrow") or self.has_class("-content-narrow")
+        changed = False
         for button in self.query(ActionButton):
+            changed = changed or button.compact != compact
             button.compact = compact
         for row in self.query(ActionRow):
             row.fit()
+        if changed:
+            # Scrolling done for the old button sizes no longer fits: start from the top.
+            self.query_one("#vault_action_scroll").scroll_home(animate=False)
+            self.call_after_refresh(self._reveal_focused_action)
 
     def _sync_chat_layout(self) -> None:
         was_narrow = self.has_class("-content-narrow")
@@ -1429,6 +1442,7 @@ class VaultScreen(WorkspaceScreen):
             next_step = self.query_one("#vault_next_step", Static)
         except NoMatches:
             return  # the screen is closing
+        self._identity_action = action
         next_step.set_class(action is not None, "-shown")
         for button in self.query("#vault_actions Button"):
             is_next = button.id == action
@@ -1438,15 +1452,17 @@ class VaultScreen(WorkspaceScreen):
                 if action != self._last_summary_action:
                     self.call_after_refresh(self._reveal_summary_action, button)
                 self._last_summary_action = action
+        self._order_groups(action)
+        self._apply_roles()
 
     def _order_groups(self, next_action: Optional[str]) -> None:
         """Put the group that holds the suggested next step first, so it is in view on arrival."""
         actions = self.query_one("#vault_actions")
         groups = [self.query_one(f"#{group_id}") for group_id in _GROUP_ORDER]
-        lead = next((g for g in groups[1:] if next_action and g.query(f"#{next_action}")), None)
+        lead = next((g for g in groups if next_action and g.query(f"#{next_action}")), None)
         if lead is not None:
             groups.remove(lead)
-            groups.insert(1, lead)
+            groups.insert(0, lead)
         for group in groups:
             group.set_class(group is lead, "-lead")
         moved = False
@@ -1455,12 +1471,16 @@ class VaultScreen(WorkspaceScreen):
                 actions.move_child(group, before=index)
                 moved = True
         if moved:
-            # The focused action keeps its place in view after the groups reorder.
+            # Earlier scrolling targeted the old layout: start again from the top, then
+            # keep the focused action in view.
+            self.query_one("#vault_action_scroll").scroll_home(animate=False)
             self.call_after_refresh(self._reveal_focused_action)
 
     def _reveal_summary_action(self, button: Button) -> None:
         """Scroll an action into view inside the inspector."""
         if not button.is_attached or not button.display:
+            return
+        if self.query_one("#vault_action_scroll").region.contains_region(button.region):
             return
         button.scroll_visible(animate=False)
 
@@ -1470,21 +1490,26 @@ class VaultScreen(WorkspaceScreen):
             vault = self._selected_vault()
             if vault is not None:
                 self._selected_vault_id = str(vault.get("vault_id") or "") or None
-        self._sync_inspector()
+        self._selection_changed()
 
     def _remember_view(self) -> None:
         """Keep the open view for the rest of the session."""
         view = _VIEW_FOR_MODE.get(self._table_mode)
         if view is not None:
             setattr(self.app, _LAST_VIEW_ATTR, view)
+            setattr(self.app, _LAST_VAULT_ATTR, self._selected_vault_id)
 
     def _reopen_view(self) -> None:
-        """Return to the view used last, once the vault is ready and a vault is selected."""
+        """Return to the view used last, on the vault it showed, once the vault is ready."""
         view, self._restore_view = self._restore_view, None
+        vault_id, self._restore_vault = self._restore_vault, None
         if view is None or view == "vault_vaults" or self._identity_state != "ready":
             return
-        if view in _SCOPED_VIEWS and self._selected_vault() is None:
-            return
+        if view in _SCOPED_VIEWS:
+            row = next((i for i, v in enumerate(self._vaults) if v.get("vault_id") == vault_id), None)
+            if row is None:
+                return
+            self.query_one("#vault_table", DataTable).move_cursor(row=row)
         handler = {
             "vault_items": self.action_items,
             "vault_devices": self.action_devices,
@@ -1501,36 +1526,61 @@ class VaultScreen(WorkspaceScreen):
         self._render_vaults()
 
     def _sync_inspector(self) -> None:
-        """Follow the open view and the selected row: switch, details and next step."""
+        """Follow the open view: the switch, the facts and the suggested next step."""
         try:
             active = _VIEW_FOR_MODE.get(self._table_mode)
             for button_id, text, _key, _short in _VIEW_TABS:
                 tab = self.query_one(f"#{button_id}", ActionButton)
-                tab.set_class(button_id == active, "-active")
+                tab.set_class(button_id == active, "-current-view")
                 count = self._view_counts.get(button_id)
                 tab.set_text(text if count is None else f"{text} ({count})")
             self.query_one("#vault_views", ActionRow).fit()
-            heading, facts = self._inspector_facts()
-            self.query_one("#vault_inspector_heading", Static).update(heading.upper())
-            self.query_one("#vault_inspector_facts", Static).update(facts)
+            self._sync_facts()
         except NoMatches:
             return  # the screen is closing
         self._apply_roles()
 
+    def _sync_facts(self) -> None:
+        """Show the selected row; this is all a cursor move changes."""
+        heading, facts = self._inspector_facts()
+        heading = heading.upper()
+        if heading != self._facts_heading:
+            self._facts_heading = heading
+            self.query_one("#vault_inspector_heading", Static).update(heading)
+        # The panel has a fixed height, so the facts need no new layout.
+        self.query_one("#vault_inspector_facts", Static).update(facts, layout=False)
+
+    def _selection_changed(self) -> None:
+        """Repaint the facts, and the roles only when the suggested step moved."""
+        try:
+            self._sync_facts()
+        except NoMatches:
+            return  # the screen is closing
+        if self._primary_action() != self._primary:
+            self._apply_roles()
+
     def _apply_roles(self) -> None:
         """Make the suggested next step primary; destructive actions keep their own role."""
-        primary = self._primary_action()
-        self._order_groups(primary)
+        primary = self._primary = self._primary_action()
         for button in self.query("#vault_actions ActionButton"):
             if button.id in _FIXED_ROLES:
                 continue
             button.set_role("primary" if button.id == primary else "default")
+        self._show_device_step(primary)
+
+    def _show_device_step(self, primary: Optional[str]) -> None:
+        """Name the pending device's Approve as the next step when no identity step is due."""
+        if self._identity_action is not None:
+            return
+        next_step = self.query_one("#vault_next_step", Static)
+        next_step.set_class(primary == "vault_approve", "-shown")
+        if primary == "vault_approve":
+            next_step.update("Next: Approve device")
 
     def _primary_action(self) -> Optional[str]:
         """The identity step when one is due, else the pending device being reviewed."""
-        step = next((b.id for b in self.query("#vault_actions Button.-next-action")), None)
-        if step is not None:
-            return step
+        if self._identity_action is not None:
+            return self._identity_action
         device = self._selected_row(self._devices) if self._table_mode == "devices" else None
         if device is not None and device.get("status") == "pending":
             return "vault_approve"
