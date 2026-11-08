@@ -214,7 +214,7 @@ class RemoteTree(Tree):
                     node.add("🚫 Connection refused").allow_expand = False
                     logger.error("Connection refused for %s", path)
                 else:
-                    node.add(f"❌ {event.worker.error}").allow_expand = False
+                    node.add(Text(f"❌ {event.worker.error}")).allow_expand = False
                     logger.error("Failed to load %s: %s", path, event.worker.error)
             else:
                 entries = event.worker.result
