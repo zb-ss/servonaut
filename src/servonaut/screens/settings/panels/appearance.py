@@ -49,10 +49,20 @@ CARD_MIN_WIDTH = 34
 MAX_CARD_COLUMNS = 3
 # At this panel width the preview sits beside the cards instead of below them.
 SIDE_DETAILS_MIN_WIDTH = 110
+# Below this panel width the three action buttons drop their borders to fit one row.
+COMPACT_ACTIONS_MAX_WIDTH = 64
 DETAILS_WIDTH = 44
 SWATCH_CELLS = 3
 _SWATCH_ROLES = ("background", "surface", "panel", "primary", "accent", "warning", "error", "success")
 _ANSI_SWATCHES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
+
+
+# Button id -> (label, short label for a narrow panel).
+_ACTION_LABELS = {
+    "appearance_new": ("New theme from current…", "New theme…"),
+    "appearance_open": ("Open themes folder", "Folder"),
+    "appearance_reload": ("Reload themes", "Reload"),
+}
 
 
 def _swatch_fills(theme: Theme) -> List[str]:
@@ -214,9 +224,11 @@ class AppearancePanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         with Horizontal(id="appearance_actions"):
-            yield Button("New theme from current…", id="appearance_new", variant="primary")
-            yield Button("Open themes folder", id="appearance_open")
-            yield Button("Reload themes", id="appearance_reload")
+            for button_id, (label, _short) in _ACTION_LABELS.items():
+                yield Button(
+                    label, id=button_id, tooltip=label,
+                    variant="primary" if button_id == "appearance_new" else "default",
+                )
         yield Static("", id="appearance_folder", markup=False)
         with Container(id="appearance_layout", classes="-stacked"):
             yield Grid(id="appearance_cards", classes="-cols-1")
@@ -258,11 +270,19 @@ class AppearancePanel(SettingsPanel):
         layout = self.query_one("#appearance_layout", Container)
         layout.set_class(wide, "-side")
         layout.set_class(not wide, "-stacked")
+        self._fit_actions(event.size.width < COMPACT_ACTIONS_MAX_WIDTH)
         cards_width = event.size.width - (DETAILS_WIDTH + 2 if wide else 0)
         columns = max(1, min(MAX_CARD_COLUMNS, cards_width // CARD_MIN_WIDTH))
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
             grid.set_class(count == columns, f"-cols-{count}")
+
+    def _fit_actions(self, compact: bool) -> None:
+        """Borderless buttons with short labels when the panel is too narrow for three."""
+        for button_id, (full, short) in _ACTION_LABELS.items():
+            button = self.query_one(f"#{button_id}", Button)
+            button.compact = compact
+            button.label = short if compact else full
 
     # ------------------------------------------------------------------
     # Cards

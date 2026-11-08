@@ -14,6 +14,11 @@ AppearancePanel #appearance_reload {
     min-width: 10;
     margin: 0 1 0 0;
 }
+AppearancePanel #appearance_actions Button.-textual-compact {
+    min-width: 0;
+    height: 1;
+    border: none;
+}
 AppearancePanel #appearance_folder {
     height: auto;
     color: $text-muted;
