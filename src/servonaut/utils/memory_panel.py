@@ -100,7 +100,7 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
         return (
             "[bold]Server Memory[/bold]\n\n"
             "[dim]No memory cached yet.[/dim]\n"
-            "[dim]Press [b]M[/b] to build an AI-queryable fact cache "
+            "[dim]Press [b]m[/b] to build an AI-queryable fact cache "
             "(OS, disk, services, web stack…).[/dim]"
         )
 

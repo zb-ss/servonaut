@@ -1321,7 +1321,7 @@ class TestPersonalVaultBindingLabel:
 
         _run(screen._refresh_vault_binding())
 
-        assert "SSH credential:[/dim] Servonaut Vault" in screen._credential_source_line()
+        assert "SSH credential: Servonaut Vault" in screen._credential_source_line().plain
         app.vault_command_service.personal_binding.assert_awaited_once()
 
     def test_a_binding_without_a_source_is_still_a_vault_binding(self):
@@ -1330,7 +1330,7 @@ class TestPersonalVaultBindingLabel:
 
         _run(screen._refresh_vault_binding())
 
-        assert "Servonaut Vault" in screen._credential_source_line()
+        assert "Servonaut Vault" in screen._credential_source_line().plain
 
     def test_no_binding_keeps_automatic_resolution(self):
         app = _vault_app(binding=None)
@@ -1338,7 +1338,7 @@ class TestPersonalVaultBindingLabel:
 
         _run(screen._refresh_vault_binding())
 
-        assert "Automatic resolution" in screen._credential_source_line()
+        assert "Automatic resolution" in screen._credential_source_line().plain
 
     def test_a_failed_lookup_keeps_automatic_resolution(self):
         app = _vault_app(binding_raises=RuntimeError("offline"))
@@ -1346,7 +1346,7 @@ class TestPersonalVaultBindingLabel:
 
         _run(screen._refresh_vault_binding())
 
-        assert "Automatic resolution" in screen._credential_source_line()
+        assert "Automatic resolution" in screen._credential_source_line().plain
 
     def test_nothing_is_looked_up_without_an_unlocked_vault_identity(self):
         app = _vault_app(binding={"source": "servonaut_vault"}, identity=False)
@@ -1355,7 +1355,7 @@ class TestPersonalVaultBindingLabel:
         _run(screen._refresh_vault_binding())
 
         app.vault_command_service.personal_binding.assert_not_awaited()
-        assert "Automatic resolution" in screen._credential_source_line()
+        assert "Automatic resolution" in screen._credential_source_line().plain
 
     def test_a_shared_servers_own_binding_is_not_looked_up_again(self):
         inst = _make_instance()
@@ -1366,7 +1366,7 @@ class TestPersonalVaultBindingLabel:
         _run(screen._refresh_vault_binding())
 
         app.vault_command_service.personal_binding.assert_not_awaited()
-        assert "SSH credential:[/dim] Bitwarden" in screen._credential_source_line()
+        assert "SSH credential: Bitwarden" in screen._credential_source_line().plain
 
     def test_a_late_empty_answer_does_not_undo_a_bind(self):
         app = _vault_app(binding=None)
@@ -1375,7 +1375,7 @@ class TestPersonalVaultBindingLabel:
 
         _run(screen._refresh_vault_binding())
 
-        assert "Servonaut Vault" in screen._credential_source_line()
+        assert "Servonaut Vault" in screen._credential_source_line().plain
 
 
 class TestVerifySshWithVaultKey:
@@ -1409,7 +1409,7 @@ class TestVerifySshWithVaultKey:
         assert build["username"] == "deploy"
         run.assert_called_once()
         assert app._notifications[-1]["message"] == "SSH verified with the Servonaut Vault key."
-        assert "Servonaut Vault" in screen._credential_source_line()
+        assert "Servonaut Vault" in screen._credential_source_line().plain
 
     def test_a_refused_vault_key_is_reported(self):
         app = _vault_app(binding={"source": "servonaut_vault"}, verify_rc=255)

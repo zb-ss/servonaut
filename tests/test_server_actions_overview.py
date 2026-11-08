@@ -261,3 +261,28 @@ async def test_inline_browse_returns_focus_to_the_opening_action(monkeypatch) ->
         await pilot.press("escape")
         await pilot.pause()
         assert screen.focused is screen.query_one("#btn_memory", Button)
+
+
+HOSTILE_VALUES = ["x [/", "[ @click=app.bell]x", "[ $surface]h", "trail\\", "[b]bold[/b]"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", HOSTILE_VALUES)
+async def test_hostile_server_text_is_literal_and_copied_as_shown(value, monkeypatch) -> None:
+    app = _LayoutHost()
+    app.instances[0].update(name=value, id=value, group=value)
+    rang: list[str] = []
+    monkeypatch.setattr(app, "action_bell", lambda: rang.append("bell"), raising=False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert app._exception is None
+        for selector in ("#server_context", "#server_identity", "#server_info"):
+            content = screen.query_one(selector).content
+            assert not any("@click" in str(span.style) for span in content.spans), selector
+        assert value in screen.query_one("#server_identity").content.plain
+        copied: list[str] = []
+        with patch("servonaut.utils.platform_utils.copy_to_clipboard", lambda text: copied.append(text) or True):
+            screen.query_one("#btn_copy_id", Button).press()
+            await pilot.pause()
+        assert copied == [value]
+        assert not rang

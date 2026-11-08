@@ -67,12 +67,12 @@ async def test_vps_actions_show_the_reverse_dns() -> None:
         await app.push_screen(screen)
 
         def info() -> str:
-            return str(screen.query_one("#server_info", Static).content)
+            return screen.query_one("#server_info", Static).content.plain
 
         await _wait_for(pilot, lambda: "Reverse DNS" in info(), "the reverse DNS line")
         # The name comes from the provider: shown literally, never as markup.
-        assert "[dim]Reverse DNS:[/dim] mail-\\[b]1\\[/b].example.test" in info()
-        assert "[dim]Public IP:[/dim] 192.0.2.1\n[dim]Reverse DNS:[/dim]" in info()
+        assert "Reverse DNS: mail-[b]1[/b].example.test" in info()
+        assert "Public IP: 192.0.2.1\nReverse DNS:" in info()
         service.get_reverse_dns.assert_awaited_once_with("vps-web-1", "192.0.2.1")
         assert app.screen is screen
 
@@ -216,15 +216,12 @@ async def test_reinstall_shows_provider_names_literally() -> None:
 def test_server_info_shows_names_literally(instance, heading) -> None:
     from unittest.mock import PropertyMock, patch
 
-    from textual.content import Content
-
     app = VpsHostApp(SimpleNamespace())
     screen = ServerActionsScreen(instance)
     with patch.object(ServerActionsScreen, "app", new_callable=PropertyMock, return_value=app):
         info = screen._build_server_info()
 
-    assert f"[bold $text-accent]{heading}[/bold $text-accent]" in info
-    plain = Content.from_markup(info).plain
+    plain = info.plain
     assert "web-[b]1[/b]" in plain
     if "os" in instance:
         assert "OS: Debian [red]12" in plain

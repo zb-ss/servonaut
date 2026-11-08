@@ -56,6 +56,7 @@ from servonaut.screens._demo_resolve import (
 )
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.markup import literal
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -878,7 +879,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._inline_return_focus = "btn_browse"
         # Markup source of #server_info, so later additions (reverse DNS)
         # edit the text we wrote instead of reading it back from the widget.
-        self._server_info_text: str = ""
+        self._server_info_text: Content = Content("")
         # Slow work started here (binding a vault key, preparing SSH) and the
         # button that would restart it, held back until it ends.
         self._busy = BusyWork(self, "#sa_busy")
@@ -962,7 +963,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             yield self.workspace_sidebar()
             with Vertical(id="sa-body", classes="workspace-content"):
                 heading, identity, connection = self._server_info_sections()
-                self._server_info_text = "\n\n".join((heading, identity, connection))
+                self._server_info_text = Content("\n\n").join((heading, identity, connection))
                 # Full-width compact context banner
                 yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
                 # Toolbar: the primary actions, always one row
@@ -1032,107 +1033,127 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 )
         yield Footer()
 
-    def _build_server_info(self) -> str:
+    def _build_server_info(self) -> Content:
         """The complete overview, also useful to non-layout consumers."""
-        return "\n\n".join(self._server_info_sections())
+        return Content("\n\n").join(self._server_info_sections())
 
-    def _server_info_sections(self) -> tuple[str, str, str]:
-        """Build the compact context and two sections from displayed records.
+    def _server_info_sections(self) -> tuple[Content, Content, Content]:
+        """Build the header and the two card texts from displayed records.
 
         Resolve connection rules against the real record, but render only the
-        displayed row and redacted connection details. Provider strings remain
-        literal Rich text, including names containing markup characters.
+        displayed row and redacted connection details. Every value comes from
+        a provider or the user's server list, so each is shown literally: a
+        name like ``web-[b]1`` shows as typed.
         """
         def field(key: str, default: str) -> str:
-            return escape(str(self._instance.get(key) or default))
+            return str(self._instance.get(key) or default)
 
-        name = escape(display_name(self._instance) or 'Unnamed')
-        public_ip = field('public_ip', 'N/A')
-        identity = []
-        network = []
-        title = "Server"
-        state = self._colorize_state(self._instance.get('state', 'unknown'))
-        provider = field('provider', 'AWS')
-        if self._instance.get('is_shared') is True:
-            title = "Team server"
-            provider = field('provider', 'Team')
-            state = "[dim]N/A (shared by the team)[/dim]"
-            identity.append(f"[dim]Team:[/dim] {field('team_name', '-')}")
+        def line(label: str, value: str | Content) -> Content:
+            shown = literal(value) if isinstance(value, str) else value
+            return Content.assemble(Content.styled(f"{label}:", "dim"), " ", shown)
+
+        name = display_name(self._instance) or "Unnamed"
+        public_ip = field("public_ip", "N/A")
+        identity: list[Content] = []
+        network: list[Content] = []
+        state: Content = self._colorize_state(self._instance.get("state", "unknown"))
+        provider = field("provider", "AWS")
+        facts: list[str] = []
+        if self._instance.get("is_shared") is True:
+            provider = field("provider", "Team")
+            state = Content.styled("N/A (shared by the team)", "dim")
+            facts = [field("team_name", "-")]
+            identity.append(line("Team", field("team_name", "-")))
             network.extend([
-                f"[dim]Host:[/dim] {public_ip}",
-                f"[dim]Port:[/dim] {field('port', '22')}",
-                f"[dim]Team login:[/dim] {field('login_user', '-')}",
+                line("Host", public_ip),
+                line("Port", field("port", "22")),
+                line("Team login", field("login_user", "-")),
             ])
-        elif self._instance.get('is_ovh'):
-            title, provider = "OVH Server", "OVH"
+        elif self._instance.get("is_ovh"):
+            provider = "OVH"
+            kind = field("provider_type", "unknown").upper()
+            facts = [f"{kind} {field('type', '-')}", field("region", "-")]
             identity.extend([
-                f"[dim]ID:[/dim] {field('id', 'unknown')}",
-                f"[dim]Type:[/dim] {field('provider_type', 'unknown').upper()} — {field('type', '-')}",
-                f"[dim]Region:[/dim] {field('region', '-')}",
-                f"[dim]OS:[/dim] {field('os', '-')}",
-                f"[dim]RAM:[/dim] {field('ram_gb', '-')} GB",
+                line("ID", field("id", "unknown")),
+                line("Type", f"{kind} — {field('type', '-')}"),
+                line("Region", field("region", "-")),
+                line("OS", field("os", "-")),
+                line("RAM", f"{field('ram_gb', '-')} GB"),
             ])
-            network.append(f"[dim]Public IP:[/dim] {public_ip}")
+            network.append(line("Public IP", public_ip))
             reverse_dns = self._display_reverse_dns()
             if reverse_dns:
-                network.append(f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}")
-            network.append(f"[dim]Private IP:[/dim] {field('private_ip', 'N/A')}")
-        elif self._instance.get('is_custom'):
-            provider = field('provider', 'custom')
-            state = "[dim]N/A (custom server)[/dim]"
+                network.append(line("Reverse DNS", reverse_dns))
+            network.append(line("Private IP", field("private_ip", "N/A")))
+        elif self._instance.get("is_custom"):
+            provider = field("provider", "custom")
+            state = Content.styled("N/A (custom server)", "dim")
+            facts = [field("group", "-")]
             identity.extend([
-                f"[dim]ID:[/dim] {field('id', 'unknown')}",
-                f"[dim]Provider:[/dim] {provider}",
-                f"[dim]Group:[/dim] {field('group', '-')}",
+                line("ID", field("id", "unknown")),
+                line("Provider", provider),
+                line("Group", field("group", "-")),
             ])
             network.extend([
-                f"[dim]Host:[/dim] {public_ip}",
-                f"[dim]Port:[/dim] {field('port', '22')}",
-                f"[dim]Username:[/dim] {field('username', 'root')}",
+                line("Host", public_ip),
+                line("Port", field("port", "22")),
+                line("Username", field("username", "root")),
             ])
         else:
+            facts = [field("type", "-"), field("region", "unknown")]
             identity.extend([
-                f"[dim]Instance ID:[/dim] {field('id', 'unknown')}",
-                f"[dim]Type:[/dim] {field('type', '-')}",
-                f"[dim]Region:[/dim] {field('region', 'unknown')}",
+                line("Instance ID", field("id", "unknown")),
+                line("Type", field("type", "-")),
+                line("Region", field("region", "unknown")),
             ])
             network.extend([
-                f"[dim]Public IP:[/dim] {public_ip}",
-                f"[dim]Private IP:[/dim] {field('private_ip', 'N/A')}",
+                line("Public IP", public_ip),
+                line("Private IP", field("private_ip", "N/A")),
             ])
 
-        context = [f"[bold $text-accent]{title}: {name}[/bold $text-accent]", f"[dim]State:[/dim] {state}   [dim]Provider:[/dim] {provider}"]
-        if self._instance.get('account_qualified'):
-            context.append(f"[dim]Account:[/dim] {field('account', '-')}")
-        connection = "[dim]Direct Connection[/dim]"
+        path = Content.styled("Direct connection", "dim")
         target = public_ip
-        if not any(self._instance.get(key) for key in ('is_shared', 'is_custom', 'is_ovh')):
+        if not any(self._instance.get(key) for key in ("is_shared", "is_custom", "is_ovh")):
             profile = self.app.connection_service.resolve_profile(connection_instance(self.app, self._instance))
             if profile and profile.bastion_host:
                 bastion = str(profile.bastion_host)
                 if self.app.demo_mode and self.app.redaction_service:
                     bastion = self.app.redaction_service.redact_host(bastion)
-                connection = f"[dim]via Bastion:[/dim] {escape(bastion)}"
-                target = field('private_ip', 'N/A')
+                path = Content.assemble(Content.styled("via Bastion:", "dim"), " ", literal(bastion))
+                target = field("private_ip", "N/A")
         network.extend([
-            "", connection, f"[dim]Target:[/dim] {target}",
-            self._credential_source_line().rstrip(),
+            Content(""), path, line("Target", target),
+            self._credential_source_line(),
         ])
-        shared_with = self._shared_with_line().rstrip()
-        if shared_with:
+        shared_with = self._shared_with_line()
+        if shared_with.plain:
             identity.append(shared_with)
-        return "\n".join(context), "[bold]Identity[/bold]\n\n" + "\n".join(identity), "[bold]Network / Connection[/bold]\n\n" + "\n".join(network)
 
-    def _shared_with_line(self) -> str:
+        heading = [Content.assemble(
+            literal(name, "bold $text-accent"), "  ", Content.styled("● ", "dim"), state,
+            "  ", literal(" · ".join([provider, *facts]), "dim"),
+        )]
+        heading.append(Content.assemble(
+            path, Content.styled(" · ", "dim"), self._credential_source_line(),
+        ))
+        if self._instance.get("account_qualified"):
+            heading.append(line("Account", field("account", "-")))
+        return (
+            Content("\n").join(heading),
+            Content.assemble(Content.styled("Identity", "bold"), "\n\n", Content("\n").join(identity)),
+            Content.assemble(Content.styled("Network / Connection", "bold"), "\n\n", Content("\n").join(network)),
+        )
+
+    def _shared_with_line(self) -> Content:
         """``Also shared with: team …`` for one of the user's own servers a team shares too."""
         teams = [
             str(row.get("team_name") or row["team_slug"])
             for row in self._sharing_teams()
         ]
         if not teams:
-            return ""
-        label = escape(scrub_for_display(self.app, ", ".join(teams)))
-        return f"[dim]Also shared with:[/dim] {label}\n"
+            return Content("")
+        label = scrub_for_display(self.app, ", ".join(teams))
+        return Content.assemble(Content.styled("Also shared with:", "dim"), " ", literal(label))
 
     def _sharing_teams(self) -> list[dict[str, Any]]:
         """The real shared row for each team also sharing this own server."""
@@ -1148,7 +1169,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 teams.setdefault(slug, row)
         return list(teams.values())
 
-    def _credential_source_line(self) -> str:
+    def _credential_source_line(self) -> Content:
         """Describe the configured SSH credential without exposing its reference."""
         label = credential_source_label(self._binding_source()) or "Automatic resolution"
         if self._binding_source() == _VAULT_SOURCE:
@@ -1162,7 +1183,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             if isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE:
                 scope = scrub_for_display(self.app, _team_key_label(row))
                 label += f"; {scope} (Servonaut Vault)"
-        return f"[dim]SSH credential:[/dim] {escape(label)}\n"
+        return Content.assemble(Content.styled("SSH credential:", "dim"), " ", literal(label))
 
     def _binding_source(self) -> Optional[str]:
         """The credential source this screen bound or looked up, else the row's (team servers)."""
@@ -1215,23 +1236,16 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         if self.is_mounted:
             self._render_server_info()
 
-    def _colorize_state(self, state: str) -> str:
-        """Add color markup to instance state.
-
-        Args:
-            state: Instance state string.
-
-        Returns:
-            Colorized state string with markup.
-        """
-        state_colors = {
-            'running': '[$text-success]running[/$text-success]',
-            'stopped': '[$text-error]stopped[/$text-error]',
-            'stopping': '[$text-warning]stopping[/$text-warning]',
-            'pending': '[$text-accent]pending[/$text-accent]',
-            'terminated': '[dim]terminated[/dim]',
+    def _colorize_state(self, state: str) -> Content:
+        """Instance state, coloured when it is one the pane knows."""
+        state_styles = {
+            "running": "$text-success",
+            "stopped": "$text-error",
+            "stopping": "$text-warning",
+            "pending": "$text-accent",
+            "terminated": "dim",
         }
-        return state_colors.get(state, escape(str(state)))
+        return literal(str(state), state_styles.get(state, ""))
 
     async def _fetch_rdns(self) -> None:
         """Fetch the VPS's reverse DNS and show it in the server info pane.
@@ -1270,7 +1284,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         toggle and a late reverse-DNS answer both land in one consistent text.
         """
         heading, identity, connection = self._server_info_sections()
-        self._server_info_text = "\n\n".join((heading, identity, connection))
+        self._server_info_text = Content("\n\n").join((heading, identity, connection))
         self.query_one("#server_context", Static).update(heading)
         self.query_one("#server_identity", Static).update(identity)
         self.query_one("#server_info", Static).update(connection)
@@ -1338,7 +1352,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         instance_name = self._instance.get("name") or ""
         try:
             if memory_service.is_memory_disabled(instance_id, instance_name):
-                panel.update("[bold]Server Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press M to review its settings.[/dim]")
+                panel.update("[bold]Server Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press m to review its settings.[/dim]")
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -1347,7 +1361,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             modules = memory_service.get_all_modules(instance_id, self._provider_for_memory())
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
-            panel.update("[bold]Server Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press M to open Server Memory and try again.[/dim]")
+            panel.update("[bold]Server Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press m to open Server Memory and try again.[/dim]")
             return
 
         text = render_memory_panel(modules)
@@ -1463,7 +1477,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     def _displayed_identity_lines(self) -> list[str]:
         """The identity card as plain text, exactly as it is displayed."""
         _, identity, _ = self._server_info_sections()
-        return Content.from_markup(identity).plain.splitlines()
+        return identity.plain.splitlines()
 
     def _copy_to_clipboard(self, text: str, what: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
@@ -1483,14 +1497,14 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
     def action_copy_summary(self) -> None:
         """Copy the identity and connection details shown on the cards."""
-        self._copy_to_clipboard(Content.from_markup(self._server_info_text).plain, "the server summary")
+        self._copy_to_clipboard(self._server_info_text.plain, "the server summary")
 
     def _live_stats_idle_text(self) -> str:
         """Text shown in the live-stats pane while polling is off."""
         return (
             "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n\n"
             "[dim]CPU, memory, load, disk and uptime appear here.\n"
-            "Press [b]L[/b] to start monitoring over SSH.[/dim]"
+            "Press [b]l[/b] to start monitoring over SSH.[/dim]"
         )
 
     def action_toggle_live(self) -> None:
@@ -1512,7 +1526,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._live_on = True
         self._sync_live_button()
         try:
-            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press L to cancel.[/dim]")
+            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press l to cancel.[/dim]")
         except Exception:  # noqa: BLE001
             pass
         self.run_worker(
@@ -1540,7 +1554,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             async for stats in service.watch(self._instance):
                 self._set_live_text(format_live_stats(stats))
         except LiveStatsError as exc:
-            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press L to retry.[/dim]")
+            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press l to retry.[/dim]")
             self._live_on = False
             self._sync_live_button()
 
