@@ -7,7 +7,6 @@ app remembers any theme picked anywhere), so this panel has no Save button.
 from __future__ import annotations
 
 import logging
-import webbrowser
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -41,6 +40,7 @@ from servonaut.styles.user_themes import (
     themes_dir,
 )
 from servonaut.utils.markup import literal
+from servonaut.utils.platform_utils import open_path
 
 logger = logging.getLogger(__name__)
 
@@ -396,11 +396,7 @@ class AppearancePanel(SettingsPanel):
         self._open_path(folder)
 
     def _open_path(self, path: Path) -> None:
-        try:
-            opened = webbrowser.open(path.as_uri())
-        except webbrowser.Error:
-            opened = False
-        if not opened:
+        if not open_path(path):
             self.app.notify(f"Open it yourself: {tildify(str(path))}", severity="warning", markup=False)
 
     def action_reload_themes(self, announce: bool = True) -> None:

@@ -203,3 +203,38 @@ def _clipboard_command() -> Optional[list[str]]:
             if shutil.which(command[0]):
                 return command
     return None
+
+
+def open_path(path: Path) -> bool:
+    """Open a file or folder with the platform's default application.
+
+    Starts the opener and returns without waiting for it, so a slow file
+    manager cannot freeze the interface. Returns False when the platform has
+    no opener or it could not be started.
+    """
+    command = _open_command(path.resolve())
+    if command is None:
+        return False
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return True
+
+
+def _open_command(path: Path) -> Optional[list[str]]:
+    """The command that opens *path* here, or ``None``; *path* is absolute."""
+    os_type = get_os()
+    if os_type == 'darwin':
+        return ['open', str(path)]
+    if os_type == 'windows':
+        return ['explorer', str(path)]
+    if os_type == 'linux' and shutil.which('xdg-open'):
+        return ['xdg-open', str(path)]
+    return None

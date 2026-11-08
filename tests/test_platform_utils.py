@@ -166,3 +166,35 @@ class TestCopyToClipboard:
         installed.clear()
         assert platform_utils._clipboard_command() is None
         assert platform_utils.copy_to_clipboard("web-1") is False
+
+
+class TestOpenPath:
+
+    @pytest.mark.parametrize(
+        ("system", "expected"),
+        [("linux", "xdg-open"), ("darwin", "open"), ("windows", "explorer")],
+    )
+    def test_uses_the_platforms_opener_without_waiting(self, monkeypatch, tmp_path, system, expected):
+        started = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: system)
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda command, **kwargs: started.append((command, kwargs)))
+
+        assert platform_utils.open_path(tmp_path) is True
+
+        (command, kwargs), = started
+        assert command == [expected, str(tmp_path.resolve())]
+        assert kwargs["start_new_session"] is True
+
+    def test_is_false_without_an_opener(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "linux")
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: None)
+        assert platform_utils.open_path(tmp_path) is False
+
+    def test_is_false_when_the_opener_cannot_start(self, monkeypatch, tmp_path):
+        def refuse(*args, **kwargs):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "darwin")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", refuse)
+        assert platform_utils.open_path(tmp_path) is False

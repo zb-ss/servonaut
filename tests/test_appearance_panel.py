@@ -332,9 +332,9 @@ async def test_a_terminal_colour_theme_cannot_be_copied(manager: ConfigManager, 
 async def test_open_themes_folder_creates_it_and_opens_it(
     manager: ConfigManager, folder: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    opened: list[str] = []
+    opened: list[Path] = []
     monkeypatch.setattr(
-        "servonaut.screens.settings.panels.appearance.webbrowser.open", lambda url: opened.append(url) or True,
+        "servonaut.screens.settings.panels.appearance.open_path", lambda path: opened.append(path) or True,
     )
     folder.rmdir()
     app = _Host(manager)
@@ -342,14 +342,14 @@ async def test_open_themes_folder_creates_it_and_opens_it(
         await _ready(app, pilot)
         await pilot.click("#appearance_open")
         await _until(lambda: bool(opened))
-        assert folder.is_dir() and opened == [folder.as_uri()]
+        assert folder.is_dir() and opened == [folder]
 
 
 @pytest.mark.asyncio
 async def test_open_folder_falls_back_to_telling_the_path(
     manager: ConfigManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("servonaut.screens.settings.panels.appearance.webbrowser.open", lambda url: False)
+    monkeypatch.setattr("servonaut.screens.settings.panels.appearance.open_path", lambda path: False)
     app = _Host(manager)
     async with app.run_test(size=(160, 50)) as pilot:
         await _ready(app, pilot)
@@ -391,9 +391,9 @@ async def test_reload_when_the_active_themes_file_vanishes_falls_back(
 async def test_edit_file_opens_the_theme_file(
     manager: ConfigManager, folder: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    opened: list[str] = []
+    opened: list[Path] = []
     monkeypatch.setattr(
-        "servonaut.screens.settings.panels.appearance.webbrowser.open", lambda url: opened.append(url) or True,
+        "servonaut.screens.settings.panels.appearance.open_path", lambda path: opened.append(path) or True,
     )
     (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
     app = _Host(manager)
@@ -402,7 +402,7 @@ async def test_edit_file_opens_the_theme_file(
         button = _card(panel, "ocean").query_one(EditFileButton)
         await pilot.click(button)
         await _until(lambda: bool(opened))
-        assert opened == [(folder / "ocean.toml").as_uri()]
+        assert opened == [folder / "ocean.toml"]
         assert app.theme == "servonaut", "pressing Edit file does not also apply the theme"
 
 
