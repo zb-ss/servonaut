@@ -107,11 +107,6 @@ SecretsSetupScreen.-content-narrow #setup_buttons Button {
     height: 1fr;
 }
 
-/* ---- Server-actions rail: the new DB-scan action button ---------- */
-#btn_db_creds {
-    width: 1fr;
-}
-
 .setup_label {
     color: $text-muted;
     height: 1;

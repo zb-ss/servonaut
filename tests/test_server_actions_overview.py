@@ -286,3 +286,17 @@ async def test_hostile_server_text_is_literal_and_copied_as_shown(value, monkeyp
             await pilot.pause()
         assert copied == [value]
         assert not rang
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_no_button_is_stretched_past_its_label(size) -> None:
+    app = _LayoutHost()
+    app.instances[0].update(is_ovh=True)
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
+        await pilot.pause()
+        for button in screen.query(ActionButton):
+            widest = button.label.cell_length + (4 if button.compact else 6)
+            assert button.region.width <= widest, (button.id, button.region.width, widest)
