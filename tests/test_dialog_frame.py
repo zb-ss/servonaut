@@ -105,8 +105,8 @@ async def test_short_dialog_keeps_safe_focus_and_returns_to_origin(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("theme", REGISTERED_THEMES)
-async def test_dialog_action_focus_changes_background_in_every_theme(theme: str) -> None:
-    """Every action variant has a focus cue beyond bold text or border colour."""
+async def test_dialog_action_focus_shows_a_cue_in_every_theme(theme: str) -> None:
+    """Every action variant shows focus with an underline, and an accent border where it can."""
     app = DialogHost()
     app.theme = theme
     screen, _ = make_dialog("confirm")
@@ -118,31 +118,37 @@ async def test_dialog_action_focus_changes_background_in_every_theme(theme: str)
         button = screen.query_one("#btn_confirm", Button)
         field.value = "web-1"
         await pilot.pause()
-        missing_cues: list[str] = []
-        for variant in ("default", "warning", "error"):
-            button.variant = variant
-            field.focus()
-            await pilot.pause()
-            blurred = (button.styles.background, button.styles.text_style.reverse)
-            blurred_render = (button.rich_style.bgcolor, button.rich_style.reverse)
-            await pilot.press("tab", "tab")
-            await pilot.pause()
-            assert screen.focused is button
-            focused = (button.styles.background, button.styles.text_style.reverse)
-            focused_render = (button.rich_style.bgcolor, button.rich_style.reverse)
-            if focused == blurred or focused_render == blurred_render:
-                missing_cues.append(variant)
-            label_segments = [
+        def label_underlined() -> bool:
+            segments = [
                 segment
                 for y in range(button.size.height)
                 for segment in button.render_line(y)
                 if "Delete" in segment.text
             ]
-            assert label_segments and all(
-                segment.style and segment.style.underline
-                for segment in label_segments
-            )
-        assert not missing_cues, f"{theme} lacks background/reverse focus cues: {missing_cues}"
+            assert segments
+            return all(segment.style and segment.style.underline for segment in segments)
+
+        # Dialog actions draw no background block (no halo), so focus shows as
+        # an underlined label (a cue that needs no colour) plus an accent border.
+        # Some themes (textual-dark, textual-light) give warning the accent's
+        # own colour; there the underline is the cue.
+        css = app.get_css_variables()
+        missing_cues: list[str] = []
+        for variant in ("default", "warning", "error"):
+            border_can_change = variant == "default" or css[variant] != css["accent"]
+            button.variant = variant
+            field.focus()
+            await pilot.pause()
+            blurred_border = button.styles.border_top
+            blurred_underline = label_underlined()
+            await pilot.press("tab", "tab")
+            await pilot.pause()
+            assert screen.focused is button
+            if blurred_underline or not label_underlined():
+                missing_cues.append(f"{variant}: underline")
+            if border_can_change and button.styles.border_top == blurred_border:
+                missing_cues.append(f"{variant}: border")
+        assert not missing_cues, f"{theme} lacks focus cues: {missing_cues}"
         field.focus()
         field.value = "invalid"
         await pilot.pause()
