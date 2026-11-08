@@ -1451,13 +1451,23 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # Live stats (opt-in, SSH-polled)
     # ------------------------------------------------------------------
 
+    def _has_vault_key_bound(self) -> bool:
+        """Whether a vault key already covers this server (own binding or a sharing team's)."""
+        if self._binding_source() is not None:
+            return True
+        return any(
+            isinstance(row.get("credential_binding"), Mapping)
+            and row["credential_binding"].get("source") == _VAULT_SOURCE
+            for row in self._sharing_teams()
+        )
+
     def _sync_vault_button_role(self) -> None:
-        """Highlight Use vault key only while binding a key is the next step."""
+        """Highlight Use vault key only while binding a key is the real next step."""
         try:
             button = self.query_one("#btn_use_vault_key", ActionButton)
         except NoMatches:
             return
-        suggested = self._vault_runtime_for_lookup() is not None and self._vault_binding_source is None
+        suggested = self._vault_runtime_for_lookup() is not None and not self._has_vault_key_bound()
         button.set_role("primary" if suggested else "default")
 
     def _sync_live_button(self) -> None:

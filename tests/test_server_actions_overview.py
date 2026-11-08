@@ -223,17 +223,94 @@ async def test_copy_actions_copy_what_is_displayed() -> None:
         assert str(app.instances[0]["id"]) in copied[1] and "Identity" in copied[1]
 
 
+def _vault_service(binding, delay: float = 0.0):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    async def personal_binding(instance):
+        await asyncio.sleep(delay)
+        return binding
+
+    service = MagicMock()
+    service.store.identity = object()
+    service.personal_binding = AsyncMock(side_effect=personal_binding)
+    return service
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("suggested", [True, False])
-async def test_vault_key_is_primary_only_when_it_is_the_next_step(suggested) -> None:
+async def test_vault_key_is_primary_until_a_binding_is_found() -> None:
     app = _LayoutHost()
+    app.vault_command_service = _vault_service({"source": "servonaut_vault"}, delay=1.5)
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
         button = screen.query_one("#btn_use_vault_key", ActionButton)
-        screen._vault_binding_source = None if suggested else "native"
-        with patch.object(screen, "_vault_runtime_for_lookup", return_value=object()):
-            screen._sync_vault_button_role()
-        assert button.has_class("-primary") is suggested
+        assert button.has_class("-primary"), "nothing bound yet: the next step"
+        await wait_until(lambda: not button.has_class("-primary"))
+
+
+@pytest.mark.asyncio
+async def test_vault_key_is_primary_when_nothing_is_bound() -> None:
+    app = _LayoutHost()
+    app.vault_command_service = _vault_service(None)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await pilot.pause()
+        assert screen.query_one("#btn_use_vault_key", ActionButton).has_class("-primary")
+
+
+@pytest.mark.asyncio
+async def test_vault_key_is_not_primary_without_a_usable_vault() -> None:
+    app = _LayoutHost()
+    app.vault_command_service = None
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert not screen.query_one("#btn_use_vault_key", ActionButton).has_class("-primary")
+
+
+@pytest.mark.asyncio
+async def test_vault_key_is_not_primary_when_a_team_key_is_already_bound() -> None:
+    app = _LayoutHost()
+    app.vault_command_service = _vault_service(None)
+    team_row = {"team_slug": "ops", "team_name": "ops", "credential_binding": {"source": "servonaut_vault"}}
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        with patch.object(screen, "_sharing_teams", return_value=[team_row]):
+            screen._render_server_info()
+        await pilot.pause()
+        assert "Team key for ops" in screen.query_one("#server_info").content.plain
+        assert not screen.query_one("#btn_use_vault_key", ActionButton).has_class("-primary")
+
+
+@pytest.mark.asyncio
+async def test_live_poll_label_follows_the_poller() -> None:
+    from servonaut.services.live_stats_service import LiveStatsError
+
+    class _Service:
+        mode = "run"
+
+        async def watch(self, instance):
+            if self.mode == "fail":
+                raise LiveStatsError("no route")
+            while True:
+                import asyncio
+                await asyncio.sleep(0.05)
+                yield SimpleNamespace()
+
+    app = _LayoutHost()
+    service = _Service()
+    app.live_stats_service = service
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        label = lambda: screen.query_one("#btn_live", ActionButton).label.plain  # noqa: E731
+        assert label().startswith("Live poll: off")
+        with patch("servonaut.screens.server_actions.format_live_stats", lambda stats: "stats"):
+            await pilot.press("l")
+            await wait_until(lambda: label().startswith("Live poll: on"))
+            await pilot.press("l")
+            await wait_until(lambda: label().startswith("Live poll: off"))
+            service.mode = "fail"
+            await pilot.press("l")
+            await wait_until(lambda: label().startswith("Live poll: off") and not screen._live_on)
 
 
 @pytest.mark.asyncio
