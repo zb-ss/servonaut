@@ -367,3 +367,105 @@ async def test_the_dangerous_modal_cue_is_true_shift_tab_reaches_the_box() -> No
         assert app.focused is scroll
         await pilot.press("down", "down")
         assert scroll.scroll_y > 0
+
+
+# ---------------------------------------------------------------------------
+# Terminal escapes in remote text (file names, errors, scan output)
+# ---------------------------------------------------------------------------
+
+OSC_CLIPBOARD = "\x1b]52;c;ZWNobyBoaQ==\x07"
+OSC_TITLE = "\x1b]0;pwned\x07"
+OSC_SHOWN = "\\x1b]52;c;ZWNobyBoaQ==\\x07"
+
+
+def _tree_host(entries: list):
+    from textual.widgets import Tree
+
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    class TreeOnly(RemoteTree):
+        def __init__(self) -> None:
+            Tree.__init__(self, "~", id="rt")
+
+        def on_mount(self, event):
+            event.prevent_default()
+
+    class Host(App):
+        def compose(self):
+            yield TreeOnly()
+
+        def on_mount(self):
+            tree = self.query_one("#rt", Tree)
+            tree.root.expand()
+            RemoteTree._add_entries_to_node(tree, tree.root, entries)
+
+    return Host()
+
+
+@pytest.mark.asyncio
+async def test_escape_sequences_in_remote_file_names_are_not_drawn() -> None:
+    from textual.widgets import Tree
+
+    entries = [
+        {"type": "file", "name": f"a{OSC_CLIPBOARD}b", "path": "~/a", "size": 1},
+        {"type": "directory", "name": f"d{OSC_TITLE}", "path": "~/d", "size": 0},
+    ]
+    app = _tree_host(entries)
+    async with app.run_test(size=(100, 10)) as pilot:
+        await pilot.pause(0.2)
+        tree = app.query_one("#rt", Tree)
+        labels = [child.label.plain for child in tree.root.children]
+        assert f"a{OSC_SHOWN}b" in labels[0]
+        assert "\\x1b]0;pwned\\x07" in labels[1]
+        drawn = "".join(
+            seg.text for line in tree.render_lines(Region(0, 0, 100, 10)) for seg in line
+        )
+        assert "\x1b" not in drawn and "\x07" not in drawn
+
+
+@pytest.mark.asyncio
+async def test_escape_sequences_in_a_remote_error_line_are_not_drawn() -> None:
+    from types import SimpleNamespace
+
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    app = _tree_host([])
+    async with app.run_test(size=(100, 10)) as pilot:
+        tree = app.query_one("#rt", RemoteTree)
+        loading = tree.root.add("loading")
+        tree._pending_fetch = (tree.root, loading, "/srv")
+        worker = SimpleNamespace(
+            group="fetch_dir", is_finished=True, result=None,
+            error=RuntimeError(f"ls: cannot read {OSC_CLIPBOARD}"),
+        )
+        tree.on_worker_state_changed(SimpleNamespace(worker=worker))
+        await pilot.pause(0.2)
+        assert OSC_SHOWN in tree.root.children[-1].label.plain
+
+
+@pytest.mark.asyncio
+async def test_escape_sequences_in_scan_output_are_not_drawn() -> None:
+    from unittest.mock import MagicMock
+
+    from textual.widgets import DataTable
+
+    from servonaut.screens.scan_results import ScanResultsScreen
+
+    results = [{"source": f"path:~/{OSC_TITLE}", "content": f"ls {OSC_CLIPBOARD}", "timestamp": "t"}]
+
+    class Host(App):
+        demo_mode = False
+        redaction_service = None
+        keyword_store = MagicMock(get_results=MagicMock(return_value=results))
+        scan_service = MagicMock()
+
+        def on_mount(self):
+            self.push_screen(ScanResultsScreen({"id": "i-example", "name": "Example"}))
+
+    app = Host()
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.3)
+        table = app.screen.query_one("#results_table", DataTable)
+        cells = [str(cell) for cell in table.get_row_at(0)]
+        assert cells[0] == "path:~/\\x1b]0;pwned\\x07"
+        assert cells[1] == f"ls {OSC_SHOWN}"

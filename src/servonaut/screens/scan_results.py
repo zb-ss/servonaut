@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Static, Button, DataTable
 from textual.worker import Worker
 
+from servonaut.utils.markup import inert_text
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
@@ -113,7 +114,11 @@ class ScanResultsScreen(Screen):
             # Replace newlines with spaces for table display
             content_display = _s(content_display.replace('\n', ' '))
 
-            table.add_row(Text(source), Text(content_display), Text(str(timestamp)))
+            table.add_row(
+                Text(inert_text(source)),
+                Text(inert_text(content_display)),
+                Text(inert_text(str(timestamp))),
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
