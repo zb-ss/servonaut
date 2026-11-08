@@ -3,27 +3,33 @@
 An action reads as plain sentence-case words with a quiet key hint on the
 right (``Browse files  1``). The label is built here, in one place, so every
 screen that adopts the widget looks the same.
+
+A screen adopts the widgets by putting :class:`ActionButton` s in an
+:class:`ActionRow` and setting ``compact`` on the buttons whenever its layout
+is narrow; the row then keeps every button fully visible.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
+from textual.containers import Horizontal
 from textual.content import Content, ContentText
+from textual.events import Resize
 from textual.widgets import Button
 
 ActionRole = Literal["default", "primary", "warning", "error"]
 
-_ROLE_VARIANTS = {
-    "default": "default",
-    "primary": "primary",
-    "warning": "warning",
-    "error": "error",
-}
 _KEY_GAP = "  "
+_COMPACT_KEY_GAP = "   "
+# Cells a button adds around its label: padding and line pad, plus the border
+# when it is not compact; every button also keeps a one-cell margin.
+_COMPACT_CHROME = 4
+_FULL_CHROME = 6
+_MARGIN = 1
 
 
-def action_label(text: str, key: str | None = None) -> Content:
+def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
     """The label shown on an action: *text*, then *key* as a muted hint.
 
     Both parts are literal: neither is parsed as markup, so a label built from
@@ -31,7 +37,7 @@ def action_label(text: str, key: str | None = None) -> Content:
     """
     if not key:
         return Content(text)
-    return Content.assemble(text, _KEY_GAP, (key, "$text-muted"))
+    return Content.assemble(text, gap, (key, "$text-muted"))
 
 
 class ActionButton(Button):
@@ -53,9 +59,10 @@ class ActionButton(Button):
         self._text = text
         self._key = key
         self._short = short
+        self._hint = True
         super().__init__(
-            action_label(short if compact and short else text, key),
-            variant=_ROLE_VARIANTS[role],
+            self._label(compact, True),
+            variant=role,
             id=id,
             classes=classes,
             tooltip=tooltip,
@@ -63,20 +70,67 @@ class ActionButton(Button):
             compact=compact,
         )
 
-    def _words(self) -> str:
-        return self._short if self.compact and self._short else self._text
+    def _label(self, compact: bool, hint: bool) -> Content:
+        words = self._short if compact and self._short else self._text
+        gap = _COMPACT_KEY_GAP if compact else _KEY_GAP
+        return action_label(words, self._key if hint else None, gap)
+
+    def _refresh_label(self) -> None:
+        self.label = self._label(self.compact, self._hint)
+        # An auto width is measured from the label; measure it again.
+        self.refresh(layout=True)
+        if self.parent is not None:
+            self.parent.refresh(layout=True)
 
     def watch_compact(self, compact: bool) -> None:
         """Use the short words when only one row is available."""
-        if hasattr(self, "_text"):
-            self.label = action_label(self._words(), self._key)
+        self._refresh_label()
 
     def set_text(self, text: str, key: str | None = None) -> None:
         """Replace the words and, when given, the key hint."""
         self._text = text
         self._key = key if key is not None else self._key
-        self.label = action_label(self._words(), self._key)
+        self._refresh_label()
+
+    def set_hint_visible(self, visible: bool) -> None:
+        """Show or drop the key hint (it is the first thing to go when space is short)."""
+        self._hint = visible
+        self._refresh_label()
 
     def set_role(self, role: ActionRole) -> None:
         """Change how prominent the action looks."""
-        self.variant = _ROLE_VARIANTS[role]
+        self.variant = role
+
+    def natural_width(self, hint: bool) -> int:
+        """Cells this button needs, margin included, with or without its key hint."""
+        chrome = _COMPACT_CHROME if self.compact else _FULL_CHROME
+        return self._label(self.compact, hint).cell_length + chrome + _MARGIN
+
+
+class ActionRow(Horizontal):
+    """A row of actions that never clips one.
+
+    When the buttons do not fit, the key hints go first; when they still do
+    not fit, the row wraps onto further lines (class ``-wrap``).
+    """
+
+    def on_resize(self, event: Resize) -> None:
+        self.fit()
+
+    def fit(self) -> None:
+        """Choose hints and wrapping for the width the row has now."""
+        width = self.content_size.width
+        buttons = list(self.query(ActionButton))
+        if width <= 0 or not buttons:
+            return
+        for hint in (True, False):
+            if sum(button.natural_width(hint) for button in buttons) <= width:
+                self._apply(buttons, hint=hint, wrap=False)
+                return
+        self._apply(buttons, hint=False, wrap=True)
+
+    def _apply(self, buttons: list[ActionButton], *, hint: bool, wrap: bool) -> None:
+        for button in buttons:
+            if button._hint != hint:
+                button.set_hint_visible(hint)
+        self.set_class(wrap, "-wrap")

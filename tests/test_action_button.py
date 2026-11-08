@@ -68,7 +68,7 @@ async def test_compact_is_one_row_borderless_and_uses_the_short_words() -> None:
         assert button.region.height == 3 and button.label.plain == "Browse files  1"
         button.compact = True
         await pilot.pause()
-        assert button.region.height == 1 and button.label.plain == "Browse  1"
+        assert button.region.height == 1 and button.label.plain == "Browse   1"
         button.compact = False
         await pilot.pause()
         assert button.region.height == 3 and button.label.plain == "Browse files  1"

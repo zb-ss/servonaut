@@ -507,3 +507,50 @@ async def test_focus_and_hover_are_visible_on_compact_buttons(theme, button_id) 
         await pilot.hover(button)
         await pilot.pause()
         assert _paint_signature(app, button) != idle, "hover is not visible"
+
+
+async def _settle_layout(pilot, screen) -> None:
+    """Wait until no button moves between frames (rows refit after a resize)."""
+    previous = None
+    for _ in range(20):
+        await pilot.pause()
+        current = [(b.id, b.region) for b in screen.query(ActionButton)]
+        if current == previous and not screen._layout_required:
+            return
+        previous = current
+
+
+def _assert_rows_inside(screen: ServerActionsScreen) -> None:
+    """No action is cut off by the edge of the row (or card) that holds it."""
+    for row in screen.query("ActionRow"):
+        for button in row.query(ActionButton):
+            assert row.region.contains_region(button.region), (button.id, button.region, row.region)
+            assert button.content_size.width >= button.label.cell_length, f"{button.id} label clipped"
+    card_ids = {**CARD_OF, **OVH_CARD_OF}
+    for button in screen.query(ActionButton):
+        card_id = card_ids.get(button.id)
+        if card_id and screen.query(f"#{card_id}"):
+            card = screen.query_one(f"#{card_id}")
+            assert card.region.contains_region(button.region), (button.id, card_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat", [False, True])
+async def test_no_action_is_clipped_across_a_width_sweep(chat) -> None:
+    app = _LayoutHost(navigation_visible=not chat)
+    app.instances[0].update(is_ovh=True, provider_type="vps")
+    async with app.run_test(size=(160, 40)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: bool(screen.query("#btn_ovh_firewall")))
+        if chat:
+            await _open_chat(app, pilot)
+        for width in (*range(160, 111, -8), *range(110, 79, -2)):
+            await pilot.resize_terminal(width, 40)
+            await _settle_layout(pilot, screen)
+            if not screen.query_one("#sa-body").display:
+                continue  # the chat replaced the content at this width
+            ssh = screen.query_one("#btn_ssh", ActionButton)
+            toolbar = screen.query_one("#action_buttons")
+            assert toolbar.region.contains_region(ssh.region), (width, ssh.region, toolbar.region)
+            assert ssh.content_size.width >= ssh.label.cell_length, f"SSH clipped at {width}"
+            _assert_rows_inside(screen)

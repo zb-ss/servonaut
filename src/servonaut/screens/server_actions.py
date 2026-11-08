@@ -35,7 +35,7 @@ from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
-from servonaut.widgets.action_button import ActionButton
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.dialogs import (
@@ -127,9 +127,9 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
     return f"Team key for {row.get('team_name') or row.get('team_slug') or 'team'}"
 
 
-def _card_actions(*buttons: ActionButton) -> Horizontal:
+def _card_actions(*buttons: ActionButton) -> ActionRow:
     """The row of actions that belong to one card."""
-    return Horizontal(*buttons, classes="sa-card-actions")
+    return ActionRow(*buttons, classes="sa-card-actions")
 
 
 def _card(card_id: str, body: Static, *buttons: ActionButton) -> Vertical:
@@ -971,7 +971,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 # Full-width compact context banner
                 yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
                 # Toolbar: the primary actions, always one row
-                yield Horizontal(
+                yield ActionRow(
                     ActionButton("← Fleet", "9", short="← Fleet", id="btn_back"),
                     Static("", classes="sa-toolbar-spacer"),
                     ActionButton("Browse files", "1", short="Browse", id="btn_browse"),
@@ -1487,6 +1487,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         compact = self.has_class("-narrow") or self.has_class("-content-narrow")
         for button in self.query(ActionButton):
             button.compact = compact
+        for row in self.query(ActionRow):
+            row.fit()
 
     def _displayed_identity_lines(self) -> list[str]:
         """The identity card as plain text, exactly as it is displayed."""
