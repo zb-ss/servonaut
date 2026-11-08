@@ -99,7 +99,7 @@ class ThemeCard(Vertical):
             self.name = name
 
     def __init__(self, info: ThemeInfo, is_active: bool, warning: Optional[Reading]) -> None:
-        super().__init__(classes="theme-card -active" if is_active else "theme-card")
+        super().__init__(id=f"theme_card_{info.name}", classes="theme-card -active" if is_active else "theme-card")
         self.theme_name = info.name
         self._info = info
         self._warning = warning

@@ -348,7 +348,7 @@ Config file: `~/.servonaut/config.json`
 | `cache_ttl_seconds` | `3600` | Cache duration (1 hour) |
 | `terminal_emulator` | `auto` | Terminal: `auto`, `gnome-terminal`, `konsole`, `alacritty`, etc. |
 | `default_scan_paths` | `["~/"]` | Paths to scan on all servers |
-| `theme` | `servonaut` | Colour theme (Settings → General, or Ctrl+P → Theme) |
+| `theme` | `servonaut` | Colour theme (Settings → Appearance, or Ctrl+P → Theme) |
 | `custom_servers` | `[]` | Non-AWS custom server list |
 | `log_viewer_tail_lines` | `100` | Initial tail lines for log viewer |
 | `log_viewer_max_lines` | `10000` | Max lines before clearing log viewer |
