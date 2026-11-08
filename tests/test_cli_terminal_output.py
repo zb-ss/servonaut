@@ -8,11 +8,11 @@ import pytest
 
 from servonaut import main as main_module
 
-HOSTILE = "web\x1b]52;c;aGVsbG8=\x07\x1b[2J\x9b31m‮-1"
+HOSTILE = "web\x1b]52;c;aGVsbG8=\x07\x1b[2J\x9b31m\u202e-1"
 
 
 def _raw_controls(text: str) -> bool:
-    return any(ch in text for ch in ("\x1b", "\x07", "\x9b", "‮"))
+    return any(ch in text for ch in ("\x1b", "\x07", "\x9b", "\u202e"))
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
@@ -80,6 +80,18 @@ def test_streams_are_restored_after_the_command(monkeypatch: pytest.MonkeyPatch)
     assert (sys.stdout, sys.stderr) == before
 
 
-def test_the_tui_and_mcp_paths_keep_the_raw_streams() -> None:
+def test_the_mcp_path_keeps_the_raw_streams() -> None:
     assert "mcp" not in main_module._TEXT_SUBCOMMANDS
-    assert "connect" not in main_module._TEXT_SUBCOMMANDS
+
+
+def test_foreground_connect_prints_relay_ids_as_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def run_connect(_args: object) -> None:
+        print(f"  [exec] {HOSTILE}: ok (3ms)")
+
+    monkeypatch.setattr(main_module, "_run_connect", run_connect)
+    _run_dispatch(monkeypatch, "connect")
+    out = capsys.readouterr().out
+    assert "web\\x1b]52" in out
+    assert not _raw_controls(out)

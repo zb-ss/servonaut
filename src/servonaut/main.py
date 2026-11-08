@@ -1422,7 +1422,7 @@ def _run_connect(args: argparse.Namespace) -> None:
 
 _TEXT_SUBCOMMANDS = frozenset({
     'ai', 'hetzner', 'secrets', 'vault', 'ca', 'ssh', 'servers', 'team',
-    'db', 'memory', 'login', 'logout',
+    'db', 'memory', 'login', 'logout', 'connect',
 })
 
 
