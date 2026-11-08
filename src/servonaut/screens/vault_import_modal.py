@@ -16,9 +16,12 @@ from typing import Any, Callable
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, SelectionList, Static
 from textual.widgets.selection_list import Selection
+
+from servonaut.utils.markup import literal
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.screens.bw_passphrase_modal import BwPassphraseModal
@@ -93,10 +96,12 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         *,
         session_service: BwSessionService | None = None,
         resolver: BwResolver | None = None,
+        vault_name: str = "",
     ) -> None:
         super().__init__()
         self._service = service
         self._vault_id = vault_id
+        self._vault_name = vault_name
         self._directory = directory or Path.home() / ".ssh"
         self._session_service = session_service
         self._resolver = resolver
@@ -134,9 +139,16 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         self._set_status(self._status_raw)
         self._busy.redraw()
 
+    def _title_content(self) -> Content:
+        """The title, with the vault the keys go into when it is known."""
+        title = Content.styled("Import SSH key into encrypted vault", "bold")
+        if not self._vault_name:
+            return title
+        return Content.assemble(title, "\n", literal(f"Vault: {self._vault_name}"))
+
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Static("[bold]Import SSH key into encrypted vault[/bold]", id="vault_import_title"),
+            Static(self._title_content(), id="vault_import_title"),
             Static(
                 "Choose a source. Existing files and Bitwarden items are never deleted.",
                 id="vault_import_intro",

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Union
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
@@ -87,7 +88,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
     def __init__(
         self,
         title: str,
-        description: str,
+        description: Union[str, Content],
         consequences: List[str],
         confirm_text: str,
         action_label: str,
@@ -97,7 +98,8 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
         Args:
             title: Dialog title, e.g. "Reinstall VPS".
-            description: Rich markup string explaining the operation.
+            description: Text explaining the operation: a markup string, or
+                ``Content`` when it carries a name from outside the app.
             consequences: List of consequences shown as bullet points.
             confirm_text: Exact text the user must type to enable confirm button.
             action_label: Label for the confirm button.

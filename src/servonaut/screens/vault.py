@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, Optional
 
 from rich.text import Text
+from textual.content import Content
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -28,6 +29,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionL
 from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
+from servonaut.utils.markup import literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
@@ -210,8 +212,11 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "skip", "Skip", show=False)]
 
-    def __init__(self, entry: Mapping[str, Any], safety_number: str, changed: bool) -> None:
+    def __init__(
+        self, entry: Mapping[str, Any], safety_number: str, changed: bool, vault_name: str = "",
+    ) -> None:
         super().__init__()
+        self._vault_name = vault_name
         self._lines = member_approval_lines(entry, safety_number, changed)
         self._safety_number = safety_number
         self._changed = changed
@@ -225,8 +230,10 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
             Static(Text(scrub_for_demo(self.app, line)))
             for line in self._lines if not line.startswith("Safety number:")
         ]
+        named = [Static(literal(f"Vault: {self._vault_name}"))] if self._vault_name else []
         yield Vertical(
             Static(f"[bold]{title}[/bold]"),
+            *named,
             *body[:-1],
             Static(Text(self._safety_number), id="vault_member_sas"),
             body[-1],
@@ -1355,6 +1362,10 @@ class VaultScreen(Screen):
         self._status(onboarding.AWAITING_ACCESS.message)
         return True
 
+    def _vault_label(self, vault: Mapping[str, Any]) -> str:
+        """A vault's name as the dialogs show it (inert, hidden in demo mode)."""
+        return self.scrub_for_display(terminal_safe(vault.get("name") or "Unnamed vault"))
+
     def _selected_vault(self) -> Optional[dict[str, Any]]:
         """The vault the user is looking at.
 
@@ -2306,6 +2317,7 @@ class VaultScreen(Screen):
                 service,
                 vault_id,
                 session_service=getattr(self.app, "bw_session_service", None),
+                vault_name=self._vault_label(selected),
             ),
             imported,
         )
@@ -2516,15 +2528,20 @@ class VaultScreen(Screen):
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
-        self.run_worker(self._process_grants(str(selected.get("vault_id") or "")), group="vault", exclusive=True)
+        self.run_worker(
+            self._process_grants(str(selected.get("vault_id") or ""), self._vault_label(selected)),
+            group="vault", exclusive=True,
+        )
 
-    async def _process_grants(self, vault_id: str) -> None:
+    async def _process_grants(self, vault_id: str, vault_name: str = "") -> None:
         service = self._service()
         if service is None:
             return
 
         async def approve(entry: Mapping[str, Any], safety_number: str, changed: bool) -> bool:
-            return bool(await self.app.push_screen_wait(VaultMemberApprovalModal(entry, safety_number, changed)))
+            return bool(await self.app.push_screen_wait(
+                VaultMemberApprovalModal(entry, safety_number, changed, vault_name)
+            ))
 
         try:
             async with self._busy('Processing access requests…', holds_screen=True):
@@ -2550,7 +2567,10 @@ class VaultScreen(Screen):
         self.app.push_screen(
             ConfirmActionScreen(
                 "Rotate vault key",
-                "A new vault key version will replace every current grant.",
+                Content.assemble(
+                    literal(f"Vault: {self._vault_label(selected)}"), "\n",
+                    "A new vault key version will replace every current grant.",
+                ),
                 ["Pending members may remain ungranted until verified.", "Open exposures remain until their deployed keys are changed."],
                 "ROTATE",
                 "Rotate",
