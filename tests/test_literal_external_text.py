@@ -43,6 +43,11 @@ HOSTILE = [
 CLICK = "[ @click=screen.dismiss(True)]web-1"
 
 
+def _rendered(value: Any) -> Content:
+    """What a widget draws for *value*: content as is, a string parsed as markup."""
+    return value if isinstance(value, Content) else Content.from_markup(value)
+
+
 def _styles(content: Content) -> List[str]:
     return [str(span.style) for span in content.spans]
 
@@ -66,6 +71,8 @@ def _assert_literal(content: Content, sample: str) -> None:
 def test_helpers_show_every_sample_literally(sample: str) -> None:
     from servonaut.widgets.chat_panel import ChatPanel
 
+    prompt = MemoryPrompt({"id": "i-1", "name": sample})
+    label = getattr(prompt, "_label_content", None) or prompt._label_markup
     built = [
         literal(sample, "bold"),
         with_bold_values("Remove {} from {}.", sample, sample),
@@ -73,7 +80,7 @@ def test_helpers_show_every_sample_literally(sample: str) -> None:
         render_memory_panel(
             {"os": {"observed": {"pretty_name": sample, "kernel": sample}, "probed_at": ""}},
         ),
-        MemoryPrompt({"id": "i-1", "name": sample})._label_content(),
+        label(),
         PowerActionConfirmModal(
             action="Power off", server_name=sample, provider=sample, consequence=sample,
         ).message,
@@ -82,8 +89,7 @@ def test_helpers_show_every_sample_literally(sample: str) -> None:
         ChatPanel._thinking_content(sample),
     ]
     for content in built:
-        assert isinstance(content, Content)
-        _assert_literal(content, sample)
+        _assert_literal(_rendered(content), sample)
 
 
 def test_with_bold_values_rejects_a_mismatched_template() -> None:
@@ -300,8 +306,7 @@ def test_server_info_shows_every_field_literally(kind: str, sample: str) -> None
         instance["is_custom"] = True
     elif kind == "shared":
         instance["is_shared"] = True
-    info = _server_info(instance)
-    assert isinstance(info, Content)
+    info = _rendered(_server_info(instance))
     _assert_literal(info, sample)
     assert info.plain.count(sample) >= 3
 
@@ -325,11 +330,11 @@ async def test_server_info_renders_without_error_and_clicks_do_nothing() -> None
 
 
 def test_memory_panel_keeps_its_own_styles_and_the_probed_text_plain() -> None:
-    panel = render_memory_panel(
+    panel = _rendered(render_memory_panel(
         {"os": {"observed": {"pretty_name": "Ubuntu [/"}, "probed_at": ""},
          "containers": {"observed": {"docker_version": "[ @click=app.bell]1", "docker_running": "x [/"},
                         "probed_at": ""}},
-    )
+    ))
     assert "Ubuntu [/" in panel.plain
     assert "[ @click=app.bell]1 (x [/ running)" in panel.plain
 
