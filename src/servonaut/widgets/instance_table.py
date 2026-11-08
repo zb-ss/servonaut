@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from rich.text import Text
+from textual.color import Color, ColorParseError
 from textual.widgets import DataTable
 
 from servonaut.utils.instance_resolver import display_name, row_identity
@@ -386,10 +387,10 @@ class InstanceTable(DataTable):
         coloured = self._colorize_state(state)
         return {
             "index": str(idx + 1),
-            "name": _name_cell(
+            "name": self._tinted(_name_cell(
                 instance, limits["name"], shared=id(instance) in self._shared_by,
                 marked=row_identity(instance) in self._marks,
-            ),
+            ), instance),
             # A state without a colour is provider text: never read as markup.
             "state": self._state_cell(instance, coloured, plain("state", state), state),
             "provider": plain("provider", instance.get("provider", "AWS")),
@@ -411,6 +412,25 @@ class InstanceTable(DataTable):
             return cell
         text = Text.from_markup(cell) if isinstance(cell, str) else cell.copy()
         text.append(f" {mark}", style="dim")
+        return self._tinted(text, instance)
+
+    def _tinted(self, text: Text, instance: dict) -> Text:
+        """*text* on a faint row tint when a refresh added or changed the server.
+
+        The tint blends the theme's success (new) or warning (changed) colour
+        into its background; a theme whose colours are not plain values (the
+        terminal-colour themes) keeps just the bold name and the note.
+        """
+        mark = self._marks.get(row_identity(instance) or "")
+        if not mark:
+            return text
+        token = "success" if mark == MARK_NEW else "warning"
+        try:
+            colours = self.app.get_css_variables()
+            tint = Color.parse(colours[token]).blend(Color.parse(colours["background"]), 0.8)
+        except (KeyError, ColorParseError):
+            return text
+        text.stylize(f"on {tint.hex}")
         return text
 
     def _optional_cell(self, key: str, instance: dict) -> Optional[str]:

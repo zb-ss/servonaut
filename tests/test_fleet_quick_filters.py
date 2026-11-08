@@ -314,3 +314,15 @@ def test_row_identity_separates_sources_accounts_and_teams_and_skips_missing_ids
     shared = {"id": "7", "is_shared": True}
     assert row_identity({**shared, "team_slug": "a"}) != row_identity({**shared, "team_slug": "b"})
     assert row_identity({"id": ""}) is None and row_identity({"name": "x"}) is None
+
+
+@pytest.mark.asyncio
+async def test_marked_rows_get_a_row_tint_taken_from_the_theme() -> None:
+    async with _Host().run_test() as pilot:
+        table = pilot.app.query_one(InstanceTable)
+        table.set_marks({row_identity(ROWS[0]): "new", row_identity(ROWS[1]): "was running"}, redraw=False)
+        def tints(row):
+            cells = table._row_cells(0, row, None)
+            return {str(span.style) for key in ("name", "state") for span in cells[key].spans if "on " in str(span.style)}
+        new, changed, plain = tints(ROWS[0]), tints(ROWS[1]), tints(ROWS[2])
+        assert new and changed and new != changed and not plain
