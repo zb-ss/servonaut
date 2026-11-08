@@ -520,3 +520,65 @@ async def test_edit_file_is_offered_only_for_a_regular_toml_file_in_the_folder(
         button.press()
         await _until(lambda: any("regular" in n.message for n in app._notifications))
         assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_arrow_keys_move_between_cards_following_the_grid(manager: ConfigManager) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        names = [card.theme_name for card in panel.query(ThemeCard)]
+        columns = panel.card_columns
+        assert columns >= 2
+        _card(panel, names[0]).focus()
+        await pilot.pause()
+
+        def focused() -> str:
+            return app.focused.theme_name
+
+        await pilot.press("right")
+        assert focused() == names[1]
+        await pilot.press("down")
+        assert focused() == names[1 + columns]
+        await pilot.press("up")
+        assert focused() == names[1]
+        await pilot.press("left")
+        assert focused() == names[0]
+        await pilot.press("left", "up")
+        assert focused() == names[0], "the first card stays put"
+        await pilot.press("end")
+        assert focused() == names[-1]
+        await pilot.press("right", "down")
+        assert focused() == names[-1], "the last card stays put"
+        await pilot.press("home")
+        assert focused() == names[0]
+
+
+@pytest.mark.asyncio
+async def test_a_card_can_be_reached_with_tab_too(manager: ConfigManager) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        reached = set()
+        for _ in range(len(app.screen.focus_chain) + 1):
+            await pilot.press("tab")
+            if isinstance(app.focused, ThemeCard):
+                reached.add(app.focused.theme_name)
+        assert {"servonaut", "servonaut-light"} <= reached
+
+
+@pytest.mark.asyncio
+async def test_the_readability_verdict_of_the_focused_card_is_visible_without_scrolling_at_100x30(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _ready(app, pilot)
+        verdict = panel.query_one("#appearance_verdict", Static)
+        assert "✓" in _text(verdict) and "Servonaut" in _text(verdict)
+        _card(panel, "pale").focus()
+        await _until(lambda: "⚠" in _text(verdict))
+        assert "Pale" in _text(verdict) and "4.5:1" in _text(verdict)
+        assert 0 <= verdict.region.y and verdict.region.bottom <= 30 and verdict.region.height >= 1
+        assert panel.region.contains_region(verdict.region)

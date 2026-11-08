@@ -107,7 +107,15 @@ class ThemeCard(Vertical):
     """One selectable theme; Enter or a click applies it, focus previews it."""
 
     can_focus = True
-    BINDINGS = [Binding("enter", "choose", "Apply", show=True)]
+    BINDINGS = [
+        Binding("enter", "choose", "Apply", show=True),
+        Binding("left", "move('left')", "Previous", show=False),
+        Binding("right", "move('right')", "Next", show=False),
+        Binding("up", "move('up')", "Row up", show=False),
+        Binding("down", "move('down')", "Row down", show=False),
+        Binding("home", "move('first')", "First", show=False),
+        Binding("end", "move('last')", "Last", show=False),
+    ]
 
     class Chosen(Message):
         def __init__(self, name: str) -> None:
@@ -158,6 +166,12 @@ class ThemeCard(Vertical):
     def action_choose(self) -> None:
         self.post_message(self.Chosen(self.theme_name))
 
+    def action_move(self, direction: str) -> None:
+        """Move focus to a neighbouring card, following the grid's rows and columns."""
+        panel = next((a for a in self.ancestors if isinstance(a, AppearancePanel)), None)
+        if panel is not None:
+            panel.move_card_focus(self, direction)
+
     def on_click(self, event: events.Click) -> None:
         if isinstance(event.widget, Button):
             return
@@ -168,8 +182,12 @@ class ThemeCard(Vertical):
         self.post_message(self.Previewed(self.theme_name))
 
 
+def _shortfall(reading: Reading) -> str:
+    return f"{reading.label} is {reading.ratio:.1f}:1 (needs {MIN_CONTRAST}:1)"
+
+
 def _warning_text(reading: Reading) -> str:
-    return f"⚠ {reading.label} is {reading.ratio:.1f}:1 (needs {MIN_CONTRAST}:1)"
+    return f"⚠ {_shortfall(reading)}"
 
 
 def _can_edit(path: Path) -> bool:
@@ -186,7 +204,7 @@ class EditFileButton(Button):
     """Opens the theme file for editing."""
 
     def __init__(self, path: Path) -> None:
-        super().__init__("Edit file", classes="theme-edit-file", compact=True)
+        super().__init__("Edit file", classes="theme-edit-file")
         self.path = path
 
 
@@ -265,6 +283,7 @@ class AppearancePanel(SettingsPanel):
                 )
         yield Static("", id="appearance_folder", markup=False)
         yield BusyIndicator(id="appearance_busy")
+        yield Static("", id="appearance_verdict", markup=False)
         with Container(id="appearance_layout", classes="-stacked"):
             yield Grid(id="appearance_cards", classes="-cols-1")
             with Vertical(id="appearance_details"):
@@ -311,6 +330,29 @@ class AppearancePanel(SettingsPanel):
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
             grid.set_class(count == columns, f"-cols-{count}")
+
+    @property
+    def card_columns(self) -> int:
+        grid = self.query_one("#appearance_cards", Grid)
+        return next((n for n in range(MAX_CARD_COLUMNS, 0, -1) if grid.has_class(f"-cols-{n}")), 1)
+
+    def move_card_focus(self, current: "ThemeCard", direction: str) -> None:
+        """Focus the card *direction* of *current*; the first and last cards are the edges."""
+        cards = list(self.query(ThemeCard))
+        if current not in cards:
+            return
+        index, columns = cards.index(current), self.card_columns
+        target = {
+            "left": index - 1,
+            "right": index + 1,
+            "up": index - columns,
+            "down": index + columns,
+            "first": 0,
+            "last": len(cards) - 1,
+        }[direction]
+        if 0 <= target < len(cards) and target != index:
+            cards[target].focus()
+            cards[target].scroll_visible()
 
     def _fit_actions(self, compact: bool) -> None:
         """Borderless buttons with short labels when the panel is too narrow for three."""
@@ -380,6 +422,7 @@ class AppearancePanel(SettingsPanel):
         self.query_one("#appearance_readability_title", Static).update(literal(f"Readability · {label}"))
         preview = self.query_one("#appearance_preview", Static)
         readability = self.query_one("#appearance_readability", Static)
+        self.query_one("#appearance_verdict", Static).update(_verdict_line(label, theme))
         if theme.ansi:
             preview.styles.background = None
             preview.update("This theme uses your terminal's own colours, so it has no fixed preview.")
@@ -490,6 +533,16 @@ class AppearancePanel(SettingsPanel):
                 severity="information" if not problems else "warning",
                 markup=False,
             )
+
+
+def _verdict_line(label: str, theme: Theme) -> Content:
+    """One line: whether the theme reads well, kept near the actions so it is always in view."""
+    if theme.ansi:
+        return literal(f"{label}: uses your terminal's colours; contrast depends on the terminal")
+    worst = worst_reading(theme)
+    if worst is None:
+        return Content.assemble(("✓", "$text-success"), f" {label}: every text colour reads well")
+    return Content.assemble(("⚠", "$text-warning"), f" {label}: {_shortfall(worst)}")
 
 
 def _preview_content(theme: Theme) -> Content:
