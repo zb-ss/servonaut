@@ -259,6 +259,17 @@ def test_the_keys_work_while_a_chip_has_focus_but_are_text_in_the_search_box() -
     _run(scenario)
 
 
+def test_inactive_chips_have_a_visible_pill_background_in_one_row() -> None:
+    async def scenario(pilot: Any) -> None:
+        for chip in _screen(pilot).query(FleetChip):
+            if not chip.display or chip.has_class("--chosen"):
+                continue
+            assert chip.styles.background.a > 0, chip.id
+            assert chip.region.height == 1
+
+    _run(scenario)
+
+
 def test_chips_take_keyboard_focus_and_enter_presses_them() -> None:
     async def scenario(pilot: Any) -> None:
         chip = _chip(pilot, "state", "stopped")

@@ -67,6 +67,7 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     display: none;
 }
 
+/* A chip is a pill: a faint panel fill says "click me" while it stays one row. */
 .fleet-chip {
     width: auto;
     min-width: 0;
@@ -74,17 +75,17 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     margin: 0 1 0 0;
     padding: 0 1;
     border: none;
-    background: transparent;
+    background: $panel;
     color: $text;
 }
 
 .fleet-chip:hover {
-    background: $boost;
+    background: $panel-lighten-2;
     color: $text-accent;
 }
 
 .fleet-chip:focus {
-    background: $boost;
+    background: $panel-lighten-2;
     text-style: bold underline;
 }
 
@@ -92,6 +93,19 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     background: $accent;
     color: $background;
     text-style: bold;
+}
+
+/* Terminal-colour themes: fills are not reliable there, so a chosen chip is
+   drawn reversed and an unchosen one underlined. */
+.fleet-chip:ansi {
+    background: $background;
+    text-style: underline;
+}
+
+.fleet-chip.--chosen:ansi {
+    background: $background;
+    color: $text;
+    text-style: bold reverse;
 }
 
 #fleet_summary_row {
