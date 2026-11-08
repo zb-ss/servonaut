@@ -393,3 +393,21 @@ async def test_unlock_height_follows_visible_content(app_class, size, keychain_a
         )
         await pilot.press("escape")
         assert app.dismissed_value is None
+
+
+@pytest.mark.parametrize("size", [(60, 20), (80, 24), (100, 30)], ids=lambda size: f"{size[0]}x{size[1]}")
+@pytest.mark.asyncio
+async def test_enrol_opens_with_the_unrecoverable_warning_in_view(size, modal_policy, monkeypatch):
+    """Focusing the first field must not scroll the warning out of sight."""
+    from servonaut.services.memory import passphrase_store
+
+    monkeypatch.setattr(passphrase_store, "keyring_available", lambda: True)
+    app = _StyledEnrolApp(mode="enrol")
+    async with app.run_test(size=size) as pilot:
+        for _ in range(3):
+            await pilot.pause(0.1)
+        body = app.screen.query_one("#enrol-body")
+        warning = app.screen.query_one("#enrol-blurb")
+        assert body.scroll_y == 0
+        assert warning.region in body.region, (size, warning.region, body.region)
+        assert app.focused.id == "enrol-pass1"
