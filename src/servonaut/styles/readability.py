@@ -63,6 +63,12 @@ def _opaque(value: str, over: Color) -> Optional[Color]:
     return over.blend(colour, colour.a) if colour.a < 1 else colour
 
 
+def token_colour(theme: Theme, token: str, over: Color) -> Optional[Color]:
+    """The colour the app draws for a design token, laid over *over* if it has opacity."""
+    value = _tokens(theme).get(token)
+    return None if value is None else _opaque(value, over)
+
+
 def readings_for(theme: Theme) -> Tuple[Reading, ...]:
     """Contrast of the text colours the app uses on the fills they sit on.
 
@@ -72,11 +78,10 @@ def readings_for(theme: Theme) -> Tuple[Reading, ...]:
         return ()
     colours = resolved_colours(theme)
     background, surface = colours["background"], colours["surface"]
-    tokens = _tokens(theme)
     text = colours["foreground"]
-    muted = _opaque(tokens.get("foreground-muted", ""), surface) or text
-    accent = _opaque(tokens.get("text-accent", ""), surface) or colours["accent"]
-    error = _opaque(tokens.get("text-error", ""), surface) or colours["error"]
+    muted = token_colour(theme, "foreground-muted", surface) or text
+    accent = token_colour(theme, "text-accent", surface) or colours["accent"]
+    error = token_colour(theme, "text-error", surface) or colours["error"]
     return (
         Reading("Text on background", contrast_ratio(text, background)),
         Reading("Text on cards", contrast_ratio(text, surface)),

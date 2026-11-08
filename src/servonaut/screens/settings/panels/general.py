@@ -14,16 +14,14 @@ from typing import Any, Dict
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.theme import Theme
-from textual.widgets import Input, Select, Static
+from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.forms import setting_row
-from servonaut.styles.themes import resolve_theme_name, theme_options
 
 
 class GeneralPanel(SettingsPanel):
-    """Top-level scalar settings: username, key, cache TTL, terminal, theme."""
+    """Top-level scalar settings: username, key, cache TTL, terminal."""
 
     PANEL_ID = "general"
     TITLE = "General"
@@ -57,23 +55,10 @@ class GeneralPanel(SettingsPanel):
                 "Terminal emulator",
                 Input(placeholder="auto", id="general_terminal"),
             )
-            yield setting_row(
-                "Theme",
-                Select(
-                    theme_options(self.app.available_themes),
-                    value=self.app.theme,
-                    allow_blank=False,
-                    id="general_theme",
-                ),
-            )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        """Follow themes picked elsewhere (Ctrl+P); the base class loads."""
-        self.app.theme_changed_signal.subscribe(self, self._follow_app_theme)
 
     def load(self) -> None:
         """Populate widgets from config and snapshot for dirty tracking."""
@@ -82,7 +67,6 @@ class GeneralPanel(SettingsPanel):
         self._show_field("general_default_key", config.default_key)
         self.query_one("#general_cache_ttl", Input).value = str(config.cache_ttl_seconds)
         self.query_one("#general_terminal", Input).value = config.terminal_emulator
-        self.query_one("#general_theme", Select).value = self._saved_theme(config.theme)
         self._snapshot_now()
 
     def current_values(self) -> Dict[str, Any]:
@@ -92,7 +76,6 @@ class GeneralPanel(SettingsPanel):
             "default_key": self._field_value("general_default_key").strip(),
             "cache_ttl_seconds": self.query_one("#general_cache_ttl", Input).value.strip(),
             "terminal_emulator": self.query_one("#general_terminal", Input).value.strip(),
-            "theme": str(self.query_one("#general_theme", Select).value),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -117,7 +100,6 @@ class GeneralPanel(SettingsPanel):
                 "general_cache_ttl", "Cache TTL must be zero or greater"
             )
 
-        theme = str(self.query_one("#general_theme", Select).value)
         return {
             "default_username": username,
             "default_key": self._field_value("general_default_key").strip(),
@@ -125,33 +107,13 @@ class GeneralPanel(SettingsPanel):
             "terminal_emulator": (
                 self.query_one("#general_terminal", Input).value.strip() or "auto"
             ),
-            "theme": theme,
         }
 
     def persist(self) -> None:
         """Validate via :meth:`collect` then write top-level scalar fields."""
         fields = self.collect()
         self.app.config_manager.update(**fields)
-        self.app.theme = fields["theme"]
         self._finish_save()
-
-    def _follow_app_theme(self, theme: Theme) -> None:
-        """Show a theme picked elsewhere unless the picker holds an unsaved one.
-
-        Without this, saving another field here would put back the theme
-        that was showing when the panel opened.
-        """
-        select = self.query_one("#general_theme", Select)
-        if select.value != self._snapshot.get("theme"):
-            return
-        self._snapshot["theme"] = theme.name
-        select.value = theme.name
-
-    def _saved_theme(self, configured: str) -> str:
-        """The picker entry for the saved theme, or the active one if unknown."""
-        available = self.app.available_themes
-        theme = resolve_theme_name(configured, available)
-        return theme if theme in available else self.app.theme
 
     # ------------------------------------------------------------------
     # Dirty marker refresh
@@ -161,6 +123,3 @@ class GeneralPanel(SettingsPanel):
         """Refresh the dirty marker on any input edit."""
         self._dirty_watch()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        """Refresh the dirty marker on theme change."""
-        self._dirty_watch()

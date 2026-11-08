@@ -118,6 +118,19 @@ async def test_ansi_settings_covers_prior_fleet_but_confirmation_stays_transpare
         assert settings.region == fleet.region
         assert settings.styles.background.a == 1
         assert settings.styles.background.ansi == -1
+        # A native dropdown opens over the panel; the prior screen stays hidden.
+        settings.show_panel("aws")
+        await wait_until(lambda: settings._current_panel() is not panel)
+        selector = settings.query_one("#aws_s3_region", Select)
+        selector.focus()
+        await pilot.press("enter")
+        await wait_until(lambda: selector.expanded)
+        await pilot.pause()
+        assert sentinel not in _native_frame(app, tmp_path / "settings-selector.svg")
+        await pilot.press("escape")
+        await wait_until(lambda: not selector.expanded)
+        settings.show_panel("general")
+        await wait_until(lambda: settings._current_panel() is panel)
         username = settings.query_one("#general_username", Input)
         await _tab_to(pilot, username)
         await pilot.press("ctrl+a", "ctrl+k")
@@ -129,14 +142,6 @@ async def test_ansi_settings_covers_prior_fleet_but_confirmation_stays_transpare
         ))
         validation = _native_frame(app, tmp_path / "settings-validation.svg")
         assert "Username cannot be empty" in validation and sentinel not in validation
-        selector = settings.query_one("#general_theme", Select)
-        selector.focus()
-        await pilot.press("enter")
-        await wait_until(lambda: selector.expanded)
-        await pilot.pause()
-        assert sentinel not in _native_frame(app, tmp_path / "settings-selector.svg")
-        await pilot.press("escape")
-        await wait_until(lambda: not selector.expanded)
         await app.push_screen(ConfirmActionScreen(
             "Review change", "Confirm this action.", ["A setting changes."],
             "confirm", "Confirm",
