@@ -22,7 +22,9 @@ from servonaut.styles.user_themes import (
     LoadResult,
     ThemeError,
     check_theme_file,
+    errors_by_file,
     load_user_themes,
+    problem_count,
     themes_dir,
 )
 
@@ -83,13 +85,20 @@ def _error_text(error: ThemeError) -> str:
     return f"error: {where}{terminal_safe(error.message)}"
 
 
+def _error_row(file: str, errors: List[ThemeError]) -> List[str]:
+    """One row for a broken file: its first problem, and how many it has in all."""
+    count = problem_count(errors)
+    suffix = f" (and {count - 1} more problems)" if count > 1 else ""
+    return [terminal_safe(file), "user", _error_text(errors[0]) + suffix]
+
+
 def _list(_args: argparse.Namespace) -> int:
     result = _load_user_themes()
     rows = [
         [terminal_safe(info.name), "user" if info.source == SOURCE_USER else "built-in", _status(info)]
         for info in _catalogue(result)
     ]
-    rows += [[terminal_safe(error.file), "user", _error_text(error)] for error in result.errors]
+    rows += [_error_row(file, errors) for file, errors in errors_by_file(result.errors).items()]
     print(tabulate(rows, headers=["NAME", "SOURCE", "STATUS"], tablefmt="plain"))
     print(f"\nUser themes go in {terminal_safe(themes_dir())}")
     return _EXIT_OK

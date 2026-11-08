@@ -2976,20 +2976,36 @@ class ServonautApp(App):
         self._reapply_theme_after_reload(previous)
         return result
 
+    def reserved_theme_names(self) -> Set[str]:
+        """Names a user theme may not take: every registered theme that is not a user's."""
+        return set(self.available_themes) - set(self.user_themes)
+
     def _register_user_themes(self) -> LoadResult:
-        """Register the valid theme files; the rest are listed in ``user_theme_errors``."""
-        for name in self.user_themes:
-            self.unregister_theme(name)
+        """Scan the themes folder and register what it holds."""
         try:
-            result = load_user_themes(reserved=self.available_themes)
+            result = load_user_themes(reserved=self.reserved_theme_names())
         except Exception:  # noqa: BLE001 - a theme file must never stop the app
             logger.exception("Scanning the themes folder failed")
             result = LoadResult()
+        self.apply_user_themes(result)
+        return result
+
+    def apply_user_themes(self, result: LoadResult) -> None:
+        """Register the valid themes of a scan; the rest are listed in ``user_theme_errors``.
+
+        The scan itself (:func:`load_user_themes`) can run off the main thread;
+        only this registration has to happen on it.
+        """
+        for name in self.user_themes:
+            self.unregister_theme(name)
         for loaded in result.themes:
             self.register_theme(loaded.theme)
         self.user_themes = {loaded.theme.name: loaded for loaded in result.themes}
         self.user_theme_errors = result.errors
-        return result
+
+    def finish_theme_reload(self, previous: Set[str]) -> None:
+        """Show the active theme as its file now says, after :meth:`apply_user_themes`."""
+        self._reapply_theme_after_reload(previous)
 
     def _reapply_theme_after_reload(self, previous: Set[str]) -> None:
         """Show the active theme as its file now says, or the default if it is gone."""

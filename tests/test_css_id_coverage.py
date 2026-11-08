@@ -1036,6 +1036,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ai_provider_servonaut_status',
         'ai_provider_temperature',
         'ai_provider_upgrade',
+        'appearance_busy',  # Reason: BusyIndicator; styled by its own DEFAULT_CSS
         'appearance',  # Reason: settings panel root; sized by .settings-panel
         'aws',
         'aws_audit_path',

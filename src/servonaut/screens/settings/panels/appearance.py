@@ -6,9 +6,11 @@ app remembers any theme picked anywhere), so this panel has no Save button.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from rich.markup import escape
 from textual import events, on
@@ -36,10 +38,15 @@ from servonaut.styles.theme_files import (
 from servonaut.styles.user_themes import (
     THEME_FILE_SUFFIX,
     ThemeError,
+    errors_by_file,
+    is_more_problems_note,
+    load_user_themes,
+    problem_count,
     resolved_colours,
     themes_dir,
 )
 from servonaut.utils.markup import literal
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.utils.platform_utils import open_path
 
 logger = logging.getLogger(__name__)
@@ -126,7 +133,8 @@ class ThemeCard(Vertical):
 
     def set_active(self, is_active: bool) -> None:
         self.set_class(is_active, "-active")
-        self.query_one(".theme-card-title", Static).update(self._title())
+        for title in self.query(".theme-card-title"):  # none while the card is being redrawn
+            title.update(self._title())
 
     def _title(self) -> Content:
         parts: List[object] = [(self._info.label, "bold")]
@@ -171,22 +179,35 @@ class EditFileButton(Button):
         self.path = path
 
 
-class ThemeErrorCard(Vertical):
-    """A theme file that could not be loaded, and why."""
+# How many of a file's problems its card lists; the rest are counted.
+CARD_PROBLEMS_SHOWN = 3
 
-    def __init__(self, error: ThemeError, path: Path) -> None:
+
+def _problem_lines(errors: List[ThemeError]) -> List[str]:
+    """The first few problems of one file as lines, then a count of the others."""
+    real = [e for e in errors if not is_more_problems_note(e)]
+    lines = [f"Line {e.line}: {e.message}" if e.line else e.message for e in real[:CARD_PROBLEMS_SHOWN]]
+    more = problem_count(errors) - len(lines)
+    if more > 0:
+        lines.append(f"…and {more} more problems")
+    return lines
+
+
+class ThemeErrorCard(Vertical):
+    """A theme file that could not be loaded: one card per file, with its first problems."""
+
+    def __init__(self, errors: List[ThemeError], path: Path) -> None:
         super().__init__(classes="theme-card -error")
-        self._error = error
+        self._errors = errors
         self._path = path
 
     def compose(self) -> ComposeResult:
         yield Static(
-            Content.assemble((self._error.file, "bold"), (" · not loaded", "$text-error")),
+            Content.assemble((self._errors[0].file, "bold"), (" · not loaded", "$text-error")),
             classes="theme-card-title",
         )
-        where = f"Line {self._error.line}: " if self._error.line else ""
         yield Static(
-            Content(f"{where}{self._error.message}. Fix the file, then Reload themes."),
+            Content("\n".join(_problem_lines(self._errors) + ["Fix the file, then choose Reload themes."])),
             classes="theme-card-detail",
         )
         if self._path.is_file():
@@ -230,6 +251,7 @@ class AppearancePanel(SettingsPanel):
                     variant="primary" if button_id == "appearance_new" else "default",
                 )
         yield Static("", id="appearance_folder", markup=False)
+        yield BusyIndicator(id="appearance_busy")
         with Container(id="appearance_layout", classes="-stacked"):
             yield Grid(id="appearance_cards", classes="-cols-1")
             with Vertical(id="appearance_details"):
@@ -255,7 +277,7 @@ class AppearancePanel(SettingsPanel):
 
     def load(self) -> None:
         self._previewed = self.app.theme
-        self.run_worker(self._rebuild_cards(), exclusive=True, group="appearance_cards")
+        self.run_worker(self._rebuild_cards, exclusive=True, group="appearance_cards")
         self._snapshot_now()
 
     def collect(self) -> Dict[str, object]:
@@ -300,7 +322,7 @@ class AppearancePanel(SettingsPanel):
             for info in infos
         ]
         folder = themes_dir()
-        cards += [ThemeErrorCard(error, folder / error.file) for error in app.user_theme_errors if _is_file_error(error)]
+        cards += [ThemeErrorCard(errors, folder / errors[0].file) for errors in errors_by_file(app.user_theme_errors).values()]
         grid = self.query_one("#appearance_cards", Grid)
         await grid.remove_children()
         await grid.mount_all(cards)
@@ -310,7 +332,7 @@ class AppearancePanel(SettingsPanel):
     def _show_folder_note(self) -> None:
         """Where themes live, plus any problem with the folder itself."""
         notes = [f"Your themes live in {tildify(str(themes_dir()))}"]
-        notes += [e.message for e in self.app.user_theme_errors if not _is_file_error(e)]
+        notes += [e.message for e in self.app.user_theme_errors if not e.file.endswith(THEME_FILE_SUFFIX)]
         self.query_one("#appearance_folder", Static).update(Content("\n".join(notes)))
 
     def _follow_app_theme(self, theme: Theme) -> None:
@@ -420,21 +442,29 @@ class AppearancePanel(SettingsPanel):
             self.app.notify(f"Open it yourself: {tildify(str(path))}", severity="warning", markup=False)
 
     def action_reload_themes(self, announce: bool = True) -> None:
-        result = self.app.reload_user_themes()
-        self.run_worker(self._rebuild_cards(), exclusive=True, group="appearance_cards")
+        self.run_worker(partial(self._reload, announce), exclusive=True, group="appearance_cards")
+
+    async def _reload(self, announce: bool) -> None:
+        """Read the folder off the main thread, then register it and redraw the cards."""
+        app = self.app
+        busy = self.query_one("#appearance_busy", BusyIndicator)
+        busy.start("Reading theme files…")
+        try:
+            previous = set(app.user_themes)
+            result = await asyncio.to_thread(load_user_themes, reserved=app.reserved_theme_names())
+            app.apply_user_themes(result)
+            app.finish_theme_reload(previous)
+            await self._rebuild_cards()
+        finally:
+            busy.stop()
         if announce:
-            problems = len(result.errors)
+            problems = len(errors_by_file(result.errors))
             message = f"Loaded {len(result.themes)} of your themes"
-            self.app.notify(
-                message if not problems else f"{message}; {problems} file problem(s) shown below",
+            app.notify(
+                message if not problems else f"{message}; {problems} file(s) had problems, shown below",
                 severity="information" if not problems else "warning",
                 markup=False,
             )
-
-
-def _is_file_error(error: ThemeError) -> bool:
-    """Whether the error belongs to one file (not the folder as a whole)."""
-    return error.file.endswith(THEME_FILE_SUFFIX)
 
 
 def _preview_content(theme: Theme) -> Content:

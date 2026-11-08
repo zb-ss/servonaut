@@ -498,3 +498,29 @@ def load_user_themes(reserved: Iterable[str] = (), folder: Optional[Path] = None
             taken.add(loaded.theme.name)
             themes.append(loaded)
     return LoadResult(tuple(themes), tuple(errors))
+
+
+_MORE_PROBLEMS = re.compile(r"^…and (\d+) more problems$")
+
+
+def is_more_problems_note(error: ThemeError) -> bool:
+    """Whether *error* is the note that counts the faults a file's list left out."""
+    return _MORE_PROBLEMS.match(error.message) is not None
+
+
+def errors_by_file(errors: Iterable[ThemeError]) -> Dict[str, List[ThemeError]]:
+    """The faults of each theme file together, in scan order; folder-level notes are left out."""
+    grouped: Dict[str, List[ThemeError]] = {}
+    for error in errors:
+        if error.file.endswith(THEME_FILE_SUFFIX):
+            grouped.setdefault(error.file, []).append(error)
+    return grouped
+
+
+def problem_count(errors: Iterable[ThemeError]) -> int:
+    """How many faults a file has, counting those its list left out."""
+    total = 0
+    for error in errors:
+        found = _MORE_PROBLEMS.match(error.message)
+        total += int(found.group(1)) if found else 1
+    return total

@@ -136,3 +136,17 @@ async def test_reload_picks_up_new_edited_and_deleted_files(themes_folder: Path,
         assert app.theme == "servonaut"
         # The saved name stays, so the theme returns if the file does.
         assert ConfigManager(config_path=tmp_path / "config.json").load().theme == "ocean"
+
+
+def test_fifty_hostile_files_still_start_the_app_in_bounded_time(themes_folder: Path, tmp_path: Path) -> None:
+    import time
+
+    flood = 'primary = "#5EB1FF"\n' + "".join(f"k{i}=1\n" for i in range(8000))[: 64 * 1024 - 64]
+    for index in range(50):
+        (themes_folder / f"f{index:02d}.toml").write_text(flood, encoding="utf-8")
+
+    started = time.perf_counter()
+    app = _app(tmp_path)
+
+    assert time.perf_counter() - started < 10
+    assert len({error.file for error in app.user_theme_errors}) == 50

@@ -415,3 +415,45 @@ async def test_a_broken_theme_file_never_stops_the_settings_screen(manager: Conf
         panel = await _ready(app, pilot)
         await _until(lambda: len(panel.query(ThemeErrorCard)) == 2)
         assert app._exception is None
+
+
+@pytest.mark.asyncio
+async def test_a_file_with_many_faults_gets_one_card_that_lists_a_few(manager: ConfigManager, folder: Path) -> None:
+    (folder / "noisy.toml").write_text('primary = "#5EB1FF"\n' + "".join(f"k{i}=1\n" for i in range(400)), encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        (card,) = panel.query(ThemeErrorCard)
+        text = " ".join(_text(part) for part in card.query(Static))
+        assert text.count("Unknown key") <= 3
+        assert "more problem" in text
+
+
+@pytest.mark.asyncio
+async def test_reload_reads_the_folder_in_a_worker_and_shows_it_is_busy(
+    manager: ConfigManager, folder: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    from servonaut.screens.settings.panels import appearance
+    from servonaut.styles.user_themes import load_user_themes as real_load
+
+    main_thread = threading.current_thread()
+    seen: list[bool] = []
+
+    def slow_load(*args, **kwargs):
+        seen.append(threading.current_thread() is not main_thread)
+        time.sleep(0.4)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(appearance, "load_user_themes", slow_load)
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        busy = panel.query_one("#appearance_busy")
+        await pilot.click("#appearance_reload")
+        await _until(lambda: busy.is_active)
+        await _until(lambda: not busy.is_active)
+        assert seen == [True]

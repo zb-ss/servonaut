@@ -137,3 +137,10 @@ def test_the_main_entry_point_dispatches_theme_commands(folder: Path, monkeypatc
         entry.main()
     assert stopped.value.code == 0
     assert "servonaut-light" in capsys.readouterr().out
+
+
+def test_list_shows_one_row_per_broken_file(folder: Path, capsys) -> None:
+    (folder / "bad.toml").write_text('primary = "nope"\nbogus = 1\nmore = 2\n', encoding="utf-8")
+    _run("list")
+    rows = [line for line in capsys.readouterr().out.splitlines() if line.startswith("bad.toml")]
+    assert len(rows) == 1 and "2 more problems" in rows[0] and "line 2" in rows[0]
