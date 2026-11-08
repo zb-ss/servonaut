@@ -59,6 +59,9 @@ def _validator() -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
+_LOCK_PYTHON_VERSION = "3.12"
+
+
 def _policy() -> dict[str, object]:
     return _read_json(_POLICY_PATH)
 
@@ -113,6 +116,12 @@ def test_every_target_lock_satisfies_the_declared_runtime_requirements() -> None
     for target in _policy()["targets"].values():  # type: ignore[union-attr]
         versions = _locked_versions(_POLICY_ROOT / target["requirements_lock"])
         for requirement in requirements:
+            # Locks are compiled for one interpreter; a requirement that only
+            # applies to older Pythons (a backport) is correctly absent.
+            if requirement.marker and not requirement.marker.evaluate(
+                {"python_version": _LOCK_PYTHON_VERSION}
+            ):
+                continue
             name = canonicalize_name(requirement.name)
             assert name in versions, f"{target['requirements_lock']}: {name} is missing"
             assert requirement.specifier.contains(
