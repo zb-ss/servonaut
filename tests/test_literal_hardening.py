@@ -253,3 +253,44 @@ async def test_clicking_a_rich_markup_link_runs_no_refused_action() -> None:
         await pilot.pause(0.2)
         assert app.screen.flag is False
         assert len(app._notifications) == 0
+
+
+# ---------------------------------------------------------------------------
+# Remote error text in the file tree
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_remote_error_line_is_not_read_as_markup() -> None:
+    from types import SimpleNamespace
+
+    from textual.widgets import Tree
+
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    message = "ls: impossible d'acceder a '/srv/[/x]': [ @click=app.bell]oops"
+
+    class TreeOnly(RemoteTree):
+        def __init__(self) -> None:
+            Tree.__init__(self, "~", id="rt")
+
+        def on_mount(self, event):
+            event.prevent_default()
+
+    class Host(App):
+        def compose(self):
+            yield TreeOnly()
+
+    app = Host()
+    async with app.run_test(size=(100, 10)) as pilot:
+        tree = app.query_one("#rt", RemoteTree)
+        loading = tree.root.add("loading")
+        tree._pending_fetch = (tree.root, loading, "/srv")
+        worker = SimpleNamespace(
+            group="fetch_dir", is_finished=True, error=RuntimeError(message), result=None,
+        )
+        tree.on_worker_state_changed(SimpleNamespace(worker=worker))
+        await pilot.pause(0.2)
+        label = tree.root.children[-1].label
+        assert isinstance(label, Text)
+        assert label.plain == f"❌ {message}"
