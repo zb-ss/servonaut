@@ -165,6 +165,12 @@ OVHManagerScreen .provider-manager-content #ovh_mgr_actions {
     background: transparent;
 }
 
+/* A compact primary is filled; disabled, it must not be */
+.provider-manager-content ActionButton.-textual-compact:disabled {
+    color: $text-muted;
+    background: transparent;
+}
+
 /* Thin, quiet scrollbars */
 AWSManagerScreen #aws_mgr_container,
 HetznerManagerScreen #hetzner_mgr_container,

@@ -138,16 +138,20 @@ async def test_actions_follow_the_selected_row_and_say_why_not(manager: Manager)
 
 
 @pytest.mark.asyncio
-async def test_disabled_actions_are_visibly_muted() -> None:
+@pytest.mark.parametrize("size", SIZES)
+async def test_disabled_actions_are_visibly_muted(size) -> None:
     app = _harness.SnapshotApp()
-    async with app.run_test(size=(160, 50)) as pilot:
-        screen = await _open(app, pilot, AWS, row=1)  # db-1 is stopped
-        stop = screen.query_one("#btn_aws_mgr_stop", ActionButton)
+    async with app.run_test(size=size) as pilot:
+        screen = await _open(app, pilot, AWS, row=0)  # app-1 is running: Start is disabled
         start = screen.query_one("#btn_aws_mgr_start", ActionButton)
-        assert stop.disabled and not start.disabled
-        assert stop.styles.color != start.styles.color
-        enabled_default = screen.query_one("#btn_aws_mgr_refresh", ActionButton)
-        assert stop.styles.color != enabled_default.styles.color
+        stop = screen.query_one("#btn_aws_mgr_stop", ActionButton)
+        launch = screen.query_one("#btn_aws_mgr_new", ActionButton)
+        assert start.disabled and not stop.disabled
+        assert start.has_class("-primary"), "a disabled primary keeps its role class"
+        assert start.styles.color != stop.styles.color
+        assert start.styles.background.a == 0, "a disabled Start keeps the primary fill"
+        if start.compact:
+            assert launch.styles.background.a > 0, "compact primary is filled when enabled"
 
 
 @pytest.mark.asyncio
