@@ -1,7 +1,9 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import Optional, List
+import time
+from datetime import timedelta
+from typing import Dict, Optional, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -13,21 +15,27 @@ from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._fleet_filter import (
+    ALL, PROVIDERS, PROVIDER_LABELS, STATES, STATE_LABELS, STATE_OTHER,
+    FleetFacets, FleetFilter, facets, next_choice, row_provider, row_state, summary,
+)
+from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
-from servonaut.widgets.instance_table import InstanceTable
+from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
-from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import (
     connection_instance,
+    display_text,
     fleet_rows,
     real_instance_id,
     reconcile_team_memory,
     refuse_unresolved,
     replace_instances,
+    row_source,
     team_rows,
 )
 from servonaut.services.memory.provider import instance_provider
@@ -71,6 +79,18 @@ class InstanceDetail(TextArea):
         self.refresh()
 
 
+class FleetChip(Button):
+    """A quick-filter chip: one state or provider choice, with its live count."""
+
+    def __init__(self, group: str, value: str, label: str) -> None:
+        super().__init__(
+            label, id=f"chip_{group}_{value}", classes="fleet-chip", compact=True,
+        )
+        self.group = group
+        self.value = value
+        self.base_label = label
+
+
 def instance_detail_text(instance: dict) -> str:
     """Full labelled metadata for the fleet's native selectable document."""
     groups = [
@@ -104,6 +124,10 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Fetch the fleet again from every provider"),
         Binding("/", "focus_search", "Search", show=True,
                 tooltip="Search instances and keyword scan results"),
+        Binding("f", "filter_state", "State", show=True,
+                tooltip="Cycle the state filter: all, running, stopped, other"),
+        Binding("p", "filter_provider", "Provider", show=True,
+                tooltip="Cycle the provider filter: all, then each provider in the list"),
         Binding("enter", "select_instance", "Actions", show=True,
                 tooltip="Open the selected server's actions"),
         # Explicit footer-visible alternative — DataTable consumes Enter for
@@ -156,6 +180,8 @@ class InstanceListScreen(WorkspaceScreen):
         "open_memory",
         "scp_transfer",
         "refresh",
+        "filter_state",
+        "filter_provider",
         "ai_analysis",
         "copy_row",
         "verify_ssh",
@@ -165,6 +191,9 @@ class InstanceListScreen(WorkspaceScreen):
 
     # Debounce delay for search input (seconds)
     _SEARCH_DEBOUNCE = 0.15
+
+    # How long a refresh marks the servers it added or changed (seconds).
+    _MARK_SECONDS = 6.0
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self.navigation_focused:
@@ -195,6 +224,13 @@ class InstanceListScreen(WorkspaceScreen):
         self._initial_search = initial_search
         # (provider, account) pairs already reported as configured twice.
         self._reported_duplicate_accounts: set = set()
+        self._filter = FleetFilter()
+        self._load = FleetLoad()
+        # What the last refreshes did to each server, shown for a few seconds.
+        self._marks: Dict[str, str] = {}
+        self._marks_timer: Optional[Timer] = None
+        self._last_updated: Optional[float] = None
+        self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
@@ -225,7 +261,8 @@ class InstanceListScreen(WorkspaceScreen):
                     "without an SSH round-trip."
                 )
                 yield banner
-                yield ProgressIndicator()
+                yield Static("", id="fleet_load_status", markup=False)
+                yield from self._compose_filters()
                 with Horizontal(id="fleet_workspace_row", classes="fleet-workspace-row"):
                     yield InstanceTable()
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
@@ -265,6 +302,24 @@ class InstanceListScreen(WorkspaceScreen):
             yield StatusBar()
             yield Footer()
 
+    def _compose_filters(self) -> ComposeResult:
+        """The chip rows and the summary line under the search box."""
+        with Horizontal(id="fleet_filters"):
+            with Horizontal(id="fleet_state_chips"):
+                yield FleetChip("state", ALL, "All")
+                for state in STATES:
+                    yield FleetChip("state", state, STATE_LABELS[state])
+            with Horizontal(id="fleet_provider_chips"):
+                yield Static("│", classes="fleet-chip-divider", markup=False)
+                for provider in PROVIDERS:
+                    yield FleetChip("provider", provider, PROVIDER_LABELS[provider])
+        with Horizontal(id="fleet_summary_row"):
+            yield Static("", id="fleet_summary", markup=False)
+            yield Static("", id="fleet_updated", markup=False)
+            refresh = Button("Refresh (r)", id="fleet_refresh", compact=True)
+            refresh.can_focus = False
+            yield refresh
+
     @staticmethod
     def _inspector_button(
         label: str, button_id: str, variant: str = "default",
@@ -298,6 +353,11 @@ class InstanceListScreen(WorkspaceScreen):
                 settle("startup")
             self._release_team_memory_hold()
 
+    def on_screen_resume(self) -> None:
+        """Keep "Updated 12 s ago" current without waiting for a refresh."""
+        if self._updated_timer is None:
+            self._updated_timer = self.set_interval(1.0, self._sync_updated)
+
     def _load_on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
 
@@ -311,6 +371,7 @@ class InstanceListScreen(WorkspaceScreen):
         # Hide keyword panel until a search is performed
         self.query_one("#keyword_matches_label").display = False
         self.query_one("#keyword_matches_container").display = False
+        self._restore_session_state()
 
         # Pre-fill search if requested by the caller (e.g. sidebar
         # "Hetzner Servers" button passes initial_search="hetzner").
@@ -374,9 +435,7 @@ class InstanceListScreen(WorkspaceScreen):
         inventory = self.app.provider_inventory("aws")
         if inventory is None:
             return
-        progress = self.query_one(ProgressIndicator)
-        progress.start("Loading instances...")
-
+        self._begin_load("aws")
         self._expect_team_memory_load("aws")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=force_refresh),
@@ -399,6 +458,7 @@ class InstanceListScreen(WorkspaceScreen):
 
         inventory = self.app.provider_inventory("aws")
         if inventory is not None:
+            self._begin_load("aws")
             self._expect_team_memory_load("aws")
             self.run_worker(
                 inventory.fetch_instances_cached(force_refresh=True),
@@ -418,6 +478,7 @@ class InstanceListScreen(WorkspaceScreen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting OVH instance refresh")
+        self._begin_load("ovh")
         self._expect_team_memory_load("ovh")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=True),
@@ -439,6 +500,7 @@ class InstanceListScreen(WorkspaceScreen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting Hetzner instance refresh")
+        self._begin_load("hetzner")
         self._expect_team_memory_load("hetzner")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=True),
@@ -463,10 +525,11 @@ class InstanceListScreen(WorkspaceScreen):
         if team_service is None or auth is None or not auth.is_authenticated:
             self._release_team_memory_hold()
             if any(row.get("is_shared") is True for row in self.app.instances or []):
-                self._instances = replace_instances(self.app, "shared", [])
+                self._replace_fleet("shared", [])
                 self._update_table()
                 self._update_status_bar()
             return
+        self._begin_load("shared")
         self._expect_team_memory_load("shared")
         self.run_worker(
             load_shared_servers(team_service),
@@ -535,7 +598,7 @@ class InstanceListScreen(WorkspaceScreen):
         refresh_rules = getattr(self.app, "refresh_team_policies", None)
         if callable(refresh_rules):
             refresh_rules(found.teams)
-        self._instances = replace_instances(self.app, "shared", found.rows)
+        self._replace_fleet("shared", found.rows)
         self._update_table()
         self._update_status_bar()
         if not self._reconcile_team_memory():
@@ -548,12 +611,17 @@ class InstanceListScreen(WorkspaceScreen):
             )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Handle worker state changes.
+        """Handle worker state changes: list the rows, then report the provider's outcome.
 
         Args:
             event: Worker state changed event.
         """
         self._settle_team_memory_load(event)
+        self._handle_worker_state(event)
+        self._record_load_outcome(event)
+
+    def _handle_worker_state(self, event: Worker.StateChanged) -> None:
+        """List what a finished inventory worker found (or report why it failed)."""
         if event.state == WorkerState.CANCELLED:
             # A cancelled worker counts as finished but has no result.
             # Pressing R cancels the refreshes still running and starts new
@@ -577,7 +645,7 @@ class InstanceListScreen(WorkspaceScreen):
             else:
                 new_ovh = event.worker.result or []
                 # Keeps the real rows aside; lists them redacted in demo mode.
-                self._instances = replace_instances(self.app, "ovh", new_ovh)
+                self._replace_fleet("ovh", new_ovh)
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("ovh")
@@ -613,7 +681,7 @@ class InstanceListScreen(WorkspaceScreen):
             else:
                 new_hetzner = event.worker.result or []
                 # Keeps the real rows aside; lists them redacted in demo mode.
-                self._instances = replace_instances(self.app, "hetzner", new_hetzner)
+                self._replace_fleet("hetzner", new_hetzner)
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("hetzner")
@@ -643,11 +711,6 @@ class InstanceListScreen(WorkspaceScreen):
             if event.worker.is_finished:
                 is_background = event.worker.name == "background_refresh"
 
-                # Stop progress indicator for foreground fetches
-                if not is_background:
-                    progress = self.query_one(ProgressIndicator)
-                    progress.stop()
-
                 if event.worker.error:
                     self._release_team_memory_hold()
                     self._handle_fetch_error(event.worker.error, is_background)
@@ -666,9 +729,8 @@ class InstanceListScreen(WorkspaceScreen):
                         hetzner.get_cached_instances() if hetzner is not None else []
                     )
                     # Keeps the real rows aside; lists them redacted in demo mode.
-                    self._instances = replace_instances(
-                        self.app, None,
-                        new_instances + custom + ovh_instances + hetzner_instances,
+                    self._replace_fleet(
+                        None, new_instances + custom + ovh_instances + hetzner_instances,
                     )
                     self._update_table()
                     self._update_status_bar()
@@ -807,12 +869,13 @@ class InstanceListScreen(WorkspaceScreen):
     def _update_table(self) -> None:
         """Update instance table with current data, preserving active filter."""
         table = self.query_one(InstanceTable)
+        # The search text and the chips stay applied through a refresh, and
+        # the table keeps the cursor on its server.
+        table.configure_filters(
+            self.query_one("#search_input", Input).value, self._filter.matches,
+        )
+        table.set_marks(self._marks, redraw=False)
         table.populate(self._instances)
-        # Re-apply the current search filter so a background refresh
-        # doesn't wipe the user's active query.
-        current_query = self.query_one("#search_input", Input).value
-        if current_query:
-            table.filter(current_query)
         self._sync_memory_banner()
         self._update_detail_panel()
 
@@ -851,6 +914,217 @@ class InstanceListScreen(WorkspaceScreen):
         # Update cache age
         cache_age = self.app.cache_service.get_age()
         status_bar.update_cache_age(cache_age)
+        self._sync_filter_ui()
+
+    def _restore_session_state(self) -> None:
+        """Bring back the filters and the refresh time this session left behind."""
+        state = getattr(self.app, "workspace_state", None)
+        state_filter = getattr(state, "fleet_state_filter", None)
+        provider_filter = getattr(state, "fleet_provider_filter", None)
+        if isinstance(state_filter, str) and isinstance(provider_filter, str):
+            self._filter = FleetFilter().with_state(state_filter).with_provider(provider_filter)
+        updated = getattr(state, "fleet_updated_at", None)
+        if isinstance(updated, float):
+            self._last_updated = updated
+        self._sync_filter_ui()
+
+    def _remember_filter(self) -> None:
+        state = getattr(self.app, "workspace_state", None)
+        if state is not None:
+            state.fleet_state_filter = self._filter.state
+            state.fleet_provider_filter = self._filter.provider
+
+    def _sync_filter_ui(self) -> None:
+        """Show the chips, their counts and the summary line for what the table lists."""
+        try:
+            table = self.query_one(InstanceTable)
+            counts = facets(table.searched_rows(), self._filter)
+            self._sync_chips(counts, table._all_instances)
+            self._sync_summary(len(table._filtered_instances), len(table._all_instances))
+        except NoMatches:
+            return
+        self._sync_updated()
+
+    def _sync_chips(self, counts: FleetFacets, fleet: List[dict]) -> None:
+        """Label each chip with its count; show only the choices the fleet offers."""
+        present = {row_provider(row) for row in fleet} | {row_state(row) for row in fleet}
+        for chip in self.query(FleetChip):
+            if chip.value == ALL:
+                number, shown = counts.total, True
+                active = not self._filter.is_active
+            elif chip.group == "state":
+                number = counts.states[chip.value]
+                active = self._filter.state == chip.value
+                shown = chip.value != STATE_OTHER or chip.value in present or active
+            else:
+                number = counts.providers[chip.value]
+                active = self._filter.provider == chip.value
+                shown = chip.value in present or active
+            chip.label = self._chip_label(chip, number)
+            chip.set_class(active, "--chosen")
+            chip.display = shown
+
+    @staticmethod
+    def _chip_label(chip: FleetChip, number: int) -> Content:
+        glyphs = {"running": ("●", "$text-success"), "stopped": ("●", "$text-error"),
+                  STATE_OTHER: ("○", "$text-muted")}
+        glyph = glyphs.get(chip.value) if chip.group == "state" else None
+        text = f"{chip.base_label} {number}"
+        if glyph is None:
+            return Content(text)
+        return Content.assemble(literal(glyph[0], glyph[1]), " ", text)
+
+    def _sync_summary(self, shown: int, total: int) -> None:
+        query = self.query_one("#search_input", Input).value.strip()
+        self.query_one("#fleet_summary", Static).update(
+            summary(shown, total, self._filter, query)
+        )
+
+    def _sync_updated(self) -> None:
+        """Say how fresh the list is: when it was last refreshed, else the cache's age."""
+        try:
+            label = self.query_one("#fleet_updated", Static)
+        except NoMatches:
+            return
+        label.update(self._updated_text())
+
+    def _updated_text(self) -> str:
+        if self._last_updated is not None:
+            return f"Updated {format_ago(time.time() - self._last_updated)}"
+        age = self.app.cache_service.get_age()
+        if isinstance(age, timedelta) and self._instances:
+            return f"Cached {format_ago(age.total_seconds())}"
+        return ""
+
+    def _set_filter(self, new_filter: FleetFilter) -> None:
+        """Apply a new chip selection to the table, the inspector and the chips."""
+        if new_filter == self._filter:
+            return
+        self._filter = new_filter
+        self._remember_filter()
+        table = self.query_one(InstanceTable)
+        table.filter(self.query_one("#search_input", Input).value, self._filter.matches)
+        self._update_status_bar()
+        self._update_detail_panel()
+
+    def _present_in_fleet(self, value: str) -> bool:
+        rows = self.query_one(InstanceTable)._all_instances
+        if value in STATES:
+            return value != STATE_OTHER or any(row_state(r) == value for r in rows)
+        return any(row_provider(r) == value for r in rows)
+
+    def action_filter_state(self) -> None:
+        """Cycle the state filter: all, running, stopped, other."""
+        choice = next_choice(self._filter.state, STATES, self._present_in_fleet)
+        self._set_filter(self._filter.with_state(choice))
+
+    def action_filter_provider(self) -> None:
+        """Cycle the provider filter through the providers in the list."""
+        choice = next_choice(self._filter.provider, PROVIDERS, self._present_in_fleet)
+        self._set_filter(self._filter.with_provider(choice))
+
+    def _press_chip(self, chip: FleetChip) -> None:
+        if chip.value == ALL:
+            self._set_filter(FleetFilter())
+        elif chip.group == "state":
+            self._set_filter(self._filter.with_state(chip.value))
+        else:
+            self._set_filter(self._filter.with_provider(chip.value))
+
+    # ------------------------------------------------------------------
+    # Loading and refresh reporting
+    # ------------------------------------------------------------------
+
+    def _replace_fleet(self, source: Optional[str], rows: List[dict]) -> None:
+        """List *rows* as *source*'s servers and remember what changed on screen."""
+        before = {
+            str(row.get("id") or ""): (row_source(row), str(row.get("state") or ""))
+            for row in self._instances
+        }
+        self._instances = replace_instances(self.app, source, rows)
+        self._mark_changes(before)
+
+    def _mark_changes(self, before: Dict[str, tuple]) -> None:
+        """Mark servers that are new, or changed state, since *before*.
+
+        A provider that listed nothing before is loading for the first time:
+        everything it brings would be new, which says nothing, so none of it
+        is marked.
+        """
+        had_rows = {source for source, _state in before.values()}
+        marks: Dict[str, str] = {}
+        for row in self._instances:
+            server_id = str(row.get("id") or "")
+            known = before.get(server_id)
+            if known is None:
+                if row_source(row) in had_rows:
+                    marks[server_id] = MARK_NEW
+            elif known[1] and known[1] != str(row.get("state") or ""):
+                marks[server_id] = MARK_WAS.format(state=known[1])
+        if not marks:
+            return
+        self._marks.update(marks)
+        if self._marks_timer is not None:
+            self._marks_timer.stop()
+        self._marks_timer = self.set_timer(self._MARK_SECONDS, self._clear_marks)
+
+    def _clear_marks(self) -> None:
+        self._marks = {}
+        self._marks_timer = None
+        try:
+            self.query_one(InstanceTable).set_marks({})
+        except NoMatches:
+            return
+
+    def _begin_load(self, key: str) -> None:
+        """A provider started answering: say so (see ``_fleet_load``)."""
+        inventory = self.app.provider_inventory(key) if key != "shared" else None
+        accounts = len(getattr(inventory, "bindings", None) or ())
+        self._load.start(
+            key, accounts=accounts, has_rows=bool(self._instances),
+            cached_age=self._cached_age_text(),
+        )
+        self._render_load()
+
+    def _cached_age_text(self) -> str:
+        age = self.app.cache_service.get_age()
+        return format_ago(age.total_seconds()) if isinstance(age, timedelta) else ""
+
+    def _record_load_outcome(self, event: Worker.StateChanged) -> None:
+        """A provider's worker ended: record its count, or why its rows are stale."""
+        key = self._LOAD_NAMES.get(event.worker.name)
+        if key is None or event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
+            return
+        if key == "shared":
+            self._load.drop("shared")
+        else:
+            error = self._load_error(key, event.worker)
+            count = sum(1 for row in self._instances if row_source(row) == key)
+            self._load.finish(key, count=count, error=error)
+        if not self._load.active:
+            self._last_updated = time.time()
+            state = getattr(self.app, "workspace_state", None)
+            if state is not None:
+                state.fleet_updated_at = self._last_updated
+            self._sync_updated()
+        self._render_load()
+
+    def _load_error(self, key: str, worker: Worker) -> str:
+        if worker.error:
+            return str(worker.error) or type(worker.error).__name__
+        reported = getattr(self.app.provider_inventory(key), "last_fetch_error", None)
+        return reported if isinstance(reported, str) else ""
+
+    def _render_load(self) -> None:
+        """Show the load report above the list, or hide it when there is none."""
+        try:
+            status = self.query_one("#fleet_load_status", Static)
+        except NoMatches:
+            return
+        content = render_load(self._load, lambda text: display_text(self.app, text))
+        status.display = content is not None
+        if content is not None:
+            status.update(content)
 
     def on_data_table_row_highlighted(self, event) -> None:
         """Update detail panel when table cursor moves."""
@@ -934,7 +1208,7 @@ class InstanceListScreen(WorkspaceScreen):
     def _apply_search_filter(self, value: str) -> None:
         """Apply search filter and keyword search (called after debounce)."""
         table = self.query_one(InstanceTable)
-        table.filter(value)
+        table.filter(value, self._filter.matches)
         self._update_status_bar()
         self._update_detail_panel()
 
@@ -1412,7 +1686,13 @@ class InstanceListScreen(WorkspaceScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id
-        if btn_id == "fleet_copy_row":
+        if isinstance(event.button, FleetChip):
+            event.stop()
+            self._press_chip(event.button)
+        elif btn_id == "fleet_refresh":
+            event.stop()
+            self.action_refresh()
+        elif btn_id == "fleet_copy_row":
             event.stop()
             self.action_copy_row()
         elif btn_id == "fleet_btn_ssh":
