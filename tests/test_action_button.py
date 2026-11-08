@@ -115,3 +115,10 @@ async def test_row_saves_space_in_order_and_never_clips(width, labels, wrapped) 
         for button in row.query(ActionButton):
             assert row.region.contains_region(button.region), button.id
             assert button.content_size.width >= button.label.cell_length
+
+
+def test_set_text_can_replace_the_short_words_too() -> None:
+    button = ActionButton("Scan all servers", "s", short="Scan all")
+    button.set_text("Scan all servers (3)", short="Scan all (3)")
+    assert button._label(False, True).plain == "Scan all servers (3)  s"
+    assert button._label(True, True).plain == "Scan all (3)   s"
