@@ -1053,6 +1053,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes hard-coded count strings ('N buckets.') or loading "
                    "status text. Error payloads are pre-scrubbed via scrub() "
                    "in callers before being passed here — no raw user data."),
+    AllowlistEntry("screens/theme_name_prompt.py", "_show_error", "update",
+                   "Local validation messages for a new theme file name: fixed "
+                   "text plus the name the user is typing, which is limited to "
+                   "[a-z0-9-] — no server, account or service data."),
     # Note: _render_buckets_table, _render_objects_table, _update_breadcrumb,
     # and _generate_presigned_url no longer need allowlist entries because
     # scrub() and scrub_name() are public method names (no leading underscore)
