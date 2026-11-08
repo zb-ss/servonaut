@@ -2421,7 +2421,10 @@ class TestServerActionsRdnsDemoMode:
             with patch.object(screen, "query_one", return_value=info_widget):
                 asyncio.run(screen._fetch_rdns())
         assert rendered, "server info was never redrawn"
-        return asked, rendered[-1], shown
+        # Server info is built as Content; `str in Content` is not a text
+        # search, so every assertion below reads the plain text.
+        last = rendered[-1]
+        return asked, getattr(last, "plain", last), shown
 
     def test_lookup_names_the_real_vps_in_demo_mode(self) -> None:
         asked, _, shown = self._run(demo=True)
@@ -2439,7 +2442,7 @@ class TestServerActionsRdnsDemoMode:
     def test_rdns_hostname_not_scrubbed_without_demo(self) -> None:
         asked, rendered, _ = self._run(demo=False)
         assert asked == [(self.REAL["id"], self.REAL["public_ip"])]
-        assert f"Reverse DNS:[/dim] {self.RDNS}" in rendered
+        assert f"Reverse DNS: {self.RDNS}" in rendered
 
 
 # ---------------------------------------------------------------------------
