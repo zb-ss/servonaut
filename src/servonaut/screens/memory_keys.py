@@ -18,6 +18,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 from servonaut.widgets.secret_input import SecretInput
 from servonaut.widgets.dialogs import (
+    DIALOG_VERTICAL_BREAKPOINTS,
     DialogActions,
     DialogBody,
     DialogFrame,
@@ -68,7 +69,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     # Enrol shows rules, two fields and feedback, so on shorter terminals the
     # shared frame gives its padding to the content (see dialogs.tcss).
-    VERTICAL_BREAKPOINTS = [(0, "-dialog-minimal"), (24, "-dialog-tight"), (40, "-dialog-roomy")]
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     DEFAULT_CSS = """
     #enrol-blurb {
