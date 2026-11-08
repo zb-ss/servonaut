@@ -82,6 +82,8 @@ class _Host(BasicDialogHost):
     def __init__(self) -> None:
         super().__init__()
         self._textual_ansi_themes = (self.ansi_theme_dark, self.ansi_theme_light)
+        # Borrows the app's palette switch, which also looks up user themes.
+        self.user_themes = {}
         self.watch_theme(self.theme)
         forbidden = AssertionError("The modal must return a decision without performing operations")
         self.config_manager = SimpleNamespace(update=Mock(side_effect=forbidden), save=Mock(side_effect=forbidden))
