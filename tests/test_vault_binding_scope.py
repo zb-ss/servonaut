@@ -322,7 +322,7 @@ async def test_demo_scope_uses_real_ids_and_keeps_names_hidden_after_binding() -
         assert call.kwargs["team"] == "team-a" and call.kwargs["server"] == "2001"
         assert "team-a" not in app.notices[-1][0]
         assert "team-a" not in app.actions._credential_source_line().plain
-        assert "team-a" not in app.actions._shared_with_line()
+        assert "team-a" not in app.actions._shared_with_line().plain
         assert app._instances_pristine[1]["credential_binding"]["source"] == "servonaut_vault"
         assert app.instances[1]["id"] != "2001"
         ServonautApp._restore_instances_in_place(app)
