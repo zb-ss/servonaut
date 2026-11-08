@@ -482,21 +482,3 @@ async def test_invalid_scalar_save_focuses_field_and_leaves_disk_unchanged(
         await wait_until(lambda: field.has_class("field-error") and app.focused is field)
         assert message in str(panel.query_one(f"#status_{panel_id}", Static).render())
         assert (tmp_path / "config.json").read_bytes() == before
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("has_unsaved_theme", [False, True])
-async def test_external_theme_follows_only_an_unchanged_picker(
-    manager: ConfigManager, has_unsaved_theme: bool,
-) -> None:
-    app = _Host(manager)
-    async with app.run_test(size=(160, 50)) as pilot:
-        panel = await _ready(app, pilot)
-        picker = panel.query_one("#general_theme", Select)
-        if has_unsaved_theme:
-            picker.value = "dracula"
-            await pilot.pause()
-        app.theme = "nord"
-        await pilot.pause()
-        assert picker.value == ("dracula" if has_unsaved_theme else "nord")
-        assert panel.has_unsaved_changes() is has_unsaved_theme

@@ -35,6 +35,8 @@ dependencies = [
     "keyring>=24",
     # Searches team agent rules' blocked patterns with a time limit.
     "regex>=2025.9.18",
+    # Reads user theme files; Python 3.11+ ships tomllib.
+    'tomli>=2 ; python_version < "3.11"',
 ]
 
 [project.optional-dependencies]

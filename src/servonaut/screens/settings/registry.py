@@ -55,8 +55,15 @@ PANELS: List[PanelSpec] = [
         id="general",
         title="General",
         group="General",
-        keywords=["username", "key", "cache", "ttl", "terminal", "theme"],
+        keywords=["username", "key", "cache", "ttl", "terminal"],
         factory=_panel("general", "GeneralPanel"),
+    ),
+    PanelSpec(
+        id="appearance",
+        title="Appearance",
+        group="General",
+        keywords=["theme", "colour", "color", "dark", "light", "toml", "contrast", "palette"],
+        factory=_panel("appearance", "AppearancePanel"),
     ),
     PanelSpec(
         id="history_paths",

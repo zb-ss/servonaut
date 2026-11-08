@@ -166,3 +166,72 @@ class TestCopyToClipboard:
         installed.clear()
         assert platform_utils._clipboard_command() is None
         assert platform_utils.copy_to_clipboard("web-1") is False
+
+
+class TestOpenPath:
+
+    @pytest.mark.parametrize(
+        ("system", "expected"),
+        [("linux", "xdg-open"), ("darwin", "open"), ("windows", "explorer")],
+    )
+    def test_uses_the_platforms_opener_without_waiting(self, monkeypatch, tmp_path, system, expected):
+        started = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: system)
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda command, **kwargs: started.append((command, kwargs)))
+
+        assert platform_utils.open_path(tmp_path) is True
+
+        (command, kwargs), = started
+        assert command == [expected, str(tmp_path.absolute())]
+        assert kwargs["start_new_session"] is True
+
+    def test_is_false_without_an_opener(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "linux")
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: None)
+        assert platform_utils.open_path(tmp_path) is False
+
+    def test_is_false_when_the_opener_cannot_start(self, monkeypatch, tmp_path):
+        def refuse(*args, **kwargs):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "darwin")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", refuse)
+        assert platform_utils.open_path(tmp_path) is False
+
+
+    def test_a_symlink_keeps_its_own_name_so_the_target_does_not_pick_the_handler(self, monkeypatch, tmp_path):
+        target = tmp_path / "run-me.desktop"
+        target.write_text("[Desktop Entry]\n")
+        link = tmp_path / "handy.toml"
+        link.symlink_to(target)
+        started = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "linux")
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+
+        platform_utils.open_path(link)
+
+        assert started == [["xdg-open", str(link.absolute())]]
+
+    def test_a_file_is_revealed_on_windows_never_run(self, monkeypatch, tmp_path):
+        theme = tmp_path / "ocean.toml"
+        theme.write_text("x")
+        started = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "windows")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+
+        platform_utils.open_path(theme)
+
+        assert started == [["explorer", f"/select,{theme.absolute()}"]]
+
+    def test_a_file_opens_as_text_on_macos(self, monkeypatch, tmp_path):
+        theme = tmp_path / "ocean.toml"
+        theme.write_text("x")
+        started = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "darwin")
+        monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+
+        platform_utils.open_path(theme)
+
+        assert started == [["open", "-t", str(theme.absolute())]]
