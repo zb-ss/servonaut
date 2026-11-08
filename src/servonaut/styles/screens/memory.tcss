@@ -3,6 +3,11 @@
    upsell modals, passphrase enrol.
    =================================================================== */
 
+/* Which teams the server is shared with takes the accent, as a status line. */
+MemoryScreen #memory-share-state {
+    color: $text-accent;
+}
+
 /* Full memory views keep records and decisions close to their context. */
 MemoryDriftScreen .memory-secondary-heading,
 MemoryExportScreen .memory-secondary-heading,
@@ -380,9 +385,19 @@ ShareInstanceScreen.-content-narrow #share-existing-row {
 }
 
 /* --- Passphrase enrol modal --- */
+/* On shorter terminals the shared dialog chrome tightens; this dialog also
+   gives up the spacing between its stacked sections so they stay in view. */
+PassphraseEnrolModal.-dialog-minimal #enrol-blurb,
+PassphraseEnrolModal.-dialog-tight #enrol-blurb,
+PassphraseEnrolModal.-dialog-minimal #enrol-rules,
+PassphraseEnrolModal.-dialog-tight #enrol-rules,
+PassphraseEnrolModal.-dialog-minimal #enrol-pass1_field,
+PassphraseEnrolModal.-dialog-tight #enrol-pass1_field {
+    margin-bottom: 0;
+}
+
 #enrol-title {
     text-style: bold;
-    margin-bottom: 1;
 }
 
 #enrol-blurb {

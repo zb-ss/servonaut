@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from textual import events
 from textual.app import App, ComposeResult
@@ -647,3 +649,15 @@ async def test_long_titled_notification_scrolls_and_dismisses_without_moving_dia
         await pilot.press("escape")
         await pilot.pause()
         assert results == [False]
+
+
+def test_dialog_breakpoints_are_named_and_used_by_the_passphrase_modal() -> None:
+    from servonaut.screens.memory_keys import PassphraseEnrolModal
+    from servonaut.widgets.dialogs import (
+        DIALOG_MINIMAL, DIALOG_ROOMY, DIALOG_TIGHT, DIALOG_VERTICAL_BREAKPOINTS,
+    )
+
+    assert [name for _, name in DIALOG_VERTICAL_BREAKPOINTS] == [DIALOG_MINIMAL, DIALOG_TIGHT, DIALOG_ROOMY]
+    assert PassphraseEnrolModal.VERTICAL_BREAKPOINTS is DIALOG_VERTICAL_BREAKPOINTS
+    stylesheet = (Path(__file__).parents[1] / "src/servonaut/styles/components/dialogs.tcss").read_text()
+    assert DIALOG_MINIMAL in stylesheet and DIALOG_TIGHT in stylesheet

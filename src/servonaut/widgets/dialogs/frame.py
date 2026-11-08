@@ -12,6 +12,16 @@ from textual.widget import Widget
 from servonaut.widgets.dialogs.actions import DialogActions
 
 
+# Class names a ModalScreen gets from ``DIALOG_VERTICAL_BREAKPOINTS``; dialogs.tcss
+# styles them. "Roomy" carries no rules: it exists so that from 40 rows up the
+# screen drops the "tight" class instead of keeping it.
+DIALOG_MINIMAL = "-dialog-minimal"
+DIALOG_TIGHT = "-dialog-tight"
+DIALOG_ROOMY = "-dialog-roomy"
+
+DIALOG_VERTICAL_BREAKPOINTS = [(0, DIALOG_MINIMAL), (24, DIALOG_TIGHT), (40, DIALOG_ROOMY)]
+
+
 class DialogNotificationSpace(Widget):
     """Reserve a stable native dock while notifications appear and expire."""
 
@@ -34,6 +44,12 @@ class DialogFrame(Vertical):
     Use DialogBody for scrollable copy, DialogContent for an editor, or pass
     a native scroll widget such as OptionList directly as the body.
     Add ``dialog-screen`` to the owning ModalScreen for centered positioning.
+
+    A dialog with a lot of content opts in to compact chrome on short terminals
+    by setting ``VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS`` on its
+    screen: below 24 rows the frame also drops its padding, and below 40 rows
+    the heading margin and the reserved notification lane go, with toasts
+    shown over the top of the dialog.
     """
 
     # The same stylesheet supports minimal hosts and the application bundle.

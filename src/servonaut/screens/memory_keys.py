@@ -18,6 +18,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 from servonaut.widgets.secret_input import SecretInput
 from servonaut.widgets.dialogs import (
+    DIALOG_VERTICAL_BREAKPOINTS,
     DialogActions,
     DialogBody,
     DialogFrame,
@@ -62,6 +63,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     """
 
     DEFAULT_CLASSES = "dialog-screen"
+    # on_mount focuses the first field itself; the automatic focus would
+    # animate a scroll against the first, not yet final, layout.
+    AUTO_FOCUS = ""
+
+    # Enrol shows rules, two fields and feedback, so on shorter terminals the
+    # shared frame gives its padding to the content (see dialogs.tcss).
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     DEFAULT_CSS = """
     #enrol-blurb {
@@ -196,7 +204,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     def on_mount(self) -> None:
         self._update_validation()
-        self.query_one("#enrol-pass1", Input).focus()
+        self.query_one("#enrol-pass1", Input).focus(scroll_visible=False)
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._show_focused_control)
@@ -212,6 +220,17 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._update_validation()
+        if self._mode == "enrol":
+            self.call_after_refresh(self._show_feedback)
+
+    def _show_feedback(self) -> None:
+        """Keep the reason Enrol is disabled in view while the user types.
+
+        The field being typed in always stays in view, even when the reason
+        and the field cannot both fit.
+        """
+        self.query_one("#enrol-mismatch", Static).scroll_visible(animate=False, immediate=True)
+        self._show_focused_control()
 
     def _update_validation(self) -> None:
         pass1 = self.query_one("#enrol-pass1", Input).value

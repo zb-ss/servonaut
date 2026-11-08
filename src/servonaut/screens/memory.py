@@ -24,6 +24,7 @@ from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Static, TextArea
@@ -1079,9 +1080,13 @@ class MemoryScreen(WorkspaceScreen):
 
     def _show_own_shares(self, listings: List[Any]) -> None:
         """Say which teams the user shares this server with (nothing when none)."""
-        if not self.is_mounted:
-            return  # closed while the lists were read
-        label = self.query_one("#memory-share-state", Static)
+        # Cached team lists can answer before the screen's own mount finishes
+        # (so "mounted" is not the test) or while it is being torn down, with
+        # the line already removed; either way a missing line means closed.
+        try:
+            label = self.query_one("#memory-share-state", Static)
+        except NoMatches:
+            return
         redaction = getattr(self.app, "redaction_service", None)
         demo = getattr(self.app, "demo_mode", False) and redaction is not None
         text = shared_with_text(listings, redaction.redact_name if demo else (lambda name: name))
@@ -1089,7 +1094,7 @@ class MemoryScreen(WorkspaceScreen):
             label.add_class("hidden")
             return
         label.update(Text.assemble(
-            (text, "blue"), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
+            (text, ""), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
         ))
         label.remove_class("hidden")
 

@@ -227,3 +227,13 @@ def test_the_text_names_each_team_with_its_lowest_role():
     ]
     assert shared_with_text(listings, str.upper) == "Shared with TEAM A (viewer and above); TEAM-B."
     assert shared_with_text([], str) == ""
+
+
+async def test_closing_the_memory_screen_while_team_lists_load_does_not_crash(tmp_path):
+    """A late answer that finds the line already removed is ignored."""
+    app = _app(tmp_path, _Team({"team-a": [_grant("i-own-1", ME)]}), screen="memory")
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: not _share_line(app).has_class("hidden"))
+        screen = app.screen
+        await _share_line(app).remove()
+        screen._show_own_shares([])
