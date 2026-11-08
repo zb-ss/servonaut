@@ -103,7 +103,7 @@ async def test_the_end_of_a_long_argument_can_be_scrolled_to_and_is_drawn(
         # Before scrolling, the drawn screen does not hold the tail.
         assert "example.invalid" not in app.export_screenshot()
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
-        assert cue.display and "more lines" in cue.visual.plain
+        assert cue.display and "Longer than the box" in cue.visual.plain
         scroll.focus()
         await pilot.press("end")
         await pilot.pause(0.2)
@@ -336,3 +336,34 @@ async def test_filler_padding_cannot_push_the_tail_out_of_sight(modal_cls, prefi
         await pilot.press("end")
         await pilot.pause(0.2)
         assert "curl" in app.export_screenshot()
+
+
+@pytest.mark.asyncio
+async def test_the_standard_modal_cue_is_true_the_box_scrolls_with_the_arrow_keys() -> None:
+    from textual.containers import VerticalScroll
+
+    app = _ModalHost(ToolConfirmModal("run_command", _long_args("long")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        cue = app.screen.query_one("#tool_confirm_more", Static).visual.plain
+        assert "arrow keys or the mouse" in cue
+        scroll = app.screen.query_one("#tool_confirm_scroll", VerticalScroll)
+        assert app.focused is scroll
+        await pilot.press("down", "down")
+        assert scroll.scroll_y > 0
+
+
+@pytest.mark.asyncio
+async def test_the_dangerous_modal_cue_is_true_shift_tab_reaches_the_box() -> None:
+    from textual.containers import VerticalScroll
+
+    app = _ModalHost(DangerousToolConfirmModal("deploy", _long_args("long")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        cue = app.screen.query_one("#dangerous_confirm_more", Static).visual.plain
+        assert "Shift+Tab" in cue and "arrow keys" in cue
+        scroll = app.screen.query_one("#dangerous_confirm_scroll", VerticalScroll)
+        await pilot.press("shift+tab")
+        assert app.focused is scroll
+        await pilot.press("down", "down")
+        assert scroll.scroll_y > 0
