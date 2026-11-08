@@ -352,10 +352,9 @@ async def test_small_prompt_keeps_actions_outside_bounded_scroll(app_class, mode
         assert body.region.bottom < footer.region.y
         for action in footer.children:
             assert action.region in footer.region
-        # Unlock is short enough to fit whole at 50x16 once the frame is
-        # compact; every other small case must scroll inside the bounded body.
-        if (mode, size) != ("unlock", (50, 16)):
-            assert body.max_scroll_y > 0
+        # Either the body scrolls, or (a short unlock) every visible field is in it.
+        shown = [child for child in body.children if child.display]
+        assert body.max_scroll_y > 0 or all(child.region in body.region for child in shown)
         await pilot.press("escape")
         assert app.dismissed_value is None
 
