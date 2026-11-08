@@ -96,6 +96,17 @@ async def test_the_table_takes_the_arrow_keys_and_shortcuts_at_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_footer_at_160_columns_still_lists_verify_and_copy() -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(160, 40)) as pilot:
+        screen = await _open_fleet(pilot)
+        footer = _footer_keys(screen)
+        assert {"v", "y"} <= footer.keys()
+        # The filter keys are documented by the chips and the help screen.
+        assert not {"f", "p"} & footer.keys()
+
+
+@pytest.mark.asyncio
 async def test_the_footer_keeps_the_shortcuts_greyed_while_searching() -> None:
     app = _FleetHost()
     async with app.run_test(size=(160, 40)) as pilot:

@@ -9,7 +9,7 @@
 #instance_list_container #fleet_workspace_row {
     width: 100%;
     height: 1fr;
-    margin-top: 1;
+    margin-top: 0;
 }
 
 #instance_list_container InstanceTable {

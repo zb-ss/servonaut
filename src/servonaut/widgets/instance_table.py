@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from rich.text import Text
+from textual.color import Color, ColorParseError
 from textual.widgets import DataTable
 
-from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.instance_resolver import display_name, row_identity
 from servonaut.services.shared_servers import fold_shared
 
 # What an empty cell shows.
@@ -70,11 +71,17 @@ def _fit(value: str, max_width: Optional[int]) -> Text:
     return text
 
 
+# Appended to the State cell of a row a refresh added or changed.
+MARK_NEW = "new"
+MARK_WAS = "was {state}"
+
 # Marks one of the user's own servers that a team shares too.
 SHARED_MARK = " · shared"
 
 
-def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False) -> Text:
+def _name_cell(
+    instance: dict, max_width: Optional[int], *, shared: bool = False, marked: bool = False,
+) -> Text:
     """The Name cell: ``account/name`` when the provider has several accounts.
 
     The account part is dimmed so the server name stays the eye's anchor;
@@ -84,8 +91,11 @@ def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False
     shown = display_name(instance)
     name = str(instance.get("name") or "")
     if shown == name and not shared:
-        return _fit(name or _EMPTY, max_width)
-    text = Text(no_wrap=True, end="")
+        text = _fit(name or _EMPTY, max_width)
+        if marked:
+            text.stylize("bold")
+        return text
+    text = Text(no_wrap=True, end="", style="bold" if marked else "")
     if shown == name:
         text.append(name or _EMPTY)
     else:
@@ -145,6 +155,10 @@ class InstanceTable(DataTable):
         self._filtered_instances: List[dict] = []
         # id() of an own row -> the teams that share it too (see fold_shared).
         self._shared_by: Dict[int, List[str]] = {}
+        self._query = ""
+        self._row_filter: Optional[Callable[[dict], bool]] = None
+        # Row identity -> what the last refresh did to it (see ``set_marks``).
+        self._marks: Dict[str, str] = {}
         self._shown_columns: List[_Column] = []
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
@@ -193,14 +207,18 @@ class InstanceTable(DataTable):
         """Populate table with instances.
 
         A team's shared server that is also one of the user's own is listed
-        once, as the user's own row marked as shared.
+        once, as the user's own row marked as shared. The search and the row
+        filter stay applied, and the cursor stays on its server (or, when
+        that server is gone, on the row at the same place).
 
         Args:
             instances: List of instance dictionaries.
         """
+        previous = self._cursor_anchor()
         self._all_instances, self._shared_by = fold_shared(instances)
-        self._filtered_instances = self._all_instances.copy()
+        self._apply_filters()
         self._refresh_table()
+        self._restore_cursor(previous)
 
     def _shared_with(self, instance: dict) -> List[str]:
         """The teams sharing *instance*: its own team, or the teams sharing an own row."""
@@ -208,29 +226,86 @@ class InstanceTable(DataTable):
             return [str(instance.get("team_name") or instance.get("team_slug") or "")]
         return self._shared_by.get(id(instance), [])
 
-    def filter(self, query: str) -> None:
-        """Filter table rows by query string.
+    def filter(
+        self, query: str, row_filter: Optional[Callable[[dict], bool]] = None,
+    ) -> None:
+        """Filter table rows by query string and an optional row predicate.
 
         Case-insensitive substring match on name, type, id, provider and,
         when the provider has several accounts, the account label — so
-        ``prod/`` lists that account's servers.
+        ``prod/`` lists that account's servers. *row_filter* narrows the
+        matches further (the screen's state and provider chips).
 
         Args:
             query: Search query string.
+            row_filter: Keeps only the rows it returns True for.
         """
-        if not query:
-            self._filtered_instances = self._all_instances.copy()
-        else:
-            query_lower = query.lower()
-            self._filtered_instances = [
-                inst for inst in self._all_instances
-                if any(
-                    query_lower in value
-                    for value in _search_fields(inst, self._shared_with(inst))
-                )
-                or query_lower in display_name(inst).lower()
-            ]
+        previous = self._cursor_anchor()
+        self._query = query
+        self._row_filter = row_filter
+        self._apply_filters()
         self._refresh_table()
+        self._restore_cursor(previous)
+
+    def searched_rows(self) -> List[dict]:
+        """The rows the search text lets through, before any row filter."""
+        return [row for row in self._all_instances if self._matches_query(row)]
+
+    def _matches_query(self, inst: dict) -> bool:
+        if not self._query:
+            return True
+        query_lower = self._query.lower()
+        return any(
+            query_lower in value
+            for value in _search_fields(inst, self._shared_with(inst))
+        ) or query_lower in display_name(inst).lower()
+
+    def _apply_filters(self) -> None:
+        keep = self._row_filter
+        self._filtered_instances = [
+            inst for inst in self._all_instances
+            if self._matches_query(inst) and (keep is None or keep(inst))
+        ]
+
+    def configure_filters(
+        self, query: str, row_filter: Optional[Callable[[dict], bool]],
+    ) -> None:
+        """Set the search and row filter the next ``populate`` applies, without redrawing."""
+        self._query = query
+        self._row_filter = row_filter
+
+    def set_marks(self, marks: Dict[str, str], *, redraw: bool = True) -> None:
+        """Mark servers a refresh added (``MARK_NEW``) or changed (``MARK_WAS``).
+
+        Keyed by ``row_identity``. Pass ``{}`` to clear them. Unless *redraw* is
+        False the rows redraw now, with the cursor kept.
+        """
+        if marks == self._marks:
+            return
+        self._marks = dict(marks)
+        if redraw:
+            self.refresh_memory_status()
+
+    def _cursor_anchor(self) -> tuple[Optional[str], int]:
+        """The selected server's id and row, to put the cursor back after a redraw."""
+        selected = self.get_selected_instance()
+        return (row_identity(selected) if selected else None), self.cursor_row
+
+    def _restore_cursor(self, anchor: tuple[Optional[str], int]) -> None:
+        """Move the cursor back to its server, else to the nearest row."""
+        instance_id, row = anchor
+        if not self._filtered_instances:
+            return
+        target = min(max(row, 0), len(self._filtered_instances) - 1)
+        if instance_id:
+            target = next(
+                (
+                    index for index, inst in enumerate(self._filtered_instances)
+                    if row_identity(inst) == instance_id
+                ),
+                target,
+            )
+        self.move_cursor(row=target, animate=False)
 
     def refresh_memory_status(self) -> None:
         """Re-render rows so the memory status column recomputes, keeping cursor.
@@ -312,11 +387,12 @@ class InstanceTable(DataTable):
         coloured = self._colorize_state(state)
         return {
             "index": str(idx + 1),
-            "name": _name_cell(
+            "name": self._tinted(_name_cell(
                 instance, limits["name"], shared=id(instance) in self._shared_by,
-            ),
+                marked=row_identity(instance) in self._marks,
+            ), instance),
             # A state without a colour is provider text: never read as markup.
-            "state": coloured if coloured != state else plain("state", state),
+            "state": self._state_cell(instance, coloured, plain("state", state), state),
             "provider": plain("provider", instance.get("provider", "AWS")),
             "public_ip": plain("public_ip", instance.get("public_ip")),
             "type": plain("type", instance.get("type")),
@@ -327,6 +403,35 @@ class InstanceTable(DataTable):
             "ssh": self._ssh_verify_cell(instance),
             "memory": self._memory_icon(instance, memory_service),
         }
+
+    def _state_cell(self, instance: dict, coloured: str, plain_cell: Text, state: str) -> Any:
+        """The State cell, followed by what the last refresh did to the server."""
+        cell = coloured if coloured != state else plain_cell
+        mark = self._marks.get(row_identity(instance) or "")
+        if not mark:
+            return cell
+        text = Text.from_markup(cell) if isinstance(cell, str) else cell.copy()
+        text.append(f" {mark}", style="dim")
+        return self._tinted(text, instance)
+
+    def _tinted(self, text: Text, instance: dict) -> Text:
+        """*text* on a faint row tint when a refresh added or changed the server.
+
+        The tint blends the theme's success (new) or warning (changed) colour
+        into its background; a theme whose colours are not plain values (the
+        terminal-colour themes) keeps just the bold name and the note.
+        """
+        mark = self._marks.get(row_identity(instance) or "")
+        if not mark:
+            return text
+        token = "success" if mark == MARK_NEW else "warning"
+        try:
+            colours = self.app.get_css_variables()
+            tint = Color.parse(colours[token]).blend(Color.parse(colours["background"]), 0.8)
+        except (KeyError, ColorParseError):
+            return text
+        text.stylize(f"on {tint.hex}")
+        return text
 
     def _optional_cell(self, key: str, instance: dict) -> Optional[str]:
         """The cell an optional column shows for *instance*, or None if nothing."""

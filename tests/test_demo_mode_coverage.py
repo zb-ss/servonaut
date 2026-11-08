@@ -2462,10 +2462,13 @@ class TestInstanceListProviderRefreshDemoMode:
     @staticmethod
     def _make_screen(demo: bool) -> Any:
         """Return a bare InstanceListScreen with mocked app and widgets."""
+        from servonaut.screens._fleet_filter import FleetFilter
         from servonaut.screens.instance_list import InstanceListScreen
 
         screen = object.__new__(InstanceListScreen)
         screen._instances = []
+        screen._filter = FleetFilter()
+        screen._marks = {}
 
         mock_app = _make_mock_app(demo=demo)
         # _update_table also queries for the search input and memory banner;
