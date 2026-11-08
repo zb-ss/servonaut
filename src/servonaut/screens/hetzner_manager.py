@@ -36,7 +36,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
-    ActionSpec, ProviderActionsMixin, action_rail, sync_actions, unless as _unless,
+    ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
 )
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -188,8 +188,11 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
                 power=(
                     ActionSpec("btn_hetzner_mgr_power_on", "Start", "s", role="primary"),
                     ActionSpec("btn_hetzner_mgr_shutdown", "Shutdown", "t"),
-                    ActionSpec("btn_hetzner_mgr_power_off", "Power off", role="warning"),
                     ActionSpec("btn_hetzner_mgr_reboot", "Reboot", "b"),
+                    ActionSpec(
+                        "btn_hetzner_mgr_power_off", "Power off", role="warning",
+                        tooltip="Hard power cut (like pulling the plug).",
+                    ),
                 ),
                 danger=(
                     ActionSpec("btn_hetzner_mgr_delete", "Delete", "d", role="error"),
@@ -411,30 +414,29 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
 
     def _sync_action_buttons(self) -> None:
-        """Toggle button enabled state based on the selected row's state.
+        self.sync_action_buttons()
 
-        State machine (Hetzner statuses):
-        * ``running``  → shutdown / power_off / reboot enabled
-        * ``stopped``  → power_on enabled
-        * other        → only delete enabled (and not always — pending
-                         servers reject delete with a transient error,
-                         but we let the user try; the audit row will
-                         capture the failure cleanly).
+    def unavailable_actions(self) -> dict[str, str | None]:
+        """Why each action cannot run on the selected row, from its Hetzner status.
+
+        * ``running`` -> shutdown / power off / reboot
+        * ``stopped`` / ``off`` -> power on
+        * anything else (transient) -> only delete; a server being created or
+          deleted may reject it, and the audit row records the failure.
         """
         inst = self._selected_instance()
         state = (inst.get("state", "") if inst else "").lower()
-
-        is_running = state in _RUNNING
-        is_stopped = state in _STOPPED
-
         has_row = inst is not None
-        sync_actions(self, {
-            "btn_hetzner_mgr_power_on": _unless(has_row, is_stopped, "Start needs a stopped server."),
-            "btn_hetzner_mgr_shutdown": _unless(has_row, is_running, "Shutdown needs a running server."),
-            "btn_hetzner_mgr_power_off": _unless(has_row, is_running, "Power off needs a running server."),
-            "btn_hetzner_mgr_reboot": _unless(has_row, is_running, "Reboot needs a running server."),
-            "btn_hetzner_mgr_delete": _unless(has_row, True, ""),
-        })
+        running = state in _RUNNING
+        return {
+            "btn_hetzner_mgr_power_on": action_unavailable(has_row, state in _STOPPED, "Start needs a stopped server."),
+            "btn_hetzner_mgr_shutdown": action_unavailable(has_row, running, "Shutdown needs a running server."),
+            "btn_hetzner_mgr_power_off": action_unavailable(
+                has_row, running, "Power off needs a running server.",
+            ),
+            "btn_hetzner_mgr_reboot": action_unavailable(has_row, running, "Reboot needs a running server."),
+            "btn_hetzner_mgr_delete": action_unavailable(has_row, True, ""),
+        }
 
     # ------------------------------------------------------------------
     # Actions
@@ -476,16 +478,20 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
             self._refresh()
 
     def action_power_on(self) -> None:
-        self._run_lifecycle("power_on")
+        if not self.refuse_unavailable("btn_hetzner_mgr_power_on"):
+            self._run_lifecycle("power_on")
 
     def action_shutdown(self) -> None:
-        self._run_lifecycle("shutdown")
+        if not self.refuse_unavailable("btn_hetzner_mgr_shutdown"):
+            self._run_lifecycle("shutdown")
 
     def action_power_off(self) -> None:
-        self._run_lifecycle("power_off")
+        if not self.refuse_unavailable("btn_hetzner_mgr_power_off"):
+            self._run_lifecycle("power_off")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot")
+        if not self.refuse_unavailable("btn_hetzner_mgr_reboot"):
+            self._run_lifecycle("reboot")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()

@@ -44,7 +44,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
-    ActionSpec, ProviderActionsMixin, action_rail, sync_actions, unless as _unless,
+    ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
 )
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -427,33 +427,26 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         return ref.label if ref is not None else account
 
     def _sync_action_buttons(self) -> None:
-        """Toggle button enabled state based on the selected row's EC2 state.
+        self.sync_action_buttons()
 
-        EC2 lifecycle rules:
-        * ``running``                   → stop / reboot / terminate enabled
-        * ``stopped``                   → start / terminate enabled
-        * ``terminated``/``shutting-down`` → all disabled (terminal)
-        * other (transient)             → only terminate enabled (allows
-                                          force-stop of a stuck instance)
+    def unavailable_actions(self) -> dict[str, str | None]:
+        """Why each action cannot run on the selected row, from its EC2 state.
+
+        * ``running``                      -> stop / reboot / terminate
+        * ``stopped``                      -> start / terminate
+        * ``terminated`` / ``shutting-down`` -> nothing (terminal)
+        * other (transient)                -> only terminate (force-stop of a stuck instance)
         """
         inst = self._selected_instance()
         state = (inst.get("state", "") if inst else "").lower()
-
-        is_running = state in _RUNNING
-        is_stopped = state in _STOPPED
-        is_terminal = state in _TERMINAL
-        has_inst = inst is not None and not is_terminal
-
         has_row = inst is not None
-        sync_actions(self, {
-            "btn_aws_mgr_start": _unless(has_row, has_inst and is_stopped, "Start needs a stopped instance."),
-            "btn_aws_mgr_stop": _unless(has_row, has_inst and is_running, "Stop needs a running instance."),
-            "btn_aws_mgr_reboot": _unless(has_row, has_inst and is_running, "Reboot needs a running instance."),
-            "btn_aws_mgr_terminate": _unless(
-                has_row, has_inst,
-                "This instance is already terminated." if is_terminal else "Select an instance first.",
-            ),
-        })
+        live = has_row and state not in _TERMINAL
+        return {
+            "btn_aws_mgr_start": action_unavailable(has_row, live and state in _STOPPED, "Start needs a stopped instance."),
+            "btn_aws_mgr_stop": action_unavailable(has_row, live and state in _RUNNING, "Stop needs a running instance."),
+            "btn_aws_mgr_reboot": action_unavailable(has_row, live and state in _RUNNING, "Reboot needs a running instance."),
+            "btn_aws_mgr_terminate": action_unavailable(has_row, live, "This instance is already terminated."),
+        }
 
     # ------------------------------------------------------------------
     # Actions
@@ -489,57 +482,22 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         self.app.push_screen(AWSCreateScreen())
 
     def action_start(self) -> None:
-        inst = self._selected_instance()
-        if inst is None:
-            return
-        state = str(inst.get("state", "")).lower()
-        if state not in _STOPPED:
-            self.notify(
-                "Start is only available for stopped instances.",
-                severity="warning", markup=False,
-            )
-            return
-        self._run_lifecycle("start_instance")
+        if not self.refuse_unavailable("btn_aws_mgr_start"):
+            self._run_lifecycle("start_instance")
 
     def action_stop(self) -> None:
-        inst = self._selected_instance()
-        if inst is None:
-            return
-        state = str(inst.get("state", "")).lower()
-        if state not in _RUNNING:
-            self.notify(
-                "Stop is only available for running instances.",
-                severity="warning", markup=False,
-            )
-            return
-        self._run_lifecycle("stop_instance")
+        if not self.refuse_unavailable("btn_aws_mgr_stop"):
+            self._run_lifecycle("stop_instance")
 
     def action_reboot(self) -> None:
-        inst = self._selected_instance()
-        if inst is None:
-            return
-        state = str(inst.get("state", "")).lower()
-        if state not in _RUNNING:
-            self.notify(
-                "Reboot is only available for running instances.",
-                severity="warning", markup=False,
-            )
-            return
-        self._run_lifecycle("reboot_instance")
+        if not self.refuse_unavailable("btn_aws_mgr_reboot"):
+            self._run_lifecycle("reboot_instance")
 
     def action_terminate(self) -> None:
-        inst = self._selected_instance()
-        if inst is None:
-            return
-        state = str(inst.get("state", "")).lower()
-        if state in _TERMINAL:
-            self.notify(
-                "Instance is already in a terminal state (terminated/shutting-down).",
-                severity="warning", markup=False,
-            )
+        if self.refuse_unavailable("btn_aws_mgr_terminate"):
             return
         self.run_worker(
-            self._do_terminate(inst),
+            self._do_terminate(self._selected_instance()),
             exclusive=True,
             name="aws_mgr_terminate",
         )

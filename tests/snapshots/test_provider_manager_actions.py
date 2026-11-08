@@ -106,11 +106,16 @@ async def test_roles_and_the_danger_zone(manager: Manager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_hetzner_power_off_is_a_risky_action() -> None:
+async def test_hetzner_power_off_is_a_risky_action_listed_last() -> None:
     app = _harness.SnapshotApp()
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open(app, pilot, HETZNER)
-        assert screen.query_one("#btn_hetzner_mgr_power_off", ActionButton).has_class("-warning")
+        power_off = screen.query_one("#btn_hetzner_mgr_power_off", ActionButton)
+        assert power_off.has_class("-warning")
+        assert "pulling the plug" in str(power_off.tooltip)
+        group = next(a for a in power_off.ancestors if a.has_class("provider-manager-action-group"))
+        assert not group.has_class("provider-manager-danger")
+        assert [b.id for b in group.query(ActionButton)][-1] == "btn_hetzner_mgr_power_off"
 
 
 @pytest.mark.asyncio
@@ -133,7 +138,7 @@ async def test_actions_follow_the_selected_row_and_say_why_not(manager: Manager)
                 assert (not button.disabled) is is_enabled, (row, button_id)
                 if not is_enabled:
                     assert button.tooltip, f"{button_id} is disabled without a reason"
-                else:
+                elif not button_id.endswith("power_off"):
                     assert not button.tooltip
 
 
@@ -232,3 +237,100 @@ async def test_buttons_are_compact_exactly_when_the_content_is_narrow(manager: M
         await wait_until(lambda: all(b.compact for b in screen.query(ActionButton)))
         await pilot.resize_terminal(160, 50)
         await wait_until(lambda: not any(b.compact for b in screen.query(ActionButton)))
+
+
+def _state_matrix(manager: Manager) -> list[tuple[dict, frozenset[str]]]:
+    """(row changes, ids of the power/danger actions enabled) for transitional states too."""
+    if manager is AWS:
+        return [
+            ({"state": "running"}, frozenset({"stop", "reboot", "terminate"})),
+            ({"state": "stopped"}, frozenset({"start", "terminate"})),
+            ({"state": "pending"}, frozenset({"terminate"})),
+            ({"state": "stopping"}, frozenset({"terminate"})),
+            ({"state": "shutting-down"}, frozenset()),
+            ({"state": "terminated"}, frozenset()),
+            ({"state": "RUNNING"}, frozenset({"stop", "reboot", "terminate"})),
+        ]
+    if manager is HETZNER:
+        return [
+            ({"state": "running"}, frozenset({"shutdown", "power_off", "reboot", "delete"})),
+            ({"state": "off"}, frozenset({"power_on", "delete"})),
+            ({"state": "starting"}, frozenset({"delete"})),
+            ({"state": "stopping"}, frozenset({"delete"})),
+            ({"state": "deleting"}, frozenset({"delete"})),
+            ({"state": "unknown"}, frozenset({"delete"})),
+        ]
+    return [
+        ({"provider_type": "vps", "state": "running"}, frozenset({"stop", "reboot"})),
+        ({"provider_type": "vps", "state": "stopped"}, frozenset({"start"})),
+        ({"provider_type": "vps", "state": "pending"}, frozenset()),
+        ({"provider_type": "cloud", "state": "active"}, frozenset({"stop", "reboot", "delete"})),
+        ({"provider_type": "cloud", "state": "shutoff"}, frozenset({"start", "delete"})),
+        ({"provider_type": "cloud", "state": "pending"}, frozenset({"delete"})),
+        ({"provider_type": "dedicated", "state": "running"}, frozenset({"reboot"})),
+        ({"provider_type": "dedicated", "state": "pending"}, frozenset({"reboot"})),
+        ({"provider_type": "", "state": "running"}, frozenset()),
+        ({"provider_type": "baremetal", "state": "running"}, frozenset()),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager", MANAGERS, ids=IDS)
+async def test_every_state_enables_exactly_the_right_actions(manager: Manager) -> None:
+    app = _harness.SnapshotApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, manager)
+        gated = {
+            b.id for b in screen.query(ActionButton)
+            if b.id and b.id.removeprefix(f"btn_{manager.prefix}_") in POWER_AND_DANGER
+        }
+        for changes, enabled in _state_matrix(manager):
+            screen._instances[0].update(changes)
+            screen._sync_action_buttons()
+            await pilot.pause()
+            for button_id in gated:
+                button = screen.query_one(f"#{button_id}", ActionButton)
+                is_enabled = button_id.removeprefix(f"btn_{manager.prefix}_") in enabled
+                assert (not button.disabled) is is_enabled, (changes, button_id)
+                if not is_enabled:
+                    assert button.tooltip, (changes, button_id)
+                elif not button_id.endswith("power_off"):
+                    assert not button.tooltip, (changes, button_id)
+
+
+# Shortcut -> (button suffix, handler under test). Only actions with a disabled state are listed.
+KEYED = {
+    "aws": (("s", "start"), ("t", "stop"), ("b", "reboot")),
+    "ovh": (("s", "start"), ("t", "stop"), ("b", "reboot")),
+    "hetzner": (("s", "power_on"), ("t", "shutdown"), ("b", "reboot")),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager,name", list(zip(MANAGERS, IDS)), ids=IDS)
+async def test_shortcuts_refuse_what_the_button_refuses(manager: Manager, name: str) -> None:
+    """A key on a row whose button is disabled says why and starts nothing."""
+    app = _harness.SnapshotApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, manager)
+        started: list[str] = []
+        screen._run_lifecycle = lambda method: started.append(method)
+        for changes, enabled in _state_matrix(manager):
+            screen._instances[0].update(changes)
+            screen._sync_action_buttons()
+            await pilot.pause()
+            for key, suffix in KEYED[name]:
+                button = screen.query_one(f"#{_bid(manager, suffix)}", ActionButton)
+                notes: list[str] = []
+                original = screen.notify
+                screen.notify = lambda message, **kw: notes.append(message)  # noqa: E731
+                started.clear()
+                screen.query_one(f"#{manager.table}").focus()
+                await pilot.press(key)
+                await pilot.pause()
+                screen.notify = original
+                if button.disabled:
+                    assert not started, (changes, key, "started a disabled action")
+                    assert notes == [button.tooltip], (changes, key, notes)
+                else:
+                    assert started and not notes, (changes, key)

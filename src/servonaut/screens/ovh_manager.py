@@ -39,7 +39,7 @@ from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
-    ActionSpec, ProviderActionsMixin, action_rail, sync_actions, unless as _unless,
+    ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
 )
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -444,41 +444,44 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             return None
 
     def _sync_action_buttons(self) -> None:
-        """Toggle button enabled state per row's provider_type + state.
+        self.sync_action_buttons()
 
-        Per-type rules (matches what OVHService routes through):
-        * cloud:     start (when stopped), stop / reboot / delete (when running)
-        * vps:       start (when stopped), stop / reboot (when running)
-        * dedicated: reboot only — start/stop don't apply
-        * other:     all disabled
+    def unavailable_actions(self) -> dict[str, str | None]:
+        """Why each action cannot run on the selected row, per product type and state.
+
+        * cloud:     start (stopped), stop / reboot (running), delete
+        * vps:       start (stopped), stop / reboot (running)
+        * dedicated: reboot only
+        * other:     nothing
         """
         inst = self._selected_instance()
         ptype = (inst.get("provider_type", "") if inst else "").lower()
         state = (inst.get("state", "") if inst else "").lower()
-
-        is_running = state in _RUNNING
-        is_stopped = state in _STOPPED
-
         has_row = inst is not None
-        sync_actions(self, {
-            "btn_ovh_mgr_start": _unless(
-                has_row, ptype in _SUPPORTS_START_STOP and is_stopped,
+        start_stop = ptype in _SUPPORTS_START_STOP
+        if ptype in _SUPPORTS_REBOOT:
+            reboot_reason = "Reboot needs a running server."
+        else:
+            reboot_reason = "Reboot is not available for this server type."
+        return {
+            "btn_ovh_mgr_start": action_unavailable(
+                has_row, start_stop and state in _STOPPED,
                 "Start needs a stopped VPS or cloud instance.",
             ),
-            "btn_ovh_mgr_stop": _unless(
-                has_row, ptype in _SUPPORTS_START_STOP and is_running,
+            "btn_ovh_mgr_stop": action_unavailable(
+                has_row, start_stop and state in _RUNNING,
                 "Stop needs a running VPS or cloud instance.",
             ),
-            "btn_ovh_mgr_reboot": _unless(
+            "btn_ovh_mgr_reboot": action_unavailable(
                 has_row,
-                ptype in _SUPPORTS_REBOOT and (is_running or ptype == "dedicated"),
-                "Reboot needs a running server.",
+                ptype in _SUPPORTS_REBOOT and (state in _RUNNING or ptype == "dedicated"),
+                reboot_reason,
             ),
-            "btn_ovh_mgr_delete": _unless(
+            "btn_ovh_mgr_delete": action_unavailable(
                 has_row, ptype in _SUPPORTS_DELETE,
                 "Only cloud instances can be deleted here.",
             ),
-        })
+        }
 
     # ------------------------------------------------------------------
     # Actions
@@ -530,13 +533,16 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             self._refresh()
 
     def action_start(self) -> None:
-        self._run_lifecycle("start_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_start"):
+            self._run_lifecycle("start_instance")
 
     def action_stop(self) -> None:
-        self._run_lifecycle("stop_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_stop"):
+            self._run_lifecycle("stop_instance")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_reboot"):
+            self._run_lifecycle("reboot_instance")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()

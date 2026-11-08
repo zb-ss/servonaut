@@ -31,13 +31,17 @@ class ActionSpec:
     short: str | None = None
     # Row actions start disabled until a row is selected.
     disabled: bool = True
+    # Shown while the action is available (a disabled action shows its reason instead).
+    tooltip: str | None = None
 
 
 def _button(spec: ActionSpec) -> ActionButton:
-    return ActionButton(
+    button = ActionButton(
         spec.text, spec.key, role=spec.role, short=spec.short,
-        id=spec.button_id, disabled=spec.disabled,
+        id=spec.button_id, disabled=spec.disabled, tooltip=spec.tooltip,
     )
+    button.available_tooltip = spec.tooltip
+    return button
 
 
 def _group(label: str, specs: Sequence[ActionSpec], *, classes: str = "") -> Horizontal:
@@ -74,17 +78,37 @@ def action_rail(
 
 
 class ProviderActionsMixin:
-    """Switch a manager's action buttons to their compact form when its layout is narrow."""
+    """What every provider manager shares: compact buttons and one enabled-state rule.
+
+    A manager implements :meth:`unavailable_actions`; the buttons and the
+    keyboard shortcuts both follow it, so a shortcut can never do what its
+    disabled button refuses.
+    """
+
+    def unavailable_actions(self) -> Mapping[str, str | None]:
+        """Button id -> why it cannot be used now (``None`` when it can)."""
+        raise NotImplementedError
+
+    def sync_action_buttons(self) -> None:
+        sync_actions(self, self.unavailable_actions())
+
+    def refuse_unavailable(self, button_id: str) -> bool:
+        """Tell the user why *button_id* cannot run now; True when it was refused."""
+        reason = self.unavailable_actions().get(button_id)
+        if reason is None:
+            return False
+        self.notify(reason, severity="warning", markup=False)
+        return True
 
     def sync_workspace_controls(self) -> None:
-        super().sync_workspace_controls()  # type: ignore[misc]
+        super().sync_workspace_controls()
         self.sync_compact_actions()
 
     def sync_compact_actions(self) -> None:
-        compact = self.has_class("-content-narrow")  # type: ignore[attr-defined]
-        for button in self.query(ActionButton):  # type: ignore[attr-defined]
+        compact = self.has_class("-content-narrow")
+        for button in self.query(ActionButton):
             button.compact = compact
-        for row in self.query(ActionRow):  # type: ignore[attr-defined]
+        for row in self.query(ActionRow):
             row.fit()
 
 
@@ -103,10 +127,10 @@ def sync_actions(
         except NoMatches:  # pragma: no cover - defensive
             continue
         button.disabled = reason is not None
-        button.tooltip = reason
+        button.tooltip = reason or getattr(button, "available_tooltip", None)
 
 
-def unless(has_row: bool, available: bool, reason: str) -> str | None:
+def action_unavailable(has_row: bool, available: bool, reason: str) -> str | None:
     """Why an action cannot be used now, or ``None`` when it can.
 
     Without a selected row every action asks for one first; otherwise

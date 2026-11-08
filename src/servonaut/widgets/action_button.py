@@ -132,11 +132,16 @@ class ActionRow(Horizontal):
                 self._apply(buttons, short=short, hint=hint, wrap=False)
                 return
         self._apply(buttons, short=True, hint=False, wrap=True)
+        # As many columns as the widest button allows, so none is squeezed.
+        widest = max(b.natural_width(short=True, hint=False) for b in buttons)
+        self.styles.grid_size_columns = max(1, min(len(buttons), width // widest))
 
     def _apply(self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
         for button in buttons:
             button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
+        if not wrap:
+            self.styles.grid_size_columns = None
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.
         self.call_after_refresh(self._remeasure)
