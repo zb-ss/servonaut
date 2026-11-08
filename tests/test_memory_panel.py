@@ -86,7 +86,7 @@ class TestRenderMemoryPanel:
     def test_empty_shows_build_cta(self):
         out = render_memory_panel({})
         assert "No memory cached" in out
-        assert "[b]M[/b]" in out
+        assert "[b]m[/b]" in out
 
     def test_renders_os_and_disk(self):
         modules = {

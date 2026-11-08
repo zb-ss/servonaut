@@ -327,7 +327,12 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_finding_resolve",
         "btn_finding_revert",   # Undo button; inherits .finding_remediation_run + global Button styling
         "btn_finding_suppress",
-        "btn_findings",         # Reason: server-actions rail Button; inherits #action_buttons styling
+        "btn_findings",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_copy_summary",     # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_live",             # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_findings_open",
         "btn_findings_refresh",
         "btn_findings_scan",

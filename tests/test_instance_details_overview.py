@@ -55,7 +55,7 @@ def test_sections_preserve_provider_values_and_credentials(extra, identity_value
         patch.object(ServerActionsScreen, "app", new_callable=PropertyMock, return_value=app),
         patch.object(screen, "_sharing_teams", return_value=[]),
     ):
-        context, identity, network = [Content.from_markup(part).plain for part in screen._server_info_sections()]
+        context, identity, network = [part.plain for part in screen._server_info_sections()]
     assert "web-[b]東京[/b]" in context
     assert "Account: personal" in context
     assert identity_value in identity
@@ -161,7 +161,7 @@ async def test_long_context_keeps_full_values_without_starving_files(monkeypatch
         screen = app.screen
         context = screen.query_one("#server_context", Static)
         for key in ("name", "account"):
-            assert app.instances[0][key] in Content.from_markup(str(context.content)).plain
+            assert app.instances[0][key] in context.content.plain
         assert screen.query_one("#sa-overview").region.height >= 12
         screen._open_inline_browse()
         await pilot.pause()

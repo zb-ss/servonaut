@@ -89,6 +89,7 @@ CSS_FILES = [
     _S / "components/workspace.tcss",
     _S / "components/sidebar.tcss",
     _S / "components/dialogs.tcss",
+    _S / "components/action_button.tcss",
     _S / "screens/credential_workspaces.tcss",
     _S / "screens/ai_choice_dialogs.tcss",
 ]

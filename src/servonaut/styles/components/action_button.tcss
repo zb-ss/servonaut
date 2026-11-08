@@ -1,0 +1,114 @@
+/* ===================================================================
+   ACTION BUTTON
+   Transparent, rounded, theme colours only. The compact form (set by a
+   screen when its layout is narrow) is a single row without a border.
+   =================================================================== */
+
+ActionButton {
+    width: auto;
+    min-width: 0;
+    height: auto;
+    margin: 0 1 0 0;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+    text-style: none;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+ActionButton:hover {
+    border: round $accent;
+    color: $text-accent;
+    background: transparent;
+}
+
+ActionButton:focus {
+    border: round $accent;
+    color: $text;
+    background: transparent;
+    text-style: bold;
+}
+
+ActionButton.-primary {
+    border: round $primary;
+    color: $text-accent;
+    text-style: bold;
+}
+
+ActionButton.-warning {
+    border: round $warning;
+    color: $text-warning;
+}
+
+ActionButton.-error {
+    border: round $error;
+    color: $text-error;
+}
+
+ActionButton.-primary:focus,
+ActionButton.-warning:focus,
+ActionButton.-error:focus {
+    border: round $accent;
+}
+
+ActionButton.-textual-compact {
+    border: none !important;
+    height: 1;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+
+ActionButton.-textual-compact:hover,
+ActionButton.-textual-compact:focus {
+    background: $panel-lighten-2;
+}
+
+ActionButton.-textual-compact.-primary {
+    background: $primary;
+    color: $background;
+}
+
+ActionButton.-textual-compact.-primary:hover,
+ActionButton.-textual-compact.-primary:focus {
+    background: $accent;
+    color: $background;
+}
+
+ActionButton:ansi {
+    color: $foreground;
+}
+
+ActionButton:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    text-style: underline not bold;
+}
+
+ActionButton:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+ActionButton.-textual-compact.-primary:ansi {
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+}
+
+/* Declared after the idle rule above: it is more specific than the plain
+   :ansi:hover / :ansi:focus rules, so without these the compact primary
+   would look the same focused, hovered and idle. */
+ActionButton.-textual-compact.-primary:ansi:hover {
+    background: $surface;
+    text-style: bold underline;
+}
+
+ActionButton.-textual-compact.-primary:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: not bold;
+}

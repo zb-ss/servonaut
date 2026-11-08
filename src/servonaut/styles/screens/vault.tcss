@@ -499,23 +499,6 @@ VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
     margin-top: 1;
 }
 
-/* Focus keeps the readable text of every other button. */
-#action_buttons #btn_use_vault_key:focus {
-    color: $text;
-}
-
-#action_buttons #btn_use_vault_key:ansi:enabled:hover {
-    background: $surface;
-    color: $foreground;
-    text-style: underline not bold;
-}
-
-#action_buttons #btn_use_vault_key:ansi:enabled:focus {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
-    text-style: not bold;
-}
-
 /* Auto-bind: the review of which vault key each server gets. */
 #auto_bind_layout {
     height: 1fr;

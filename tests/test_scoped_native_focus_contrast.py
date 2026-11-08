@@ -138,13 +138,13 @@ async def test_vault_focus_dispatch_keeps_native_action(theme, clipboard, record
             button = screen.query_one('#btn_use_vault_key', Button)
             assert button.has_focus and not button.disabled
             geometry = button.region, button.content_region
-            _paint(app, button, 'Use Vault Key', palette, 'vault-focused', rows, failures)
+            _paint(app, button, 'Use vault key', palette, 'vault-focused', rows, failures)
             other = screen.query_one('#btn_ban_ip', Button)
             assert screen.region.contains_region(other.region)
             await pilot.hover(other)
             await pilot.pause()
             assert app.focused is button and other.mouse_hover
-            _paint(app, button, 'Use Vault Key', palette, 'vault-focused-other-hover', rows, failures)
+            _paint(app, button, 'Use vault key', palette, 'vault-focused-other-hover', rows, failures)
             await pilot.press('enter')
             await wait_until(lambda: sum(c.args == ('Vault services are unavailable.',)
                                         for c in notify.call_args_list) == 1)
@@ -155,13 +155,13 @@ async def test_vault_focus_dispatch_keeps_native_action(theme, clipboard, record
             await pilot.hover(button)
             await pilot.pause()
             assert app.focused is other and button.mouse_hover and not button.has_focus
-            _paint(app, button, 'Use Vault Key', palette, 'vault-hover-only', rows, failures)
+            _paint(app, button, 'Use vault key', palette, 'vault-hover-only', rows, failures)
             if app.current_theme.ansi and not all(g['underline'] for g in rows[-1]['glyphs']):
                 failures.append(['vault-hover-only', 'missing-native-hover-cue'])
             await _tab_to(pilot, button)
             await pilot.pause()
             assert app.focused is button and button.mouse_hover
-            _paint(app, button, 'Use Vault Key', palette, 'vault-focused-hover', rows, failures)
+            _paint(app, button, 'Use vault key', palette, 'vault-focused-hover', rows, failures)
             if app.current_theme.ansi:
                 signatures = [[(g['foreground'], g['background'], g['bold']) for g in rows[i]['glyphs']]
                               for i in (0, 1, 3)]
