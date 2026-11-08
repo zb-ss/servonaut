@@ -42,7 +42,6 @@ from servonaut.services.vault.display import (
 from servonaut.services.vault.errors import (
     VaultKeyInUse, VaultRecoveryNotConfirmed, vault_failure_reason,
 )
-from servonaut.utils.markup import literal
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -1323,10 +1322,10 @@ class VaultScreen(WorkspaceScreen):
         for row in self._vaults:
             counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
             table.add_row(
-                markup_literal(self.scrub_for_display(row.get("name") or "Unnamed vault")),
-                markup_literal(self.scrub_for_display(row.get("kind") or "")),
+                markup_literal(self._safe(row.get("name") or "Unnamed vault")),
+                markup_literal(self._safe(row.get("kind") or "")),
                 str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
-                markup_literal(self.scrub_for_display(row.get("vault_id") or "")),
+                markup_literal(self._safe(row.get("vault_id") or "")),
             )
         # The highlight stays on the vault that was last chosen.
         chosen = next((i for i, row in enumerate(self._vaults) if row.get("vault_id") == self._selected_vault_id), None)
@@ -1359,10 +1358,10 @@ class VaultScreen(WorkspaceScreen):
         for row in self._items:
             table.add_row(
                 self._item_name_cell(row),
-                markup_literal(self.scrub_for_display(row.get("type") or "unsupported")),
+                markup_literal(self._safe(row.get("type") or "unsupported")),
                 str(row.get("revision") or ""),
-                markup_literal(self.scrub_for_display(row.get("public_fingerprint") or "")),
-                markup_literal(self.scrub_for_display(row.get("item_id") or "")),
+                markup_literal(self._safe(row.get("public_fingerprint") or "")),
+                markup_literal(self._safe(row.get("item_id") or "")),
             )
 
     def _render_exposures(self) -> None:
@@ -1371,21 +1370,21 @@ class VaultScreen(WorkspaceScreen):
         table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
             note = "Key replaced in vault; old key may still be on servers" if row.get("key_replaced") is True else ""
-            table.add_row(markup_literal(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self.scrub_for_display(row.get("reason") or "")), note, markup_literal(self.scrub_for_display(row.get("item_id") or "")), markup_literal(self.scrub_for_display(row.get("exposure_id") or "")))
+            table.add_row(markup_literal(self._safe(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self._safe(row.get("reason") or "")), note, markup_literal(self._safe(row.get("item_id") or "")), markup_literal(self._safe(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
         self._records_heading("Key rotation", len(self._rotation_hosts), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Server", "Status", "Detail")
         for host in self._rotation_hosts:
-            table.add_row(markup_literal(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), markup_literal(self.scrub_for_display(host.get("status") or "unknown")), markup_literal(self.scrub_for_display(host.get("error") or "")))
+            table.add_row(markup_literal(self._safe(host.get("server_id") or host.get("server") or "")), markup_literal(self._safe(host.get("status") or "unknown")), markup_literal(self._safe(host.get("error") or "")))
 
     def _render_devices(self) -> None:
         self._records_heading("Devices", len(self._devices))
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Platform", "Status", "Device ID")
         for row in self._devices:
-            table.add_row(markup_literal(self.scrub_for_display(row.get("name") or "")), markup_literal(self.scrub_for_display(row.get("platform") or "")), markup_literal(self.scrub_for_display(row.get("status") or "")), markup_literal(self.scrub_for_display(row.get("device_id") or "")))
+            table.add_row(markup_literal(self._safe(row.get("name") or "")), markup_literal(self._safe(row.get("platform") or "")), markup_literal(self._safe(row.get("status") or "")), markup_literal(self._safe(row.get("device_id") or "")))
 
     def _render_roster(self) -> None:
         self._records_heading("Members", len(self._roster), scoped=True)
@@ -1393,7 +1392,7 @@ class VaultScreen(WorkspaceScreen):
         table.clear(columns=True); table.add_columns("Member", "Role", "Status", "Fingerprint")
         for member in self._roster:
             identity = member.get("identity") if isinstance(member.get("identity"), Mapping) else {}
-            table.add_row(markup_literal(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), markup_literal(self.scrub_for_display(member.get("role") or "")), markup_literal(self.scrub_for_display(member.get("status") or "")), markup_literal(self.scrub_for_display(identity.get("fingerprint") or "")))
+            table.add_row(markup_literal(self._safe(member.get("display_name") or member.get("user_id") or "")), markup_literal(self._safe(member.get("role") or "")), markup_literal(self._safe(member.get("status") or "")), markup_literal(self._safe(identity.get("fingerprint") or "")))
 
     def _records_heading(self, label: str, count: int, *, scoped: bool = False) -> None:
         """Frame the current native table without changing its rows or selection."""
@@ -1557,16 +1556,20 @@ class VaultScreen(WorkspaceScreen):
             return heading, Content.styled("Nothing selected.", "$text-muted")
         return heading, Content("\n").join(build(row))
 
+    def _safe(self, value: object) -> str:
+        """Text from the service or teammates as inert, redacted display text."""
+        return self.scrub_for_display(terminal_safe(value))
+
     def _fact(self, label: str, value: object, style: str = "") -> Content:
-        text = self.scrub_for_display(value) if value not in (None, "") else "-"
+        text = self._safe(value) if value not in (None, "") else "-"
         return Content.assemble((f"{label}: ", "$text-muted"), (text, style) if style else text)
 
     def _title_fact(self, value: object, status: object = None) -> Content:
-        name = self.scrub_for_display(value or "Unnamed")
+        name = self._safe(value or "Unnamed")
         if not status:
             return Content.styled(name, "bold")
         style = "$text-warning" if status == "pending" else "$text-muted"
-        return Content.assemble((name, "bold"), "  ", (self.scrub_for_display(status), style))
+        return Content.assemble((name, "bold"), "  ", (self._safe(status), style))
 
     def _vault_facts(self, row: Mapping[str, Any]) -> list[Content]:
         counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
@@ -1581,7 +1584,7 @@ class VaultScreen(WorkspaceScreen):
     def _item_facts(self, row: Mapping[str, Any]) -> list[Content]:
         title = self._key_display_name(str(row.get("item_id") or "")) if row.get("type") == "ssh_key" else row.get("type") or "unsupported"
         return [
-            Content.styled(self.scrub_for_display(title), "bold"),
+            Content.styled(self._safe(title), "bold"),
             self._fact("Type", row.get("type") or "unsupported"),
             self._fact("Revision", row.get("revision")),
             self._fact("Fingerprint", row.get("public_fingerprint")),
@@ -1605,7 +1608,7 @@ class VaultScreen(WorkspaceScreen):
 
     def _exposure_facts(self, row: Mapping[str, Any]) -> list[Content]:
         return [
-            Content.styled(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "Exposure"), "bold"),
+            Content.styled(self._safe(row.get("subject") or row.get("public_fingerprint") or "Exposure"), "bold"),
             self._fact("Reason", row.get("reason")),
             self._fact("Item ID", row.get("item_id")),
             self._fact("Exposure ID", row.get("exposure_id")),

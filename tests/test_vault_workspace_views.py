@@ -460,3 +460,41 @@ async def test_no_action_or_view_is_clipped_at_any_width(size) -> None:
             assert button.region.width > 0, button.id
             assert screen.query_one("#vault_action_scroll").region.contains_region(button.region), button.id
             assert_button_label_painted(app, button)
+
+
+@pytest.mark.asyncio
+async def test_terminal_escape_sequences_in_names_never_reach_the_terminal() -> None:
+    from rich.console import Console
+
+    hostile = "osc\x1b]8;;http://example.invalid\x1b\\link \x1b]52;c;eA==\x07 \x1b]0;title\x07end"
+
+    class Hostile(_Service):
+        async def list_vaults(self):
+            rows = await super().list_vaults()
+            rows[0]["name"] = hostile
+            return rows
+
+        async def list_devices(self):
+            return [{"device_id": "d-1", "name": hostile, "platform": hostile, "status": "pending"}]
+
+        async def get_vault(self, **_kwargs):
+            return {"roster": [{"user_id": "u", "display_name": hostile, "role": hostile, "status": hostile,
+                                "identity": {"fingerprint": hostile}}]}
+
+        async def list_exposures(self, **_kwargs):
+            return {"data": [{"exposure_id": "e", "item_id": "k1", "subject": hostile, "reason": hostile}]}
+
+    app = _StyledVaultHost(Hostile())
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(app)
+        for action, mode in (
+            (screen.action_items, "items"), (screen.action_devices, "devices"),
+            (screen.action_roster, "roster"), (screen.action_exposures, "exposures"),
+            (screen.action_vaults, "vaults"),
+        ):
+            action()
+            await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
+            await pilot.pause()
+            output = screen._compositor.render_update(full=True).render_segments(Console(width=160))
+            assert "\x1b]" not in output and "example.invalid\x1b" not in output, mode
+            assert "\x1b]8" not in _facts(screen) and "\x07" not in _facts(screen), mode
