@@ -381,3 +381,45 @@ async def test_every_button_on_a_screen_is_in_the_same_hint_state(manager: Manag
         assert len(set(has_hint.values())) == 1, has_hint
         shown = {b.id: b.label.plain.endswith(b._key) for b in buttons if b._key}
         assert len(set(shown.values())) == 1, shown
+
+
+def _style_signature(app, widget) -> frozenset[tuple]:
+    """The colours and attributes painted over *widget*, without its text."""
+    rows = app.screen._compositor.render_strips()
+    cells = set()
+    for y in range(widget.region.y, widget.region.bottom):
+        for segment in rows[y].crop(widget.region.x, widget.region.right):
+            style = segment.style
+            if style is None or not segment.text.strip():
+                continue
+            cells.add((
+                str(style.color), str(style.bgcolor), style.bold, style.dim,
+                style.underline, style.reverse,
+            ))
+    return frozenset(cells)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light", "servonaut", "servonaut-light"])
+@pytest.mark.parametrize("size", SIZES)
+async def test_disabled_default_and_danger_actions_paint_distinctly(theme, size) -> None:
+    app = _harness.SnapshotApp()
+    app.theme = theme
+    async with app.run_test(size=size) as pilot:
+        screen = await _open(app, pilot, AWS, row=1)  # stopped: Stop is disabled
+        disabled = screen.query_one("#btn_aws_mgr_stop", ActionButton)
+        default = screen.query_one("#btn_aws_mgr_refresh", ActionButton)
+        danger = screen.query_one("#btn_aws_mgr_terminate", ActionButton)
+        for button in (disabled, default, danger):
+            button.scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+        signatures = {
+            "disabled": _style_signature(app, disabled),
+            "default": _style_signature(app, default),
+            "danger": _style_signature(app, danger),
+        }
+        assert all(signatures.values()), signatures
+        names = list(signatures)
+        for index, first in enumerate(names):
+            for second in names[index + 1:]:
+                assert signatures[first] != signatures[second], (theme, size, first, second)
