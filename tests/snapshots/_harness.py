@@ -500,9 +500,14 @@ class GatedProvider:
 
     last_fetch_partial = False
 
-    def __init__(self, rows: List[dict], bindings: int = 1, cached: bool = True) -> None:
+    def __init__(
+        self, rows: List[dict], bindings: int = 1, cached: bool = True,
+        account: Optional[str] = None,
+    ) -> None:
         self._rows = rows
         self._cached = cached
+        # Rows of a real inventory carry their account; the gate does the same.
+        self._account = account
         self.bindings = [object()] * bindings
         self.last_fetch_error: Optional[str] = None
         self.gate = asyncio.Event()
@@ -518,8 +523,15 @@ class GatedProvider:
         self.failure = error
         self.gate.set()
 
+    def _tagged(self) -> List[dict]:
+        rows = copy.deepcopy(self._rows)
+        for row in rows:
+            if self._account:
+                row["account"] = self._account
+        return rows
+
     def get_cached_instances(self) -> List[dict]:
-        return copy.deepcopy(self._rows) if self._cached else []
+        return self._tagged() if self._cached else []
 
     def is_cache_fresh(self) -> bool:
         return False
@@ -529,7 +541,7 @@ class GatedProvider:
         await self.gate.wait()
         if self.failure is not None:
             raise self.failure
-        return copy.deepcopy(self._rows)
+        return self._tagged()
 
 
 def gate_providers(app: Any, *, cached: bool = True) -> Dict[str, GatedProvider]:
@@ -537,8 +549,11 @@ def gate_providers(app: Any, *, cached: bool = True) -> Dict[str, GatedProvider]
 
     With ``cached=False`` a provider has no cached rows to fall back on.
     """
+    account = next(
+        (row.get("account") for row in getattr(app, "instances", []) if row.get("account")), None,
+    )
     gates = {
-        "aws": GatedProvider(AWS_ROWS, bindings=2, cached=cached),
+        "aws": GatedProvider(AWS_ROWS, bindings=2, cached=cached, account=account),
         "ovh": GatedProvider(OVH_ROWS, cached=cached),
         "hetzner": GatedProvider(HETZNER_ROWS, cached=cached),
     }

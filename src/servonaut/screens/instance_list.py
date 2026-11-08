@@ -39,7 +39,7 @@ from servonaut.screens._demo_resolve import (
     team_rows,
 )
 from servonaut.services.memory.provider import instance_provider
-from servonaut.utils.instance_resolver import display_name, is_aws_row
+from servonaut.utils.instance_resolver import display_name, is_aws_row, row_identity
 from servonaut.utils.markup import literal
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -1044,8 +1044,9 @@ class InstanceListScreen(WorkspaceScreen):
     def _replace_fleet(self, source: Optional[str], rows: List[dict]) -> None:
         """List *rows* as *source*'s servers and remember what changed on screen."""
         before = {
-            str(row.get("id") or ""): (row_source(row), str(row.get("state") or ""))
+            identity: (row_source(row), str(row.get("state") or ""))
             for row in self._instances
+            if (identity := row_identity(row))
         }
         self._instances = replace_instances(self.app, source, rows)
         self._mark_changes(before)
@@ -1060,13 +1061,15 @@ class InstanceListScreen(WorkspaceScreen):
         had_rows = {source for source, _state in before.values()}
         marks: Dict[str, str] = {}
         for row in self._instances:
-            server_id = str(row.get("id") or "")
-            known = before.get(server_id)
+            identity = row_identity(row)
+            if identity is None:
+                continue
+            known = before.get(identity)
             if known is None:
                 if row_source(row) in had_rows:
-                    marks[server_id] = MARK_NEW
+                    marks[identity] = MARK_NEW
             elif known[1] and known[1] != str(row.get("state") or ""):
-                marks[server_id] = MARK_WAS.format(state=known[1])
+                marks[identity] = MARK_WAS.format(state=known[1])
         if not marks:
             return
         self._marks.update(marks)

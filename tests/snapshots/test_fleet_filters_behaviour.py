@@ -17,6 +17,7 @@ from textual.worker import WorkerState
 
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens.instance_list import FleetChip, InstanceListScreen
+from servonaut.utils.instance_resolver import row_identity
 from servonaut.widgets.instance_table import InstanceTable
 
 from . import _harness
@@ -374,9 +375,8 @@ def test_a_refresh_marks_changed_and_new_rows_for_a_few_seconds(
         gates["aws"].release(changed)
         await _harness.wait_until(pilot, lambda: "worker-3" in _names(pilot), "the new row")
         table = screen.query_one(InstanceTable)
-        assert table._marks == {
-            _harness.AWS_ROWS[1]["id"]: "was stopped", "i-00000000000000009": "new",
-        }
+        identity = {row["name"]: row_identity(row) for row in table._all_instances}
+        assert table._marks == {identity["db-1"]: "was stopped", identity["worker-3"]: "new"}
         assert "AWS ✓" in status.visual.plain and "OVH …" in status.visual.plain
         gates["ovh"].release()
         gates["hetzner"].release()

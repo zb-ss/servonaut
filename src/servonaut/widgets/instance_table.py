@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from rich.text import Text
 from textual.widgets import DataTable
 
-from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.instance_resolver import display_name, row_identity
 from servonaut.services.shared_servers import fold_shared
 
 # What an empty cell shows.
@@ -156,7 +156,7 @@ class InstanceTable(DataTable):
         self._shared_by: Dict[int, List[str]] = {}
         self._query = ""
         self._row_filter: Optional[Callable[[dict], bool]] = None
-        # Server id -> what the last refresh did to it (see ``set_marks``).
+        # Row identity -> what the last refresh did to it (see ``set_marks``).
         self._marks: Dict[str, str] = {}
         self._shown_columns: List[_Column] = []
         self._setup_columns([column for column in COLUMNS if not column.optional])
@@ -276,7 +276,7 @@ class InstanceTable(DataTable):
     def set_marks(self, marks: Dict[str, str], *, redraw: bool = True) -> None:
         """Mark servers a refresh added (``MARK_NEW``) or changed (``MARK_WAS``).
 
-        Keyed by server id. Pass ``{}`` to clear them. Unless *redraw* is
+        Keyed by ``row_identity``. Pass ``{}`` to clear them. Unless *redraw* is
         False the rows redraw now, with the cursor kept.
         """
         if marks == self._marks:
@@ -288,7 +288,7 @@ class InstanceTable(DataTable):
     def _cursor_anchor(self) -> tuple[Optional[str], int]:
         """The selected server's id and row, to put the cursor back after a redraw."""
         selected = self.get_selected_instance()
-        return (str(selected.get("id") or "") or None if selected else None), self.cursor_row
+        return (row_identity(selected) if selected else None), self.cursor_row
 
     def _restore_cursor(self, anchor: tuple[Optional[str], int]) -> None:
         """Move the cursor back to its server, else to the nearest row."""
@@ -300,7 +300,7 @@ class InstanceTable(DataTable):
             target = next(
                 (
                     index for index, inst in enumerate(self._filtered_instances)
-                    if str(inst.get("id") or "") == instance_id
+                    if row_identity(inst) == instance_id
                 ),
                 target,
             )
@@ -388,7 +388,7 @@ class InstanceTable(DataTable):
             "index": str(idx + 1),
             "name": _name_cell(
                 instance, limits["name"], shared=id(instance) in self._shared_by,
-                marked=str(instance.get("id") or "") in self._marks,
+                marked=row_identity(instance) in self._marks,
             ),
             # A state without a colour is provider text: never read as markup.
             "state": self._state_cell(instance, coloured, plain("state", state), state),
@@ -406,7 +406,7 @@ class InstanceTable(DataTable):
     def _state_cell(self, instance: dict, coloured: str, plain_cell: Text, state: str) -> Any:
         """The State cell, followed by what the last refresh did to the server."""
         cell = coloured if coloured != state else plain_cell
-        mark = self._marks.get(str(instance.get("id") or ""))
+        mark = self._marks.get(row_identity(instance) or "")
         if not mark:
             return cell
         text = Text.from_markup(cell) if isinstance(cell, str) else cell.copy()

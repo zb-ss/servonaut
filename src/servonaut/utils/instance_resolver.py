@@ -188,3 +188,22 @@ def resolve_instance_from_lists(
     """
     pools = list(aws) + list(custom) + list(ovh or []) + list(hetzner or [])
     return resolve_unique(id_or_name, pools)
+
+
+# The row flags that say which slice of the fleet a row belongs to.
+_SOURCE_FLAGS = ("is_shared", "is_custom", "is_ovh", "is_hetzner")
+
+
+def row_identity(row: dict) -> Optional[str]:
+    """A key that tells one listed server from every other, or None without an id.
+
+    Ids are only unique within a provider (and a team), so the key also names
+    the source, the account and the team. A row with no id has no identity:
+    nothing may be tracked by it.
+    """
+    server_id = str(row.get("id") or "")
+    if not server_id:
+        return None
+    source = "+".join(flag for flag in _SOURCE_FLAGS if row.get(flag))
+    team = str(row.get("team_slug") or row.get("team_name") or "") if row.get("is_shared") else ""
+    return "\x1f".join((source, str(row.get("account") or ""), team, server_id))

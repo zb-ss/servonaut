@@ -9,6 +9,7 @@ from servonaut.screens._fleet_filter import (
     ALL, PROVIDERS, STATES, FleetFilter, facets, next_choice, row_provider, row_state, summary,
 )
 from servonaut.screens._fleet_load import FleetLoad, Phase, format_ago, render_load
+from servonaut.utils.instance_resolver import row_identity
 from servonaut.widgets.instance_table import InstanceTable
 
 ROWS = [
@@ -248,8 +249,66 @@ async def test_the_cursor_moves_to_the_nearest_row_when_its_server_is_gone() -> 
 async def test_marks_decorate_the_name_and_state_cells() -> None:
     async with _Host().run_test() as pilot:
         table = pilot.app.query_one(InstanceTable)
-        table.set_marks({"2": "was running", "1": "new"}, redraw=False)
+        table.set_marks({row_identity(ROWS[1]): "was running"}, redraw=False)
         cells = table._row_cells(0, ROWS[1], None)
         assert cells["state"].plain.endswith("was running") and _is_bold(cells["name"])
         plain_cells = table._row_cells(0, ROWS[2], None)
         assert "was" not in str(plain_cells["state"]) and not _is_bold(plain_cells["name"])
+
+
+# ---- row identity: ids repeat across sources and may be missing ------------
+
+DUPLICATES = [
+    {"id": "7", "name": "db-1", "state": "stopped"},
+    {"id": "7", "name": "dup-hz", "state": "running", "is_hetzner": True},
+    {"name": "no-id-a", "state": "running", "is_custom": True},
+    {"name": "no-id-b", "state": "stopped", "is_custom": True},
+]
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_follows_a_server_whose_id_another_source_shares() -> None:
+    async with _Host().run_test() as pilot:
+        table = pilot.app.query_one(InstanceTable)
+        table.populate([dict(row) for row in DUPLICATES])
+        table.move_cursor(row=1)
+        table.populate([dict(row) for row in DUPLICATES])
+        assert table.get_selected_instance()["name"] == "dup-hz"
+
+
+@pytest.mark.asyncio
+async def test_rows_without_an_id_do_not_anchor_the_cursor() -> None:
+    async with _Host().run_test() as pilot:
+        table = pilot.app.query_one(InstanceTable)
+        table.populate([dict(row) for row in DUPLICATES])
+        table.move_cursor(row=3)
+        table.populate([{"id": "9", "name": "new-1"}, *(dict(row) for row in DUPLICATES)])
+        # No identity to follow: the cursor keeps its row number.
+        assert table.cursor_row == 3
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_refresh_marks_nothing_even_with_shared_or_missing_ids() -> None:
+    from types import SimpleNamespace
+
+    from servonaut.screens.instance_list import InstanceListScreen
+
+    screen = InstanceListScreen()
+    screen.set_timer = lambda *args, **kwargs: None
+    screen._instances = [dict(row) for row in DUPLICATES]
+    screen._replace_fleet = InstanceListScreen._replace_fleet.__get__(screen)
+    app = SimpleNamespace(instances=[], _instances_pristine=[], demo_mode=False)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(InstanceListScreen, "app", property(lambda _self: app))
+        screen._replace_fleet(None, DUPLICATES)
+        screen._replace_fleet(None, DUPLICATES)
+    assert screen._marks == {}
+
+
+def test_row_identity_separates_sources_accounts_and_teams_and_skips_missing_ids() -> None:
+    aws = {"id": "7"}
+    assert row_identity(aws) != row_identity({"id": "7", "is_hetzner": True})
+    assert row_identity(aws) != row_identity({"id": "7", "account": "prod"})
+    shared = {"id": "7", "is_shared": True}
+    assert row_identity({**shared, "team_slug": "a"}) != row_identity({**shared, "team_slug": "b"})
+    assert row_identity({"id": ""}) is None and row_identity({"name": "x"}) is None
