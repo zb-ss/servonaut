@@ -88,9 +88,10 @@ class ActionButton(Button):
         """Use the short words when only one row is available."""
         self._refresh_label()
 
-    def set_text(self, text: str, key: str | None = None) -> None:
-        """Replace the words and, when given, the key hint."""
+    def set_text(self, text: str, key: str | None = None, short: str | None = None) -> None:
+        """Replace the words and, when given, the key hint and the short words."""
         self._text = text
+        self._short = short if short is not None else self._short
         self._key = key if key is not None else self._key
         self._refresh_label()
 
