@@ -291,7 +291,7 @@ async def test_the_create_vault_choices_are_clean() -> None:
     app = _ModalApp(VaultCreateModal(options))
     async with app.run_test(size=(140, 40)) as pilot:
         await wait_until(lambda: app.screen is app._modal)
-        await _drawn(app, "osc", "tail")
+        await _drawn(app, "osc")  # the closed Select clips a long label at the dialog edge
         _assert_clean(app)
         await pilot.press("enter")  # open the choices
         await _drawn(app, "second", "osc")  # the dialog's width may wrap the label
