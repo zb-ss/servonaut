@@ -233,6 +233,8 @@ class InstanceListScreen(WorkspaceScreen):
         self._marks_timer: Optional[Timer] = None
         self._last_updated: Optional[float] = None
         self._refresh_failed = False
+        self._cache_written_at: Optional[float] = None
+        self._updated_shown: Optional[str] = None
         self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
@@ -915,10 +917,16 @@ class InstanceListScreen(WorkspaceScreen):
         filtered = len(table._filtered_instances)
         status_bar.update_instance_count(total, filtered)
 
-        # Update cache age
-        cache_age = self.app.cache_service.get_age()
-        status_bar.update_cache_age(cache_age)
+        # The cache age is shown once, next to the summary (see _updated_text);
+        # reading it here also keeps the file off the once-a-second path.
+        self._note_cache_age(self.app.cache_service.get_age())
         self._sync_filter_ui()
+
+    def _note_cache_age(self, age: object) -> None:
+        """Remember when the cache was written, to count its age without reading it again."""
+        self._cache_written_at = (
+            time.time() - age.total_seconds() if isinstance(age, timedelta) else None
+        )
 
     def _restore_session_state(self) -> None:
         """Bring back the filters and the refresh time this session left behind."""
@@ -985,19 +993,26 @@ class InstanceListScreen(WorkspaceScreen):
         )
 
     def _sync_updated(self) -> None:
-        """Say how fresh the list is: when it was last refreshed, else the cache's age."""
+        """Say how fresh the list is, redrawing only when the words change."""
+        text = self._updated_text()
+        if text == self._updated_shown:
+            return
         try:
-            label = self.query_one("#fleet_updated", Static)
+            self.query_one("#fleet_updated", Static).update(text)
         except NoMatches:
             return
-        label.update(self._updated_text())
+        self._updated_shown = text
+
+    def _cache_ago(self) -> str:
+        if self._cache_written_at is None or not self._instances:
+            return ""
+        return format_ago(time.time() - self._cache_written_at)
 
     def _updated_text(self) -> str:
-        age = self.app.cache_service.get_age()
-        cached = (
-            f"cached {format_ago(age.total_seconds())}"
-            if isinstance(age, timedelta) and self._instances else ""
-        )
+        """The freshness label; empty while the refresh line already says it."""
+        if self._load.active and not self._load.first_run:
+            return ""
+        cached = f"cached {self._cache_ago()}" if self._cache_ago() else ""
         if self._refresh_failed:
             return f"Refresh failed · {cached}" if cached else "Refresh failed"
         if self._last_updated is not None:
@@ -1098,8 +1113,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._render_load()
 
     def _cached_age_text(self) -> str:
-        age = self.app.cache_service.get_age()
-        return format_ago(age.total_seconds()) if isinstance(age, timedelta) else ""
+        return self._cache_ago()
 
     def _record_load_outcome(self, event: Worker.StateChanged) -> None:
         """A provider's worker ended: record its count, or why its rows are stale."""
@@ -1150,6 +1164,7 @@ class InstanceListScreen(WorkspaceScreen):
         status.display = content is not None
         if content is not None:
             status.update(content)
+        self._sync_updated()
 
     def on_data_table_row_highlighted(self, event) -> None:
         """Update detail panel when table cursor moves."""

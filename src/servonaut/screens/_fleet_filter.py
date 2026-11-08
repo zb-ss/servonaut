@@ -130,11 +130,13 @@ def next_choice(
 
 
 def summary(shown: int, total: int, active: FleetFilter, query: Optional[str] = None) -> str:
-    """"Showing 9 of 12 · Running · AWS": fixed words and counts, never server text.
+    """"12 servers", or "Showing 9 of 12 · Running · AWS" while something narrows the list.
 
-    *query* only says that a search is narrowing the list; its text is
-    already visible in the search box.
+    Fixed words and counts, never server text. *query* only says that a search
+    is narrowing the list; its text is already visible in the search box.
     """
+    if not active.is_active and not query:
+        return f"{total} server" + ("" if total == 1 else "s")
     parts = [f"Showing {shown} of {total}", *active.describe()]
     if query:
         parts.append("search")

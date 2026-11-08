@@ -84,7 +84,7 @@ def test_chips_count_the_fleet_and_show_only_what_is_present() -> None:
             assert _chip_text(pilot, "provider", provider).endswith(str(count))
         # No team servers: no Team chip.
         assert not _chip(pilot, "provider", "shared").display
-        assert _summary(pilot) == "Showing 7 of 7"
+        assert _summary(pilot) == "7 servers"
 
     _run(scenario)
 
@@ -140,7 +140,7 @@ def test_the_all_chip_clears_state_and_provider_together() -> None:
         assert set(_names(pilot)) == {"app-1", "bastion-1"}
         await _click(pilot, "state", "all")
         assert len(_names(pilot)) == 7
-        assert _summary(pilot) == "Showing 7 of 7"
+        assert _summary(pilot) == "7 servers"
 
     _run(scenario)
 
@@ -553,6 +553,42 @@ def test_one_provider_answering_is_an_update_even_if_another_failed() -> None:
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
         assert screen._updated_text() == "Updated just now"
+
+    _run(scenario)
+
+
+def test_the_cache_age_is_shown_in_one_place_at_a_time() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        updated = screen.query_one("#fleet_updated", Static)
+        assert updated.visual.plain == "Cached 5 min ago"
+        assert "Cache:" not in screen.query_one("StatusBar").render().plain
+        gates = _harness.gate_providers(pilot.app)
+        screen.action_refresh()
+        await pilot.pause()
+        pill = screen.query_one("#fleet_load_status", Static).visual.plain
+        assert "cached 5 min ago" in pill
+        assert updated.visual.plain == ""
+        for gate in gates.values():
+            gate.release()
+        await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
+        await pilot.pause()
+        assert updated.visual.plain == "Updated just now"
+
+    _run(scenario)
+
+
+def test_the_updated_ticker_does_not_read_the_cache_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        reads: List[int] = []
+        original = pilot.app.cache_service.get_age
+        monkeypatch.setattr(
+            pilot.app.cache_service, "get_age", lambda: reads.append(1) or original(),
+        )
+        for _ in range(5):
+            screen._sync_updated()
+        assert reads == []
 
     _run(scenario)
 

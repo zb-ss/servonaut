@@ -89,7 +89,9 @@ def test_summary_says_only_fixed_words() -> None:
     assert summary(9, 12, FleetFilter(state="running", provider="aws")) == (
         "Showing 9 of 12 · Running · AWS"
     )
-    assert summary(12, 12, FleetFilter()) == "Showing 12 of 12"
+    assert summary(12, 12, FleetFilter()) == "12 servers"
+    assert summary(1, 1, FleetFilter()) == "1 server"
+    assert summary(0, 0, FleetFilter()) == "0 servers"
     assert summary(2, 12, FleetFilter(), "secret-name") == "Showing 2 of 12 · search"
 
 
