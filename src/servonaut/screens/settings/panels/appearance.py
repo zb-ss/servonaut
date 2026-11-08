@@ -129,7 +129,7 @@ class ThemeCard(Vertical):
         yield Static(self._title(), classes="theme-card-title")
         yield Static(swatch_strip(self._info.theme), classes="theme-card-swatches")
         yield Static(self._detail(), classes="theme-card-detail")
-        if self._info.path is not None:
+        if self._info.path is not None and _can_edit(self._info.path):
             yield EditFileButton(self._info.path)
 
     def set_active(self, is_active: bool) -> None:
@@ -172,6 +172,16 @@ def _warning_text(reading: Reading) -> str:
     return f"⚠ {reading.label} is {reading.ratio:.1f}:1 (needs {MIN_CONTRAST}:1)"
 
 
+def _can_edit(path: Path) -> bool:
+    """Whether *path* is a regular .toml file directly inside the themes folder, not a link."""
+    return (
+        path.suffix == THEME_FILE_SUFFIX
+        and path.parent == themes_dir()
+        and not path.is_symlink()
+        and path.is_file()
+    )
+
+
 class EditFileButton(Button):
     """Opens the theme file for editing."""
 
@@ -211,8 +221,10 @@ class ThemeErrorCard(Vertical):
             Content("\n".join(_problem_lines(self._errors) + ["Fix the file, then choose Reload themes."])),
             classes="theme-card-detail",
         )
-        if self._path.is_file():
+        if _can_edit(self._path):
             yield EditFileButton(self._path)
+        elif self._path.is_symlink():
+            yield Static("This file is a link, so it cannot be opened from here.", classes="theme-card-detail")
 
 
 class AppearancePanel(SettingsPanel):
@@ -399,8 +411,15 @@ class AppearancePanel(SettingsPanel):
     @on(Button.Pressed, ".theme-edit-file")
     def _on_edit_pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        if isinstance(event.button, EditFileButton):
-            self._open_path(event.button.path)
+        if not isinstance(event.button, EditFileButton):
+            return
+        if not _can_edit(event.button.path):  # it may have changed since the card was drawn
+            self.app.notify(
+                "Only a regular .toml file inside the themes folder can be opened from here.",
+                severity="warning", markup=False,
+            )
+            return
+        self._open_path(event.button.path)
 
     def action_new_theme(self) -> None:
         app = self.app

@@ -491,3 +491,32 @@ async def test_new_theme_from_an_unregistered_current_theme_is_handled(
         await _until(lambda: isinstance(app.screen, SettingsScreen))
         await _until(lambda: any("cannot be copied" in n.message for n in app._notifications))
         assert list(folder.iterdir()) == [] and app._exception is None
+
+
+@pytest.mark.asyncio
+async def test_edit_file_is_offered_only_for_a_regular_toml_file_in_the_folder(
+    manager: ConfigManager, folder: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr(
+        "servonaut.screens.settings.panels.appearance.open_path", lambda path: opened.append(path) or True,
+    )
+    target = folder.parent / "run-me.desktop"
+    target.write_text("[Desktop Entry]\nExec=true\n", encoding="utf-8")
+    (folder / "handy.toml").symlink_to(target)
+    (folder / "plain.toml").write_text('primary = "nope"\n', encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: len(panel.query(ThemeErrorCard)) == 2)
+        cards = {card._errors[0].file: card for card in panel.query(ThemeErrorCard)}
+        assert not cards["handy.toml"].query(EditFileButton)
+        assert "link" in " ".join(_text(part) for part in cards["handy.toml"].query(Static)).lower()
+        (button,) = cards["plain.toml"].query(EditFileButton)
+
+        # The file is swapped for a link after the card was drawn: pressing refuses.
+        (folder / "plain.toml").unlink()
+        (folder / "plain.toml").symlink_to(target)
+        button.press()
+        await _until(lambda: any("regular" in n.message for n in app._notifications))
+        assert opened == []

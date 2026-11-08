@@ -208,11 +208,16 @@ def _clipboard_command() -> Optional[list[str]]:
 def open_path(path: Path) -> bool:
     """Open a file or folder with the platform's default application.
 
+    The path is used as given, never resolved: a link keeps its own name, so
+    the file it points at cannot choose the handler. Callers that open files
+    must refuse links themselves. A file is never run: on Windows it is shown
+    in Explorer, on macOS it opens as text.
+
     Starts the opener and returns without waiting for it, so a slow file
     manager cannot freeze the interface. Returns False when the platform has
     no opener or it could not be started.
     """
-    command = _open_command(path.resolve())
+    command = _open_command(path.absolute())
     if command is None:
         return False
     try:
@@ -231,10 +236,11 @@ def open_path(path: Path) -> bool:
 def _open_command(path: Path) -> Optional[list[str]]:
     """The command that opens *path* here, or ``None``; *path* is absolute."""
     os_type = get_os()
+    is_file = path.is_file()
     if os_type == 'darwin':
-        return ['open', str(path)]
+        return ['open', '-t', str(path)] if is_file else ['open', str(path)]
     if os_type == 'windows':
-        return ['explorer', str(path)]
+        return ['explorer', f'/select,{path}'] if is_file else ['explorer', str(path)]
     if os_type == 'linux' and shutil.which('xdg-open'):
         return ['xdg-open', str(path)]
     return None
