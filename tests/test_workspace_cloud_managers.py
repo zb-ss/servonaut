@@ -169,7 +169,11 @@ async def test_provider_workspace_controls_preserve_content_and_keyboard_reachab
         initial_id, next_id = FOCUS_TARGETS[screen_type]
         assert origin is screen.query_one(f"#{initial_id}")
         await pilot.press("tab")
-        assert app.focused is screen.query_one(f"#{next_id}")
+        if screen.has_class("-content-narrow") and screen.query(".provider-manager-rail"):
+            # Narrow: the actions come before the table, so Tab reaches them first.
+            assert app.focused is screen.query(".provider-manager-rail ActionButton").first()
+        else:
+            assert app.focused is screen.query_one(f"#{next_id}")
         origin.focus()
         assert screen.query_one(Sidebar).display is visible
         assert screen.query_one("#workspace_context", Static).render().plain == label
@@ -347,8 +351,8 @@ async def test_narrow_manager_primary_actions_are_painted_on_arrival(
             assert_button_label_painted(app, button)
             assert app.get_widget_at(*button.region.center)[0] is button
 
-        await pilot.press("tab")
-        assert app.focused is table
+        # The action rail precedes the table at this width.
+        await pilot.pause()
         await pilot.press("tab")
         assert app.focused is screen.query_one(f"#btn_{provider}_mgr_refresh")
         await pilot.press("tab")
