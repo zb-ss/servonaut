@@ -42,31 +42,43 @@ async def _held(view_button: str, release_after: Any, *, awaiting_c: bool = Fals
         await release_after(app, pilot, screen)
         service.gate.set()
         await settle(app, pilot)
-        await pilot.pause(0.3)
+        # The load has finished when its records are shown or it said it was dropped.
+        await wait_until(
+            lambda: screen._table_mode != "vaults" or "selection changed" in screen._status_raw.lower()
+        )
         yield app, pilot, screen, service
 
 
 def _consistent(screen: Any) -> bool:
     """Records of a vault are on screen only together with that vault selected."""
     if screen._table_mode == "vaults":
-        return True
+        row = screen.query_one("#vault_table", DataTable).cursor_row
+        highlighted = screen._vaults[row]["vault_id"] if 0 <= row < len(screen._vaults) else None
+        return highlighted == screen._selected_vault_id
     shown = {"items": screen._items, "exposures": screen._exposures, "roster": screen._roster}.get(screen._table_mode)
     return bool(shown) and screen._selected_vault_id == VAULT_A
+
+
+async def _moved_to_b(screen: Any) -> None:
+    """Wait until the highlight has moved to the second vault and the screen noticed."""
+    await wait_until(
+        lambda: screen.query_one("#vault_table", DataTable).cursor_row == 1
+        and screen._selected_vault_id == VAULT_B
+    )
 
 
 async def _arrow_down(app: Any, pilot: Any, screen: Any) -> None:
     screen.query_one("#vault_table", DataTable).focus()
     await pilot.press("down")
-    await pilot.pause()
+    await _moved_to_b(screen)
 
 
 async def _click_second_row(app: Any, pilot: Any, screen: Any) -> None:
     # The first row sits under the header: y=2 is the second vault.
     screen.query_one("#vault_table", DataTable).focus()
     await pilot.pause()
-    await pilot.click("#vault_table", offset=(4, 2))
-    await pilot.pause(0.2)
-    assert screen.query_one("#vault_table", DataTable).cursor_row == 1
+    assert await pilot.click("#vault_table", offset=(4, 2))
+    await _moved_to_b(screen)
 
 
 @pytest.mark.parametrize("view_button", ["vault_items", "vault_exposures", "vault_roster"])

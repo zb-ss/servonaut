@@ -7,6 +7,7 @@ The Vault screen shows such text with its control characters removed.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -34,6 +35,16 @@ def _output(app: Any) -> str:
     """Everything the compositor would write to the terminal for the whole screen."""
     update = app.screen._compositor.render_update(full=True)
     return update.render_segments(app.console)
+
+
+def _plain_output(app: Any) -> str:
+    """The text of the drawn screen, without the colour and cursor codes."""
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", _output(app))
+
+
+async def _drawn(app: Any, *words: str) -> None:
+    """Wait until every word is on the drawn screen, so a check is made on what it names."""
+    await wait_until(lambda: all(word in _plain_output(app) for word in words))
 
 
 def _assert_clean(app: Any) -> None:
@@ -177,7 +188,7 @@ async def test_member_approval_dialog_is_clean() -> None:
         await press(app, pilot, "vault_roster")
         await press(app, pilot, "vault_grants")
         await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
-        await pilot.pause(0.2)
+        await _drawn(app, "osc", "tail")
         _assert_clean(app)
         return " ".join(s.visual.plain for s in app.screen.query(Static))
 
@@ -198,7 +209,7 @@ async def test_revealed_value_is_clean_but_keeps_its_lines() -> None:
         vault_screen(app).action_reveal()
         await _confirm_typed(app, pilot, "REVEAL")
         await wait_until(lambda: app.screen.query("#vault_revealed_value"))
-        await pilot.pause(0.2)
+        await _drawn(app, "line one", "line two")
         _assert_clean(app)
         return app.screen.query_one("#vault_revealed_value", Static).visual.plain
 
@@ -239,14 +250,12 @@ class _ModalApp(App):
         self.push_screen(self._modal)
 
 
-async def _shown(modal: Any, *, press_keys: tuple = ()) -> str:
+async def _shown(modal: Any, *expected: str) -> str:
+    """Open *modal*, wait until the *expected* words are drawn, check the output, return its text."""
     app = _ModalApp(modal)
     async with app.run_test(size=(140, 40)) as pilot:
         await wait_until(lambda: app.screen is modal)
-        await pilot.pause(0.2)
-        for key in press_keys:
-            await pilot.press(key)
-            await pilot.pause(0.2)
+        await _drawn(app, *expected)
         _assert_clean(app)
         return " ".join(widget.visual.plain for widget in app.screen.query(Static))
 
@@ -255,14 +264,14 @@ async def _shown(modal: Any, *, press_keys: tuple = ()) -> str:
 async def test_the_device_safety_number_dialog_is_clean() -> None:
     from servonaut.screens.vault import VaultSasConfirmModal
 
-    shown = await _shown(VaultSasConfirmModal(f"12345 {HOSTILE} 67890"))
+    shown = await _shown(VaultSasConfirmModal(f"12345 {HOSTILE} 67890"), "12345 osc", "67890")
     assert "12345 osc" in shown
 
 
 @pytest.mark.asyncio
 async def test_the_member_safety_number_is_clean() -> None:
     entry = {"user_id": "u-2", "display_name": "Pat", "role": "member"}
-    shown = await _shown(VaultMemberApprovalModal(entry, f"11111 {HOSTILE} 33333", False, "Team"))
+    shown = await _shown(VaultMemberApprovalModal(entry, f"11111 {HOSTILE} 33333", False, "Team"), "11111 osc", "33333")
     assert "11111 osc" in shown
 
 
@@ -270,7 +279,7 @@ async def test_the_member_safety_number_is_clean() -> None:
 async def test_the_pending_device_dialog_is_clean() -> None:
     from servonaut.screens.vault import VaultPendingDeviceModal
 
-    shown = await _shown(VaultPendingDeviceModal({"device_name": HOSTILE, "platform": HOSTILE}))
+    shown = await _shown(VaultPendingDeviceModal({"device_name": HOSTILE, "platform": HOSTILE}), "osc", "tail")
     assert "osc" in shown and "tail" in shown
 
 
@@ -282,8 +291,8 @@ async def test_the_create_vault_choices_are_clean() -> None:
     app = _ModalApp(VaultCreateModal(options))
     async with app.run_test(size=(140, 40)) as pilot:
         await wait_until(lambda: app.screen is app._modal)
-        await pilot.pause(0.2)
+        await _drawn(app, "osc", "tail")
         _assert_clean(app)
         await pilot.press("enter")  # open the choices
-        await pilot.pause(0.3)
+        await _drawn(app, "second osc")
         _assert_clean(app)
