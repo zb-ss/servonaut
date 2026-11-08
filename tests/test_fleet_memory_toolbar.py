@@ -347,3 +347,45 @@ async def test_clear_does_nothing_without_a_selection(tmp_path):
         screen.action_clear_selected()
         await pilot.pause()
         assert not isinstance(app.screen, SimpleConfirmModal)
+
+
+async def test_growing_a_label_refits_the_row_so_clear_stays_on_it(tmp_path):
+    app = _host(tmp_path, rows=MANY[:9])
+    async with app.run_test(size=(107, 40)) as pilot:
+        screen = await _ready(pilot)
+        app.instances.extend(dict(r) for r in MANY[9:] + [
+            {"id": f"web-{n}", "name": f"web-{n}", "provider": "custom"} for n in range(13, 120)])
+        screen._sync_chrome()
+        screen._refresh_auto_scan_status()
+        await pilot.pause()
+        await pilot.pause()
+        toolbar = screen.query_one("#memory-actions", ActionRow)
+        for button_id in BUTTONS:
+            button = screen.query_one(f"#{button_id}", ActionButton)
+            assert toolbar.region.contains_region(button.region), button_id
+            assert button.content_size.width >= button.label.cell_length, button_id
+
+
+async def test_the_onboarding_buttons_are_disabled_while_a_scan_runs(tmp_path):
+    app = _host(tmp_path, probed=())
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(pilot)
+        assert screen.query_one("#btn_banner_scan").disabled is False
+        screen._scanning = True
+        screen._sync_chrome()
+        assert screen.query_one("#btn_banner_scan").disabled is True
+        screen._scanning = False
+        screen._sync_chrome()
+        assert screen.query_one("#btn_banner_scan").disabled is False
+
+
+async def test_the_card_notices_servers_that_arrive_later(tmp_path):
+    app = _host(tmp_path, rows=[], probed=(), production=True)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(pilot)
+        assert "Add a server" in str(screen.query_one("#fleet-empty-text").render())
+        app.instances.append(dict(ROWS[0]))
+        screen._recheck_card()
+        await pilot.pause()
+        assert "Add a server" not in str(screen.query_one("#fleet-empty-text").render())
+        assert screen.query_one("#btn_empty_scan").display is True

@@ -110,6 +110,8 @@ _ROW_ACTIONS = frozenset({
 })
 _ROW_BUTTONS = ("btn_open", "btn_share", "btn_clear")
 _MAX_WRAPPED_LINES = 3
+# How often an onboarding card looks for servers listed since it appeared.
+_CARD_RECHECK_SECONDS = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +457,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         self._refresh_auto_scan_status()
         self._sync_compact_buttons()
         self.call_after_refresh(self._sync_compact_buttons)
+        self.set_interval(_CARD_RECHECK_SECONDS, self._recheck_card)
         self._launch_populate()
         # Memory Sync unlock is offered HERE (on entering a memory section),
         # not on app boot — a passphrase modal on startup is too intrusive.
@@ -926,7 +929,16 @@ class FleetMemoryScreen(WorkspaceScreen):
             f"Scan all servers{suffix}", short=f"Scan all{suffix}"
         )
         # A longer label may need another layout of the row.
+        self._refit_actions()
+
+    def _refit_actions(self) -> None:
+        """Lay the action row out again: a label changed width."""
         self._after_layout(self.query_one("#memory-actions", ActionRow).fit)
+
+    def _recheck_card(self) -> None:
+        """Pick up servers listed since the card appeared, so its words never go stale."""
+        if self._shown_kind == "card":
+            self._sync_chrome()
 
     # Set when a share form opens: coming back, what is shared may have changed.
     _reread_shares = False
@@ -1723,6 +1735,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         self.query_one("#btn_toggle_auto_scan", ActionButton).set_text(
             f"Auto-scan: {state}", short=f"Auto: {state}"
         )
+        self._refit_actions()
 
     def _auto_scan_enabled(self) -> bool:
         """Whether the background fleet scan is switched on."""
