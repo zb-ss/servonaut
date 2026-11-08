@@ -30,7 +30,6 @@ from typing import List, Optional, TYPE_CHECKING, Union
 
 from textual.app import ComposeResult
 from textual.content import Content
-
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
