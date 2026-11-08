@@ -112,6 +112,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/vault.py", "_records_heading", "update",
                    "Heading labels are fixed call-site strings; context contains counts and "
                    "scoped names protected by _display_record_name and scrub_for_display."),
+    AllowlistEntry("screens/vault.py", "_sync_facts", "update",
+                   "The facts are built by the per-view fact builders, which pass every record "
+                   "value through scrub_text (demo redaction and terminal-safe text)."),
+    AllowlistEntry("screens/vault.py", "_show_device_step", "update",
+                   "Writes the fixed product copy 'Next: Approve device', without record data."),
     AllowlistEntry("screens/vault.py", "_identity_summary", "update",
                    "All caller state labels and selected action button labels are fixed product "
                    "copy, without identity metadata."),
