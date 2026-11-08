@@ -16,7 +16,7 @@ _PERSONAL = "11111111-1111-4111-8111-111111111111"
 _TEAM = "22222222-2222-4222-8222-222222222222"
 # An OpenSSH SHA256 fingerprint is "SHA256:" and 43 characters; ids are UUIDs.
 _FINGERPRINT = "SHA256:" + "q" * 43
-_ITEM_1 = "9a3f1c52-7d4e-4b8a-9c11-2e5f60a7b8c9"
+_ITEM_1 = "33333333-3333-4333-8333-333333333333"
 _HOSTILE = "[bold red]Mallory[/bold red] [link=https://example.invalid]x"
 
 _VIEW_BUTTONS = ("vault_vaults", "vault_items", "vault_devices", "vault_roster", "vault_exposures")
