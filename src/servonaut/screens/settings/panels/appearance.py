@@ -16,7 +16,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.color import Color
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Grid, Horizontal, Vertical
 from textual.content import Content
 from textual.message import Message
 from textual.theme import Theme
@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 # A card needs about this many cells to show a swatch strip and a file path.
 CARD_MIN_WIDTH = 34
 MAX_CARD_COLUMNS = 3
+# At this panel width the preview sits beside the cards instead of below them.
+SIDE_DETAILS_MIN_WIDTH = 110
+DETAILS_WIDTH = 44
 SWATCH_CELLS = 3
 _SWATCH_ROLES = ("background", "surface", "panel", "primary", "accent", "warning", "error", "success")
 _ANSI_SWATCHES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
@@ -154,7 +157,7 @@ class EditFileButton(Button):
     """Opens the theme file for editing."""
 
     def __init__(self, path: Path) -> None:
-        super().__init__("Edit file", classes="theme-edit-file")
+        super().__init__("Edit file", classes="theme-edit-file", compact=True)
         self.path = path
 
 
@@ -193,95 +196,6 @@ class AppearancePanel(SettingsPanel):
         Binding("ctrl+r", "reload_themes", "Reload", show=True),
     ]
 
-    DEFAULT_CSS = """
-    AppearancePanel #appearance_actions {
-        height: auto;
-        margin-bottom: 1;
-    }
-    AppearancePanel #appearance_new,
-    AppearancePanel #appearance_open,
-    AppearancePanel #appearance_reload {
-        width: auto;
-        min-width: 10;
-        margin: 0 1 0 0;
-    }
-    AppearancePanel #appearance_folder {
-        height: auto;
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-    AppearancePanel #appearance_cards {
-        height: auto;
-        grid-size: 1;
-        grid-gutter: 1 1;
-        grid-rows: auto;
-        margin-bottom: 1;
-    }
-    AppearancePanel #appearance_cards.-cols-2 { grid-size: 2; }
-    AppearancePanel #appearance_cards.-cols-3 { grid-size: 3; }
-    AppearancePanel .theme-card {
-        height: auto;
-        padding: 0 1;
-        border: round $border-blurred;
-        background: transparent;
-    }
-    AppearancePanel .theme-card:focus {
-        border: round $text-accent;
-    }
-    AppearancePanel .theme-card.-active {
-        border: round $accent;
-    }
-    AppearancePanel .theme-card.-error {
-        border: round $error;
-    }
-    AppearancePanel .theme-card-title {
-        height: auto;
-    }
-    AppearancePanel .theme-card-swatches {
-        height: 1;
-        margin: 1 0;
-    }
-    AppearancePanel .theme-card-detail {
-        height: auto;
-        color: $text-muted;
-    }
-    AppearancePanel .theme-edit-file {
-        width: auto;
-        min-width: 10;
-        margin: 1 0 0 0;
-    }
-    AppearancePanel #appearance_details {
-        height: auto;
-    }
-    AppearancePanel .appearance-section {
-        height: auto;
-        width: 1fr;
-        padding: 0 1;
-        border: round $border-blurred;
-        background: transparent;
-        margin-right: 1;
-    }
-    AppearancePanel #appearance_preview_title,
-    AppearancePanel #appearance_readability_title,
-    AppearancePanel .appearance-section-title {
-        height: auto;
-        color: $text-muted;
-        text-style: bold;
-    }
-    AppearancePanel #appearance_preview {
-        height: auto;
-        padding: 1;
-    }
-    AppearancePanel #appearance_readability {
-        height: auto;
-    }
-    AppearancePanel #appearance_hint {
-        height: auto;
-        color: $text-muted;
-        margin-top: 1;
-    }
-    """
-
     def __init__(self) -> None:
         super().__init__()
         self._previewed: str = ""
@@ -295,8 +209,7 @@ class AppearancePanel(SettingsPanel):
         with Vertical(classes="panel-context"):
             yield Static(escape(self.TITLE), classes="panel-title")
             yield Static(self.DESCRIPTION, classes="panel-description", markup=False)
-        with VerticalScroll(classes="panel-body"):
-            yield from self.form_rows()
+        yield from self.form_rows()
         yield Static("", id=f"status_{self.PANEL_ID}", classes="panel-status")
 
     def form_rows(self) -> ComposeResult:
@@ -305,21 +218,20 @@ class AppearancePanel(SettingsPanel):
             yield Button("Open themes folder", id="appearance_open")
             yield Button("Reload themes", id="appearance_reload")
         yield Static("", id="appearance_folder", markup=False)
-        yield Grid(id="appearance_cards", classes="-cols-1")
-        with Horizontal(id="appearance_details"):
-            with Vertical(classes="appearance-section"):
-                yield Static("", id="appearance_preview_title", classes="appearance-section-title", markup=False)
-                yield Static("", id="appearance_preview")
-            with Vertical(classes="appearance-section"):
-                yield Static("", id="appearance_readability_title", classes="appearance-section-title", markup=False)
-                yield Static("", id="appearance_readability")
-                yield Static(
-                    "Themes set the core colours plus optional extras (borders, cursor, "
-                    "terminal palette for command output). Check a file from the shell "
-                    "with: servonaut theme check <file>",
-                    id="appearance_hint",
-                    markup=False,
-                )
+        with Container(id="appearance_layout", classes="-stacked"):
+            yield Grid(id="appearance_cards", classes="-cols-1")
+            with Vertical(id="appearance_details"):
+                with Vertical(classes="appearance-section"):
+                    yield Static("", id="appearance_preview_title", classes="appearance-section-title", markup=False)
+                    yield Static("", id="appearance_preview")
+                with Vertical(classes="appearance-section"):
+                    yield Static("", id="appearance_readability_title", classes="appearance-section-title", markup=False)
+                    yield Static("", id="appearance_readability")
+                    yield Static(
+                        "Check a theme file from the shell with: servonaut theme check <file>",
+                        id="appearance_hint",
+                        markup=False,
+                    )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -341,7 +253,13 @@ class AppearancePanel(SettingsPanel):
         """Nothing to save: choosing a theme applies and saves it."""
 
     def on_resize(self, event: events.Resize) -> None:
-        columns = max(1, min(MAX_CARD_COLUMNS, event.size.width // CARD_MIN_WIDTH))
+        """Put the preview beside the cards when there is room, below them otherwise."""
+        wide = event.size.width >= SIDE_DETAILS_MIN_WIDTH
+        layout = self.query_one("#appearance_layout", Container)
+        layout.set_class(wide, "-side")
+        layout.set_class(not wide, "-stacked")
+        cards_width = event.size.width - (DETAILS_WIDTH + 2 if wide else 0)
+        columns = max(1, min(MAX_CARD_COLUMNS, cards_width // CARD_MIN_WIDTH))
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
             grid.set_class(count == columns, f"-cols-{count}")
@@ -516,10 +434,10 @@ def _preview_content(theme: Theme) -> Content:
 
     return Content("\n").join([
         Content.assemble(
-            paint(" SSH connect ", on_primary, colours["primary"], True), " ",
-            paint(" Browse files ", text, panel), " ",
+            paint(" Connect ", on_primary, colours["primary"], True), " ",
+            paint(" Files ", text, panel), " ",
             paint(" Ban IP… ", colours["warning"], surface), " ",
-            paint(" Terminate… ", colours["error"], surface),
+            paint(" Stop… ", colours["error"], surface),
         ),
         Content(""),
         Content.assemble(paint(" Name        State     Provider ", on_primary, colours["primary"], True)),

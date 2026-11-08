@@ -44,6 +44,7 @@ CSS_FILES = [
     _S / "screens/settings_analysis.tcss",
     _S / "screens/settings_access.tcss",
     _S / "screens/settings_operations.tcss",
+    _S / "screens/settings_appearance.tcss",
     _S / "screens/file_browser.tcss",
     _S / "screens/command_overlay.tcss",
     _S / "screens/settings_shared.tcss",

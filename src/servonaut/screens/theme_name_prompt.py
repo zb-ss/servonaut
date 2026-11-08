@@ -26,6 +26,16 @@ class ThemeNamePromptScreen(ModalScreen[Optional[Tuple[str, bool]]]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
     AUTO_FOCUS = "#theme_name_input"
 
+    DEFAULT_CSS = """
+    ThemeNamePromptScreen #theme_name_error {
+        height: auto;
+        color: $text-error;
+    }
+    ThemeNamePromptScreen #theme_name_error.-replace {
+        color: $text-warning;
+    }
+    """
+
     def __init__(self, suggestion: str, taken: frozenset[str], existing_files: frozenset[str]) -> None:
         """*taken* are theme names already in use; *existing_files* are file names without ``.toml``."""
         super().__init__(classes="dialog-screen")
@@ -91,7 +101,7 @@ class ThemeNamePromptScreen(ModalScreen[Optional[Tuple[str, bool]]]):
             return
         if name in self._existing_files and not self._confirming_replace:
             self._set_confirming(True)
-            self._show_error(f"{name}.toml already exists. Choose Replace to overwrite it.")
+            self._show_error(f"{name}.toml already exists. Choose Replace to overwrite it.", replace=True)
             return
         self.dismiss((name, self._confirming_replace))
 
@@ -101,5 +111,7 @@ class ThemeNamePromptScreen(ModalScreen[Optional[Tuple[str, bool]]]):
         button.label = "Replace" if confirming else "Create"
         button.variant = "warning" if confirming else "primary"
 
-    def _show_error(self, message: str) -> None:
-        self.query_one("#theme_name_error", Static).update(message)
+    def _show_error(self, message: str, replace: bool = False) -> None:
+        error = self.query_one("#theme_name_error", Static)
+        error.set_class(replace, "-replace")
+        error.update(message)
