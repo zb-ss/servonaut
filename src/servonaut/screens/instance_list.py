@@ -230,6 +230,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._marks: Dict[str, str] = {}
         self._marks_timer: Optional[Timer] = None
         self._last_updated: Optional[float] = None
+        self._refresh_failed = False
         self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
@@ -990,12 +991,16 @@ class InstanceListScreen(WorkspaceScreen):
         label.update(self._updated_text())
 
     def _updated_text(self) -> str:
+        age = self.app.cache_service.get_age()
+        cached = (
+            f"cached {format_ago(age.total_seconds())}"
+            if isinstance(age, timedelta) and self._instances else ""
+        )
+        if self._refresh_failed:
+            return f"Refresh failed · {cached}" if cached else "Refresh failed"
         if self._last_updated is not None:
             return f"Updated {format_ago(time.time() - self._last_updated)}"
-        age = self.app.cache_service.get_age()
-        if isinstance(age, timedelta) and self._instances:
-            return f"Cached {format_ago(age.total_seconds())}"
-        return ""
+        return cached.capitalize()
 
     def _set_filter(self, new_filter: FleetFilter) -> None:
         """Apply a new chip selection to the table, the inspector and the chips."""
@@ -1103,12 +1108,20 @@ class InstanceListScreen(WorkspaceScreen):
             count = sum(1 for row in self._instances if row_source(row) == key)
             self._load.finish(key, count=count, error=error)
         if not self._load.active:
+            self._cycle_ended()
+        self._render_load()
+
+    def _cycle_ended(self) -> None:
+        """Claim "Updated" only if some provider really answered with fresh rows."""
+        if self._load.delivered:
             self._last_updated = time.time()
+            self._refresh_failed = False
             state = getattr(self.app, "workspace_state", None)
             if state is not None:
                 state.fleet_updated_at = self._last_updated
-            self._sync_updated()
-        self._render_load()
+        elif self._load.problems:
+            self._refresh_failed = True
+        self._sync_updated()
 
     def _load_error(self, key: str, worker: Worker) -> str:
         """Why a provider's rows are not fresh, or "" when they are."""

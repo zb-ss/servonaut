@@ -169,6 +169,18 @@ def test_nothing_to_report_after_a_clean_cycle_or_before_one() -> None:
     assert render_load(load) is None
 
 
+def test_a_cycle_delivers_only_when_a_provider_answers_cleanly() -> None:
+    load = _load("aws", "ovh")
+    load.finish("aws", count=3, error="offline")
+    load.finish("ovh", count=2, error="offline")
+    assert not load.delivered
+    load.start("hetzner", has_rows=True)
+    load.finish("hetzner", count=1)
+    assert load.delivered
+    load.start("aws", has_rows=True)  # the previous cycle ended: a new one begins
+    assert not load.delivered
+
+
 def test_a_provider_can_be_dropped() -> None:
     load = _load("aws", "shared")
     load.drop("shared")

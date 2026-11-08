@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, List
 
 import pytest
 from textual.widgets import Button, Input, Static
+from textual.worker import WorkerState
 
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens.instance_list import FleetChip, InstanceListScreen
@@ -506,6 +508,51 @@ def test_the_refresh_button_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
         await pilot.click("#fleet_refresh")
         await pilot.pause()
         assert calls == ["r"]
+
+    _run(scenario)
+
+
+def test_a_team_only_load_does_not_claim_the_list_was_updated() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        before = screen._updated_text()
+        assert before.startswith("Cached")
+        screen._begin_load("shared")
+        worker = SimpleNamespace(name="shared_refresh", error=None, result=None, is_finished=True)
+        screen._record_load_outcome(SimpleNamespace(worker=worker, state=WorkerState.SUCCESS))
+        assert screen._updated_text() == before
+        assert pilot.app.workspace_state.fleet_updated_at is None
+
+    _run(scenario)
+
+
+def test_a_refresh_where_every_provider_fails_says_so() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        gates = _harness.gate_providers(pilot.app)
+        screen.action_refresh()
+        for gate in gates.values():
+            gate.release(error="offline")
+        await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
+        await pilot.pause()
+        text = screen.query_one("#fleet_updated", Static).visual.plain
+        assert text.startswith("Refresh failed") and "cached" in text
+        assert pilot.app.workspace_state.fleet_updated_at is None
+
+    _run(scenario)
+
+
+def test_one_provider_answering_is_an_update_even_if_another_failed() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        gates = _harness.gate_providers(pilot.app)
+        screen.action_refresh()
+        gates["aws"].release()
+        gates["hetzner"].release()
+        gates["ovh"].release(error="offline")
+        await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
+        await pilot.pause()
+        assert screen._updated_text() == "Updated just now"
 
     _run(scenario)
 

@@ -50,6 +50,8 @@ class FleetLoad:
     providers: Dict[str, ProviderLoad] = field(default_factory=dict)
     first_run: bool = False
     cached_age: str = ""
+    # Whether a provider answered with fresh rows in this cycle.
+    delivered: bool = False
 
     @property
     def active(self) -> bool:
@@ -66,6 +68,7 @@ class FleetLoad:
         """A provider began fetching. The first one after a quiet period opens a cycle."""
         if not self.active:
             self.providers = {}
+            self.delivered = False
             self.first_run = not has_rows
             self.cached_age = cached_age
         self.providers[key] = ProviderLoad(key=key, accounts=max(1, accounts))
@@ -83,6 +86,7 @@ class FleetLoad:
         load.reason = error
         if not error:
             load.phase = Phase.DONE
+            self.delivered = True
         else:
             load.phase = Phase.STALE if count else Phase.FAILED
 
