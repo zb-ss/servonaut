@@ -171,6 +171,12 @@ ServerActionsScreen.-content-narrow #action_buttons .section_label {
     display: none;
 }
 
+/* Rows are scarce when narrow: Back keeps its own row but no spacer */
+ServerActionsScreen.-narrow #action_buttons .sa-group:last-child,
+ServerActionsScreen.-content-narrow #action_buttons .sa-group:last-child {
+    margin-top: 0;
+}
+
 ServerActionsScreen.-narrow #action_buttons,
 ServerActionsScreen.-content-narrow #action_buttons {
     padding: 0 1 0 1;
@@ -302,4 +308,10 @@ ServerActionsScreen.-short #sa-detail .sa-section {
 
 ServerActionsScreen.-short #action_buttons .section_label {
     padding: 0;
+}
+
+/* The overview cards carry their own rounded border, so on a short terminal
+   the toolbar's divider line would only cost the overview a row. */
+ServerActionsScreen.-short #action_buttons {
+    border-bottom: none;
 }

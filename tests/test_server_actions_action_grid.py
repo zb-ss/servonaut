@@ -154,13 +154,21 @@ async def test_vault_key_is_bound_to_u_and_not_k() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
-async def test_back_is_set_apart_from_the_last_category(size) -> None:
+@pytest.mark.parametrize("size,gap", [((160, 50), 1), ((100, 30), 0)])
+async def test_back_gets_a_spacer_only_when_rows_are_plentiful(size, gap) -> None:
     app = _LayoutHost()
     async with app.run_test(size=size) as pilot:
         screen = await _open_actions(app, pilot)
         groups = list(screen.query("#action_buttons .sa-group"))
-        assert groups[-1].region.y - groups[-2].region.bottom >= 1
+        assert groups[-1].region.y - groups[-2].region.bottom == gap
+
+
+@pytest.mark.asyncio
+async def test_short_terminal_gives_the_overview_twelve_rows() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert screen.query_one("#sa-overview").region.height >= 12
 
 
 @pytest.mark.asyncio
