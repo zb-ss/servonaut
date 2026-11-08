@@ -22,7 +22,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
@@ -31,6 +31,23 @@ from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 
 logger = logging.getLogger(__name__)
+
+
+def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
+    """Say so when the arguments are longer than their box.
+
+    What the user approves must be readable in full: a cut with no sign of it
+    would let a long value hide its tail.
+    """
+    try:
+        scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+        cue = screen.query_one(f"#{prefix}_confirm_more", Static)
+    except Exception:  # pragma: no cover - modal closed meanwhile
+        return
+    hidden = int(scroll.max_scroll_y)
+    cue.display = hidden > 0
+    if hidden > 0:
+        cue.update(f"{hidden} more lines below: scroll to read (Tab, then arrow keys)")
 
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
@@ -102,10 +119,16 @@ class ToolConfirmModal(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
-    ToolConfirmModal #tool_confirm_args {
-        margin-bottom: 1;
+    ToolConfirmModal #tool_confirm_scroll {
+        height: auto;
         max-height: 12;
-        overflow-y: auto;
+        margin-bottom: 0;
+    }
+
+    ToolConfirmModal #tool_confirm_more {
+        color: $text-warning;
+        margin-bottom: 1;
+        display: none;
     }
 
     ToolConfirmModal #tool_confirm_buttons {
@@ -135,10 +158,11 @@ class ToolConfirmModal(ModalScreen[bool]):
                 "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
                 id="tool_confirm_body",
             ),
-            Static(
-                _format_args(self._args),
-                id="tool_confirm_args",
+            VerticalScroll(
+                Static(_format_args(self._args), id="tool_confirm_args"),
+                id="tool_confirm_scroll",
             ),
+            Static("", id="tool_confirm_more"),
             Horizontal(
                 Button("Confirm", id="btn_tool_confirm", variant="primary"),
                 Button("Cancel", id="btn_tool_cancel", variant="default"),
@@ -147,6 +171,12 @@ class ToolConfirmModal(ModalScreen[bool]):
             id="tool_confirm_container",
         )
         yield Footer()
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "tool")
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "tool")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_tool_confirm":
@@ -203,10 +233,16 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
-    DangerousToolConfirmModal #dangerous_confirm_args {
-        margin-bottom: 1;
+    DangerousToolConfirmModal #dangerous_confirm_scroll {
+        height: auto;
         max-height: 10;
-        overflow-y: auto;
+        margin-bottom: 0;
+    }
+
+    DangerousToolConfirmModal #dangerous_confirm_more {
+        color: $text-warning;
+        margin-bottom: 1;
+        display: none;
     }
 
     DangerousToolConfirmModal #dangerous_confirm_input {
@@ -254,10 +290,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
                 f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
                 id="dangerous_confirm_body",
             ),
-            Static(
-                _format_args(self._args),
-                id="dangerous_confirm_args",
+            VerticalScroll(
+                Static(_format_args(self._args), id="dangerous_confirm_args"),
+                id="dangerous_confirm_scroll",
             ),
+            Static("", id="dangerous_confirm_more"),
             Input(
                 placeholder=f"Type {_DANGEROUS_CONFIRM_WORD} to confirm",
                 id="dangerous_confirm_input",
@@ -272,7 +309,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         )
         yield Footer()
 
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "dangerous")
+
     def on_mount(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "dangerous")
         # Focus the input so the user can type immediately.
         try:
             self.query_one("#dangerous_confirm_input", Input).focus()
