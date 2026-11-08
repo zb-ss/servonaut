@@ -197,6 +197,10 @@ async def test_no_action_is_clipped_across_a_width_sweep(manager: Manager, chat:
                     assert row.region.contains_region(button.region), (width, button.id)
                     assert rail.region.contains_region(button.region), (width, button.id)
                     assert button.content_size.width >= button.label.cell_length, (width, button.id)
+            danger = screen.query(".provider-manager-danger ActionButton").first()
+            danger.scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+            assert app.get_widget_at(*danger.region.center)[0] is danger, (width, "danger button not reachable")
 
 
 @pytest.mark.asyncio
