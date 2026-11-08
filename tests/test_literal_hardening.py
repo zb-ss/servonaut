@@ -103,7 +103,7 @@ async def test_the_end_of_a_long_argument_can_be_scrolled_to_and_is_drawn(
         # Before scrolling, the drawn screen does not hold the tail.
         assert "example.invalid" not in app.export_screenshot()
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
-        assert cue.display and "Longer than the box" in cue.visual.plain
+        assert cue.display and "more lines below" in cue.visual.plain
         scroll.focus()
         await pilot.press("end")
         await pilot.pause(0.2)
@@ -346,7 +346,7 @@ async def test_the_standard_modal_cue_is_true_the_box_scrolls_with_the_arrow_key
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.3)
         cue = app.screen.query_one("#tool_confirm_more", Static).visual.plain
-        assert "arrow keys or the mouse" in cue
+        assert "arrow keys or the mouse" in cue and "more lines below" in cue
         scroll = app.screen.query_one("#tool_confirm_scroll", VerticalScroll)
         assert app.focused is scroll
         await pilot.press("down", "down")
@@ -481,3 +481,40 @@ def test_a_deeply_nested_saved_row_still_opens(stored: str) -> None:
         content = panel._stored_tool_row_content(stored)
     assert isinstance(content, Content)
     assert len(content.plain) >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_cls,prefix", [
+    (ToolConfirmModal, "tool"), (DangerousToolConfirmModal, "dangerous"),
+])
+async def test_the_cue_follows_the_scroll_position_without_moving_the_layout(modal_cls, prefix: str) -> None:
+    import re
+
+    from textual.containers import VerticalScroll
+
+    app = _ModalHost(modal_cls("run_command", _long_args("newlines")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+        cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
+        buttons_before = app.screen.query_one(f"#btn_{prefix}_confirm").region
+        region_before = cue.region
+
+        def hidden() -> int:
+            match = re.match(r"(\d+) more lines below", cue.visual.plain)
+            return int(match.group(1)) if match else 0
+
+        assert hidden() == int(scroll.max_scroll_y) > 0
+        scroll.focus()
+        await pilot.press("down", "down", "down")
+        await pilot.pause(0.2)
+        assert hidden() == int(scroll.max_scroll_y - scroll.scroll_y)
+        await pilot.press("end")
+        await pilot.pause(0.2)
+        assert hidden() == 0
+        assert "End of the text" in cue.visual.plain
+        assert cue.display and cue.region == region_before
+        assert app.screen.query_one(f"#btn_{prefix}_confirm").region == buttons_before
+        await pilot.press("home")
+        await pilot.pause(0.2)
+        assert hidden() == int(scroll.max_scroll_y)

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from textual.app import ComposeResult
@@ -35,20 +36,18 @@ logger = logging.getLogger(__name__)
 
 # How to reach the rest, per modal: the standard modal starts with the box
 # focused, in the dangerous one the typed-confirm input has the focus first.
-_CUES = {
-    "tool": "Longer than the box: scroll with the arrow keys or the mouse to read it all.",
-    "dangerous": (
-        "Longer than the box: press Shift+Tab, then the arrow keys, "
-        "or scroll with the mouse to read it all."
-    ),
+_CUE_HOW = {
+    "tool": "scroll with the arrow keys or the mouse.",
+    "dangerous": "Shift+Tab, then the arrow keys, or the mouse.",
 }
 
 
 def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
-    """Say so when the arguments are longer than their box.
+    """Say how much of the arguments is still below the box.
 
     What the user approves must be readable in full: a cut with no sign of it
-    would let a long value hide its tail.
+    would let a long value hide its tail. The line keeps its row while the
+    text is longer than the box, so scrolling never moves the layout.
     """
     try:
         scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
@@ -56,7 +55,18 @@ def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
     except Exception:  # pragma: no cover - modal closed meanwhile
         return
     cue.display = scroll.max_scroll_y > 0
-    cue.update(_CUES[prefix])
+    remaining = math.ceil(scroll.max_scroll_y - scroll.scroll_y)
+    if remaining > 0:
+        cue.update(f"{remaining} more lines below: {_CUE_HOW[prefix]}")
+    else:
+        cue.update("End of the text.")
+
+
+def _follow_scroll(screen: ModalScreen, prefix: str) -> None:
+    """Keep the cue in step with the scroll position (keys, wheel, scrollbar)."""
+    scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+    screen.watch(scroll, "scroll_y", lambda _old, _new: _show_overflow_cue(screen, prefix))
+    screen.call_after_refresh(_show_overflow_cue, screen, prefix)
 
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
@@ -136,6 +146,7 @@ class ToolConfirmModal(ModalScreen[bool]):
 
     ToolConfirmModal #tool_confirm_more {
         color: $text-warning;
+        height: 1;
         margin-bottom: 1;
         display: none;
     }
@@ -182,7 +193,7 @@ class ToolConfirmModal(ModalScreen[bool]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.call_after_refresh(_show_overflow_cue, self, "tool")
+        _follow_scroll(self, "tool")
 
     def on_resize(self) -> None:
         self.call_after_refresh(_show_overflow_cue, self, "tool")
@@ -250,6 +261,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
 
     DangerousToolConfirmModal #dangerous_confirm_more {
         color: $text-warning;
+        height: 1;
         margin-bottom: 1;
         display: none;
     }
@@ -322,7 +334,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         self.call_after_refresh(_show_overflow_cue, self, "dangerous")
 
     def on_mount(self) -> None:
-        self.call_after_refresh(_show_overflow_cue, self, "dangerous")
+        _follow_scroll(self, "dangerous")
         # Focus the input so the user can type immediately.
         try:
             self.query_one("#dangerous_confirm_input", Input).focus()
