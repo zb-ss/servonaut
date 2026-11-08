@@ -24,6 +24,7 @@ from servonaut.screens.vault import (
 from servonaut.services.api_client import APIError, FeatureDisabledError
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.action_button import ActionButton
 from tests._async_bounds import wait_until
 
 def test_vault_screen_exposes_safe_metadata_actions() -> None:
@@ -193,27 +194,19 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         assert all(fragment in screenshot for fragment in ("Narrow", "metadata", "vault"))
 
         action_scroll = screen.query_one("#vault_action_scroll", VerticalScroll)
-        assert action_scroll.region.height <= 8
-        assert str(screen.query_one("#vault_rotate_exposure", Button).label) == "Rotate exposed SSH key"
-        assert str(screen.query_one("#vault_rotate", Button).label) == "Rotate vault key"
+        assert action_scroll.region.height <= 10
+        assert screen.query_one("#vault_rotate_exposure", ActionButton).words == "Rotate exposed SSH key"
+        assert screen.query_one("#vault_rotate", ActionButton).words == "Rotate vault key"
 
         first = screen.query_one("#vault_refresh", Button)
         last = screen.query_one("#vault_rotate", Button)
         first.focus()
-        maintenance = screen.query_one("#vault_maintenance_group")
-        title = maintenance.query_one("CollapsibleTitle")
-        for _ in range(len(screen.focus_chain) + 1):
-            if title.has_focus:
-                break
-            await pilot.press("tab")
-        assert title.has_focus
-        await pilot.press("enter")
-        await wait_until(lambda: not maintenance.collapsed)
         for _ in range(len(screen.focus_chain) + 1):
             if last.has_focus:
                 break
             await pilot.press("tab")
         assert last.has_focus
+        await wait_until(lambda: action_scroll.region.contains_region(last.region))
         assert action_scroll.scroll_y > 0
         assert app.get_widget_at(*last.content_region.center)[0] is last
 

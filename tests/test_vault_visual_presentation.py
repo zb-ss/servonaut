@@ -15,6 +15,12 @@ from tests.test_workspace_vault_reflow import (
 )
 
 
+# Every action button: the view switch, the header and the inspector.
+_ALL_ACTIONS = "#vault_actions Button, #vault_views Button, #vault_identity_heading Button"
+# Without the view switch, which is hidden until the identity is ready.
+_STEP_ACTIONS = "#vault_actions Button, #vault_identity_heading Button"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 @pytest.mark.parametrize(
@@ -40,7 +46,7 @@ async def test_summary_presents_existing_next_step_without_changing_permissions(
         assert primary.has_class("-next-action") and not primary.disabled
         assert screen.query_one("#vault_content").can_view_entire(primary)
         assert app.get_widget_at(*primary.content_region.center)[0] is primary
-        assert str(screen.query_one("#vault_next_step", Static).render()) == f"Next: {primary.label}"
+        assert str(screen.query_one("#vault_next_step", Static).render()) == f"Next: {primary.words}"
         assert "Identity fingerprint: local-fingerprint" in str(screen.query_one("#vault_status", Static).render())
         assert screen.query_one("#vault_setup", Button).disabled
         assert screen.query_one("#vault_recover", Button).disabled
@@ -48,7 +54,7 @@ async def test_summary_presents_existing_next_step_without_changing_permissions(
         expected = set(VaultScreen._READY_ACTIONS) | {
             "vault_refresh", "vault_setup", "vault_add_device", "vault_recover",
         }
-        assert {button.id for button in screen.query("#vault_actions Button")} == expected
+        assert {button.id for button in screen.query(_ALL_ACTIONS)} == expected
         table = screen.query_one("#vault_table", DataTable)
         assert table.is_mounted and not table.display
         assert screen.query_one("#vault_records_empty").has_class("-shown")
@@ -127,7 +133,7 @@ async def test_initial_narrow_setup_keeps_the_complete_identity_summary_in_view(
         assert table.is_mounted
         assert not screen.query_one("#vault_records_panel").display
         assert screen.has_class("-identity-pending")
-        assert {button.id for button in screen.query("#vault_actions Button") if button.display} == {
+        assert {button.id for button in screen.query(_STEP_ACTIONS) if button.display} == {
             "vault_setup", "vault_refresh",
         }
         setup = screen.query_one("#vault_setup", Button)
@@ -175,7 +181,7 @@ async def test_native_sidebar_entry_with_pending_identity_keeps_setup_action_vis
         assert table.is_mounted
         assert not screen.query_one("#vault_records_panel").display
         assert screen.has_class("-identity-pending")
-        assert {button.id for button in screen.query("#vault_actions Button") if button.display} == {
+        assert {button.id for button in screen.query(_STEP_ACTIONS) if button.display} == {
             "vault_setup", "vault_refresh",
         }
         assert app.get_widget_at(*setup.content_region.center)[0] is setup
@@ -268,10 +274,8 @@ async def test_ready_empty_native_sidebar_entry_shows_create_and_cancel_without_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-async def test_secondary_vault_actions_have_native_mouse_and_keyboard_disclosures(size) -> None:
-    """Native disclosures expose the original guarded operations without activating them."""
-    from textual.widgets import Collapsible
-
+async def test_every_guarded_action_is_reachable_by_keyboard_without_running(size) -> None:
+    """Tabbing through the inspector reaches the irreversible actions without activating them."""
     service = _OnboardingService(vaults=[{
         "vault_id": "vault-record-1", "name": "Personal", "kind": "personal",
         "my_role": "owner", "my_grant": {"version": 1}, "counts": {},
@@ -281,38 +285,17 @@ async def test_secondary_vault_actions_have_native_mouse_and_keyboard_disclosure
         screen = app.screen
         await wait_until(lambda: screen._identity_state == "ready" and not screen._busy_work)
         await pilot.pause()
-        identity = screen.query_one("#vault_identity_group", Collapsible)
-        maintenance = screen.query_one("#vault_maintenance_group", Collapsible)
-        assert identity.collapsed and maintenance.collapsed
-        assert identity.title == "Identity and devices"
-        assert maintenance.title == "Exposure and key maintenance"
-        title = identity.query_one("CollapsibleTitle")
-        for _ in range(len(screen.focus_chain) + 1):
-            if app.focused is title:
-                break
-            await pilot.press("tab")
-        assert app.focused is title
-        await pilot.wait_for_scheduled_animations()
-        assert app.get_widget_at(*title.content_region.center)[0] is title
-        assert await pilot.click(title)
-        await wait_until(lambda: not identity.collapsed)
-
-        title = maintenance.query_one("CollapsibleTitle")
-        for _ in range(len(screen.focus_chain) + 1):
-            if app.focused is title:
-                break
-            await pilot.press("tab")
-        assert app.focused is title
-        await pilot.press("enter")
-        await wait_until(lambda: not maintenance.collapsed)
-        target = screen.query_one("#vault_delete_keys", Button)
-        for _ in range(len(screen.focus_chain) + 1):
-            if app.focused is target:
-                break
-            await pilot.press("tab")
-        assert app.focused is target and not target.disabled
-        await pilot.wait_for_scheduled_animations()
-        assert app.get_widget_at(*target.content_region.center)[0] is target
+        for button_id in ("vault_reset", "vault_rotate", "vault_delete_keys"):
+            target = screen.query_one(f"#{button_id}", Button)
+            for _ in range(len(screen.focus_chain) + 1):
+                if app.focused is target:
+                    break
+                await pilot.press("tab")
+            assert app.focused is target
+            await pilot.wait_for_scheduled_animations()
+            assert screen.query_one("#vault_action_scroll").region.contains_region(target.region)
+            assert app.get_widget_at(*target.content_region.center)[0] is target
+        # Not enabled: the actions need a selected record or step they do not have yet.
         assert service.created == [] and service.item_calls == 0
         assert app._exception is None
 
@@ -355,7 +338,6 @@ async def test_pending_device_native_sidebar_entry_reveals_approve_above_footer(
         assert table.row_count == 2 and table.cursor_row == 1
         assert table.region.height >= 7
         assert app.focused is approve
-        assert not screen.query_one("#vault_identity_group").collapsed
         assert approve.region.width > 0 and approve.region.height > 0
         assert screen.region.contains_region(approve.region)
         assert content.can_view_entire(approve)

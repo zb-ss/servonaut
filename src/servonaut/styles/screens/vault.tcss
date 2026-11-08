@@ -56,6 +56,10 @@ VaultScreen #vault_records_context {
     color: $text-muted;
 }
 
+VaultScreen #vault_refresh {
+    margin: 0 0 0 1;
+}
+
 VaultScreen #vault_status {
     height: auto;
     margin: 0;
@@ -70,6 +74,48 @@ VaultScreen #vault_next_step {
 
 VaultScreen #vault_next_step.-shown {
     display: block;
+}
+
+VaultScreen #vault_busy_row {
+    height: auto;
+}
+
+VaultScreen #vault_busy {
+    width: 1fr;
+}
+
+VaultScreen #vault_cancel_wait {
+    display: none;
+    margin: 0;
+}
+
+VaultScreen #vault_cancel_wait.-shown {
+    display: block;
+}
+
+/* The views of the records table, as one segmented switch. */
+VaultScreen #vault_views {
+    width: 100%;
+    height: auto;
+}
+
+VaultScreen #vault_views.-wrap {
+    grid-size: 3;
+}
+
+VaultScreen .vault_view {
+    margin: 0 1 0 0;
+}
+
+VaultScreen .vault_view.-current-view {
+    border: round $accent;
+    color: $text-accent;
+    text-style: bold;
+}
+
+VaultScreen .vault_view.-textual-compact.-current-view {
+    background: $primary;
+    color: $background;
 }
 
 VaultScreen #vault_workspace {
@@ -116,8 +162,9 @@ VaultScreen #vault_table {
     min-height: 7;
 }
 
+/* The inspector: the selected record, then the actions that act on it. */
 VaultScreen #vault_action_scroll {
-    width: 39;
+    width: 52;
     height: 1fr;
     min-height: 7;
     margin-left: 1;
@@ -137,64 +184,75 @@ VaultScreen .vault_action_group {
     margin-bottom: 1;
 }
 
+/* Section headings are quiet labels, not bars that read as table headers. */
 VaultScreen .vault_group_heading {
     height: auto;
     min-height: 1;
+    margin-bottom: 1;
+    color: $text-muted;
     text-style: bold;
-    color: $text;
+}
+
+VaultScreen #vault_inspector_heading {
+    height: auto;
+}
+
+VaultScreen #vault_inspector_facts {
+    height: auto;
 }
 
 VaultScreen .vault_group_buttons {
-    height: auto;
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-gutter: 0 1;
-}
-
-VaultScreen #vault_actions Button {
     width: 100%;
     height: auto;
-    min-height: 1;
+}
+
+/* Each button's own margin is the gap, so the two columns keep every label whole. */
+VaultScreen .vault_group_buttons.-wrap {
+    grid-size: 2;
+    grid-gutter: 0 0;
+}
+
+VaultScreen #vault_actions ActionButton {
     min-width: 0;
-    margin: 0;
-    padding: 0 1;
-    border: none;
-    background: $surface;
-    content-align: left middle;
 }
 
-VaultScreen #vault_actions Button.-next-action,
-VaultScreen #vault_actions Button:hover,
-VaultScreen #vault_actions Button:focus {
-    border: none;
-    background: $primary;
-    color: auto 100%;
-    text-style: bold;
+/* The risky actions sit apart from the everyday ones. */
+VaultScreen #vault_danger_group {
+    padding-top: 1;
+    border-top: solid $border-blurred;
 }
 
-VaultScreen #vault_actions Button:ansi.-next-action,
-VaultScreen #vault_actions Button:ansi:hover,
-VaultScreen #vault_actions Button:ansi:focus {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
-    text-style: not bold;
+VaultScreen #vault_danger_group.-lead {
+    padding-top: 0;
+    border-top: none;
+}
+
+/* Setup, Add device and Recover only show while the identity needs them. */
+VaultScreen #vault_onboarding_group {
+    display: none;
+}
+
+VaultScreen.-identity-pending #vault_onboarding_group {
+    display: block;
+}
+
+VaultScreen.-identity-pending #vault_actions ActionButton {
+    display: none;
+}
+
+VaultScreen.-identity-pending #vault_actions ActionButton.-state-action {
+    display: block;
 }
 
 /* The mounted records and ready-only actions wait for verified custody. */
 VaultScreen.-identity-pending #vault_records_panel,
+VaultScreen.-identity-pending #vault_views,
+VaultScreen.-identity-pending #vault_inspector,
 VaultScreen.-identity-pending #vault_keys_group,
+VaultScreen.-identity-pending #vault_identity_group,
 VaultScreen.-identity-pending #vault_maintenance_group,
-VaultScreen.-identity-pending #vault_actions Button {
+VaultScreen.-identity-pending #vault_danger_group {
     display: none;
-}
-
-VaultScreen.-identity-pending #vault_actions Button.-state-action {
-    display: block;
-    height: auto;
-    min-height: 3;
-    border: round $primary;
-    content-align: center middle;
 }
 
 VaultScreen.-identity-pending #vault_identity_panel {
@@ -229,19 +287,15 @@ VaultScreen.-identity-pending #vault_action_scroll {
     padding: 0 1;
 }
 
-VaultScreen.-identity-pending .vault_group_buttons {
-    grid-size: 3;
-    grid-columns: 1fr 1fr 1fr;
-}
-
 VaultScreen.-identity-pending.-vault-busy #vault_action_scroll {
     display: none;
 }
 
-/* Narrow terminals keep the table and a keyboard-scrollable action shelf. */
+/* Narrow terminals stack the inspector below the table and let it scroll. */
+/* The table's minimum, the gap and the inspector's height. */
 VaultScreen.-content-narrow #vault_workspace {
     layout: vertical;
-    min-height: 20;
+    min-height: 22;
 }
 
 VaultScreen.-content-narrow #vault_records_panel {
@@ -250,18 +304,52 @@ VaultScreen.-content-narrow #vault_records_panel {
 
 VaultScreen.-content-narrow #vault_action_scroll {
     width: 100%;
-    height: 8;
-    min-height: 8;
-    max-height: 8;
+    height: 1fr;
+    min-height: 10;
     margin: 1 0 0 0;
 }
 
-VaultScreen.-content-narrow.-records-empty #vault_workspace {
+VaultScreen.-content-narrow .vault_group_heading {
+    margin-bottom: 0;
+}
+
+/* The table row shows the facts; only the name and state stay, so the actions have the room. */
+VaultScreen.-content-narrow #vault_inspector_heading {
+    display: none;
+}
+
+VaultScreen.-content-narrow #vault_inspector_facts {
+    height: 1;
+}
+
+/* Pinned above the scrolling actions, so the selection stays named while they scroll. */
+VaultScreen.-content-narrow #vault_inspector {
+    dock: top;
+    height: 1;
+    margin-bottom: 0;
+}
+
+VaultScreen.-content-narrow #vault_actions {
+    margin-top: 1;
+}
+
+
+VaultScreen.-content-narrow #vault_identity_panel {
+    margin-bottom: 0;
+}
+
+VaultScreen.-content-narrow .vault_view {
+    margin: 0 1 0 0;
+}
+
+VaultScreen.-content-narrow.-records-empty #vault_workspace,
+VaultScreen.-content-narrow.-identity-pending #vault_workspace {
     min-height: 0;
 }
 
-VaultScreen.-content-narrow.-identity-pending #vault_workspace {
-    min-height: 0;
+VaultScreen.-content-narrow.-records-empty #vault_action_scroll {
+    height: 8;
+    min-height: 8;
 }
 
 VaultScreen.-content-narrow.-identity-pending #vault_action_scroll {
@@ -270,38 +358,6 @@ VaultScreen.-content-narrow.-identity-pending #vault_action_scroll {
     max-height: initial;
     margin: 0;
 }
-
-VaultScreen.-content-narrow.-identity-pending .vault_group_buttons {
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 VaultRevealModal {
     align: center middle;
@@ -957,61 +1013,4 @@ VaultAutoBindScreen.-short #auto_bind_actions Button {
     height: 1;
     border: none;
     padding: 0 1;
-}
-
-/* Primary work stays open; secondary operations have native disclosure titles. */
-VaultScreen #vault_action_header {
-    height: auto;
-    margin-bottom: 0;
-}
-
-VaultScreen #vault_action_header .vault_group_heading {
-    width: 1fr;
-}
-
-VaultScreen #vault_action_header #vault_refresh {
-    width: auto;
-    min-width: 10;
-    min-height: 1;
-    height: auto;
-    content-align: right middle;
-}
-
-VaultScreen #vault_onboarding_group {
-    display: none;
-}
-
-VaultScreen.-identity-pending #vault_onboarding_group {
-    display: block;
-}
-
-VaultScreen.-identity-pending #vault_identity_group {
-    display: none;
-}
-
-VaultScreen #vault_actions Collapsible {
-    height: auto;
-    padding: 0;
-    margin: 0;
-    border: none;
-    background: $surface;
-}
-
-VaultScreen #vault_actions Collapsible > Contents {
-    height: auto;
-    padding: 0 0 1 0;
-}
-
-VaultScreen #vault_actions CollapsibleTitle {
-    width: 100%;
-    padding: 0;
-    color: $text;
-    text-style: bold;
-}
-
-VaultScreen #vault_actions CollapsibleTitle:hover,
-VaultScreen #vault_actions CollapsibleTitle:focus {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
-    text-style: $block-cursor-text-style;
 }

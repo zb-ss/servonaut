@@ -74,6 +74,11 @@ class ActionButton(Button):
             compact=compact,
         )
 
+    @property
+    def words(self) -> str:
+        """The full words of the action, without its key hint."""
+        return self._text
+
     def _label(self, compact: bool, hint: bool, use_short: bool | None = None) -> Content:
         shorter = self._use_short if use_short is None else use_short
         words = self._short if (compact or shorter) and self._short else self._text

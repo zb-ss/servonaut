@@ -374,7 +374,7 @@ async def test_a_pending_device_is_selected_with_approve_device_in_view() -> Non
         assert screen.query_one("#vault_table").cursor_row == 1
         await wait_until(lambda: _in_view(screen, "vault_approve"))
         await pilot.wait_for_scheduled_animations()
-        assert not screen.query_one("#vault_identity_group").collapsed
+        assert screen.query_one("#vault_identity_group").display
         assert approve.region.width > 0 and approve.region.height > 0
         assert screen.region.contains_region(approve.region)
         assert screen.can_view_entire(approve)
@@ -415,6 +415,7 @@ async def test_approving_a_device_can_be_stopped_while_it_waits_for_the_new_devi
     async with app.run_test(size=(160, 50)):
         screen = await _settled(app, "Identity fingerprint")
         screen._devices = [{"device_id": "d-2", "status": "pending"}]
+        screen._table_mode = "devices"
         screen._render_devices()
         screen.action_approve()
         await wait_until(lambda: _busy(screen) is not None and approvals == ["d-2"])
