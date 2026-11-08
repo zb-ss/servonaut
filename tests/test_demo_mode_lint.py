@@ -963,6 +963,28 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "replace_instances(), which redacts in demo mode; proven "
                    "per row by test_fleet_inspector's demo-mode test."),
 
+    # instance_list.py — the filter summary and the "updated ago" label are
+    # built from fixed words and numbers only (counts, filter names, an age);
+    # no server text is placed in them.
+    AllowlistEntry("screens/instance_list.py", "_sync_summary", "update",
+                   "Fixed words and counts; never server text."),
+    AllowlistEntry("screens/instance_list.py", "_sync_updated", "update",
+                   "A fixed 'Updated/Cached <age>' phrase; never server text."),
+
+    # instance_list.py — _mark_changes merges into a plain dict of server id ->
+    # marker word; it is dict.update, not a widget write.
+    AllowlistEntry("screens/instance_list.py", "_mark_changes", "update",
+                   "dict.update on the marker map; not a widget write."),
+
+    # instance_list.py — _render_load shows each provider's failure reason, the
+    # one piece of server-origin text in the load report. It reaches the
+    # widget only after display_text() (the demo-mode redaction of free text)
+    # and is placed as literal content; the demo-mode test in
+    # test_fleet_filters_behaviour proves it.
+    AllowlistEntry("screens/instance_list.py", "_render_load", "update",
+                   "Failure reasons pass through display_text() before they "
+                   "are placed; the rest is fixed words and counts."),
+
     # chat_panel.py — _send clears the chat input TextArea with '' after reading
     # the user's message — no server-origin data involved.
     AllowlistEntry("widgets/chat_panel.py", "_send", "load_text",
