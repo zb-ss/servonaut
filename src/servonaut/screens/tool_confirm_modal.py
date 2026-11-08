@@ -33,6 +33,17 @@ from servonaut.widgets.safe_header import SafeHeader
 logger = logging.getLogger(__name__)
 
 
+# How to reach the rest, per modal: the standard modal starts with the box
+# focused, in the dangerous one the typed-confirm input has the focus first.
+_CUES = {
+    "tool": "Longer than the box: scroll with the arrow keys or the mouse to read it all.",
+    "dangerous": (
+        "Longer than the box: press Shift+Tab, then the arrow keys, "
+        "or scroll with the mouse to read it all."
+    ),
+}
+
+
 def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
     """Say so when the arguments are longer than their box.
 
@@ -44,10 +55,8 @@ def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
         cue = screen.query_one(f"#{prefix}_confirm_more", Static)
     except Exception:  # pragma: no cover - modal closed meanwhile
         return
-    hidden = int(scroll.max_scroll_y)
-    cue.display = hidden > 0
-    if hidden > 0:
-        cue.update(f"{hidden} more lines below: scroll to read (Tab, then arrow keys)")
+    cue.display = scroll.max_scroll_y > 0
+    cue.update(_CUES[prefix])
 
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
