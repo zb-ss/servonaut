@@ -19,14 +19,14 @@ from . import _harness
 
 HOSTILE = (
     "web\x1b]52;c;aGVsbG8=\x07\x1b]8;;http://1.2.3.4/\x1b\\\x1b]0;pwned\x07"
-    "\x1b[2J\x1b[10;10H\x9b31m‮evil-1"
+    "\x1b[2J\x1b[10;10H\x9b31m\u202eevil-1"
 )
-BENIGN = re.sub("[\x00-\x1f\x7f-\x9f‮]", "", HOSTILE)
+BENIGN = re.sub("[\x00-\x1f\x7f-\x9f\u202e]", "", HOSTILE)
 
 _TEXTUAL_OWN = re.compile(
     r"\x1b\[\d+;\d+H|\x1b\[[0-9;:]*m|\x1b\]8;id=[^;\x1b]*;[^\x1b\x07]*\x1b\\|\x1b\]8;;\x1b\\"
 )
-_STILL_UNSAFE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f‮]")
+_STILL_UNSAFE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e]")
 
 _TABLE_ROWS = {"160x50": 42, "100x30": 24}
 

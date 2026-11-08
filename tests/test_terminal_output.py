@@ -34,15 +34,15 @@ from servonaut.widgets.instance_table import InstanceTable
 # and cursor move, a C1 CSI (one byte), and a bidi override.
 HOSTILE = (
     "web\x1b]52;c;aGVsbG8=\x07\x1b]8;;http://1.2.3.4/\x1b\\\x1b]0;pwned\x07"
-    "\x1b[2J\x1b[10;10H\x9b31m‮evil-1"
+    "\x1b[2J\x1b[10;10H\x9b31m\u202eevil-1"
 )
-BENIGN = re.sub("[\x00-\x1f\x7f-\x9f‮]", "", HOSTILE)
+BENIGN = re.sub("[\x00-\x1f\x7f-\x9f\u202e]", "", HOSTILE)
 
 # What Textual itself writes: cursor positions, styles and link wrappers.
 _TEXTUAL_OWN = re.compile(
     r"\x1b\[\d+;\d+H|\x1b\[[0-9;:]*m|\x1b\]8;id=[^;\x1b]*;[^\x1b\x07]*\x1b\\|\x1b\]8;;\x1b\\"
 )
-_STILL_UNSAFE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f‮]")
+_STILL_UNSAFE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e]")
 
 SIZE = (80, 14)
 
@@ -109,12 +109,6 @@ def _static_escaped(name: str) -> Static:
     return Static(f"[b]{escape_markup(name)}[/b] tail")
 
 
-def _instance_table(name: str) -> InstanceTable:
-    table = InstanceTable()
-    table.on_mount = lambda: None  # type: ignore[method-assign]
-    return table
-
-
 SINKS = {
     "datatable_str": _table(lambda name: name),
     "datatable_text": _table(lambda name: Text(name)),
@@ -130,6 +124,7 @@ def test_hostile_name_renders_as_the_benign_name(sink: str) -> None:
     hostile = _show(build, HOSTILE)
     _assert_safe(hostile)
     assert "\x1b]52" not in hostile
+    assert "web]52" in hostile  # the name is drawn, not dropped
     assert hostile == _show(build, BENIGN)
 
 
@@ -179,6 +174,7 @@ def test_instance_table_with_a_hostile_instance_name() -> None:
 
     hostile = frame(HOSTILE)
     _assert_safe(hostile)
+    assert "web]52" in hostile
     assert hostile == frame(BENIGN)
 
 
@@ -188,7 +184,7 @@ def test_hostile_cell_does_not_move_the_next_column() -> None:
     hostile_rows = _show(build, HOSTILE).split("\n")
     benign_rows = _show(build, BENIGN).split("\n")
     assert hostile_rows == benign_rows
-    assert any("next-col" in row for row in hostile_rows)
+    assert any("web]52" in row and "next-col" in row for row in hostile_rows)
 
 
 def test_link_target_holding_escape_is_not_written() -> None:
@@ -257,9 +253,66 @@ def test_upstream_strip_render_is_the_one_the_filter_wraps() -> None:
     assert hashlib.sha256(source.encode()).hexdigest() == _UPSTREAM_STRIP_RENDER_SHA256
 
 
-def test_segments_are_the_only_input_to_the_render_cache() -> None:
-    """Fails when Textual renders a strip from something other than ``_segments``."""
-    original = getattr(Strip.render, "_servonaut_original_render")
-    source = inspect.getsource(original)
-    assert "self._segments" in source
-    assert "self._render_cache" in source
+def _source_hash(function: Any) -> str:
+    return hashlib.sha256(textwrap.dedent(inspect.getsource(function)).encode()).hexdigest()
+
+
+# The filter relies on more than Strip.render: the link is written by
+# Strip.render_style, and each way of building a frame update must render its
+# strips through Strip.render. A Textual upgrade that changes any of these
+# must be checked before these hashes are updated.
+_UPSTREAM_SOURCE_SHA256 = {
+    "Strip.render_style": "a7e0cafb8cf327cee47e958b3c94282d314bfaa9707f303c7af4955eda4cbcfc",
+    "LayoutUpdate.render_segments": "241f12e4f5ea085af4d3497297c094bd4e52f9622f9af24da88c427871298d8c",
+    "ChopsUpdate.render_segments": "d6ddb7d34a6c23ec3b838ae320f471f1062c52c135034ff1f6a11709c5bc3a34",
+    "InlineUpdate.render_segments": "99ddb64572ce70324341d13f9fe6df53cf4c8206fbc7efb83f5df3df4e25dca9",
+}
+
+
+def test_every_path_to_the_terminal_still_goes_through_strip_render() -> None:
+    from textual import _compositor
+
+    functions = {
+        "Strip.render_style": Strip.render_style,
+        "LayoutUpdate.render_segments": _compositor.LayoutUpdate.render_segments,
+        "ChopsUpdate.render_segments": _compositor.ChopsUpdate.render_segments,
+        "InlineUpdate.render_segments": _compositor.InlineUpdate.render_segments,
+    }
+    assert {name: _source_hash(function) for name, function in functions.items()} == (
+        _UPSTREAM_SOURCE_SHA256
+    )
+
+
+def test_a_partial_update_after_the_first_frame_is_filtered_too() -> None:
+    """Live frames are mostly partial updates (ChopsUpdate), not full ones."""
+    from textual._compositor import ChopsUpdate
+
+    sent: List[Any] = []
+
+    class Host(App):
+        def compose(self) -> ComposeResult:
+            table = DataTable()
+            table.add_columns("Name", "Next")
+            table.add_row("web-1", "next-col")
+            yield table
+
+        def _display(self, screen: Any, renderable: Any) -> None:
+            sent.append(renderable)
+            super()._display(screen, renderable)
+
+    async def run() -> str:
+        app = Host()
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            sent.clear()
+            app.query_one(DataTable).update_cell_at((0, 0), HOSTILE, update_width=True)
+            await pilot.pause()
+            await pilot.pause()
+            partial = [u for u in sent if isinstance(u, ChopsUpdate)]
+            assert partial, "no partial update was drawn"
+            return "".join(u.render_segments(app.console) for u in partial)
+
+    frame = asyncio.run(run())
+    _assert_safe(frame)
+    assert "\x1b]52" not in frame
+    assert "web]52" in frame
