@@ -729,16 +729,16 @@ class AWSCreateScreen(Screen):
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
         # With several accounts, say which one gets billed.
-        where = region
+        places = [region]
         if len(provider_accounts(self.app, "aws")) > 1:
-            account = shown_label(self.app, self._account)
-            where = f"{account}, {region}"
+            places.insert(0, shown_label(self.app, self._account))
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Launch EC2 Instance",
                 description=with_bold_values(
-                    "Launch {} in {} as {} with AMI {}, key {}, subnet {}, SG {}.",
-                    name, where, type_name, ami_id, key_name, subnet_id, sg_id,
+                    "Launch {} in " + ", ".join(["{}"] * len(places))
+                    + " as {} with AMI {}, key {}, subnet {}, SG {}.",
+                    name, *places, type_name, ami_id, key_name, subnet_id, sg_id,
                 ),
                 consequences=[
                     "EC2 billing starts immediately once the instance reaches running state",

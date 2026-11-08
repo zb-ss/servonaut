@@ -9,10 +9,11 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
+from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
@@ -392,13 +393,14 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Add Firewall Rule",
-                description=with_bold_values(
-                    "Add rule {}: {} on {}.",
-                    f"#{sequence}",
-                    f"{action.upper()} {protocol.upper()}"
-                    + (f" port {port_raw}" if port_raw else "")
-                    + (f" from {source}" if source else ""),
-                    self._display_ip,
+                description=Content.assemble(
+                    "Add rule ", literal(f"#{sequence}", "bold"), ": ",
+                    literal(
+                        f"{action.upper()} {protocol.upper()}"
+                        + (f" port {port_raw}" if port_raw else "")
+                        + (f" from {source}" if source else "")
+                    ),
+                    " on ", literal(self._display_ip, "bold"), ".",
                 ),
                 consequences=[
                     "The new rule will be applied to incoming traffic immediately",

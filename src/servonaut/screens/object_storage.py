@@ -38,7 +38,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from servonaut.utils.markup import with_bold_values
-from servonaut.utils.markup import with_bold_values
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer

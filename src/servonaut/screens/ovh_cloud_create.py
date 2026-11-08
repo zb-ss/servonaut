@@ -11,7 +11,6 @@ import asyncio
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
-from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
