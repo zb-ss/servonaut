@@ -7,7 +7,7 @@ import importlib
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
 
 from textual.app import App
 from textual.binding import Binding
@@ -17,6 +17,7 @@ from textual.screen import ModalScreen
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES, widen_parse_cache
 from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
+from servonaut.styles.user_themes import LoadResult, ThemeError, UserTheme, load_user_themes
 from servonaut.styles.themes import (
     SERVONAUT_ANSI_DARK,
     SERVONAUT_ANSI_LIGHT,
@@ -264,6 +265,9 @@ class ServonautApp(App):
         for theme in SERVONAUT_THEMES:
             self.register_theme(theme)
         self._textual_ansi_themes = (self.ansi_theme_dark, self.ansi_theme_light)
+        self.user_themes: Dict[str, UserTheme] = {}
+        self.user_theme_errors: Tuple[ThemeError, ...] = ()
+        self._register_user_themes()
         self.instances = []
         self.workspace_state = WorkspaceState()
         self.memory_first_connect_seen = set()
@@ -2961,6 +2965,43 @@ class ServonautApp(App):
             lambda: open_relay_status(self),
         )
 
+    def reload_user_themes(self) -> LoadResult:
+        """Scan the themes folder again and show the active theme as it now reads.
+
+        An edited file replaces its old version and a deleted one disappears;
+        if the active theme's file is gone the default takes over.
+        """
+        previous = set(self.user_themes)
+        result = self._register_user_themes()
+        self._reapply_theme_after_reload(previous)
+        return result
+
+    def _register_user_themes(self) -> LoadResult:
+        """Register the valid theme files; the rest are listed in ``user_theme_errors``."""
+        for name in self.user_themes:
+            self.unregister_theme(name)
+        try:
+            result = load_user_themes(reserved=self.available_themes)
+        except Exception:  # noqa: BLE001 - a theme file must never stop the app
+            logger.exception("Scanning the themes folder failed")
+            result = LoadResult()
+        for loaded in result.themes:
+            self.register_theme(loaded.theme)
+        self.user_themes = {loaded.theme.name: loaded for loaded in result.themes}
+        self.user_theme_errors = result.errors
+        return result
+
+    def _reapply_theme_after_reload(self, previous: Set[str]) -> None:
+        """Show the active theme as its file now says, or the default if it is gone."""
+        active = self.theme
+        if active in self.available_themes:
+            if active in previous or active in self.user_themes:
+                self._match_ansi_palette(active)
+                self._watch_theme(active)  # Textual's own re-apply of the registered colours
+            return
+        if active in previous:
+            self.theme = resolve_theme_name(active, self.available_themes)
+
     def _apply_configured_theme(self, configured: str) -> None:
         """Switch to the saved theme; TEXTUAL_THEME still wins for one run."""
         if os.environ.get("TEXTUAL_THEME"):
@@ -2983,7 +3024,10 @@ class ServonautApp(App):
 
     def _match_ansi_palette(self, theme_name: str) -> None:
         """Draw ANSI colours (Rich text, command output) in the theme's own hues."""
-        if is_servonaut_theme(theme_name):
+        user_theme = self.user_themes.get(theme_name)
+        if user_theme is not None:
+            self.ansi_theme_dark = self.ansi_theme_light = user_theme.ansi
+        elif is_servonaut_theme(theme_name):
             self.ansi_theme_dark, self.ansi_theme_light = SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
         else:
             self.ansi_theme_dark, self.ansi_theme_light = self._textual_ansi_themes
