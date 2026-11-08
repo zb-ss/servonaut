@@ -489,20 +489,29 @@ async def test_chat_bubbles_show_message_text_literally() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_session_saved_before_the_change_opens_without_crashing() -> None:
-    """Tool rows stored as markup (an unclosed tag, a click) show as plain text."""
+async def test_a_session_saved_before_the_change_opens_and_reads_as_before() -> None:
+    """Rows stored as markup show their text, with no tags, style or action."""
     from servonaut.services.chat_service import ChatMessage
 
     stored = [
         "[dim italic]Tool result[/dim italic] [bold]tc_1[/bold] [dim](ok)[/dim]\nlisting \\[/",
+        "[$text-warning]⊘ Skipped tool[/$text-warning] [bold]tool_x[/bold] [dim]— not available[/dim]",
+        "[ @click=app.toggle('demo_mode')]row[/]",
         "[$text-warning]⊘ Skipped tool[/$text-warning] [bold]x [/[/bold] [dim]— y[/dim]",
-        "[ @click=app.toggle('demo_mode')]row[/",
     ]
     app = _chat_host([ChatMessage(role="tool", content=text) for text in stored])
     async with app.run_test(size=(100, 20)) as pilot:
         await pilot.pause(0.2)
         rows = list(app.query(".chat-message-tool"))
-        assert [row.visual.plain for row in rows] == stored
+        assert [row.visual.plain for row in rows[:3]] == [
+            "Tool result tc_1 (ok)\nlisting [/",
+            "⊘ Skipped tool tool_x — not available",
+            "row",
+        ]
+        # Text that is not valid markup is shown as stored, never raised.
+        assert rows[3].visual.plain == stored[3]
+        for row in rows:
+            assert not any("@click" in str(span.style) for span in row.visual.spans)
         await _click(pilot, rows[2], "row")
         assert app.demo_mode is True
 

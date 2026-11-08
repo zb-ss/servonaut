@@ -133,3 +133,45 @@ async def test_the_dangerous_modal_still_needs_run_typed_for_a_long_argument() -
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert app.dismissed == [True]
+
+
+# ---------------------------------------------------------------------------
+# Saved tool rows: round trip and downgrade safety
+# ---------------------------------------------------------------------------
+
+
+def test_saved_tool_rows_hold_no_bracket_and_round_trip_exactly() -> None:
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, PropertyMock, patch
+
+    from servonaut.services.chat_service import ChatSession
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    session = ChatSession(id="s1", messages=[])
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._session = session
+    panel._get_chat_service = lambda: MagicMock()
+    app = SimpleNamespace(
+        config_manager=MagicMock(get=MagicMock(
+            return_value=SimpleNamespace(chat_keep_tool_results=True))),
+        demo_mode=False, redaction_service=None,
+    )
+    row = {"kind": "result", "tool_call_id": "tc_[/", "status": "ok",
+           "body": "grep found x [/] y [ @click=app.bell]z \\"}
+    with patch.object(ChatPanel, "app", new_callable=PropertyMock, return_value=app):
+        panel._maybe_persist_tool_message(row)
+        stored = session.messages[0].content
+        assert "[" not in stored
+        assert json.loads(stored) == row
+        rebuilt = panel._stored_tool_row_content(stored)
+    assert rebuilt.plain == "Tool result tc_[/ (ok)\ngrep found x [/] y [ @click=app.bell]z \\"
+
+
+def test_a_saved_row_is_plain_text_for_a_release_that_reads_markup() -> None:
+    """The stored text parses as markup without error and shows no tag."""
+    import json
+
+    row = {"kind": "skipped", "tool": "x [/", "reason": "[/] [old="}
+    stored = json.dumps(row).replace("[", "\\u005b")
+    assert Content.from_markup(stored).plain == stored

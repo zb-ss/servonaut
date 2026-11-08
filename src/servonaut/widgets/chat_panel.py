@@ -51,6 +51,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.content import Content
+from textual.markup import MarkupError
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
 
@@ -1556,8 +1557,9 @@ class ChatPanel(Widget):
         """Content for a saved ``role="tool"`` row.
 
         New rows hold the plain fields of the row as JSON. Rows saved by
-        earlier versions hold markup text; it is shown literally so an old
-        session can never break the panel when it is opened.
+        earlier versions hold markup text; only its text is kept (no style
+        and no action survives), and text that is not valid markup is shown
+        as stored, so an old session opens and reads as it always did.
         """
         try:
             row = json.loads(stored)
@@ -1573,6 +1575,10 @@ class ChatPanel(Widget):
             return self._tool_skipped_content(
                 str(row.get("tool", "")), self._redacted(str(row.get("reason", ""))),
             )
+        try:
+            stored = Content.from_markup(stored).plain
+        except MarkupError:
+            pass
         return literal(self._redacted(stored))
 
     @staticmethod
@@ -3952,9 +3958,8 @@ class ChatPanel(Widget):
             if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
                 display_accumulated = self.app.redaction_service.scrub_stream(accumulated)
             # Live-update the thinking bubble with the running text so
-            # the user sees streaming output without re-render. A2 —
-            # ``_update_thinking_status`` escapes its argument before
-            # interpolating into Rich markup.
+            # the user sees streaming output without re-render.
+            # ``_update_thinking_status`` shows its argument literally.
             self._update_thinking_status(display_accumulated or "Thinking...")
             # Streaming speech: sentences completed by this delta start
             # (or extend) the turn's spoken utterance. After the display
@@ -4327,7 +4332,9 @@ class ChatPanel(Widget):
             session.messages.append(  # type: ignore[union-attr]
                 ChatMessage(
                     role="tool",
-                    content=json.dumps(row),
+                    # Every "[" is written as a JSON escape: a release without this
+                    # format reads stored rows as markup and must find no tags.
+                    content=json.dumps(row).replace("[", "\\u005b"),
                     provider="servonaut",
                 )
             )
