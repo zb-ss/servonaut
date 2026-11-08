@@ -85,9 +85,9 @@ async def test_clicking_a_hostile_vault_name_in_a_dialog_does_nothing() -> None:
         assert hostile in plain, plain
         column = plain.index(hostile)
         for offset in range(column, column + len(hostile)):
-            await pilot.click(description, offset=(offset, 0))
-            await pilot.pause(0.1)
-        await pilot.pause(0.2)
+            # Each click must really land on the text; then let the app handle it.
+            assert await pilot.click(description, offset=(offset, 0)), f"click at column {offset} missed"
+            await pilot.pause()
         return isinstance(app.screen, ConfirmActionScreen), service.targets("rotate"), len(app._notifications)
 
     service = FakeVaultService(names={"B": hostile})
