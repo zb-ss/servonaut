@@ -841,9 +841,11 @@ class FleetMemoryScreen(WorkspaceScreen):
     # False until the first fill, so a fleet still loading is never shown as empty.
     _loaded = False
 
-    # What the onboarding offer last showed ("card", "banner" or None), and
-    # the progress of a running scan; both read before the first fill.
+    # What the onboarding offer last showed ("card", "banner" or None), whether
+    # a scan is running, and its progress; all read before the first fill, and
+    # by screens built without __init__ (as some tests do).
     _shown_kind: Optional[str] = None
+    _scanning = False
     _scan_note = ""
 
     def _sync_chrome(self) -> None:

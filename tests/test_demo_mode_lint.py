@@ -353,6 +353,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Updates status footer with hard-coded count labels (fresh/stale "
                    "integers) — code-controlled strings, not streaming data."),
 
+    # fleet_memory.py — the onboarding card and banner show fixed product text
+    # or the scan's plain progress note ("Scanning N of M…"), never server text.
+    AllowlistEntry("screens/fleet_memory.py", "_sync_onboarding_text", "update",
+                   "Writes the fixed empty-state / banner sentences or the scan "
+                   "progress note, which carries only completed/total counts — "
+                   "no server-origin data."),
+
     # fleet_memory.py — _set_progress writes scan progress markup. The
     # just_finished name embedded in the template is scrubbed at source in
     # scan_one() before being appended to succeeded/failed and passed here.
