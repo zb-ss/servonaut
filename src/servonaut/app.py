@@ -24,6 +24,7 @@ from servonaut.styles.themes import (
 )
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
+from servonaut.utils.terminal_output import install as install_terminal_output_filter
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +268,7 @@ class ServonautApp(App):
                 ``"desktop"`` in the desktop window; sign-in names it.
             **kwargs: Passed through to Textual App.__init__.
         """
+        install_terminal_output_filter()
         super().__init__(**kwargs)
         for theme in SERVONAUT_THEMES:
             self.register_theme(theme)
