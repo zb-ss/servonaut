@@ -5,6 +5,7 @@ Hosted in the real app so the shipped stylesheet decides the geometry.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -340,3 +341,53 @@ async def test_arrow_keys_walk_the_actions_and_keep_focus_in_view(key) -> None:
             assert screen.focused is order[(order.index(before) + step) % len(order)]
             if screen.focused in overview.query(ActionButton):
                 assert overview.region.contains_region(screen.focused.region), screen.focused.id
+
+
+AWS_ROW = {
+    "id": "i-0123456789abcdef0", "name": "web-1", "type": "t3.micro", "state": "running",
+    "public_ip": "54.1.2.3", "private_ip": "10.0.0.5", "region": "eu-west-1", "key_name": "k",
+}
+BASTION = "bastion-1.example.internal"
+
+
+def _row_for(kind: str) -> dict:
+    if kind == "aws":
+        return dict(AWS_ROW)
+    if kind == "ovh":
+        return {**AWS_ROW, "id": "vps-0123abcd.vps.example.net", "is_ovh": True, "provider_type": "vps"}
+    return {**AWS_ROW, "id": "custom-0123456789", "is_custom": True, "username": "deploy", "group": "edge"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["aws", "ovh", "custom"])
+@pytest.mark.parametrize("when", ["before", "after"])
+async def test_copy_in_demo_mode_copies_the_redacted_value(kind, when) -> None:
+    app = _LayoutHost()
+    app.instances[0] = _row_for(kind)
+    real = dict(app.instances[0])
+    app.connection_service = SimpleNamespace(
+        resolve_profile=lambda inst: SimpleNamespace(bastion_host=BASTION) if kind == "aws" else None,
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        if when == "before":
+            app.action_toggle_demo()
+            await pilot.pause()
+        screen = await _open_actions(app, pilot)
+        if when == "after":
+            app.action_toggle_demo()
+            await pilot.pause()
+            await pilot.pause()
+        assert app.demo_mode
+        shown_id = next(
+            line.partition(": ")[2] for line in screen.query_one("#server_identity").content.plain.splitlines()
+            if line.partition(": ")[0] in ("Instance ID", "ID")
+        )
+        copied: list[str] = []
+        with patch("servonaut.utils.platform_utils.copy_to_clipboard", lambda text: copied.append(text) or True):
+            screen.query_one("#btn_copy_id", Button).press()
+            screen.query_one("#btn_copy_summary", Button).press()
+            await pilot.pause()
+        assert copied[0] == shown_id and shown_id != real["id"]
+        everything = "\n".join(copied)
+        for secret in (real["id"], real["name"], real["public_ip"], real["private_ip"], BASTION):
+            assert secret not in everything, secret
