@@ -277,7 +277,10 @@ def test_the_most_files_of_the_largest_size_still_scan_in_bounded_time(tmp_path:
         _write(tmp_path, f"f{index:02d}.toml", _flood(header='primary = "#5EB1FF"\n'))
     started = time.perf_counter()
     result = load_user_themes((), tmp_path)
-    assert time.perf_counter() - started < 5
+    # About 400k keys in all: a linear scan takes a few seconds (most of it
+    # TOML parsing), a quadratic one takes minutes. The bound leaves room for
+    # a slow or busy CI runner and still fails on a quadratic scan.
+    assert time.perf_counter() - started < 20
     assert len({e.file for e in result.errors}) == MAX_THEME_FILES
 
 
