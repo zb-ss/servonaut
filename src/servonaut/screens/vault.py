@@ -1328,6 +1328,10 @@ class VaultScreen(WorkspaceScreen):
                 str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
                 markup_literal(self.scrub_for_display(row.get("vault_id") or "")),
             )
+        # The highlight stays on the vault that was last chosen.
+        chosen = next((i for i, row in enumerate(self._vaults) if row.get("vault_id") == self._selected_vault_id), None)
+        if chosen is not None:
+            table.move_cursor(row=chosen)
 
     def _item_name_cell(self, row: Mapping[str, Any]) -> str:
         if row.get("type") != "ssh_key":
@@ -1463,6 +1467,10 @@ class VaultScreen(WorkspaceScreen):
 
     @on(DataTable.RowHighlighted, "#vault_table")
     def _row_highlighted(self) -> None:
+        if self._table_mode == "vaults":
+            vault = self._selected_vault()
+            if vault is not None:
+                self._selected_vault_id = str(vault.get("vault_id") or "") or None
         self._sync_inspector()
 
     def _remember_view(self) -> None:
@@ -1796,9 +1804,12 @@ class VaultScreen(WorkspaceScreen):
         return True
 
     def _selected_vault(self) -> Optional[dict[str, Any]]:
-        """The vault being looked at: the highlighted row, or the one whose records are open."""
-        if self._table_mode != "vaults" and self._selected_vault_id:
-            return next((row for row in self._vaults if row.get("vault_id") == self._selected_vault_id), None)
+        """The vault being looked at: the highlighted row of the vault list, else the one whose records are open.
+
+        Another table's cursor row says nothing about which vault is meant.
+        """
+        if self._table_mode != "vaults":
+            return next((row for row in self._vaults if row.get("vault_id") == self._selected_vault_id), None) if self._selected_vault_id else None
         table = self.query_one("#vault_table", DataTable)
         row = table.cursor_row
         if 0 <= row < len(self._vaults):
@@ -2026,6 +2037,8 @@ class VaultScreen(WorkspaceScreen):
         return names, None
 
     def _selected_item(self) -> Optional[dict[str, Any]]:
+        if self._table_mode != "items":
+            return None
         table = self.query_one("#vault_table", DataTable)
         row = table.cursor_row
         if 0 <= row < len(self._items):
@@ -2412,6 +2425,8 @@ class VaultScreen(WorkspaceScreen):
         self._status(f"{len(self._exposures)} open exposure{'s' if len(self._exposures) != 1 else ''} for this vault.")
 
     def _selected_exposure(self) -> Optional[dict[str, Any]]:
+        if self._table_mode != "exposures":
+            return None
         row = self.query_one("#vault_table", DataTable).cursor_row
         return self._exposures[row] if 0 <= row < len(self._exposures) else None
 
@@ -2608,7 +2623,7 @@ class VaultScreen(WorkspaceScreen):
             return
         table = self.query_one("#vault_table", DataTable)
         row = table.cursor_row
-        if not (0 <= row < len(self._devices)):
+        if self._table_mode != "devices" or not (0 <= row < len(self._devices)):
             self.app.notify("Load devices and select a pending device first.", severity="warning", markup=False)
             return
         device_id = str(self._devices[row].get("device_id") or "")
@@ -2942,7 +2957,8 @@ class VaultScreen(WorkspaceScreen):
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
-        self.run_worker(self._load_roster(str(selected.get("vault_id") or "")), group="vault", exclusive=True)
+        self._selected_vault_id = str(selected.get("vault_id") or "")
+        self.run_worker(self._load_roster(self._selected_vault_id), group="vault", exclusive=True)
 
     async def _load_roster(self, vault_id: str) -> None:
         service = self._service()

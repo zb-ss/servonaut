@@ -79,6 +79,14 @@ class _Service:
              "status": "pending", "identity": {"fingerprint": "SHA256:member"}},
         ]}
 
+    async def process_grants(self, *, vault_id, approval):
+        self.calls.append(f"process_grants:{vault_id}")
+        return []
+
+    async def rotate(self, *, vault_id):
+        self.calls.append(f"rotate:{vault_id}")
+        return {}
+
     async def list_exposures(self, *, vault_id, **_kwargs):
         self.calls.append(f"list_exposures:{vault_id}")
         return {"data": [
@@ -221,6 +229,70 @@ async def test_switching_views_keeps_acting_on_the_vault_being_looked_at() -> No
         await pilot.pause()
         screen.action_exposures()
         await wait_until(lambda: f"list_exposures:{_TEAM}" in service.calls)
+
+
+async def _view(screen: VaultScreen, action, mode: str) -> None:
+    action()
+    await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
+
+
+@pytest.mark.asyncio
+async def test_devices_view_keeps_acting_on_the_vault_chosen_before_it() -> None:
+    service = _Service()
+    app = _StyledVaultHost(service)
+    async with app.run_test(size=(160, 50)):
+        screen = await _ready(app)
+        await _view(screen, screen.action_devices, "devices")
+        # Device row 1 is where the pending device sits; it must not pick the second vault.
+        assert screen.query_one("#vault_table", DataTable).cursor_row == 1
+        assert screen._selected_vault()["vault_id"] == _PERSONAL
+        screen.action_grants()
+        await wait_until(lambda: f"process_grants:{_PERSONAL}" in service.calls)
+        await wait_until(lambda: not screen._busy_work)
+        await _view(screen, screen.action_items, "items")
+        assert service.calls[-1] == "list_items"
+        assert screen._selected_vault_id == _PERSONAL
+
+
+@pytest.mark.asyncio
+async def test_members_of_a_vault_are_the_target_of_grants_and_rotate() -> None:
+    service = _Service()
+    app = _StyledVaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(app)
+        screen.query_one("#vault_table", DataTable).move_cursor(row=1)
+        await wait_until(lambda: screen._selected_vault_id == _TEAM)
+        await _view(screen, screen.action_roster, "roster")
+        screen.query_one("#vault_table", DataTable).move_cursor(row=0)
+        await pilot.pause()
+        assert screen._selected_vault()["vault_id"] == _TEAM
+        screen.action_grants()
+        await wait_until(lambda: f"process_grants:{_TEAM}" in service.calls)
+        await wait_until(lambda: not screen._busy_work)
+        # The vault list returns to the vault that was chosen, not to row 0.
+        screen.action_vaults()
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).cursor_row == 1)
+        assert screen._selected_vault()["vault_id"] == _TEAM
+
+
+@pytest.mark.asyncio
+async def test_row_actions_only_act_in_the_view_that_lists_their_rows() -> None:
+    service = _Service()
+    app = _StyledVaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(app)
+        await _view(screen, screen.action_items, "items")
+        await _view(screen, screen.action_devices, "devices")
+        screen.query_one("#vault_table", DataTable).move_cursor(row=0)
+        assert screen._selected_item() is None
+        screen.action_reveal()
+        await pilot.pause()
+        assert type(app.screen) is VaultScreen  # no reveal confirmation opened
+        await _view(screen, screen.action_items, "items")
+        screen.action_approve()
+        await pilot.pause()
+        assert type(app.screen) is VaultScreen
+        assert screen._selected_exposure() is None and screen._selected_item() is not None
 
 
 @pytest.mark.asyncio
