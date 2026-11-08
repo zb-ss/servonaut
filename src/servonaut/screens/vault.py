@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, Optional
 
 from rich.text import Text
+from textual.content import Content
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -24,7 +25,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Collapsible, DataTable, Footer, Input, Select, SelectionList, Static
+from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
@@ -41,6 +42,8 @@ from servonaut.services.vault.display import (
 from servonaut.services.vault.errors import (
     VaultKeyInUse, VaultRecoveryNotConfirmed, vault_failure_reason,
 )
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -52,6 +55,38 @@ from servonaut.widgets.secret_input import SecretInput
 logger = logging.getLogger(__name__)
 
 _ITEM_NAME_DISPLAY_MAX = 60
+
+# The views of the records table: button id, words, key hint, short words.
+_VIEW_TABS = (
+    ("vault_vaults", "Vaults", "l", None),
+    ("vault_items", "Items", "i", None),
+    ("vault_devices", "Devices", "d", None),
+    ("vault_roster", "Members", "m", None),
+    ("vault_exposures", "Exposures", "e", None),
+)
+# The view each table mode belongs to; a rotation result is part of Exposures.
+_VIEW_FOR_MODE = {
+    "vaults": "vault_vaults", "items": "vault_items", "devices": "vault_devices",
+    "roster": "vault_roster", "exposures": "vault_exposures", "rotation": "vault_exposures",
+}
+_COUNT_KEY_FOR_HEADING = {
+    "Vaults": "vault_vaults", "Items": "vault_items", "Devices": "vault_devices",
+    "Members": "vault_roster", "Exposures": "vault_exposures",
+}
+# The app remembers the last view for the session, so reopening the screen returns to it.
+_LAST_VIEW_ATTR = "vault_last_view"
+# The inspector's groups in their usual order; the group holding the suggested next step leads.
+_GROUP_ORDER = (
+    "vault_inspector", "vault_onboarding_group", "vault_keys_group", "vault_identity_group",
+    "vault_maintenance_group", "vault_danger_group",
+)
+# Actions whose role marks them as risky; the suggested next step never replaces it.
+_FIXED_ROLES = frozenset({
+    "vault_rotate", "vault_recovery_rotate", "vault_reset", "vault_delete_key",
+    "vault_delete_keys", "vault_rotate_exposure", "vault_cancel_wait",
+})
+# Views that act on one chosen vault; reopening them needs a vault to be selected.
+_SCOPED_VIEWS = ("vault_items", "vault_roster", "vault_exposures")
 
 
 def _log_identity_failure(action: str, exc: BaseException) -> None:
@@ -997,6 +1032,8 @@ class VaultScreen(WorkspaceScreen):
     """Full-screen vault metadata, device state, and exposure entry point."""
 
     CHAT_REFLOW = True
+    # The records table first, as the header's Refresh sits before it in focus order.
+    AUTO_FOCUS = "#vault_table, #vault_actions Button"
     # Leave room for two action columns and content padding.
     CHAT_MIN_CONTENT_WIDTH = 64
     # Wider content can show action groups side by side.
@@ -1016,10 +1053,13 @@ class VaultScreen(WorkspaceScreen):
         Binding("e", "exposures", "Exposures", show=True),
         Binding("d", "devices", "Devices", show=True),
         Binding("g", "grants", "Process grants", show=True),
+        Binding("l", "vaults", "Vaults", show=False),
+        Binding("i", "items", "Items", show=False),
+        Binding("m", "roster", "Members", show=False),
     ]
 
     _READY_ACTIONS = (
-        "vault_confirm_identity", "vault_create", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
+        "vault_confirm_identity", "vault_create", "vault_vaults", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
         "vault_rotate_exposure", "vault_devices", "vault_approve", "vault_recovery_rotate",
         "vault_reset", "vault_import", "vault_auto_bind", "vault_roster", "vault_grants", "vault_rotate",
         "vault_rename_key", "vault_delete_key", "vault_delete_keys",
@@ -1052,6 +1092,10 @@ class VaultScreen(WorkspaceScreen):
         # The action the status line names, focused (and so scrolled into view) once work ends.
         self._next_action: Optional[str] = None
         self._last_summary_action: Optional[str] = None
+        # Rows loaded per view, shown in the view switch once a view has been opened.
+        self._view_counts: dict[str, int] = {}
+        # The view this screen reopens once the vault is ready (the last one used).
+        self._restore_view: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -1064,11 +1108,15 @@ class VaultScreen(WorkspaceScreen):
                         with Horizontal(id="vault_identity_heading"):
                             yield Static("Vault", id="vault_title")
                             yield Static("Checking identity", id="vault_identity_state")
+                            yield ActionButton("Refresh", "r", id="vault_refresh")
                         yield Static("Loading encrypted vault metadata…", id="vault_status")
                         yield Static("", id="vault_next_step", markup=False)
                         with Horizontal(id="vault_busy_row"):
                             yield BusyIndicator(id="vault_busy")
-                            yield Button("Stop waiting", id="vault_cancel_wait", disabled=True)
+                            yield ActionButton("Stop waiting", id="vault_cancel_wait", role="error", disabled=True)
+                    with ActionRow(id="vault_views"):
+                        for button_id, text, key, short in _VIEW_TABS:
+                            yield ActionButton(text, key, short=short, id=button_id, classes="vault_view")
                     with Horizontal(id="vault_workspace"):
                         with Vertical(id="vault_records_panel"):
                             with Horizontal(id="vault_records_header"):
@@ -1082,47 +1130,57 @@ class VaultScreen(WorkspaceScreen):
                             yield DataTable(id="vault_table", cursor_type="row", zebra_stripes=True)
                         with VerticalScroll(id="vault_action_scroll"):
                             with Vertical(id="vault_actions"):
-                                with Horizontal(id="vault_action_header"):
-                                    yield Static("Actions", classes="vault_group_heading")
-                                    yield Button("Refresh", id="vault_refresh")
-                                with Vertical(id="vault_keys_group", classes="vault_action_group"):
-                                    yield Static("Keys and items", classes="vault_group_heading")
-                                    with Horizontal(classes="vault_group_buttons"):
-                                        yield Button("Create vault", id="vault_create")
-                                        yield Button("Items", id="vault_items")
-                                        yield Button("Reveal", id="vault_reveal")
-                                        yield Button("Import SSH", id="vault_import")
-                                        yield Button("Auto-bind keys", id="vault_auto_bind")
+                                with Vertical(id="vault_inspector", classes="vault_action_group"):
+                                    yield Static("SELECTED VAULT", id="vault_inspector_heading", classes="vault_group_heading")
+                                    yield Static("", id="vault_inspector_facts")
                                 with Vertical(id="vault_onboarding_group", classes="vault_action_group"):
-                                    yield Static("Identity and devices", classes="vault_group_heading")
-                                    with Horizontal(classes="vault_group_buttons"):
-                                        yield Button("Setup", id="vault_setup")
-                                        yield Button("Add device", id="vault_add_device")
-                                        yield Button("Recover", id="vault_recover")
-                                with Collapsible(title="Identity and devices", collapsed=True, id="vault_identity_group", classes="vault_action_group"):
-                                    with Horizontal(classes="vault_group_buttons"):
-                                        yield Button("Confirm identity", id="vault_confirm_identity")
-                                        yield Button("Devices", id="vault_devices")
-                                        yield Button("Approve device", id="vault_approve")
-                                        yield Button("Roster", id="vault_roster")
-                                        yield Button("Grants", id="vault_grants")
-                                with Collapsible(title="Exposure and key maintenance", collapsed=True, id="vault_maintenance_group", classes="vault_action_group"):
-                                    with Horizontal(classes="vault_group_buttons"):
-                                        yield Button("Exposures", id="vault_exposures")
-                                        yield Button("Resolve exposure", id="vault_resolve_exposure")
-                                        yield Button("Rotate exposed SSH key", id="vault_rotate_exposure")
-                                        yield Button("Rotate recovery key", id="vault_recovery_rotate")
-                                        yield Button("Reset identity", id="vault_reset")
-                                        yield Button("Rotate vault key", id="vault_rotate")
-                                        yield Button("Rename key", id="vault_rename_key")
-                                        yield Button("Delete key", id="vault_delete_key")
-                                        yield Button("Delete multiple", id="vault_delete_keys")
+                                    yield Static("IDENTITY AND DEVICES", classes="vault_group_heading")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Setup", id="vault_setup")
+                                        yield ActionButton("Add device", id="vault_add_device")
+                                        yield ActionButton("Recover", id="vault_recover")
+                                with Vertical(id="vault_keys_group", classes="vault_action_group"):
+                                    yield Static("KEYS AND ITEMS", classes="vault_group_heading")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Create vault", id="vault_create")
+                                        yield ActionButton("Import SSH", id="vault_import")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Reveal", "v", id="vault_reveal")
+                                        yield ActionButton("Rename key", id="vault_rename_key")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Auto-bind keys", short="Auto-bind", id="vault_auto_bind")
+                                with Vertical(id="vault_identity_group", classes="vault_action_group"):
+                                    yield Static("IDENTITY AND ACCESS", classes="vault_group_heading")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Confirm identity", short="Confirm", id="vault_confirm_identity")
+                                        yield ActionButton("Approve device", short="Approve", id="vault_approve")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Process grants", "g", short="Grants", id="vault_grants")
+                                with Vertical(id="vault_maintenance_group", classes="vault_action_group"):
+                                    yield Static("EXPOSURES", classes="vault_group_heading")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Resolve exposure", short="Resolve", id="vault_resolve_exposure")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Rotate exposed SSH key", short="Rotate key", id="vault_rotate_exposure", role="warning")
+                                with Vertical(id="vault_danger_group", classes="vault_action_group"):
+                                    yield Static("IRREVERSIBLE", classes="vault_group_heading")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Rotate vault key", short="Rotate", id="vault_rotate", role="error")
+                                        yield ActionButton("Reset identity", short="Reset", id="vault_reset", role="error")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Rotate recovery key", short="Recovery key", id="vault_recovery_rotate", role="error")
+                                        yield ActionButton("Delete key", id="vault_delete_key", role="error")
+                                    with ActionRow(classes="vault_group_buttons"):
+                                        yield ActionButton("Delete multiple", short="Delete many", id="vault_delete_keys", role="error")
         yield Footer()
 
     def on_mount(self) -> None:
         self._sync_compact_layout()
+        self._restore_view = getattr(self.app, _LAST_VIEW_ATTR, None)
         table = self.query_one("#vault_table", DataTable)
         table.add_columns("Name", "Kind", "Items", "Open exposures", "Vault ID")
+        self._sync_compact_buttons()
+        self._sync_inspector()
         self._set_identity_state("loading")
         service = self._service()
         if callable(getattr(service, "drain_device_pending_events", None)):
@@ -1135,6 +1193,18 @@ class VaultScreen(WorkspaceScreen):
 
     def _sync_compact_layout(self) -> None:
         self.set_class(self.size.height <= 32, "-short")
+
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        self._sync_compact_buttons()
+
+    def _sync_compact_buttons(self) -> None:
+        """One-row borderless buttons whenever the layout is narrow."""
+        compact = self.has_class("-narrow") or self.has_class("-content-narrow")
+        for button in self.query(ActionButton):
+            button.compact = compact
+        for row in self.query(ActionRow):
+            row.fit()
 
     def _sync_chat_layout(self) -> None:
         was_narrow = self.has_class("-content-narrow")
@@ -1343,6 +1413,11 @@ class VaultScreen(WorkspaceScreen):
         self.query_one("#vault_records_panel").set_class(count == 0, "-empty")
         self.set_class(count == 0, "-records-empty")
         self.query_one("#vault_table", DataTable).display = count != 0
+        count_key = _COUNT_KEY_FOR_HEADING.get(label)
+        if count_key is not None:
+            self._view_counts[count_key] = count
+        self._remember_view()
+        self._sync_inspector()
 
     def _identity_summary(self, label: str, action: Optional[str] = None) -> None:
         """Surface the existing next step while keeping its original action widget."""
@@ -1356,56 +1431,183 @@ class VaultScreen(WorkspaceScreen):
             is_next = button.id == action
             button.set_class(is_next, "-next-action")
             if is_next:
-                next_step.update(f"Next: {button.label}")
+                next_step.update(f"Next: {button.words}" if isinstance(button, ActionButton) else f"Next: {button.label}")
                 if action != self._last_summary_action:
                     self.call_after_refresh(self._reveal_summary_action, button)
                 self._last_summary_action = action
 
-    def _reveal_summary_action(self, button: Button, outer_scroll: Optional[float] = None) -> None:
-        """Reveal next controls, including their outer viewport when focused."""
-        if not button.is_attached or button.parent is None or button.parent.parent is None:
+    def _order_groups(self, next_action: Optional[str]) -> None:
+        """Put the group that holds the suggested next step first, so it is in view on arrival."""
+        actions = self.query_one("#vault_actions")
+        groups = [self.query_one(f"#{group_id}") for group_id in _GROUP_ORDER]
+        lead = next((g for g in groups[1:] if next_action and g.query(f"#{next_action}")), None)
+        if lead is not None:
+            groups.remove(lead)
+            groups.insert(1, lead)
+        for group in groups:
+            group.set_class(group is lead, "-lead")
+        moved = False
+        for index, group in enumerate(groups):
+            if actions.children[index] is not group:
+                actions.move_child(group, before=index)
+                moved = True
+        if moved:
+            # The focused action keeps its place in view after the groups reorder.
+            self.call_after_refresh(self._reveal_focused_action)
+
+    def _reveal_summary_action(self, button: Button) -> None:
+        """Scroll an action into view inside the inspector."""
+        if not button.is_attached or not button.display:
             return
-        actions = self.query_one("#vault_action_scroll", VerticalScroll)
-        content = self.query_one("#vault_content")
-        section = next((owner for owner in button.ancestors if isinstance(owner, Collapsible)), None)
-        if section is not None and section.collapsed:
-            # Native Collapsible queues scroll_visible, which then defers its
-            # scroll writes. Run the local reveal after both native callbacks.
-            before = content.scroll_y if outer_scroll is None else outer_scroll
-            section.collapsed = False
-            self.call_after_refresh(
-                self.call_after_refresh, self._reveal_summary_action, button, before,
-            )
+        button.scroll_visible(animate=False)
+
+    @on(DataTable.RowHighlighted, "#vault_table")
+    def _row_highlighted(self) -> None:
+        self._sync_inspector()
+
+    def _remember_view(self) -> None:
+        """Keep the open view for the rest of the session."""
+        view = _VIEW_FOR_MODE.get(self._table_mode)
+        if view is not None:
+            setattr(self.app, _LAST_VIEW_ATTR, view)
+
+    def _reopen_view(self) -> None:
+        """Return to the view used last, once the vault is ready and a vault is selected."""
+        view, self._restore_view = self._restore_view, None
+        if view is None or view == "vault_vaults" or self._identity_state != "ready":
             return
-        if outer_scroll is not None:
-            content.scroll_to(y=outer_scroll, animate=False, immediate=True)
-        group = section or button.parent.parent
-        heading = group.query_one("CollapsibleTitle" if section else ".vault_group_heading")
-        if not actions.display or not group.display or not button.display:
+        if view in _SCOPED_VIEWS and self._selected_vault() is None:
             return
-        reflow_pending = (
-            self.has_class("-content-narrow")
-            and group.region.width < actions.scrollable_content_region.width
-        )
-        if not heading.region.height or not actions.region.height or reflow_pending:
-            if not self.has_class("-chat-replace"):
-                self.call_after_refresh(self._reveal_summary_action, button, outer_scroll)
+        handler = {
+            "vault_items": self.action_items,
+            "vault_devices": self.action_devices,
+            "vault_roster": self.action_roster,
+            "vault_exposures": self.action_exposures,
+        }.get(view)
+        if handler is not None:
+            handler()
+
+    def action_vaults(self) -> None:
+        if not self._allows_identity_action("ready"):
             return
-        # Parent-relative positions remain stable between deferred paints.
-        target_y = heading.virtual_region.y
-        for owner in heading.ancestors:
-            if owner is actions:
-                break
-            target_y += owner.virtual_region.y
-        button_y = button.virtual_region.y
-        for owner in button.ancestors:
-            if owner is actions:
-                break
-            button_y += owner.virtual_region.y
-        target_y = max(target_y, button_y + button.region.height - actions.scrollable_content_region.height)
-        actions.scroll_to(y=target_y, animate=False, immediate=True)
-        if self.focused is button:
-            content.scroll_to_widget(actions, animate=False, immediate=True)
+        self._table_mode = "vaults"
+        self._render_vaults()
+
+    def _sync_inspector(self) -> None:
+        """Follow the open view and the selected row: switch, details and next step."""
+        try:
+            active = _VIEW_FOR_MODE.get(self._table_mode)
+            for button_id, text, _key, _short in _VIEW_TABS:
+                tab = self.query_one(f"#{button_id}", ActionButton)
+                tab.set_class(button_id == active, "-active")
+                count = self._view_counts.get(button_id)
+                tab.set_text(text if count is None else f"{text} ({count})")
+            self.query_one("#vault_views", ActionRow).fit()
+            heading, facts = self._inspector_facts()
+            self.query_one("#vault_inspector_heading", Static).update(heading.upper())
+            self.query_one("#vault_inspector_facts", Static).update(facts)
+        except NoMatches:
+            return  # the screen is closing
+        self._apply_roles()
+
+    def _apply_roles(self) -> None:
+        """Make the suggested next step primary; destructive actions keep their own role."""
+        primary = self._primary_action()
+        self._order_groups(primary)
+        for button in self.query("#vault_actions ActionButton"):
+            if button.id in _FIXED_ROLES:
+                continue
+            button.set_role("primary" if button.id == primary else "default")
+
+    def _primary_action(self) -> Optional[str]:
+        """The identity step when one is due, else the pending device being reviewed."""
+        step = next((b.id for b in self.query("#vault_actions Button.-next-action")), None)
+        if step is not None:
+            return step
+        device = self._selected_row(self._devices) if self._table_mode == "devices" else None
+        if device is not None and device.get("status") == "pending":
+            return "vault_approve"
+        return None
+
+    def _selected_row(self, rows: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+        cursor = self.query_one("#vault_table", DataTable).cursor_row
+        return rows[cursor] if 0 <= cursor < len(rows) else None
+
+    def _inspector_facts(self) -> tuple[str, Content]:
+        """The selected row of the open view as labelled facts (names shown literally)."""
+        mode = self._table_mode
+        heading, rows, build = {
+            "vaults": ("Selected vault", self._vaults, self._vault_facts),
+            "items": ("Selected item", self._items, self._item_facts),
+            "devices": ("Selected device", self._devices, self._device_facts),
+            "roster": ("Selected member", self._roster, self._member_facts),
+            "exposures": ("Selected exposure", self._exposures, self._exposure_facts),
+            "rotation": ("Selected server", self._rotation_hosts, self._rotation_facts),
+        }[mode]
+        row = self._selected_row(rows)
+        if row is None:
+            return heading, Content.styled("Nothing selected.", "$text-muted")
+        return heading, Content("\n").join(build(row))
+
+    def _fact(self, label: str, value: object, style: str = "") -> Content:
+        text = self.scrub_for_display(value) if value not in (None, "") else "-"
+        return Content.assemble((f"{label}: ", "$text-muted"), (text, style) if style else text)
+
+    def _title_fact(self, value: object, status: object = None) -> Content:
+        name = self.scrub_for_display(value or "Unnamed")
+        if not status:
+            return Content.styled(name, "bold")
+        style = "$text-warning" if status == "pending" else "$text-muted"
+        return Content.assemble((name, "bold"), "  ", (self.scrub_for_display(status), style))
+
+    def _vault_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
+        return [
+            self._title_fact(row.get("name") or "Unnamed vault"),
+            self._fact("Kind", row.get("kind")),
+            self._fact("Items", counts.get("items", 0)),
+            self._fact("Open exposures", counts.get("open_exposures", 0)),
+            self._fact("Vault ID", row.get("vault_id")),
+        ]
+
+    def _item_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        title = self._key_display_name(str(row.get("item_id") or "")) if row.get("type") == "ssh_key" else row.get("type") or "unsupported"
+        return [
+            Content.styled(self.scrub_for_display(title), "bold"),
+            self._fact("Type", row.get("type") or "unsupported"),
+            self._fact("Revision", row.get("revision")),
+            self._fact("Fingerprint", row.get("public_fingerprint")),
+            self._fact("Item ID", row.get("item_id")),
+        ]
+
+    def _device_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        return [
+            self._title_fact(row.get("name"), row.get("status")),
+            self._fact("Platform", row.get("platform")),
+            self._fact("Device ID", row.get("device_id")),
+        ]
+
+    def _member_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        identity = row.get("identity") if isinstance(row.get("identity"), Mapping) else {}
+        return [
+            self._title_fact(row.get("display_name") or row.get("user_id"), row.get("status")),
+            self._fact("Role", row.get("role")),
+            self._fact("Fingerprint", identity.get("fingerprint")),
+        ]
+
+    def _exposure_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        return [
+            Content.styled(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "Exposure"), "bold"),
+            self._fact("Reason", row.get("reason")),
+            self._fact("Item ID", row.get("item_id")),
+            self._fact("Exposure ID", row.get("exposure_id")),
+        ]
+
+    def _rotation_facts(self, row: Mapping[str, Any]) -> list[Content]:
+        return [
+            self._title_fact(row.get("server_id") or row.get("server"), row.get("status") or "unknown"),
+            self._fact("Detail", row.get("error")),
+        ]
 
     def _set_identity_state(self, state: str) -> None:
         """Make only the safe next identity action available for this state."""
@@ -1448,6 +1650,7 @@ class VaultScreen(WorkspaceScreen):
         )
         for button in self.query("#vault_actions Button"):
             button.set_class(not button.disabled, "-state-action")
+        self._apply_roles()
 
     def _allows_identity_action(self, *states: str) -> bool:
         """Keep keyboard actions from bypassing the disabled-button state."""
@@ -1508,6 +1711,8 @@ class VaultScreen(WorkspaceScreen):
     async def _load(self) -> None:
         async with self._busy("Checking your vault…"):
             await self._load_now()
+        if self._restore_view is not None:
+            self.call_after_refresh(self._reopen_view)
 
     async def _load_now(self) -> None:
         service = self._service()
@@ -1555,6 +1760,8 @@ class VaultScreen(WorkspaceScreen):
             return
         self._set_identity_state("ready")
         self._vaults = [dict(row) for row in vaults or []]
+        for view in _SCOPED_VIEWS:
+            self._view_counts.pop(view, None)
         fingerprint = getattr(status, "fingerprint", None)
         if fingerprint is None and isinstance(status, Mapping):
             fingerprint = status.get("fingerprint") or status.get("local_identity")
@@ -1589,6 +1796,9 @@ class VaultScreen(WorkspaceScreen):
         return True
 
     def _selected_vault(self) -> Optional[dict[str, Any]]:
+        """The vault being looked at: the highlighted row, or the one whose records are open."""
+        if self._table_mode != "vaults" and self._selected_vault_id:
+            return next((row for row in self._vaults if row.get("vault_id") == self._selected_vault_id), None)
         table = self.query_one("#vault_table", DataTable)
         row = table.cursor_row
         if 0 <= row < len(self._vaults):
@@ -1598,6 +1808,7 @@ class VaultScreen(WorkspaceScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {
             "vault_refresh": self.action_refresh,
+            "vault_vaults": self.action_vaults,
             "vault_setup": self.action_setup,
             "vault_confirm_identity": self.action_confirm_identity,
             "vault_create": self.action_create,
@@ -2175,9 +2386,13 @@ class VaultScreen(WorkspaceScreen):
     def action_exposures(self) -> None:
         if not self._allows_identity_action("ready"):
             return
-        if not self._selected_vault_id:
+        selected = self._selected_vault()
+        if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
             return
+        if self._refuse_without_access(selected):
+            return
+        self._selected_vault_id = str(selected.get("vault_id") or "")
         self.run_worker(self._load_exposures(), group="vault", exclusive=True)
 
     async def _load_exposures(self) -> None:
