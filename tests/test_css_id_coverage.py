@@ -102,20 +102,27 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # backup_workspaces.tcss: SnapshotManagerScreen .backup-action-panel
         "snapshots_cloud_actions",
         # vault.tcss: VaultScreen #vault_actions Button
+        "vault_add_device",
         "vault_approve",
+        "vault_auto_bind",
         "vault_confirm_identity",
+        "vault_create",
         "vault_delete_key",
         "vault_delete_keys",
         "vault_devices",
         "vault_exposures",
         "vault_grants",
+        "vault_import",
+        "vault_recover",
         "vault_recovery_rotate",
         "vault_rename_key",
         "vault_reset",
         "vault_resolve_exposure",
+        "vault_reveal",
         "vault_roster",
         "vault_rotate",
         "vault_rotate_exposure",
+        "vault_setup",
 
         # Shared dialog type/region rules style these widgets; IDs remain
         # stable for callers and interaction tests without per-ID CSS.

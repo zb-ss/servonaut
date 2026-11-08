@@ -353,29 +353,13 @@ def case_for(kind: str) -> ReflowCase:
 
 
 async def reveal_secondary_vault_target(pilot: Pilot, screen: WorkspaceScreen) -> None:
-    """Use the native disclosure before checking its guarded target."""
+    """Check the irreversible actions are laid out with the rest, and nothing ran."""
     if not isinstance(screen, VaultScreen):
         return
     before = state(screen)
     before_operations = tuple(pilot.app.vault_command_service.operations)
-    section = screen.query_one("#vault_maintenance_group", Collapsible)
-    if section.collapsed:
-        title = section.query_one("CollapsibleTitle")
-        await tab_to(pilot, title)
-        await pilot.wait_for_scheduled_animations()
-        await pilot.pause()
-        assert pilot.app.focused is title
-        assert screen.region.contains_region(title.region)
-        assert " ".join(section.title.split()) in " ".join(_painted(pilot.app, title).split())
-        hit = pilot.app.get_widget_at(*title.region.center)[0]
-        assert hit is title or title in hit.ancestors
-        await pilot.press("enter")
-        await wait_until(lambda: not section.collapsed)
-        await pilot.wait_for_scheduled_animations()
-        await pilot.pause()
-        table = screen.query_one("#vault_table", DataTable)
-        await tab_to(pilot, table)
-        assert pilot.app.focused is table
+    assert screen.query_one("#vault_danger_group").display
+    assert screen.query_one("#vault_rotate").display
     assert state(screen) == before
     assert tuple(pilot.app.vault_command_service.operations) == before_operations
 

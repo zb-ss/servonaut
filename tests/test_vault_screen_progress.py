@@ -374,7 +374,7 @@ async def test_a_pending_device_is_selected_with_approve_device_in_view() -> Non
         assert screen.query_one("#vault_table").cursor_row == 1
         await wait_until(lambda: _in_view(screen, "vault_approve"))
         await pilot.wait_for_scheduled_animations()
-        assert not screen.query_one("#vault_identity_group").collapsed
+        assert screen.query_one("#vault_identity_group").display
         assert approve.region.width > 0 and approve.region.height > 0
         assert screen.region.contains_region(approve.region)
         assert screen.can_view_entire(approve)
