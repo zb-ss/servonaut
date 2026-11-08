@@ -36,6 +36,10 @@ class _SettingsBootApp(App):
         self.auth_service = MagicMock()
         self.auth_service.is_authenticated = False
         self.auth_service.has_feature = MagicMock(return_value=False)
+        # The Appearance panel lists the app's user themes, and the theme files
+        # it could not load, next to the built-in themes.
+        self.user_themes = {}
+        self.user_theme_errors = ()
 
     def on_mount(self) -> None:
         from servonaut.screens.settings import SettingsScreen
