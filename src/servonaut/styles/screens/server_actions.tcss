@@ -209,3 +209,12 @@ ServerActionsScreen.-narrow #action_buttons,
 ServerActionsScreen.-content-narrow #action_buttons {
     padding: 0;
 }
+
+/* With chat open the strip is too narrow for one row: two actions per row */
+ServerActionsScreen.-chat-open.-content-narrow #sa-diagnostics .sa-card-actions,
+ServerActionsScreen.-chat-open.-content-narrow #sa-provider .sa-card-actions {
+    layout: grid;
+    grid-size: 2;
+    grid-rows: 1;
+    grid-gutter: 0 1;
+}

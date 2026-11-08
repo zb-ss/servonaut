@@ -905,7 +905,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                     Static("[bold]OVH[/bold]", classes="sa-card-title"),
                     _card_actions(
                         ActionButton("Reinstall OS", id="btn_ovh_reinstall", role="error"),
-                        ActionButton("Resize / upgrade", id="btn_ovh_resize"),
+                        ActionButton("Resize / upgrade", short="Resize", id="btn_ovh_resize"),
                         ActionButton("Snapshots", id="btn_ovh_snapshots"),
                         ActionButton("Firewall", id="btn_ovh_firewall"),
                     ),
@@ -982,13 +982,13 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             _card(
                                 "card_identity",
                                 Static(identity, id="server_identity"),
-                                ActionButton("Copy instance ID", id="btn_copy_id"),
+                                ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id"),
                                 ActionButton("Copy summary", id="btn_copy_summary"),
                             ),
                             _card(
                                 "card_network",
                                 Static(connection, id="server_info"),
-                                ActionButton("Use vault key", "u", id="btn_use_vault_key"),
+                                ActionButton("Use vault key", "u", short="Vault key", id="btn_use_vault_key"),
                                 ActionButton("SSH ref", "r", id="btn_manage_ssh_ref"),
                                 ActionButton("Verify SSH", "v", id="btn_verify_ssh"),
                             ),
@@ -1003,7 +1003,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             _card(
                                 "card_memory",
                                 Static("[bold]Server Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
-                                ActionButton("Server memory", "m", id="btn_memory"),
+                                ActionButton("Server memory", "m", short="Memory", id="btn_memory"),
                                 ActionButton("Monitoring", "f", id="btn_findings"),
                                 ActionButton("Scan DB", "d", id="btn_db_creds"),
                             ),
@@ -1012,9 +1012,9 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                         Vertical(
                             Static("[bold]Diagnostics & security[/bold]", classes="sa-card-title"),
                             _card_actions(
-                                ActionButton("Stream logs", "6", id="btn_logs"),
-                                ActionButton("AI log analysis", "7", id="btn_ai_analysis"),
-                                ActionButton("Keyword scan results", "5", id="btn_scan"),
+                                ActionButton("Stream logs", "6", short="Logs", id="btn_logs"),
+                                ActionButton("AI log analysis", "7", short="AI analysis", id="btn_ai_analysis"),
+                                ActionButton("Keyword scan results", "5", short="Scan results", id="btn_scan"),
                                 ActionButton("Ban IP", "8", id="btn_ban_ip", role="error"),
                             ),
                             id="sa-diagnostics",
