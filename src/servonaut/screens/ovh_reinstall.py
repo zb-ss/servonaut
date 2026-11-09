@@ -12,6 +12,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer, Verti
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._busy_work import BusyWork
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -207,9 +208,8 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Reinstall VPS",
-                description=(
-                    f"Reinstall [bold]{escape(str(instance_name))}[/bold] with "
-                    f"[bold]{escape(str(image_name))}[/bold]."
+                description=with_bold_values(
+                    "Reinstall {} with {}.", instance_name, image_name,
                 ),
                 consequences=[
                     "All data on the VPS will be permanently destroyed",

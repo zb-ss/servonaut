@@ -126,8 +126,8 @@ def test_rdns_delete_confirmation_uses_alias_but_deletes_real_target(
         expected_ip = app.redaction_service.redact_host(ENTRY["ip"]) if is_demo else ENTRY["ip"]
         assert modal._confirm_text == expected_ip
         if is_demo:
-            assert ENTRY["ip"] not in modal._description
-            assert ENTRY["hostname"] not in modal._description
+            assert ENTRY["ip"] not in str(modal._description)
+            assert ENTRY["hostname"] not in str(modal._description)
         if confirmed:
             app.ovh_ip_service.delete_reverse_dns.assert_awaited_once_with(
                 ENTRY["ip_block"], ENTRY["ip"],
@@ -222,13 +222,13 @@ def test_snapshot_confirmation_preserves_selected_operation_target(
 
         asyncio.run(run())
         modal = app.push_screen_wait.call_args.args[0]
-        assert alias in modal._description
+        assert alias in str(modal._description)
         audit = app.ovh_audit.log_action.call_args.kwargs
         assert audit["target"] == raw_id
         assert audit["details"]["snapshot_name"] == snapshot["id"]
         assert audit["confirmed"] is confirmed
         if is_demo:
-            assert snapshot["id"] not in modal._description + modal._confirm_text
+            assert snapshot["id"] not in str(modal._description) + modal._confirm_text
         if operation == "delete":
             assert modal._confirm_text == alias
         service = app.ovh_snapshot_service

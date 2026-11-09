@@ -52,7 +52,7 @@ async def test_cached_results_populate_after_table_columns_are_created() -> None
             "Timestamp",
         ]
         assert table.row_count == 1
-        assert table.get_row_at(0) == [
+        assert [str(cell) for cell in table.get_row_at(0)] == [
             "path:~",
             "first line second line",
             "2026-08-25T12:00:00",

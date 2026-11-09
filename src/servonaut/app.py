@@ -7,7 +7,7 @@ import importlib
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from textual.app import App
 from textual.binding import Binding
@@ -86,6 +86,22 @@ def _note_memory_bootstrap_outcome(task: "asyncio.Future[None]") -> None:
     exc = task.exception()
     if exc is not None:
         logger.info("Memory Sync unlock did not finish: %s", exc)
+
+
+# Framework actions no Servonaut binding or link uses. They act on any widget,
+# class or screen by name, so they are refused rather than left reachable from
+# an action string or link. ``screenshot`` is refused too: the palette saves
+# one by calling the app directly, and no binding or link uses the action.
+_GENERIC_FRAMEWORK_ACTIONS = frozenset({
+    "simulate_key", "toggle", "add_class", "remove_class", "toggle_class",
+    "suspend_process", "notify", "push_screen", "switch_screen", "switch_mode",
+    "screenshot",
+})
+
+
+def _is_generic_framework_action(action: str, parameters: tuple) -> bool:
+    """True for an action the app refuses to run (see the set above)."""
+    return str(action).strip() in _GENERIC_FRAMEWORK_ACTIONS
 
 
 class ServonautApp(App):
@@ -3116,11 +3132,42 @@ class ServonautApp(App):
             and self._navigation_hold_reason()
         ):
             return False
+        if _is_generic_framework_action(action, parameters):
+            return False
         return super().check_action(action, parameters)
 
     async def action_quit_from_content(self) -> None:
         """Use the ordinary quit path for the unmodified content shortcut."""
         await self.action_quit()
+
+    async def run_action(
+        self,
+        action: Any,
+        default_namespace: Any = None,
+        namespaces: Any = None,
+    ) -> bool:
+        """Run *action* unless it is a framework action the app never uses.
+
+        Actions can be started by anything that reaches a widget's text, not
+        only by key bindings, so the check covers every target (``app``,
+        ``screen``, ``focused`` or the widget itself) and both forms an
+        action arrives in: a string, or the parsed tuple a Rich-markup link
+        produces.
+        """
+        if self._is_generic_action(action, default_namespace, namespaces):
+            return False
+        return await super().run_action(action, default_namespace, namespaces)
+
+    def _is_generic_action(
+        self, action: Any, default_namespace: Any, namespaces: Any,
+    ) -> bool:
+        try:
+            _target, name, params = self._parse_action(
+                action, self if default_namespace is None else default_namespace, namespaces,
+            )
+        except Exception:  # noqa: BLE001 - the framework reports malformed actions itself
+            return False
+        return _is_generic_framework_action(name, params)
 
     async def action_quit(self) -> None:
         if not self._refuse_navigation():

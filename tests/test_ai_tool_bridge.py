@@ -18,6 +18,8 @@ defaulting to standard, and confirm_callback exception handling.
 """
 from __future__ import annotations
 
+import json
+
 import asyncio
 import time
 from typing import Any, Dict
@@ -1285,12 +1287,12 @@ def test_tool_message_persisted_when_keep_toggle_on(
     app.config_manager = config_manager
     monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
-    ChatPanel._maybe_persist_tool_message(panel, "[bold]tool ran[/bold]")
+    ChatPanel._maybe_persist_tool_message(panel, {"kind": "skipped", "tool": "x", "reason": "[bold]tool ran[/bold]"})
 
     assert len(session.messages) == 1
     appended = session.messages[0]
     assert appended.role == "tool"
-    assert appended.content == "[bold]tool ran[/bold]"
+    assert json.loads(appended.content) == {"kind": "skipped", "tool": "x", "reason": "[bold]tool ran[/bold]"}
     chat_service.save_session.assert_called_once_with(session)
 
 
@@ -1318,7 +1320,7 @@ def test_tool_message_dropped_when_keep_toggle_off(
     app.config_manager = config_manager
     monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
-    ChatPanel._maybe_persist_tool_message(panel, "irrelevant")
+    ChatPanel._maybe_persist_tool_message(panel, {"kind": "skipped"})
 
     assert session.messages == []
     chat_service.save_session.assert_not_called()

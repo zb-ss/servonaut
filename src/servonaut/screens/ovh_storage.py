@@ -17,6 +17,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
 from servonaut.screens._busy_work import BusyWork
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -495,7 +496,7 @@ class OVHStorageScreen(WorkspaceScreen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Volume",
-                    description=f"Permanently delete volume [bold]{self._display_name(volume_name)}[/bold].",
+                    description=with_bold_values("Permanently delete volume {}.", self._display_name(volume_name)),
                     consequences=[
                         "All data on this volume will be permanently lost",
                         "Any remaining snapshots may also be affected",
@@ -569,9 +570,9 @@ class OVHStorageScreen(WorkspaceScreen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Attach Volume",
-                    description=(
-                        f"Attach volume [bold]{self._display_name(volume_name)}[/bold] to instance "
-                        f"[bold]{self._display_instance_id(instance_id)}[/bold]."
+                    description=with_bold_values(
+                        "Attach volume {} to instance {}.",
+                        self._display_name(volume_name), self._display_instance_id(instance_id),
                     ),
                     consequences=["The volume will be available as a block device on the instance"],
                     confirm_text=self._display_name(volume_name),
@@ -636,9 +637,9 @@ class OVHStorageScreen(WorkspaceScreen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Detach Volume",
-                    description=(
-                        f"Detach volume [bold]{self._display_name(volume_name)}[/bold] from instance "
-                        f"[bold]{self._display_instance_id(instance_id)}[/bold]."
+                    description=with_bold_values(
+                        "Detach volume {} from instance {}.",
+                        self._display_name(volume_name), self._display_instance_id(instance_id),
                     ),
                     consequences=[
                         "The volume will no longer be accessible from the instance",

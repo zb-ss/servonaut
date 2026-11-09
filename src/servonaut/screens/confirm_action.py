@@ -11,6 +11,7 @@ from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -50,8 +51,10 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
         Args:
             title: Dialog title, e.g. "Reinstall VPS".
-            description: Text explaining the operation: a markup string, or
-                ``Content`` when it carries a name from outside the app.
+            description: Text explaining the operation. A plain string is read
+                as markup, so anything that carries a name or value from
+                outside the app must be passed as ``Content`` (see
+                :func:`servonaut.utils.markup.literal`).
             consequences: List of consequences shown as bullet points.
             confirm_text: Exact text the user must type to enable confirm button.
             action_label: Label for the confirm button.
@@ -106,7 +109,9 @@ class ConfirmActionScreen(ModalScreen[bool]):
                     classes="dialog-emphasis",
                 ),
                 Static(
-                    Content.assemble('Type "', (self._confirm_text, "bold"), '" to confirm:'),
+                    Content.assemble(
+                        'Type "', literal(self._confirm_text, "bold"), '" to confirm:',
+                    ),
                     id="confirm_prompt",
                 ),
                 Input(placeholder=self._confirm_text, id="confirm_input"),

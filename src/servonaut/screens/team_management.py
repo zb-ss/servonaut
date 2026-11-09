@@ -17,6 +17,7 @@ from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._batch_status import failure_details
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
@@ -1635,7 +1636,7 @@ class TeamManagementScreen(WorkspaceScreen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Remove Member",
-                    description=f"Remove [bold]{markup_literal(email)} [/bold]from the team?",
+                    description=with_bold_values("Remove {} from the team?", email),
                     consequences=["Member will lose access to all shared servers"],
                     confirm_text=email,
                     action_label="Remove",

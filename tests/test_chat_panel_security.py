@@ -286,14 +286,13 @@ def test_refresh_messages_escapes_user_content(
     )
 
 
-def test_update_thinking_status_escapes_streamed_text(
+def test_update_thinking_status_shows_streamed_text_literally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A2 — token-stream accumulator escapes its content.
+    """The token-stream accumulator never parses its content as markup.
 
-    This is the most security-critical site: every token delta passes
-    through here, so an injected ``[link=evil]`` mid-stream would mount
-    a real Link widget if escaping were missing.
+    Every token delta passes through here, so an injected ``[link=evil]``
+    mid-stream must stay plain text with no link style.
     """
     panel = _build_panel()
     _attach_app(panel, monkeypatch)
@@ -301,7 +300,7 @@ def test_update_thinking_status_escapes_streamed_text(
     captured: list = []
 
     class _StubWidget:
-        def update(self, content: str) -> None:
+        def update(self, content) -> None:
             captured.append(content)
 
     panel.query_one = MagicMock(return_value=_StubWidget())  # type: ignore[assignment]
@@ -309,6 +308,5 @@ def test_update_thinking_status_escapes_streamed_text(
     panel._update_thinking_status("Hello [link=evil]click me[/link] world")
 
     assert captured, "No thinking-status update happened"
-    assert (
-        r"\[link=evil]click me\[/link]" in captured[0]
-    ), f"Thinking status leaked unescaped markup: {captured!r}"
+    assert "Hello [link=evil]click me[/link] world" in captured[0].plain
+    assert not any("link" in str(span.style) for span in captured[0].spans)

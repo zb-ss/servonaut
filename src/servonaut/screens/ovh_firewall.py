@@ -9,8 +9,10 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.content import Content
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
@@ -344,9 +346,8 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title=f"{action_word} Firewall",
-                description=(
-                    f"{action_word} the OVH firewall for "
-                    f"[bold]{self._display_ip}[/bold]."
+                description=with_bold_values(
+                    f"{action_word} the OVH firewall for {{}}.", self._display_ip,
                 ),
                 consequences=[
                     f"The firewall will be {'enabled' if new_state else 'disabled'}",
@@ -430,12 +431,14 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Add Firewall Rule",
-                description=(
-                    f"Add rule [bold]#{sequence}[/bold]: "
-                    f"{action.upper()} {protocol.upper()}"
-                    + (f" port {port_raw}" if port_raw else "")
-                    + (f" from {source}" if source else "")
-                    + f" on [bold]{self._display_ip}[/bold]."
+                description=Content.assemble(
+                    "Add rule ", literal(f"#{sequence}", "bold"), ": ",
+                    literal(
+                        f"{action.upper()} {protocol.upper()}"
+                        + (f" port {port_raw}" if port_raw else "")
+                        + (f" from {source}" if source else "")
+                    ),
+                    " on ", literal(self._display_ip, "bold"), ".",
                 ),
                 consequences=[
                     "The new rule will be applied to incoming traffic immediately",
@@ -503,9 +506,8 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete Firewall Rule",
-                description=(
-                    f"Delete firewall rule [bold]#{sequence}[/bold] "
-                    f"from [bold]{self._display_ip}[/bold]."
+                description=with_bold_values(
+                    "Delete firewall rule {} from {}.", f"#{sequence}", self._display_ip,
                 ),
                 consequences=[
                     "The rule will be permanently removed",

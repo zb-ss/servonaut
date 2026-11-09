@@ -81,10 +81,10 @@ def test_reinstall_targets_the_real_vps_and_shows_the_row(demo: bool) -> None:
     vps.reinstall.assert_awaited_once_with(VPS["id"], "img-1")
     assert app.ovh_audit.log_action.call_args.kwargs["target"] == VPS["id"]
     confirmation = confirm.call_args.kwargs
-    assert shown["name"] in confirmation["description"]
+    assert shown["name"] in str(confirmation["description"])
     if demo:
         for real in (VPS["id"], VPS["name"]):
-            assert real not in confirmation["description"]
+            assert real not in str(confirmation["description"])
             assert real not in str(notify.call_args_list)
 
 
@@ -110,7 +110,7 @@ def test_resize_targets_the_real_vps(demo: bool) -> None:
     vps.list_upgrade_models.assert_awaited_once_with(VPS["id"])
     vps.upgrade.assert_awaited_once_with(VPS["id"], "vps-comfort")
     if demo:
-        assert VPS["name"] not in confirm.call_args.kwargs["description"]
+        assert VPS["name"] not in str(confirm.call_args.kwargs["description"])
 
 
 @pytest.mark.parametrize("demo", [True, False])
@@ -143,7 +143,7 @@ def test_firewall_manages_the_real_address_and_shows_the_row(demo: bool) -> None
     ip_service.get_firewall.assert_awaited_once_with(VPS["public_ip"])
     ip_service.list_firewall_rules.assert_awaited_once_with(VPS["public_ip"])
     ip_service.toggle_firewall.assert_awaited_once_with(VPS["public_ip"], True)
-    description = confirm.call_args.kwargs["description"]
+    description = str(confirm.call_args.kwargs["description"])
     assert shown["public_ip"] in description
     if demo:
         assert VPS["public_ip"] not in description

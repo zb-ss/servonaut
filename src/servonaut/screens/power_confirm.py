@@ -14,12 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Tuple
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -96,18 +97,23 @@ class PowerActionConfirmModal(ModalScreen[bool]):
         self._consequence = consequence
 
     @property
-    def message(self) -> str:
-        """The question, with every interpolated value markup-escaped."""
-        return (
-            f"{escape(self._action)} [bold]{escape(self._server_name)}[/bold] "
-            f"({escape(self._provider)})?\n\n{escape(self._consequence)}"
+    def message(self) -> Content:
+        """The question; every interpolated value is shown literally."""
+        return Content.assemble(
+            literal(self._action),
+            " ",
+            literal(self._server_name, "bold"),
+            " (",
+            literal(self._provider),
+            ")?\n\n",
+            literal(self._consequence),
         )
 
     def compose(self) -> ComposeResult:
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                f"[bold $text-warning]{escape(self._action)} server[/bold $text-warning]",
+                literal(f"{self._action} server", "bold $text-warning"),
                 id="power_confirm_title",
             ),
             body=DialogBody(Static(self.message, id="power_confirm_message")),
@@ -159,7 +165,7 @@ async def confirm_and_run_power_action(
     server_name: str,
     provider: str,
     in_progress_verb: str,
-    set_status: Callable[[str], None],
+    set_status: Callable[[Content], None],
     run: Callable[[], Awaitable[None]],
     on_declined: Optional[Callable[[], None]] = None,
 ) -> bool:
@@ -178,7 +184,7 @@ async def confirm_and_run_power_action(
             a demo-mode placeholder stays a placeholder.
         provider: Provider label shown in the question.
         in_progress_verb: Status-line verb, e.g. ``"Stopping"``.
-        set_status: Writes the manager's status line (Rich markup).
+        set_status: Writes the manager's status line.
         run: Performs the action once confirmed.
         on_declined: Called when the user answers no.
 
@@ -195,6 +201,6 @@ async def confirm_and_run_power_action(
             if on_declined is not None:
                 on_declined()
             return False
-    set_status(f"[dim]{escape(in_progress_verb)} {escape(server_name)}…[/dim]")
+    set_status(literal(f"{in_progress_verb} {server_name}…", "dim"))
     await run()
     return True

@@ -124,6 +124,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Backend publisher receives fixed copy or literal Content built from "
                    "display_text-protected errors/heartbeat and existing demo-redacted client "
                    "IDs."),
+    AllowlistEntry("screens/tool_confirm_modal.py", "_show_overflow_cue", "update",
+                   "Only a fixed sentence and a line count; the arguments themselves "
+                   "are shown in the scroll box and are not part of this text."),
     AllowlistEntry("screens/bulk_action.py", "refresh_after_demo_toggle", "update",
                    "Descriptions are fixed copy or supplied by domain builders that "
                    "redact names and server labels individually before returning plain Text."),

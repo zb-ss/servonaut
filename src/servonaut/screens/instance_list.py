@@ -1216,8 +1216,8 @@ class InstanceListScreen(WorkspaceScreen):
         name = display_name(instance) or str(instance.get("id") or "Unnamed")
         provider = str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS"))
         address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
-        # Server-sourced text is content, never markup: a name such as
-        # "[ @click=...]" must neither crash the screen nor run an action.
+        # Server-sourced text is content, never markup: a name written like a
+        # markup link must neither crash the screen nor run an action.
         header.update(Content.assemble(
             literal(name, "bold $text-accent"),
             "  ",
@@ -1303,7 +1303,9 @@ class InstanceListScreen(WorkspaceScreen):
             # Scan output is raw text from the server: content, not markup.
             container.mount(Static(Content.assemble(
                 literal(f"Server: {server_id}", "bold"),
-                f"\n  Source: {source}\n  ",
+                "\n  ",
+                literal(f"Source: {source}"),
+                "\n  ",
                 literal(content, "dim"),
                 "\n",
             )))
@@ -1786,7 +1788,7 @@ class InstanceListScreen(WorkspaceScreen):
 
         if copy_to_clipboard(text):
             name = instance.get('name') or instance.get('id', '')
-            self.app.notify(f"Copied: {name}")
+            self.app.notify(f"Copied: {name}", markup=False)
         else:
             self.app.notify("Clipboard not available", severity="warning")
 

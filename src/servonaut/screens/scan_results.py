@@ -4,12 +4,14 @@ from __future__ import annotations
 from typing import List
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Footer, Static, Button, DataTable, TextArea
 from textual.worker import Worker
 
+from servonaut.utils.markup import inert_text
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
@@ -128,7 +130,11 @@ class ScanResultsScreen(WorkspaceScreen):
             # Replace newlines with spaces for table display
             content_display = _s(content_display.replace('\n', ' '))
 
-            table.add_row(source, content_display, timestamp)
+            table.add_row(
+                Text(inert_text(source)),
+                Text(inert_text(content_display)),
+                Text(inert_text(str(timestamp))),
+            )
         self._show_match(table.cursor_row)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -145,7 +151,7 @@ class ScanResultsScreen(WorkspaceScreen):
         source = str(match.get("source", "Unknown"))
         timestamp = str(match.get("timestamp", ""))
         content = str(match.get("content", ""))
-        document = f"Source: {source}\nTimestamp: {timestamp}\n\n{content}"
+        document = inert_text(f"Source: {source}\nTimestamp: {timestamp}\n\n{content}")
         if self.app.demo_mode and self.app.redaction_service:
             document = self.app.redaction_service.scrub_stream(document)
         detail.load_text(document)

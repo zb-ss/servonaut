@@ -16,6 +16,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._busy_work import BusyWork
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -380,10 +381,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Move Failover IP",
-                description=(
-                    f"Move [bold]{ip_addr}[/bold] to "
-                    f"[bold]{target}[/bold]."
-                ),
+                description=with_bold_values("Move {} to {}.", ip_addr, target),
                 consequences=[
                     "The IP will be detached from its current service",
                     "Connectivity to the current service via this IP will be lost",
@@ -500,7 +498,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete Reverse DNS",
-                description=f"Remove the reverse DNS record for [bold]{ip}[/bold].",
+                description=with_bold_values("Remove the reverse DNS record for {}.", ip),
                 consequences=[
                     "The existing PTR record will be deleted",
                     "Reverse DNS lookups for this IP will return no result",

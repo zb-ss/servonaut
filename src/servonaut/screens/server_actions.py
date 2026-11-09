@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from rich.markup import escape
 from rich.text import Text
@@ -34,6 +34,7 @@ from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
+from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -1376,7 +1377,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # the probed server — scrub before rendering, same posture as the
         # Memory screen and log viewer.
         if self.app.demo_mode and getattr(self.app, "redaction_service", None):
-            text = self.app.redaction_service.scrub_stream(text)
+            text = scrub(text, self.app.redaction_service.scrub_stream)
         panel.update(text)
 
     # ------------------------------------------------------------------

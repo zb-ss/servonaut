@@ -9,27 +9,29 @@ Two ModalScreen flavours, sized by the tool's ``guard_level``:
 
 Both present a brief blocking choice over the current conversation;
 dismissing the prompt returns to chat. All user-influenced strings (tool names,
-arg values from the model) are passed through ``rich.markup.escape``
-before interpolation — the model output can contain rich-markup
-metacharacters and we don't want a malformed brace to corrupt the row.
+arg values from the model) are built as ``Content`` and never parsed as
+markup, so what the user approves is exactly what the model sent.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.utils.markup import literal
 from servonaut.widgets.dialogs import (
+    DIALOG_VERTICAL_BREAKPOINTS,
     DialogActions,
-    DialogBody,
+    DialogContent,
     DialogFrame,
     DialogNotificationSpace,
 )
@@ -38,25 +40,69 @@ from servonaut.widgets.safe_header import SafeHeader
 logger = logging.getLogger(__name__)
 
 
-# Maximum displayed length per arg value before we truncate. Models
-# can dump multi-KB blobs into args (e.g. file content for transfer);
-# long values blow out the modal layout.
-_MAX_ARG_VALUE_LEN = 200
+# How to reach the rest, per modal. Both start with a button or the
+# typed-confirm input focused, so the text box is one Shift+Tab away from the
+# input and two from the standard modal's Cancel button.
+_CUE_HOW = {
+    "tool": "Shift+Tab until the text is focused, then the arrow keys, or the mouse.",
+    "dangerous": "Shift+Tab, then the arrow keys, or the mouse.",
+}
+
+
+def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
+    """Say how much of the arguments is still below the box.
+
+    What the user approves must be readable in full: a cut with no sign of it
+    would let a long value hide its tail. The line keeps its row while the
+    text is longer than the box, so scrolling never moves the layout.
+    """
+    try:
+        scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+        cue = screen.query_one(f"#{prefix}_confirm_more", Static)
+    except Exception:  # pragma: no cover - modal closed meanwhile
+        return
+    cue.display = scroll.max_scroll_y > 0
+    remaining = math.ceil(scroll.max_scroll_y - scroll.scroll_y)
+    if remaining > 0:
+        cue.update(f"{remaining} more lines below: {_CUE_HOW[prefix]}")
+    else:
+        cue.update("End of the text.")
+
+
+def _follow_scroll(screen: ModalScreen, prefix: str) -> None:
+    """Keep the cue in step with the scroll position (keys, wheel, scrollbar)."""
+    scroll = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+    screen.watch(scroll, "scroll_y", lambda _old, _new: _show_overflow_cue(screen, prefix))
+    screen.call_after_refresh(_show_overflow_cue, screen, prefix)
+
+
+def _arguments_box(args: Dict[str, Any], prefix: str) -> list:
+    """The scrolling argument text and the cue that follows its position."""
+    return [
+        VerticalScroll(
+            Static(_format_args(args), id=f"{prefix}_confirm_args"),
+            id=f"{prefix}_confirm_scroll",
+            classes="dialog-arg-scroll",
+        ),
+        Static("", id=f"{prefix}_confirm_more", classes="dialog-scroll-cue"),
+    ]
+
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
 # wrong values leave the modal open and show a correction hint.
 _DANGEROUS_CONFIRM_WORD = "RUN"
 
 
-def _format_args(args: Dict[str, Any]) -> str:
-    """Render an args dict as escaped ``key: value`` pairs, one per line.
+def _format_args(args: Dict[str, Any]) -> Content:
+    """Render an args dict as ``key: value`` lines, one per argument.
 
-    Long values are truncated with an ellipsis. Non-string values are
-    JSON-serialised for compact display so a list of paths shows up
-    without Python's repr noise.
+    Every value is shown in full: the user approves what is displayed, so
+    nothing may be cut or hidden. The argument area scrolls. Non-string
+    values are JSON-serialised for compact display so a list of paths shows
+    up without Python's repr noise.
     """
     if not args:
-        return "[dim]<no arguments>[/dim]"
+        return Content.styled("<no arguments>", "dim")
     lines = []
     for key, value in args.items():
         if isinstance(value, str):
@@ -66,10 +112,8 @@ def _format_args(args: Dict[str, Any]) -> str:
                 display = json.dumps(value, default=str)
             except (TypeError, ValueError):
                 display = str(value)
-        if len(display) > _MAX_ARG_VALUE_LEN:
-            display = display[: _MAX_ARG_VALUE_LEN - 3] + "..."
-        lines.append(f"[dim]{escape(str(key))}:[/dim] {escape(display)}")
-    return "\n".join(lines)
+        lines.append(Content.assemble(literal(f"{key}:", "dim"), " ", literal(display)))
+    return Content("\n").join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +135,7 @@ class ToolConfirmModal(ModalScreen[bool]):
     ]
 
     AUTO_FOCUS = "#btn_tool_cancel"
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(classes="dialog-screen")
@@ -102,17 +147,17 @@ class ToolConfirmModal(ModalScreen[bool]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                f"[bold $text-accent]{escape(self._tool)}[/bold $text-accent]",
+                literal(self._tool, "bold $text-accent"),
                 id="tool_confirm_title",
             ),
-            body=DialogBody(
+            body=DialogContent(
                 Static(
                     "Servonaut AI wants to run this tool. "
                     "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
                     id="tool_confirm_body",
                     classes="dialog-description",
                 ),
-                Static(_format_args(self._args), id="tool_confirm_args"),
+                *_arguments_box(self._args, "tool"),
             ),
             actions=DialogActions(
                 Button("Confirm", id="btn_tool_confirm", variant="primary"),
@@ -122,6 +167,12 @@ class ToolConfirmModal(ModalScreen[bool]):
             id="tool_confirm_container",
         )
         yield Footer()
+
+    def on_mount(self) -> None:
+        _follow_scroll(self, "tool")
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "tool")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_tool_confirm":
@@ -156,6 +207,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
     ]
 
     AUTO_FOCUS = "#dangerous_confirm_input"
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     DEFAULT_CSS = """
     DangerousToolConfirmModal #dangerous_confirm_error {
@@ -179,13 +231,14 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-error]Dangerous tool: "
-                f"{escape(self._tool)}[/bold $text-error]",
+                Content.assemble(
+                    Content.styled("Dangerous tool:", "bold $text-error"),
+                    " ",
+                    literal(self._tool, "bold $text-error"),
+                ),
                 id="dangerous_confirm_title",
             ),
-            body=DialogBody(
-                Static(_format_args(self._args), id="dangerous_confirm_args"),
-            ),
+            body=DialogContent(*_arguments_box(self._args, "dangerous")),
             status=Vertical(
                 Static(
                     "Servonaut AI wants to run a [bold]potentially destructive[/bold] tool. "
@@ -208,7 +261,11 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         )
         yield Footer()
 
+    def on_resize(self) -> None:
+        self.call_after_refresh(_show_overflow_cue, self, "dangerous")
+
     def on_mount(self) -> None:
+        _follow_scroll(self, "dangerous")
         # Focus the input so the user can type immediately.
         try:
             self.query_one("#dangerous_confirm_input", Input).focus()

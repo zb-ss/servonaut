@@ -255,7 +255,7 @@ class TestMemoryPanelRender:
         # provider "" → store scans every provider directory
         mem.get_all_modules.assert_called_once()
         assert mem.get_all_modules.call_args.args[1] == ""
-        assert "No memory cached" in updated["text"]
+        assert "No memory cached" in str(updated["text"])
 
     def test_render_disabled_shows_disabled_message(self):
         fake_app = _FakeApp()

@@ -198,18 +198,18 @@ async def test_reinstall_shows_provider_names_literally() -> None:
     async with app.run_test(size=(155, 47)) as pilot:
         await _open_confirmation(app, pilot, dict(VPS, name="web-[b]1[/b]"))
         description = app.screen._description
-        assert "Reinstall [bold]web-\\[b]1\\[/b][/bold] with" in description
-        assert "[bold]Debian \\[red]12\\[/red][/bold]." in description
+        assert "Reinstall web-[b]1[/b] with Debian [red]12[/red]." == description.plain
+        assert [str(s.style) for s in description.spans] == ["bold", "bold"]
 
 
 @pytest.mark.parametrize(
     "instance, heading",
     [
-        (dict(VPS, name="web-[b]1[/b]", os="Debian [red]12"), "OVH Server: web-\\[b]1\\[/b]"),
+        (dict(VPS, name="web-[b]1[/b]", os="Debian [red]12"), "OVH Server: web-[b]1[/b]"),
         ({"id": "custom-1", "name": "web-[b]1[/b]", "is_custom": True,
-          "public_ip": "10.0.0.5", "group": "[i]edge"}, "Server: web-\\[b]1\\[/b]"),
+          "public_ip": "10.0.0.5", "group": "[i]edge"}, "Server: web-[b]1[/b]"),
         ({"id": "i-0abc", "name": "web-[b]1[/b]", "public_ip": "9.9.9.9",
-          "region": "eu-west-1", "state": "running"}, "Server: web-\\[b]1\\[/b]"),
+          "region": "eu-west-1", "state": "running"}, "Server: web-[b]1[/b]"),
     ],
     ids=["ovh", "custom", "aws"],
 )
@@ -222,7 +222,12 @@ def test_server_info_shows_names_literally(instance, heading) -> None:
         info = screen._build_server_info()
 
     plain = info.plain
-    assert "web-[b]1[/b]" in plain
+    name = "web-[b]1[/b]"
+    assert any(
+        plain[span.start:span.end] == name and str(span.style) == "bold $text-accent"
+        for span in info.spans
+    )
+    assert name in plain
     if "os" in instance:
         assert "OS: Debian [red]12" in plain
     if "group" in instance:

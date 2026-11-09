@@ -11,7 +11,6 @@ import asyncio
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
-from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -21,6 +20,7 @@ from textual.widgets import (
 )
 
 from servonaut.screens._busy_work import BusyWork
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -634,16 +634,22 @@ class OVHCloudCreateScreen(WorkspaceScreen):
 
         # With several accounts, say which one is billed.
         account = (
-            f" in account [bold]{escape(shown_label(self.app, self._account))}[/bold]"
+            shown_label(self.app, self._account)
             if len(provider_accounts(self.app, "ovh")) > 1 else ""
         )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Create Cloud Instance",
                 description=(
-                    f"Create instance [bold]{name}[/bold] in [bold]{region}[/bold] "
-                    f"using [bold]{flavor_name}[/bold] / [bold]{image_name}[/bold]"
-                    f"{account}."
+                    with_bold_values(
+                        "Create instance {} in {} using {} / {} in account {}.",
+                        name, region, flavor_name, image_name, account,
+                    )
+                    if account
+                    else with_bold_values(
+                        "Create instance {} in {} using {} / {}.",
+                        name, region, flavor_name, image_name,
+                    )
                 ),
                 consequences=[
                     cost_line,

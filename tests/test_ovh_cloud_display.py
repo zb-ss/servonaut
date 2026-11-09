@@ -63,8 +63,8 @@ def test_key_deletion_redacts_confirmation_but_preserves_api_target(is_demo: boo
     ):
         asyncio.run(screen._do_delete(key))
     confirmation = app.push_screen_wait.call_args.args[0]
-    assert ("private-project" not in confirmation._description) is is_demo
-    assert ("private-key-name" not in confirmation._description) is is_demo
+    assert ("private-project" not in str(confirmation._description)) is is_demo
+    assert ("private-key-name" not in str(confirmation._description)) is is_demo
     assert ("private-key-name" != confirmation._confirm_text) is is_demo
     app.ovh_cloud_service.delete_ssh_key.assert_awaited_once_with("private-project", "private-key-id")
 

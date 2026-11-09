@@ -349,7 +349,7 @@ async def test_hetzner_create_uses_the_chosen_project(accounts, config):
         screen.query_one("#hetzner_input_name", Input).value = "db-1"
         with patch.object(type(app), "push_screen_wait", AsyncMock(return_value=True)) as ask:
             await screen._on_create()
-        assert "in project [bold]staging[/bold]" in ask.call_args.args[0]._description
+        assert ask.call_args.args[0]._description.plain.endswith("in project staging.")
 
     created = [c for c in accounts.hetzner["staging"].calls if c[0] == "create_server"]
     assert created and created[0][1]["ssh_keys"] == ["staging-key"]
@@ -461,7 +461,7 @@ async def test_ovh_cloud_create_uses_the_chosen_accounts_project(accounts, confi
         screen.query_one("#input_name", Input).value = "batch-1"
         with patch.object(type(app), "push_screen_wait", AsyncMock(return_value=True)) as ask:
             await screen._on_create()
-        assert "in account [bold]ca[/bold]" in ask.call_args.args[0]._description
+        assert ask.call_args.args[0]._description.plain.endswith("in account ca.")
 
     audit = app.ovh_audit.log_action.call_args.kwargs
     assert (audit["target"], audit["details"]["account"]) == ("proj-ca", "ca")
