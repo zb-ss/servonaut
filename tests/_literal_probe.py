@@ -1,6 +1,6 @@
 """Shared checks for screens that show text chosen outside the app.
 
-A screen is literal when a name such as ``a[@click=app.pwn]b[/]`` is drawn as
+A screen is literal when a name such as ``a[@click=app.ran]b[/]`` is drawn as
 typed, nothing on screen carries a click action or a link, and a name that is
 not valid markup (``key-1[/]``) does not stop the screen from drawing.
 
@@ -17,12 +17,12 @@ import pytest
 
 from servonaut.utils import markup_backstop
 
-CLICK = "x[@click=app.pwn]y[/]"
+CLICK = "x[@click=app.ran]y[/]"
 CRASH = "key-1[/]"
 # Each of these defeats one of the escape helpers: Rich's escape leaves a tag
 # with a leading space, and a bracket-only escape is undone by a backslash.
-SPACED_CLICK = "[ @click=app.pwn]x[/]"
-BACKSLASH_CLICK = "\\[@click=app.pwn]x\\[/]"
+SPACED_CLICK = "[ @click=app.ran]x[/]"
+BACKSLASH_CLICK = "\\[@click=app.ran]x\\[/]"
 BACKSLASH_CRASH = "a\\[/]b\\"
 PAYLOADS = {
     "click": CLICK,

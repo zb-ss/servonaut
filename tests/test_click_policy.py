@@ -146,8 +146,8 @@ class _Body(Screen):
     def compose(self):
         if self.mode == "static":
             yield Static(
-                "[@click=app.pwn]a[/] [@click=screen.start]b[/] [@click=app.quit]c[/] "
-                "[@click=app.toggle_demo]d[/] [@click=pwn]e[/] [@click=app.focus('x')]f[/]",
+                "[@click=app.ran]a[/] [@click=screen.start]b[/] [@click=app.quit]c[/] "
+                "[@click=app.toggle_demo]d[/] [@click=record]e[/] [@click=app.focus('x')]f[/]",
                 id="target",
             )
         elif self.mode == "table":
@@ -170,21 +170,21 @@ class _Body(Screen):
             yield Static("base")
 
 
-class _HostileApp(ServonautApp):
+class _OutsideTextApp(ServonautApp):
     def __init__(self, mode: str) -> None:
         super().__init__()
         # The app installs the parser backstop when it starts; this test is
         # about the click policy alone.
         markup_backstop.uninstall()
         self.mode = mode
-        self.pwned = 0
+        self.ran = 0
         self.modal_result = "unset"
 
     def on_mount(self, event) -> None:  # skip the real start-up
         event.prevent_default()
 
-    def action_pwn(self) -> None:
-        self.pwned += 1
+    def action_ran(self) -> None:
+        self.ran += 1
 
     def get_default_screen(self):
         return _Body(self.mode)
@@ -223,13 +223,13 @@ def raw_parsers():
 
 @pytest.mark.asyncio
 async def test_actions_named_by_static_text_do_nothing(raw_parsers) -> None:
-    app = _HostileApp("static")
+    app = _OutsideTextApp("static")
     demo_before = app.demo_mode
     async with app.run_test(size=(100, 12)) as pilot:
         await pilot.pause()
         assert _clickable_cells(app), "the sample text must carry actions for the test to mean anything"
         await _click_every_cell(pilot, app)
-        assert app.pwned == 0
+        assert app.ran == 0
         assert app.screen.started == 0
         assert app.demo_mode == demo_before
         assert app.is_running
@@ -237,22 +237,22 @@ async def test_actions_named_by_static_text_do_nothing(raw_parsers) -> None:
 
 @pytest.mark.asyncio
 async def test_actions_named_by_a_table_cell_do_nothing(raw_parsers) -> None:
-    app = _HostileApp("table")
+    app = _OutsideTextApp("table")
     async with app.run_test(size=(100, 12)) as pilot:
         table = app.query_one(DataTable)
         table.add_columns("name", "n")
         table.add_row("a", "1")
-        table.add_row("[@click=app.pwn]evil[/] [@click=screen.start]go[/]", "2")
+        table.add_row("[@click=app.ran]name[/] [@click=screen.start]go[/]", "2")
         await pilot.pause()
         assert _clickable_cells(app)
         await _click_every_cell(pilot, app)
-        assert app.pwned == 0
+        assert app.ran == 0
         assert app.screen.started == 0
 
 
 @pytest.mark.asyncio
 async def test_a_modal_cannot_be_answered_by_text_inside_it(raw_parsers) -> None:
-    app = _HostileApp("none")
+    app = _OutsideTextApp("none")
     async with app.run_test(size=(100, 12)) as pilot:
         app.push_screen(_Confirm(), callback=lambda result: setattr(app, "modal_result", result))
         await pilot.pause()
@@ -266,7 +266,7 @@ async def test_a_modal_cannot_be_answered_by_text_inside_it(raw_parsers) -> None
 async def test_markdown_links_open_only_web_addresses(raw_parsers, monkeypatch) -> None:
     opened: list[str] = []
     monkeypatch.setattr(App, "open_url", lambda self, url, *, new_tab=True: opened.append(url))
-    app = _HostileApp("markdown")
+    app = _OutsideTextApp("markdown")
     async with app.run_test(size=(100, 12), notifications=True) as pilot:
         await pilot.pause()
         cells = _clickable_cells(app)
@@ -278,7 +278,7 @@ async def test_markdown_links_open_only_web_addresses(raw_parsers, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_scroll_bar_track_still_scrolls(raw_parsers) -> None:
-    app = _HostileApp("scroll")
+    app = _OutsideTextApp("scroll")
     async with app.run_test(size=(60, 12)) as pilot:
         await pilot.pause()
         scroller = app.query_one("#target")
@@ -292,7 +292,7 @@ async def test_scroll_bar_track_still_scrolls(raw_parsers) -> None:
 
 @pytest.mark.asyncio
 async def test_scroll_bar_thumb_can_be_dragged(raw_parsers) -> None:
-    app = _HostileApp("scroll")
+    app = _OutsideTextApp("scroll")
     async with app.run_test(size=(60, 12)) as pilot:
         await pilot.pause()
         scroller = app.query_one("#target")
@@ -308,7 +308,7 @@ async def test_scroll_bar_thumb_can_be_dragged(raw_parsers) -> None:
 async def test_a_link_in_a_markdown_table_cell_opens_through_the_web_check(raw_parsers, monkeypatch) -> None:
     opened: list[str] = []
     monkeypatch.setattr(App, "open_url", lambda self, url, *, new_tab=True: opened.append(url))
-    app = _HostileApp("markdown_table")
+    app = _OutsideTextApp("markdown_table")
     async with app.run_test(size=(100, 14)) as pilot:
         await pilot.pause()
         cells = _clickable_cells(app)

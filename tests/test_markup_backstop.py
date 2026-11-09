@@ -3,7 +3,7 @@
 1. Fingerprints. The backstop replaces two parser functions and relies on how
    Textual and Rich call them. Each test fails when an upgrade changes what the
    backstop depends on, so a new Textual or Rich cannot silently bypass it.
-2. Behaviour. Hostile strings through every parser path are inert, in real
+2. Behaviour. Strings from outside the app through every parser path are inert, in real
    widgets, and the app's own styling survives.
 """
 from __future__ import annotations
@@ -125,7 +125,7 @@ def test_uninstall_and_suspended_restore_the_upstream_parsers() -> None:
 # Parsers
 # ---------------------------------------------------------------------------
 
-HOSTILE = [
+OUTSIDE_STRINGS = [
     "[@click=app.quit]x[/]",
     "[ @click=app.quit]x",
     "[$accent @click=screen.dismiss(True)]x",
@@ -155,13 +155,13 @@ def _rich_style_is_inert(style) -> bool:
     return "link" not in words and not any(word.startswith("@") for word in words)
 
 
-@pytest.mark.parametrize("sample", HOSTILE)
+@pytest.mark.parametrize("sample", OUTSIDE_STRINGS)
 def test_textual_parse_is_inert(sample: str) -> None:
     content = Content.from_markup(f"[b]Name:[/b] {sample}")
     assert all(_textual_style_is_inert(span.style) for span in content.spans)
 
 
-@pytest.mark.parametrize("sample", HOSTILE)
+@pytest.mark.parametrize("sample", OUTSIDE_STRINGS)
 def test_rich_parse_is_inert(sample: str) -> None:
     text = Text.from_markup(f"[b]Name:[/b] {sample}")
     assert all(_rich_style_is_inert(span.style) for span in text.spans)
@@ -253,7 +253,7 @@ def _widgets(payload: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["static", "label", "button", "option_list", "select", "tree", "table"])
 @pytest.mark.parametrize("payload", PAYLOADS)
-async def test_widgets_draw_hostile_text_with_nothing_clickable(kind: str, payload: str) -> None:
+async def test_widgets_draw_outside_text_with_nothing_clickable(kind: str, payload: str) -> None:
     app = _Host(_widgets(payload)[kind])
     async with app.run_test(size=(100, 30)) as pilot:
         if kind == "table":

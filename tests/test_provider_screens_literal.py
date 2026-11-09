@@ -17,7 +17,7 @@ from tests.test_cloud_screens_multi_account import (
 class LiteralHost(Host):
     CSS_PATH = ServonautApp.CSS_PATH
 
-    def action_pwn(self) -> None:  # an action a hostile name could name
+    def action_ran(self) -> None:  # an action an outside name could name
         raise AssertionError("an action named by a provider name must not run")
 
 

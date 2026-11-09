@@ -1,6 +1,6 @@
 """Names from a teammate, a server or an AWS caller are drawn literally.
 
-Each test puts a hostile name where the screen reads it, with the parser
+Each test puts an outside name where the screen reads it, with the parser
 backstop uninstalled, and checks the three things a safe screen does: the name
 is on screen as typed, nothing on screen carries an action or a link, and a
 name that is not valid markup does not stop the screen from drawing.
@@ -41,7 +41,7 @@ class _Host(App):
         for key, value in attrs.items():
             setattr(self, key, value)
 
-    def action_pwn(self) -> None:
+    def action_ran(self) -> None:
         raise AssertionError("an action named by outside text must not run")
 
     def on_mount(self) -> None:

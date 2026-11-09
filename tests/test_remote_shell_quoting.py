@@ -2,7 +2,7 @@
 
 Any local account on a managed server can create a file called ``x;cmd;.log``
 or ``$(cmd)``. Each builder that interpolates such a name into a remote command
-is exercised here with hostile names, and the command is also run locally under
+is exercised here with outside names, and the command is also run locally under
 ``sh -c`` against a temporary directory to show that nothing extra executes.
 """
 from __future__ import annotations
@@ -22,9 +22,9 @@ from servonaut.services.scan_service import ScanService
 from servonaut.utils.remote_shell import shell_path, shell_word
 from servonaut.widgets.remote_tree import RemoteTree
 
-MARKER = "injected-marker"
+MARKER = "marker-file"
 
-HOSTILE_NAMES = {
+OUTSIDE_NAMES = {
     "semicolon": f"x;touch {MARKER};.log",
     "space": "a b c.log",
     "substitution": f"$(touch {MARKER}).log",
@@ -77,14 +77,14 @@ def _local_path(name: str, directory) -> str:
     return name if name.startswith("-") else str(directory / name)
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES.values(), ids=HOSTILE_NAMES.keys())
+@pytest.mark.parametrize("name", OUTSIDE_NAMES.values(), ids=OUTSIDE_NAMES.keys())
 def test_shell_word_is_one_inert_word(name, tmp_path):
     (tmp_path / name).write_text("content\n")
     assert _sh(f"cat {shell_word(name)}", tmp_path) == "content\n"
     assert not (tmp_path / MARKER).exists()
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES.values(), ids=HOSTILE_NAMES.keys())
+@pytest.mark.parametrize("name", OUTSIDE_NAMES.values(), ids=OUTSIDE_NAMES.keys())
 def test_tail_command_runs_nothing_extra(service, name, tmp_path):
     (tmp_path / name).write_text("line one\n")
     command = service.get_tail_command(_local_path(name, tmp_path), num_lines=5, follow=False)
@@ -92,7 +92,7 @@ def test_tail_command_runs_nothing_extra(service, name, tmp_path):
     assert not (tmp_path / MARKER).exists()
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES.values(), ids=HOSTILE_NAMES.keys())
+@pytest.mark.parametrize("name", OUTSIDE_NAMES.values(), ids=OUTSIDE_NAMES.keys())
 def test_rotated_read_command_runs_nothing_extra(service, name, tmp_path):
     rotated = f"{name}.1"
     (tmp_path / rotated).write_text("old line\n")
@@ -101,7 +101,7 @@ def test_rotated_read_command_runs_nothing_extra(service, name, tmp_path):
     assert not (tmp_path / MARKER).exists()
 
 
-def test_tail_command_quotes_a_hostile_name(service):
+def test_tail_command_quotes_an_outside_name(service):
     command = service.get_tail_command("/var/log/x;reboot;.log", follow=True)
     assert command == "tail -n 100 -f '/var/log/x;reboot;.log'"
 
@@ -218,8 +218,8 @@ def _run_locally(cwd):
     return run
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES.values(), ids=HOSTILE_NAMES.keys())
-def test_expanding_a_directory_with_a_hostile_name_runs_nothing_extra(name, tmp_path):
+@pytest.mark.parametrize("name", OUTSIDE_NAMES.values(), ids=OUTSIDE_NAMES.keys())
+def test_expanding_a_directory_with_an_outside_name_runs_nothing_extra(name, tmp_path):
     directory = tmp_path / name
     directory.mkdir()
     (directory / "inside.txt").write_text("")
