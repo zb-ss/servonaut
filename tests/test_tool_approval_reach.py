@@ -98,3 +98,26 @@ async def test_typing_run_still_confirms_after_scrolling_with_the_input_focused(
         await pilot.press("enter")
         await pilot.pause(0.1)
     assert app.dismissed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("long_undo", [False, True])
+async def test_the_remediation_command_is_drawn_and_reachable(size, long_undo) -> None:
+    from servonaut.screens.remediation_confirm import RemediationConfirmModal
+    from tests.test_safety_dialogs import make_preview
+
+    preview = make_preview(long=True, long_undo=long_undo)
+    app = _Host(RemediationConfirmModal(preview, dry_run=False))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause(0.5)
+        body = app.screen.query_one("#remediation_confirm_scroll", VerticalScroll)
+        assert body.size.height >= 3
+        drawn = _drawn(app)
+        assert "Exact command (server-signed):" in drawn
+        assert "example step 1 [red]literal[/red]" in drawn
+        body.scroll_end(animate=False)
+        await pilot.pause(0.3)
+        assert "example step 45 [red]literal[/red]" in _drawn(app)
+        for button in app.screen.query(Button):
+            assert button.region.area > 0 and button.region.bottom <= app.size.height

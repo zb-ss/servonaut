@@ -27,6 +27,7 @@ from textual.widgets import Button, Input, Static
 
 from servonaut.utils.markup import literal
 from servonaut.widgets.dialogs import (
+    DIALOG_VERTICAL_BREAKPOINTS,
     DialogActions,
     DialogBody,
     DialogFrame,
@@ -88,12 +89,24 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
     ]
 
     AUTO_FOCUS = "#remediation_confirm_input"
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     DEFAULT_CSS = """
     RemediationConfirmModal .remediation-undo {
         height: auto;
         max-height: 3;
         overflow-x: hidden;
+    }
+
+    /* The command being approved always keeps a few rows; the undo box,
+       which is capped above, gives way first. */
+    RemediationConfirmModal #remediation_confirm_scroll {
+        min-height: 3;
+    }
+
+    RemediationConfirmModal.-dialog-tight .remediation-undo,
+    RemediationConfirmModal.-dialog-minimal .remediation-undo {
+        max-height: 1;
     }
     """
 
