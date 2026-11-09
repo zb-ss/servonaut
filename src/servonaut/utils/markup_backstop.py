@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import inspect
 from typing import Any, Callable, Iterator
 
 import rich.console
@@ -132,43 +133,66 @@ def safe_to_content(markup: str, *args: Any, **kwargs: Any) -> Content:
 
 def original_textual_parser() -> Callable[..., Content]:
     """Textual's own markup parser, whether or not the backstop is installed."""
-    return _upstream.get("textual") or textual.markup.to_content
+    return inspect.unwrap(textual.markup.to_content)
 
 
 def original_rich_parser() -> Callable[..., Text]:
     """Rich's own markup parser, whether or not the backstop is installed."""
-    return _upstream.get("rich") or rich.markup.render
+    return inspect.unwrap(rich.markup.render)
+
+
+def _in_chain(function: Callable[..., Any], target: Callable[..., Any]) -> bool:
+    """Whether *target* is *function* or sits beneath it (wrappers set ``__wrapped__``)."""
+    seen = set()
+    while function is not None and id(function) not in seen:
+        if function is target:
+            return True
+        seen.add(id(function))
+        function = getattr(function, "__wrapped__", None)
+    return False
 
 
 def installed() -> bool:
-    return bool(_upstream)
+    """Whether the safe parsers are live right now: the live parsers are, or wrap, them.
+
+    Read from the bindings themselves, so a test harness that replaced a
+    parser (and restored it) cannot leave this answering from stale state.
+    A harness checker placed on top of the safe parsers still counts.
+    """
+    return (
+        _in_chain(textual.markup.to_content, safe_to_content)
+        and _in_chain(rich.markup.render, safe_rich_render)
+        and rich.console.render_markup is safe_rich_render
+    )
 
 
 def install() -> None:
-    """Put the safe parsers in place. Safe to call repeatedly."""
-    if installed():
-        return
-    _upstream["textual"] = textual.markup.to_content
-    _upstream["rich"] = rich.markup.render
-    # ``inspect.unwrap`` finds the upstream parser from the wrapper.
-    safe_to_content.__wrapped__ = _upstream["textual"]  # type: ignore[attr-defined]
-    safe_rich_render.__wrapped__ = _upstream["rich"]  # type: ignore[attr-defined]
-    textual.markup.to_content = safe_to_content
-    rich.markup.render = safe_rich_render
+    """Make the safe parsers live. Safe to call repeatedly.
+
+    A parser that already is, or wraps, the safe one is left as it is. Any
+    other (the upstream parser, or a harness checker around it) is wrapped, and
+    the wrapper calls it, so installing never hides a layer beneath it.
+    """
+    if not _in_chain(textual.markup.to_content, safe_to_content):
+        _upstream["textual"] = textual.markup.to_content
+        safe_to_content.__wrapped__ = _upstream["textual"]  # type: ignore[attr-defined]
+        textual.markup.to_content = safe_to_content
+    if not _in_chain(rich.markup.render, safe_rich_render):
+        _upstream["rich"] = rich.markup.render
+        safe_rich_render.__wrapped__ = _upstream["rich"]  # type: ignore[attr-defined]
+        rich.markup.render = safe_rich_render
     # ``Console.render_str`` reads its own module-level binding.
     rich.console.render_markup = safe_rich_render
 
 
 def uninstall() -> None:
-    """Restore the upstream parsers (for tests that need the raw behaviour)."""
-    if not installed():
-        return
-    textual.markup.to_content = _upstream["textual"]
-    rich.markup.render = _upstream["rich"]
-    rich.console.render_markup = _upstream["rich"]
-    del safe_to_content.__wrapped__  # type: ignore[attr-defined]
-    del safe_rich_render.__wrapped__  # type: ignore[attr-defined]
-    _upstream.clear()
+    """Restore the parsers the backstop wrapped (for tests that need the raw behaviour)."""
+    if textual.markup.to_content is safe_to_content:
+        textual.markup.to_content = _upstream["textual"]
+    if rich.markup.render is safe_rich_render:
+        rich.markup.render = _upstream["rich"]
+    if rich.console.render_markup is safe_rich_render:
+        rich.console.render_markup = rich.markup.render
 
 
 @contextlib.contextmanager
