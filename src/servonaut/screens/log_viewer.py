@@ -19,6 +19,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Static, RichLog
 
 from servonaut.utils.markup import literal
+from servonaut.utils.ssh_names import SSHNameError
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
@@ -273,16 +274,24 @@ class LogViewerScreen(Screen):
             self.query_one("#log_output", RichLog).write(Text(message, style="red"))
             self.app.notify(message, severity="error", markup=False)
             return
-        ssh_cmd = self.app.ssh_service.build_ssh_command(
-            host=conn["host"],
-            username=conn["username"],
-            key_path=conn["key_path"],
-            proxy_args=conn["proxy_args"],
-            remote_command=read_cmd,
-            port=conn["port"],
-            extra_options=conn.get("extra_options") or [],
-            **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
-        )
+        try:
+            ssh_cmd = self.app.ssh_service.build_ssh_command(
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn["key_path"],
+                proxy_args=conn["proxy_args"],
+                remote_command=read_cmd,
+                port=conn["port"],
+                extra_options=conn.get("extra_options") or [],
+                **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
+            )
+        except SSHNameError as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
 
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
 

@@ -36,6 +36,7 @@ from servonaut.services.ssh_host_keys import (
     HostKeyTarget,
     detect_host_key_problem,
 )
+from servonaut.utils.ssh_names import SSHNameError
 
 # TYPE_CHECKING import for sync service (break circular dep at runtime)
 if TYPE_CHECKING:
@@ -65,6 +66,7 @@ _STOPPED_MESSAGE = (
 
 #: ``ModuleBuildFailure.reason`` when the server's vault key cannot be used.
 VAULT_CREDENTIAL_FAILURE = "vault_credential_unavailable"
+BAD_SSH_NAME_FAILURE = "ssh_bad_name"
 #: ``ModuleBuildFailure.reason`` when the Servonaut service rate-limited the
 #: server's vault key lookup twice (after waiting for its Retry-After once).
 VAULT_RATE_LIMITED = "vault_rate_limited"
@@ -1799,19 +1801,24 @@ class MemoryService(MemoryServiceInterface):
                 remote_command is not None and "ControlMaster=no" in control_options
                 and "ControlPath=none" not in control_options
             )
-            return ssh_service.build_ssh_command(
-                host=resolved["host"],
-                username=resolved["username"],
-                key_path=resolved.get("key_path"),
-                proxy_args=[] if bound else (resolved.get("proxy_args") or []),
-                remote_command=remote_command,
-                port=resolved.get("port"),
-                extra_options=[
-                    *(["ProxyCommand=false"] if bound else []),
-                    "BatchMode=yes", *control_options, *(resolved.get("extra_options") or []),
-                ],
-                **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
-            )
+            try:
+                return ssh_service.build_ssh_command(
+                    host=resolved["host"],
+                    username=resolved["username"],
+                    key_path=resolved.get("key_path"),
+                    proxy_args=[] if bound else (resolved.get("proxy_args") or []),
+                    remote_command=remote_command,
+                    port=resolved.get("port"),
+                    extra_options=[
+                        *(["ProxyCommand=false"] if bound else []),
+                        "BatchMode=yes", *control_options, *(resolved.get("extra_options") or []),
+                    ],
+                    **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
+                )
+            except SSHNameError as exc:
+                # Every probe command is refused alike: report the reason once.
+                _record_problem(BAD_SSH_NAME_FAILURE, str(exc))
+                raise
 
         def _classify(exc: CalledProcessError) -> Optional[str]:
             """Why ssh itself failed in *exc* (None: the remote command ran); records a refused host key."""
@@ -2037,7 +2044,7 @@ class MemoryService(MemoryServiceInterface):
                 if known is None:
                     return None
                 # Every later command would fail the same way: stop connecting.
-                if known.reason in (VAULT_CREDENTIAL_FAILURE, VAULT_RATE_LIMITED):
+                if known.reason in (VAULT_CREDENTIAL_FAILURE, VAULT_RATE_LIMITED, BAD_SSH_NAME_FAILURE):
                     raise VaultCredentialError(known.message)
                 return "", known.message, SSH_FAILURE_EXIT_CODE
 

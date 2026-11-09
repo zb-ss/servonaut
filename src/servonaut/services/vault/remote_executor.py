@@ -29,6 +29,7 @@ from servonaut.services.ssh_host_keys import ensure_known_hosts_file, servonaut_
 from servonaut.services.ssh_ref_resolver import ResolvedSshRef
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 from servonaut.utils.remote_shell import shell_quote
+from servonaut.utils.ssh_names import SSHNameError
 
 from .ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, CommandResult, EnrollmentError, HostExecutor
 from .ssh_agent import PrivateSshAgent
@@ -270,7 +271,11 @@ class SshHostExecutor(HostExecutor):
         with self._bw_key(None if lease is not None else resolved) as bw_key:
             if bw_key is not None:
                 kwargs["key_path"] = bw_key
-            command = self.ssh_service.build_ssh_command(**kwargs)
+            try:
+                command = self.ssh_service.build_ssh_command(**kwargs)
+            except SSHNameError as exc:
+                # A vault flow reports a VaultUserError's message to the person.
+                raise EnrollmentError(str(exc)) from exc
             process = await asyncio.create_subprocess_exec(
                 *command, stdin=asyncio.subprocess.PIPE if stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
