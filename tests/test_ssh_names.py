@@ -16,8 +16,8 @@ BAD_HOSTS = [
     "x';touch marker;'", "web 1", "web\t1", "web\n1", "a\\b", "$(touch marker)", "`id`",
     "a;b", "a|b", "a&b", 'a"b', "a<b", "a*b", "a\x1bb", "a=b",
 ]
-GOOD_USERS = ["ec2-user", "deploy", "CORP\\jdoe", "jdoe@CORP", "dot.name", "übung"]
-BAD_USERS = ["a'b", "a b", "a\nb", "a\x1bb", "a\tb"]
+GOOD_USERS = ["ec2-user", "deploy", "CORP\\jdoe", "jdoe@CORP", "dot.name", "übung", "John Smith"]
+BAD_USERS = ["a'b", "a\nb", "a\x1bb", "a\tb"]
 
 
 @pytest.mark.parametrize("host", GOOD_HOSTS)
@@ -37,7 +37,7 @@ def test_real_user_names_pass(user) -> None:
 
 
 @pytest.mark.parametrize("user", BAD_USERS)
-def test_a_user_with_a_quote_or_whitespace_is_refused(user) -> None:
+def test_a_user_with_a_quote_or_control_character_is_refused(user) -> None:
     with pytest.raises(SSHNameError, match="user name"):
         check_ssh_user(user)
 

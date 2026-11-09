@@ -9,8 +9,10 @@ command is built, with a message that says what to fix.
 
 Only what a real name never needs is refused. Letters in any script, digits,
 ``. - _ : %`` and brackets (IPv6 literals and scope ids) all pass. A user name
-may also hold ``\\`` and ``@`` (domain accounts), so only a quote, whitespace
-and control characters are refused there.
+may also hold ``\\``, ``@`` and spaces (domain and Windows accounts); it is never
+interpolated into a shell (ssh gets it inside the ``user@host`` argument), so
+only control characters and a quote are refused there. The quote stays refused
+because a user name can reach a ProxyCommand or a login script.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import re
 from servonaut.utils.markup import inert_text
 
 _HOST_UNSAFE = re.compile(r"""[\x00-\x20\x7f-\x9f'"`\\$;|&<>(){}*?!#^~=,]""")
-_USER_UNSAFE = re.compile(r"""[\x00-\x20\x7f-\x9f']""")
+_USER_UNSAFE = re.compile(r"""[\x00-\x1f\x7f-\x9f']""")
 _SHOWN_LIMIT = 60
 
 
@@ -42,10 +44,10 @@ def check_ssh_host(host: object) -> None:
 
 
 def check_ssh_user(user: object) -> None:
-    """Raise ``SSHNameError`` when *user* holds a quote, whitespace or a control character."""
+    """Raise ``SSHNameError`` when *user* holds a quote or a control character."""
     if isinstance(user, str) and _USER_UNSAFE.search(user):
         raise SSHNameError(
-            f"Not connecting: the user name {_shown(user)!r} contains a space, quote or control "
+            f"Not connecting: the user name {_shown(user)!r} contains a quote or control "
             "character. Correct the server's user name in its details."
         )
 
