@@ -16,7 +16,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -266,7 +266,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
         if self.app.demo_mode:
             redactor = self.app.redaction_service
             address = redactor.redact_host(address) if redactor else "Hidden"
-        context.update(f"Selected IP\n{address}")
+        context.update(literal(f"Selected IP\n{address}"))
 
     def action_back(self) -> None:
         self.app.pop_screen()

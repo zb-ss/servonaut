@@ -11,7 +11,7 @@ from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static
 
-from servonaut.utils.markup import literal
+from servonaut.utils.markup import inert_text, literal
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -114,7 +114,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
                     ),
                     id="confirm_prompt",
                 ),
-                Input(placeholder=self._confirm_text, id="confirm_input"),
+                Input(placeholder=inert_text(self._confirm_text), id="confirm_input"),
             ),
             actions=DialogActions(
                 Button("Cancel", variant="default", id="btn_cancel"),

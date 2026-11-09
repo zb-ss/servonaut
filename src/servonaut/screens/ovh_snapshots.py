@@ -13,7 +13,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -330,7 +330,9 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         snapshot = self._snapshots[row]
         name = self._display_snapshot_name(snapshot)
         identifier = self._display_snapshot_name({"id": snapshot.get("id")})
-        context.update(name if identifier == name or identifier == "—" else f"{name}\n{identifier}")
+        context.update(literal(
+            name if identifier == name or identifier == "—" else f"{name}\n{identifier}"
+        ))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "snapshots_table":

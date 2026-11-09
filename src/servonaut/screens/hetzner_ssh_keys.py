@@ -27,7 +27,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -316,7 +316,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
         if self.app.demo_mode and self.app.redaction_service:
             name = self.app.redaction_service.redact_key_name(name)
         identifier = str(key.get("id") or "—")
-        context.update(f"{name}\nID: {identifier}")
+        context.update(literal(f"{name}\nID: {identifier}"))
 
     def _selected_key(self) -> dict | None:
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
