@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import re
 
-from servonaut.utils.markup import inert_text
 
 _HOST_UNSAFE = re.compile(r"""[\x00-\x20\x7f-\x9f'"`\\$;|&<>(){}*?!#^~=,]""")
 _USER_UNSAFE = re.compile(r"""[\x00-\x1f\x7f-\x9f']""")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _SHOWN_LIMIT = 60
 
 
@@ -29,8 +29,15 @@ class SSHNameError(ValueError):
     """A host or user name that cannot be used safely in an ssh command."""
 
 
+def _write_out(match: "re.Match[str]") -> str:
+    code = ord(match.group())
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+
+
 def _shown(value: str) -> str:
-    text = inert_text(value)
+    # Written out here (not through the markup helpers) so the MCP server,
+    # which loads no UI library, can import this module.
+    text = _CONTROL.sub(_write_out, value)
     return text if len(text) <= _SHOWN_LIMIT else text[:_SHOWN_LIMIT] + "..."
 
 
