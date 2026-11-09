@@ -32,15 +32,17 @@ to manage EC2 inventory beyond what the instance list offers.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Union
 
 from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
+from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -580,10 +582,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Terminate EC2 Instance",
-                description=(
-                    f"Terminate [bold]{markup_escape(name)}[/bold] "
-                    f"([bold]{markup_escape(str(inst.get('type', '')))}[/bold]) in "
-                    f"[bold]{markup_escape(region)}[/bold]?"
+                description=with_bold_values(
+                    "Terminate {} ({}) in {}?", name, inst.get('type', ''), region,
                 ),
                 consequences=[
                     "All data on instance-store volumes will be permanently destroyed",
@@ -640,7 +640,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _set_status(self, text: str) -> None:
+    def _set_status(self, text: Union[str, Content]) -> None:
         # Provider errors quote real ids and names: demo mode shows stand-ins.
         text = display_text(self.app, text)
         try:

@@ -17,6 +17,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from rich.markup import escape
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens._provider_accounts import (
@@ -715,10 +716,9 @@ class OVHDNSScreen(Screen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete DNS Record",
-                    description=(
-                        f"Permanently delete [bold]{record.get('fieldType', '')}[/bold] record "
-                        f"[bold]{display_subdomain}[/bold] pointing to "
-                        f"[bold]{confirm_text}[/bold]."
+                    description=with_bold_values(
+                        "Permanently delete {} record {} pointing to {}.",
+                        record.get('fieldType', ''), display_subdomain, confirm_text,
                     ),
                     consequences=[
                         "This record will be removed from the zone immediately after refresh",
@@ -859,9 +859,9 @@ class OVHDNSScreen(Screen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Reverse DNS",
-                    description=(
-                        f"Remove reverse DNS for [bold]{escape(display_ip)}[/bold] "
-                        f"(currently [bold]{escape(display_hostname or 'not set')}[/bold])."
+                    description=with_bold_values(
+                        "Remove reverse DNS for {} (currently {}).",
+                        display_ip, display_hostname or 'not set',
                     ),
                     consequences=[
                         "The PTR record will be removed",

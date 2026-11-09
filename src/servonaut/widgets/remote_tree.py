@@ -7,10 +7,12 @@ import logging
 import shlex
 from typing import List, Optional, Dict, TYPE_CHECKING
 
+from rich.text import Text
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from textual.worker import Worker
 
+from servonaut.utils.markup import inert_text
 from servonaut.utils.ssh_utils import run_ssh
 
 if TYPE_CHECKING:
@@ -213,7 +215,7 @@ class RemoteTree(Tree):
                     node.add("🚫 Connection refused").allow_expand = False
                     logger.error("Connection refused for %s", path)
                 else:
-                    node.add(f"❌ {event.worker.error}").allow_expand = False
+                    node.add(Text(inert_text(f"❌ {event.worker.error}"))).allow_expand = False
                     logger.error("Failed to load %s: %s", path, event.worker.error)
             else:
                 entries = event.worker.result
@@ -404,7 +406,7 @@ class RemoteTree(Tree):
         for entry in entries:
             if entry['type'] == 'directory':
                 icon = "📁"
-                child = parent.add(f"{icon} {entry['name']}", expand=False)
+                child = parent.add(Text(inert_text(f"{icon} {entry['name']}")), expand=False)
                 child.data = {
                     "path": entry['path'],
                     "type": "directory"
@@ -413,7 +415,7 @@ class RemoteTree(Tree):
             else:
                 icon = "📄"
                 size_str = self._format_size(entry['size'])
-                child = parent.add(f"{icon} {entry['name']} ({size_str})")
+                child = parent.add(Text(inert_text(f"{icon} {entry['name']} ({size_str})")))
                 child.data = {
                     "path": entry['path'],
                     "type": "file"

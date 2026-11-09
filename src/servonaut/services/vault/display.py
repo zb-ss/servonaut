@@ -16,6 +16,18 @@ def terminal_safe(value: object) -> str:
     )
 
 
+def strip_terminal_controls(value: object) -> str:
+    """*value* without control characters, keeping line breaks and tabs.
+
+    For text that may run over several lines (messages, revealed values):
+    escape sequences and other controls are removed, the layout stays.
+    """
+    return "".join(
+        char for char in str(value)
+        if char in "\n\t" or not (ord(char) < 32 or 127 <= ord(char) <= 159 or char in _BIDI_CONTROLS)
+    )
+
+
 def markup_literal(value: object) -> str:
     """Escape every opening bracket for literal text in Textual 8 markup.
 

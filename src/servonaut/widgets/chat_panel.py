@@ -44,17 +44,20 @@ import math
 import threading
 import time
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rich.markup import escape as _rich_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal, VerticalScroll
+from textual.content import Content
+from textual.markup import MarkupError
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
 
 from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
+from servonaut.utils.markup import literal
 
 # D6 — module-level ``logger`` placed AFTER all imports so static analysers
 # can verify import ordering and lint rules don't flag the gap.
@@ -69,6 +72,7 @@ SERVONAUT_LOGO = (
 
 # Inline bot marker for assistant messages
 BOT_MARKER = "[bold $text-accent]\u25c9[/]"
+_BOT_MARKER_CONTENT = Content.styled("\u25c9", "bold $text-accent")
 
 # T10 watcher: the second ``upstream_unavailable`` within this window
 # triggers either an auto-fallback (when ``ai.local_fallback_provider``
@@ -1511,54 +1515,94 @@ class ChatPanel(Widget):
             return
 
         for msg in messages:
-            # A2 — escape ``msg.content`` at every interpolation site. A
-            # malicious model could inject Rich markup (e.g. a clickable
-            # ``[link=evil]`` href) that survives a thread-export round-trip
-            # and renders as a real Rich Link on next mount. The user-role
-            # path is also escaped because conversations imported from the
-            # server may include user-role rows fabricated by the model.
+            # Message text is never parsed as markup: a model (or a session
+            # imported from the server) can send brackets that Textual would
+            # read as tags or actions. Redaction is display-only; the
+            # on-disk session stays raw.
             if msg.role == "tool":
-                # Tool rows were rendered with Rich markup at write time
-                # (header + body) and stored verbatim — re-render the
-                # markup so the styling survives reload. The content
-                # comes from CLI-side composition (tool name + status +
-                # result_summary, each escaped before storage), not
-                # raw model output, so re-rendering is safe.
-                # Demo-mode: scrub the stored markup before re-rendering.
-                # On-disk session stays raw (ISSUE-1 invariant). The markup
-                # has already been escaped so we scrub the pre-escape
-                # original embedded in the stored string — calling
-                # scrub_stream on already-escaped markup is safe because
-                # scrub_stream only replaces data tokens, not Rich tags.
-                tool_content = msg.content or ""
-                if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
-                    tool_content = self.app.redaction_service.scrub_stream(tool_content)
                 widget = Static(
-                    tool_content,
+                    self._stored_tool_row_content(msg.content or ""),
                     classes="chat-message-tool",
                 )
                 container.mount(widget)
                 continue
-            # Scrub BEFORE _rich_escape: order must be redact → escape → embed.
-            # On-disk session stays raw; redaction is display-only.
-            raw_content = msg.content or ""
-            if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
-                raw_content = self.app.redaction_service.scrub_stream(raw_content)
-            safe_content = _rich_escape(raw_content)
+            shown = self._redacted(msg.content or "")
             if msg.role == "user":
                 widget = Static(
-                    f"[bold]You[/bold]\n{safe_content}",
+                    Content.assemble(Content.styled("You", "bold"), "\n", literal(shown)),
                     classes="chat-message-user",
                 )
             else:
                 widget = Static(
-                    f"{BOT_MARKER} [bold]Servonaut[/bold]\n{safe_content}",
+                    Content.assemble(
+                        _BOT_MARKER_CONTENT, " ", Content.styled("Servonaut", "bold"),
+                        "\n", literal(shown),
+                    ),
                     classes="chat-message-assistant",
                 )
             container.mount(widget)
 
         self.call_after_refresh(self._scroll_to_bottom)
         self._update_stats()
+
+    def _redacted(self, text: str) -> str:
+        """*text* as demo mode shows it; unchanged outside demo mode."""
+        redaction = getattr(self.app, "redaction_service", None)
+        if not getattr(self.app, "demo_mode", False) or redaction is None:
+            return text
+        scrubbed = redaction.scrub_stream(text)
+        return scrubbed if isinstance(scrubbed, str) else text
+
+    def _stored_tool_row_content(self, stored: str) -> Content:
+        """Content for a saved ``role="tool"`` row.
+
+        New rows hold the plain fields of the row as JSON. Rows saved by
+        earlier versions hold markup text; only its text is kept (no style
+        and no action survives), and text that is not valid markup is shown
+        as stored, so an old session opens and reads as it always did.
+        """
+        try:
+            row = json.loads(stored)
+        except (ValueError, RecursionError):
+            row = None
+        if isinstance(row, dict) and row.get("kind") == "result":
+            return self._tool_result_content(
+                str(row.get("tool_call_id", "")),
+                str(row.get("status", "ok")),
+                self._redacted(str(row.get("body", ""))),
+            )
+        if isinstance(row, dict) and row.get("kind") == "skipped":
+            return self._tool_skipped_content(
+                str(row.get("tool", "")), self._redacted(str(row.get("reason", ""))),
+            )
+        try:
+            stored = Content.from_markup(stored).plain
+        except (MarkupError, RecursionError):
+            pass
+        return literal(self._redacted(stored))
+
+    @staticmethod
+    def _tool_result_content(tool_id: str, status: str, body: str) -> Content:
+        parts: List[Union[str, Content]] = [
+            Content.styled("Tool result", "dim italic"),
+            " ",
+            literal(tool_id, "bold"),
+            " ",
+            literal(f"({status})", "dim"),
+        ]
+        if body:
+            parts.extend(["\n", literal(body)])
+        return Content.assemble(*parts)
+
+    @staticmethod
+    def _tool_skipped_content(tool_name: str, reason: str) -> Content:
+        return Content.assemble(
+            Content.styled("⊘ Skipped tool", "$text-warning"),
+            " ",
+            literal(tool_name or "?", "bold"),
+            " ",
+            literal(f"— {reason or 'tool unavailable'}", "dim"),
+        )
 
     def _scroll_to_bottom(self) -> None:
         try:
@@ -1606,17 +1650,19 @@ class ChatPanel(Widget):
         except Exception:
             pass
 
+    @staticmethod
+    def _thinking_content(text: str) -> Content:
+        return Content.assemble(_BOT_MARKER_CONTENT, " ", literal(text, "dim italic"))
+
     def _show_thinking(self, text: str = "Servonaut is thinking...") -> None:
         """Add an animated thinking indicator with customisable text.
 
-        A2 — *text* may originate from a server-controlled status string
-        (e.g. SSE token deltas accumulated mid-stream). Escape it before
-        interpolation so injected ``[link=...]`` payloads cannot hijack
-        the indicator.
+        *text* may originate from a server-controlled status string (e.g.
+        SSE token deltas accumulated mid-stream), so it is shown literally.
         """
         container = self.query_one("#chat-messages", VerticalScroll)
         widget = Static(
-            f"{BOT_MARKER} [dim italic]{_rich_escape(text)}[/dim italic]",
+            self._thinking_content(text),
             id="chat-thinking",
             classes="chat-message-assistant chat-thinking",
         )
@@ -1626,15 +1672,12 @@ class ChatPanel(Widget):
     def _update_thinking_status(self, text: str) -> None:
         """Update the thinking indicator text (called from worker thread).
 
-        A2 — escape *text* before interpolating into Rich markup. This is
-        the primary streaming sink: every token delta we accumulate flows
-        through here, so this is the most security-critical escape point.
+        The primary streaming sink: every token delta flows through here,
+        and the text is shown literally.
         """
         try:
             widget = self.query_one("#chat-thinking", Static)
-            widget.update(
-                f"{BOT_MARKER} [dim italic]{_rich_escape(text)}[/dim italic]"
-            )
+            widget.update(self._thinking_content(text))
             # Streaming tokens grow the bubble; without this the viewport
             # stays anchored to the top and the user has to scroll down
             # to see what's being typed. ``_follow_tail`` only scrolls
@@ -3915,9 +3958,8 @@ class ChatPanel(Widget):
             if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
                 display_accumulated = self.app.redaction_service.scrub_stream(accumulated)
             # Live-update the thinking bubble with the running text so
-            # the user sees streaming output without re-render. A2 —
-            # ``_update_thinking_status`` escapes its argument before
-            # interpolating into Rich markup.
+            # the user sees streaming output without re-render.
+            # ``_update_thinking_status`` shows its argument literally.
             self._update_thinking_status(display_accumulated or "Thinking...")
             # Streaming speech: sentences completed by this delta start
             # (or extend) the turn's spoken utterance. After the display
@@ -4206,43 +4248,26 @@ class ChatPanel(Widget):
         an empty "(no response)" assistant bubble despite the tool
         having succeeded.
         """
-        tool_id = _rich_escape(str(data.get("tool_call_id", "")))
-        status = _rich_escape(str(data.get("status", "ok")))
+        tool_id = str(data.get("tool_call_id", ""))
+        status = str(data.get("status", "ok"))
         result_summary = data.get("result_summary")
         try:
             container = self.query_one("#chat-messages", VerticalScroll)
         except Exception:
             return
 
-        header = (
-            f"[dim italic]Tool result[/dim italic] "
-            f"[bold]{tool_id}[/bold] [dim]({status})[/dim]"
-        )
+        body = ""
         if isinstance(result_summary, str) and result_summary.strip():
-            # Demo-mode: scrub tool result content BEFORE escape so IPs /
-            # ARNs / secrets are never visible on screen. Order: scrub →
-            # escape → embed (avoids Rich-markup injection).
-            raw_body = result_summary.strip()
+            # Demo mode: scrub tool output so IPs / ARNs / secrets are never
+            # visible on screen. The widget may render before it is fully
+            # mounted, when `app` does not expose the demo-mode attributes.
             try:
-                _app = self.app
-                # getattr defensive access: this row can render before the
-                # widget is fully mounted, when `app` may not expose the
-                # demo-mode attributes yet.
-                if getattr(_app, "demo_mode", False) and getattr(_app, "redaction_service", None):
-                    scrubbed = _app.redaction_service.scrub_stream(raw_body)
-                    if isinstance(scrubbed, str):
-                        raw_body = scrubbed
+                body = self._redacted(result_summary.strip())
             except Exception:
-                pass  # Not mounted or app not available — skip redaction gracefully
-            # Server-controlled string — escape every byte before
-            # interpolating into Rich markup (markup-injection guard).
-            safe_body = _rich_escape(raw_body)
-            body = f"\n{safe_body}"
-        else:
-            body = ""
+                body = result_summary.strip()
 
         widget = Static(
-            header + body,
+            self._tool_result_content(tool_id, status, body),
             classes="chat-message-tool",
         )
         container.mount(widget)
@@ -4252,53 +4277,44 @@ class ChatPanel(Widget):
         self.call_after_refresh(self._follow_tail)
         # Persist if the user opted to keep tool results in local history.
         # Default True (debug-friendly); toggle off in Settings to drop.
-        self._maybe_persist_tool_message(header + body)
+        self._maybe_persist_tool_message(
+            {"kind": "result", "tool_call_id": tool_id, "status": status, "body": body}
+        )
 
     def _render_tool_skipped_row(self, tool_name: str, reason: str) -> None:
         """Append a soft-skip row for tools the bridge couldn't dispatch.
 
         Distinct from ``_render_tool_result_row`` so the user can tell at
-        a glance "this didn't run" vs "this ran with status X". All
-        interpolated strings escape via ``_rich_escape`` because the tool
-        name and reason are server-controlled.
+        a glance "this didn't run" vs "this ran with status X". The tool name
+        and reason are server-controlled and are shown literally.
         """
         try:
             container = self.query_one("#chat-messages", VerticalScroll)
         except Exception:
             return
-        safe_tool = _rich_escape(tool_name or "?")
-        # Demo-mode: reason comes from result.error which may carry bridge
-        # error details (paths, IPs). Scrub before escape. Defense-in-depth:
-        # the probability is low but the fix is cheap.
+        # Demo mode: reason comes from result.error which may carry bridge
+        # error details (paths, IPs). Scrub it before display.
         raw_reason = reason or "tool unavailable"
         try:
-            _app = self.app
-            if getattr(_app, "demo_mode", False) and getattr(_app, "redaction_service", None):
-                scrubbed = _app.redaction_service.scrub_stream(raw_reason)
-                if isinstance(scrubbed, str):
-                    raw_reason = scrubbed
+            raw_reason = self._redacted(raw_reason)
         except Exception:
             pass
-        safe_reason = _rich_escape(raw_reason)
-        rendered = (
-            f"[$text-warning]⊘ Skipped tool[/$text-warning] [bold]{safe_tool}[/bold] "
-            f"[dim]— {safe_reason}[/dim]"
-        )
         widget = Static(
-            rendered,
+            self._tool_skipped_content(tool_name, raw_reason),
             classes="chat-message-tool",
         )
         container.mount(widget)
         self.call_after_refresh(self._follow_tail)
-        self._maybe_persist_tool_message(rendered)
+        self._maybe_persist_tool_message(
+            {"kind": "skipped", "tool": tool_name or "?", "reason": raw_reason}
+        )
 
-    def _maybe_persist_tool_message(self, rendered_markup: str) -> None:
+    def _maybe_persist_tool_message(self, row: Dict[str, str]) -> None:
         """Append a ``role="tool"`` ChatMessage when the user opted in.
 
         Toggled by ``config.chat_keep_tool_results`` (default True).
-        Writes the same Rich-markup string the transient render uses so
-        the reload path can update the Static widget verbatim — no
-        re-formatting on the read side. Defensive at every step:
+        Stores the row's plain fields as JSON, never markup; the reload path
+        builds the styled content from them. Defensive at every step:
         unmounted-test-panel callers (no .app, no _session) and a
         missing config field all early-return cleanly.
         """
@@ -4316,7 +4332,9 @@ class ChatPanel(Widget):
             session.messages.append(  # type: ignore[union-attr]
                 ChatMessage(
                     role="tool",
-                    content=rendered_markup,
+                    # Every "[" is written as a JSON escape: a release without this
+                    # format reads stored rows as markup and must find no tags.
+                    content=json.dumps(row).replace("[", "\\u005b"),
                     provider="servonaut",
                 )
             )

@@ -18,12 +18,14 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+
+from servonaut.utils.markup import literal
 
 #: The literal the user must type to arm the Execute button.
 CONFIRM_PHRASE = "RUN"
@@ -97,35 +99,47 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         p = self._preview
-        label = escape(str(
+        label = str(
             self._label or p.get("label") or p.get("action")
             or p.get("verb") or "Remediation",
-        ))
-        risk = escape(str(
-            p.get("exec_risk") or p.get("risk_tier") or "unknown",
-        ))
-        reversible = "reversible" if p.get("reversible") else "not reversible"
-        mode = ("[bold $text-accent]DRY RUN[/bold $text-accent] — nothing changes on the box"
-                if self._dry_run
-                else "[bold $text-error]LIVE EXECUTION[/bold $text-error] — this mutates the server")
-        command_block = "\n".join(
-            escape(line) for line in preview_command_lines(p)
         )
-        expires = escape(str(p.get("expires_at") or ""))
-        revert_line = escape(revert_plan_summary(p))
+        risk = str(p.get("exec_risk") or p.get("risk_tier") or "unknown")
+        reversible = "reversible" if p.get("reversible") else "not reversible"
+        mode = (
+            Content.assemble(
+                Content.styled("DRY RUN", "bold $text-accent"),
+                " — nothing changes on the box",
+            )
+            if self._dry_run
+            else Content.assemble(
+                Content.styled("LIVE EXECUTION", "bold $text-error"),
+                " — this mutates the server",
+            )
+        )
+        command_block = literal("\n".join(preview_command_lines(p)))
+        expires = str(p.get("expires_at") or "")
+        revert_line = revert_plan_summary(p)
 
         yield Container(
             Static(
-                f"[bold]{label}[/bold]\n"
-                f"[dim]{risk} risk · {reversible}[/dim]\n\n"
-                f"{mode}",
+                Content.assemble(
+                    literal(label, "bold"),
+                    "\n",
+                    literal(f"{risk} risk · {reversible}", "dim"),
+                    "\n\n",
+                    mode,
+                ),
                 id="remediation_confirm_header",
             ),
             VerticalScroll(
                 Static(
-                    "[bold]Exact command (server-signed):[/bold]\n"
-                    f"{command_block}\n\n"
-                    f"[dim]Preview token expires: {expires}[/dim]",
+                    Content.assemble(
+                        Content.styled("Exact command (server-signed):", "bold"),
+                        "\n",
+                        command_block,
+                        "\n\n",
+                        literal(f"Preview token expires: {expires}", "dim"),
+                    ),
                     id="remediation_confirm_command",
                 ),
                 id="remediation_confirm_scroll",
@@ -133,7 +147,7 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
             # Outside the scroll on purpose: a long command must not
             # push the undo path out of view at confirm time.
             Static(
-                f"[dim]Undo, if needed: {revert_line}[/dim]",
+                literal(f"Undo, if needed: {revert_line}", "dim"),
                 id="remediation_confirm_revert",
             ),
             Input(

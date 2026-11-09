@@ -33,13 +33,13 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
-from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.utils.markup import with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -729,18 +729,16 @@ class AWSCreateScreen(Screen):
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
         # With several accounts, say which one gets billed.
-        where = markup_escape(region)
+        places = [region]
         if len(provider_accounts(self.app, "aws")) > 1:
-            account = shown_label(self.app, self._account)
-            where = f"{markup_escape(account)}[/bold], [bold]{where}"
+            places.insert(0, shown_label(self.app, self._account))
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Launch EC2 Instance",
-                description=(
-                    f"Launch [bold]{markup_escape(name)}[/bold] in [bold]{where}[/bold] "
-                    f"as [bold]{markup_escape(type_name)}[/bold] with AMI [bold]{markup_escape(ami_id)}[/bold], "
-                    f"key [bold]{markup_escape(key_name)}[/bold], subnet [bold]{markup_escape(subnet_id)}[/bold], "
-                    f"SG [bold]{markup_escape(sg_id)}[/bold]."
+                description=with_bold_values(
+                    "Launch {} in " + ", ".join(["{}"] * len(places))
+                    + " as {} with AMI {}, key {}, subnet {}, SG {}.",
+                    name, *places, type_name, ami_id, key_name, subnet_id, sg_id,
                 ),
                 consequences=[
                     "EC2 billing starts immediately once the instance reaches running state",

@@ -157,7 +157,7 @@ async def test_own_shared_server_binds_the_scope_chosen_by_the_user(
         if personal:
             service.bind.assert_not_awaited()
             assert service.bind_personal.await_args.kwargs["instance_id"] == "i-1"
-            assert "Your key" in app.actions._credential_source_line()
+            assert "Your key" in app.actions._credential_source_line().plain
             assert "credential_binding" not in app.instances[2]
             assert "Your key" in app.notices[-1][0]
         else:
@@ -165,7 +165,7 @@ async def test_own_shared_server_binds_the_scope_chosen_by_the_user(
             assert service.bind.await_args.kwargs["team"] == "team-b"
             assert service.bind.await_args.kwargs["server"] == "shared-team-b"
             assert app.actions._binding_source() is None  # This did not create a personal binding.
-            assert "Team key for team-b" in app.actions._credential_source_line()
+            assert "Team key for team-b" in app.actions._credential_source_line().plain
             assert "credential_binding" not in app.instances[0]
             assert "credential_binding" not in app.instances[1]
             assert app.instances[2]["credential_binding"]["source"] == "servonaut_vault"
@@ -299,7 +299,7 @@ async def test_team_binding_status_keeps_the_existing_personal_key() -> None:
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
         await app.actions._refresh_vault_binding()
-        line = app.actions._credential_source_line()
+        line = app.actions._credential_source_line().plain
         assert "Your key" in line and "Team key for team-a" in line
         assert "You keep connecting with your key" in app.notices[-1][0]
         app.vault_command_service.bind_personal.assert_not_awaited()
@@ -321,13 +321,13 @@ async def test_demo_scope_uses_real_ids_and_keeps_names_hidden_after_binding() -
         call = app.vault_command_service.bind.await_args
         assert call.kwargs["team"] == "team-a" and call.kwargs["server"] == "2001"
         assert "team-a" not in app.notices[-1][0]
-        assert "team-a" not in app.actions._credential_source_line()
-        assert "team-a" not in app.actions._shared_with_line()
+        assert "team-a" not in app.actions._credential_source_line().plain
+        assert "team-a" not in app.actions._shared_with_line().plain
         assert app._instances_pristine[1]["credential_binding"]["source"] == "servonaut_vault"
         assert app.instances[1]["id"] != "2001"
         ServonautApp._restore_instances_in_place(app)
         app.demo_mode = False
-        assert "Team key for team-a" in app.actions._credential_source_line()
+        assert "Team key for team-a" in app.actions._credential_source_line().plain
 
 
 @pytest.mark.asyncio
@@ -376,8 +376,8 @@ async def test_direct_team_binding_updates_the_team_status_without_a_scope_picke
         await _settle(pilot, lambda: bool(app.notices))
         call = app.vault_command_service.bind.await_args
         assert call.kwargs["team"] == "team-a" and call.kwargs["server"] == "shared-team-a"
-        assert "Team key for team-a" in app.actions._credential_source_line()
-        assert "Your key" not in app.actions._credential_source_line()
+        assert "Team key for team-a" in app.actions._credential_source_line().plain
+        assert "Your key" not in app.actions._credential_source_line().plain
 
 
 @pytest.mark.asyncio
