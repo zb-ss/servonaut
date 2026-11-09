@@ -88,6 +88,9 @@ def cell(value: object, style: str = "") -> Text:
 
     Data tables read a plain string as markup. A name chosen outside the app
     must not be, so cells that show one are built as ``Text``.
+
+    ``Text`` cells do not order against each other, so a table that sorts a
+    column of them passes ``key=lambda cell: cell.plain``.
     """
     return Text(inert_text(str(value)), style=style)
 
