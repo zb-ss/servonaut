@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 
+from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -24,6 +25,8 @@ from servonaut.styles.themes import (
 )
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
+from servonaut.utils.click_policy import click_action_allowed
+from servonaut.utils.markup import is_web_url
 from servonaut.utils.markup_backstop import install as install_markup_backstop
 from servonaut.utils.terminal_output import install as install_terminal_output_filter
 
@@ -2992,6 +2995,30 @@ class ServonautApp(App):
         if _is_generic_framework_action(action, parameters):
             return False
         return super().check_action(action, parameters)
+
+    async def _broker_event(self, event_name: str, event: Any, default_namespace: Any) -> bool:
+        """Run a click action from drawn text only when its widget draws that action.
+
+        Text from outside the app can reach a widget that reads markup, and the
+        action in its style would run on a click. See ``utils.click_policy``.
+        """
+        style = getattr(event, "style", None)
+        if style is None:
+            return False
+        try:
+            _modifiers, action = extract_handler_actions(event_name, style.meta)
+        except NoHandler:
+            return False
+        if not click_action_allowed(action, default_namespace):
+            return False
+        return await super()._broker_event(event_name, event, default_namespace)
+
+    def open_url(self, url: str, *, new_tab: bool = True) -> None:
+        """Open a web address; a link may name any scheme, only http/https are opened."""
+        if not is_web_url(url):
+            self.notify("Only web links (http/https) can be opened.", severity="warning", markup=False)
+            return
+        super().open_url(url, new_tab=new_tab)
 
     async def run_action(
         self,
