@@ -19,7 +19,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.scrollbar import ScrollBar, ScrollBarRender
 from textual.widgets import Button, DataTable, Markdown, Static
-from textual.widgets._markdown import MarkdownBlock
+from textual.widgets._markdown import MarkdownBlock, MarkdownTableCellContents
 from textual.renderables.bar import Bar
 
 from servonaut.app import ServonautApp
@@ -80,6 +80,8 @@ class _Plain:
     [
         ("link('https://example.invalid')", MarkdownBlock.__new__(MarkdownBlock), True),
         (("link", ("https://example.invalid",)), MarkdownBlock.__new__(MarkdownBlock), True),
+        ("link('https://example.invalid')", MarkdownTableCellContents.__new__(MarkdownTableCellContents), True),
+        ("grab", MarkdownTableCellContents.__new__(MarkdownTableCellContents), False),
         ("grab", ScrollBar.__new__(ScrollBar), True),
         ("scroll_up", ScrollBar.__new__(ScrollBar), True),
         ("scroll_down", ScrollBar.__new__(ScrollBar), True),
@@ -153,6 +155,11 @@ class _Body(Screen):
         elif self.mode == "markdown":
             yield Markdown(
                 "[web](https://example.invalid/a) [file](file:///etc/passwd) [share](smb://host/s)",
+                id="target",
+            )
+        elif self.mode == "markdown_table":
+            yield Markdown(
+                "| name |\n|---|\n| [cell](https://example.invalid/t) |\n| [bad](file:///etc/passwd) |",
                 id="target",
             )
         elif self.mode == "scroll":
@@ -295,3 +302,16 @@ async def test_scroll_bar_thumb_can_be_dragged(raw_parsers) -> None:
         await pilot.mouse_up(offset=(region.x, region.y + region.height - 2))
         await pilot.pause()
         assert scroller.scroll_y > 0
+
+
+@pytest.mark.asyncio
+async def test_a_link_in_a_markdown_table_cell_opens_through_the_web_check(raw_parsers, monkeypatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(App, "open_url", lambda self, url, *, new_tab=True: opened.append(url))
+    app = _HostileApp("markdown_table")
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        cells = _clickable_cells(app)
+        assert cells
+        await _click_every_cell(pilot, app)
+        assert set(opened) == {"https://example.invalid/t"}

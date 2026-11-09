@@ -6,7 +6,7 @@ action, so the app runs a style action only for the ones Textual's own widgets
 attach to what they draw (the tab bar range action exists in a renderable, but
 no widget sets it):
 
-* a Markdown link (``link``), on a Markdown block;
+* a Markdown link (``link``), on a Markdown block or a Markdown table cell;
 * the scroll bar grab and track actions, on a scroll bar.
 
 The app's own markup has no click action. Everything else, however it is
@@ -18,10 +18,11 @@ from typing import Any, FrozenSet, Tuple, Type
 
 from textual import actions
 from textual.scrollbar import ScrollBar
-from textual.widgets._markdown import MarkdownBlock
+from textual.widgets._markdown import MarkdownBlock, MarkdownTableCellContents
 
 _ALLOWED: Tuple[Tuple[Type[Any], FrozenSet[str]], ...] = (
     (MarkdownBlock, frozenset({"link"})),
+    (MarkdownTableCellContents, frozenset({"link"})),
     (ScrollBar, frozenset({"grab", "scroll_up", "scroll_down"})),
 )
 
