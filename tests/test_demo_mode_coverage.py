@@ -379,7 +379,7 @@ class TestMemoryScreenDemoMode:
 
         mock_table = MagicMock()
         rows = []
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_banner = MagicMock()
         mock_banner.classes = []
 
@@ -423,7 +423,7 @@ class TestMemoryScreenDemoMode:
 
         mock_table = MagicMock()
         rows = []
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_banner = MagicMock()
         mock_banner.classes = []
 
@@ -1694,7 +1694,7 @@ class TestHetznerManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -1783,7 +1783,7 @@ class TestOvhManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -1914,7 +1914,7 @@ class TestMemoryDriftDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_label = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2752,7 +2752,7 @@ class TestAWSManagerDemoMode:
         # Capture rows added to the table
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2813,7 +2813,7 @@ class TestAWSManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2884,7 +2884,7 @@ class TestObjectStorageDemoMode:
         # Capture rows added to the table
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
         mock_breadcrumb = MagicMock()
 
@@ -2947,7 +2947,7 @@ class TestObjectStorageDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
         mock_breadcrumb = MagicMock()
 
@@ -3145,7 +3145,7 @@ class TestCustomServersDemoMode:
         mock_app.custom_server_service.list_servers.return_value = servers
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
             with patch.object(screen, "query_one", return_value=mock_table):
                 screen._populate_table()
@@ -3218,7 +3218,7 @@ class TestHetznerCreateWizardDemoMode:
         mock_app.config_manager.get.return_value.hetzner.default_hetzner_ssh_key = ""
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
 
         async def _run():
             with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
@@ -3235,7 +3235,7 @@ class TestHetznerCreateWizardDemoMode:
         )
         cells = " ".join(str(c) for c in rows[0])
         assert "ops@example.org" not in cells
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_raw_without_demo(self) -> None:
         mock_app = _make_mock_app(demo=False)
@@ -3640,7 +3640,7 @@ class TestSshKeyLabelsDemoMode:
         key = {"name": "client-laptop-key", "id": "k1", "fingerprint": "aa:bb",
                "public_key": "ssh-ed25519 AAAA"}
         mock_app, rows = self._run_load(OVHSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("client-laptop-key")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("client-laptop-key")
 
     def test_hetzner_key_label(self) -> None:
         from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
@@ -3650,7 +3650,7 @@ class TestSshKeyLabelsDemoMode:
 
         key = {"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb"}
         mock_app, rows = self._run_load(HetznerSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_wizard_confirm_label(self) -> None:
         from servonaut.screens.hetzner_create import HetznerCreateScreen

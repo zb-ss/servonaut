@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, TYPE_CHECKING
 
+from textual.content import Content
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -13,6 +14,7 @@ from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 
 if TYPE_CHECKING:
@@ -176,8 +178,8 @@ class LogPickerModal(ModalScreen[str]):
             for path in filtered_available:
                 option_id = f"avail:{path}"
                 self._option_map[option_id] = path
-                marker = " [bold $text-success]●[/bold $text-success]" if path == self._current_log else ""
-                all_options.append(Option(f"  {path}{marker}", id=option_id))
+                marker = (" ●", "bold $text-success") if path == self._current_log else ""
+                all_options.append(Option(Content.assemble("  ", literal(path), marker), id=option_id))
                 if self._first_selectable is None:
                     self._first_selectable = idx
                 idx += 1
@@ -192,8 +194,11 @@ class LogPickerModal(ModalScreen[str]):
             for path in filtered_custom:
                 option_id = f"custom:{path}"
                 self._option_map[option_id] = path
-                marker = " [bold $text-success]●[/bold $text-success]" if path == self._current_log else ""
-                all_options.append(Option(f"  {path} [$text-accent]\\[saved][/$text-accent]{marker}", id=option_id))
+                marker = (" ●", "bold $text-success") if path == self._current_log else ""
+                all_options.append(Option(
+                    Content.assemble("  ", literal(path), " ", ("[saved]", "$text-accent"), marker),
+                    id=option_id,
+                ))
                 if self._first_selectable is None:
                     self._first_selectable = idx
                 idx += 1
@@ -217,10 +222,10 @@ class LogPickerModal(ModalScreen[str]):
                 if self._classify_fn:
                     classification = self._classify_fn(path)
                     if classification == "compressed":
-                        tag = " [$text-warning]\\[zip][/$text-warning]"
+                        tag = (" [zip]", "$text-warning")
                     elif classification == "rotated":
-                        tag = " [dim]\\[rot][/dim]"
-                all_options.append(Option(f"  {path}{tag}", id=option_id))
+                        tag = (" [rot]", "dim")
+                all_options.append(Option(Content.assemble("  ", literal(path), tag), id=option_id))
                 if self._first_selectable is None:
                     self._first_selectable = idx
                 idx += 1

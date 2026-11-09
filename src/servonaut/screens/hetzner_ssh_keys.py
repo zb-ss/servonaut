@@ -27,7 +27,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -255,7 +255,7 @@ class HetznerSSHKeysScreen(Screen):
         for key in self._keys:
             fp = key.get("fingerprint", "") or ""
             table.add_row(
-                _s(str(key.get("name", ""))),
+                cell(_s(str(key.get("name", "")))),
                 str(key.get("id", "")),
                 fp[:32],
                 key=str(key.get("id", "")) or str(key.get("name", "")),
@@ -442,7 +442,7 @@ class HetznerSSHKeysScreen(Screen):
             return
 
         self._set_status(
-            f"[dim]Deleting key {key.get('name', identifier)}…[/dim]"
+            literal(f"Deleting key {key.get('name', identifier)}…", "dim")
         )
         try:
             await svc.delete_ssh_key(identifier)
@@ -451,7 +451,7 @@ class HetznerSSHKeysScreen(Screen):
                 "Hetzner SSH key delete failed for %s: %s", identifier, exc,
             )
             self._set_status(
-                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
+                literal(f"Delete failed: {self._short_err(exc)}", "$text-error")
             )
             self.notify(
                 f"Delete failed: {exc}", severity="error", markup=False,

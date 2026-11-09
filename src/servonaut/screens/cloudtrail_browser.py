@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from textual.content import Content
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -18,6 +19,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
+from servonaut.utils.markup import cell, literal
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
@@ -351,8 +353,10 @@ class CloudTrailBrowserScreen(Screen):
             previous = select.value
             options = [
                 (
-                    f"{self._username_label(value) if field == 'username' else value}"
-                    f"  ({count})",
+                    literal(
+                        f"{self._username_label(value) if field == 'username' else value}"
+                        f"  ({count})"
+                    ),
                     value,
                 )
                 for value, count in sorted(
@@ -366,7 +370,7 @@ class CloudTrailBrowserScreen(Screen):
                 and previous != _TYPE_A_VALUE
                 and previous not in counts
             ):
-                options.append((f"{previous}  (typed)", previous))
+                options.append((literal(f"{previous}  (typed)"), previous))
             options.append(("Type a value...", _TYPE_A_VALUE))
             self._suppress_filter_events = True
             try:
@@ -394,12 +398,12 @@ class CloudTrailBrowserScreen(Screen):
                     select.value = Select.NULL
                     return
                 options = [
-                    (str(text), val)
+                    (literal(str(text)), val)
                     for text, val in select._options
                     if val is not Select.NULL and val != _TYPE_A_VALUE
                 ]
                 if value not in [val for _, val in options]:
-                    options.append((f"{value}  (typed)", value))
+                    options.append((literal(f"{value}  (typed)"), value))
                 options.append(("Type a value...", _TYPE_A_VALUE))
                 select.set_options(options)
                 select.value = value
@@ -504,13 +508,13 @@ class CloudTrailBrowserScreen(Screen):
             if hasattr(event_time, "strftime"):
                 event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
             table.add_row(
-                str(event_time),
-                ev.get("event_name", ""),       # public taxonomy — NOT scrubbed
-                self._username_label(ev.get("username", "")),
-                _s(ev.get("source_ip", "")),
-                _s(ev.get("resource_name", "") or ev.get("resource_type", "")),
-                ev.get("region", ""),            # public taxonomy — NOT scrubbed
-                ev.get("error_code", "") or "",  # public taxonomy — NOT scrubbed
+                cell(event_time),
+                cell(ev.get("event_name", "")),       # public taxonomy — NOT scrubbed
+                cell(self._username_label(ev.get("username", ""))),
+                cell(_s(ev.get("source_ip", ""))),
+                cell(_s(ev.get("resource_name", "") or ev.get("resource_type", ""))),
+                cell(ev.get("region", "")),            # public taxonomy — NOT scrubbed
+                cell(ev.get("error_code", "") or ""),  # public taxonomy — NOT scrubbed
             )
 
     def action_next_page(self) -> None:
@@ -611,17 +615,22 @@ class CloudTrailBrowserScreen(Screen):
             return x
 
         raw_event = event.get("raw_event", "")
-        self.query_one("#event_detail_text", Static).update(
-            f"[bold]Event:[/bold] {event.get('event_name', '')}\n"
-            f"[bold]Time:[/bold] {event_time}\n"
-            f"[bold]User:[/bold] {self._user_detail(event.get('username', ''))}\n"
-            f"[bold]Source IP:[/bold] {_s(event.get('source_ip', ''))}\n"
-            f"[bold]Resource Type:[/bold] {_s(event.get('resource_type', ''))}\n"
-            f"[bold]Resource Name:[/bold] {_s(event.get('resource_name', ''))}\n"
-            f"[bold]Region:[/bold] {event.get('region', '')}\n"
-            f"[bold]Error:[/bold] {event.get('error_code', '') or '(none)'}\n\n"
-            f"[bold]Raw Event:[/bold]\n{_s(raw_event)}"
+        fields = (
+            ("Event", event.get("event_name", "")),
+            ("Time", event_time),
+            ("User", self._user_detail(event.get("username", ""))),
+            ("Source IP", _s(event.get("source_ip", ""))),
+            ("Resource Type", _s(event.get("resource_type", ""))),
+            ("Resource Name", _s(event.get("resource_name", ""))),
+            ("Region", event.get("region", "")),
+            ("Error", event.get("error_code", "") or "(none)"),
         )
+        # Every value (the raw event holds caller-chosen text) is drawn as typed.
+        pieces: list = []
+        for label, value in fields:
+            pieces += [(f"{label}:", "bold"), " ", literal(str(value)), "\n"]
+        pieces += ["\n", ("Raw Event:", "bold"), "\n", literal(_s(str(raw_event)))]
+        self.query_one("#event_detail_text", Static).update(Content.assemble(*pieces))
 
     # ------------------------------------------------------------------
     # Copy

@@ -16,7 +16,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._batch_status import failure_details
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
@@ -1099,9 +1099,9 @@ class TeamManagementScreen(Screen):
             if role == "owner":
                 owned_count += 1
             table.add_row(
-                markup_literal(terminal_safe(_s(team.get("name", "")))),
-                markup_literal(terminal_safe(role)),
-                markup_literal(terminal_safe(team.get("member_count", ""))),
+                cell(terminal_safe(_s(team.get("name", "")))),
+                cell(terminal_safe(role)),
+                cell(terminal_safe(team.get("member_count", ""))),
                 key=slug,
             )
         # Backend caps team creation at one-team-per-Teams-subscription. Hide
@@ -1120,8 +1120,8 @@ class TeamManagementScreen(Screen):
 
         for member in members:
             table.add_row(
-                markup_literal(terminal_safe(_s(self._member_display_email(member)))),
-                markup_literal(terminal_safe(member.get("role", ""))),
+                cell(terminal_safe(_s(self._member_display_email(member)))),
+                cell(terminal_safe(member.get("role", ""))),
                 self._format_status(member),
             )
 
@@ -1148,7 +1148,7 @@ class TeamManagementScreen(Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 pushed_by = self.app.redaction_service.redact_name(pushed_by)
             created = (cfg.get("created_at") or "")[:10]  # YYYY-MM-DD portion
-            table.add_row(str(version), markup_literal(_s(description)), created, markup_literal(pushed_by), key=str(cfg.get("id", "")))
+            table.add_row(str(version), cell(_s(description)), created, cell(pushed_by), key=str(cfg.get("id", "")))
 
     def _config_author(self, config: dict) -> str:
         author = config.get("pushed_by")
@@ -1363,10 +1363,10 @@ class TeamManagementScreen(Screen):
 
         for server in servers:
             table.add_row(
-                markup_literal(terminal_safe(_name(server.get("name", "")))),
+                cell(terminal_safe(_name(server.get("name", "")))),
                 # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
-                markup_literal(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
-                markup_literal(terminal_safe(server.get("region", "") or "")),
+                cell(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
+                cell(terminal_safe(server.get("region", "") or "")),
             )
 
     # ------------------------------------------------------------------

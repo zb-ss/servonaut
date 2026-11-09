@@ -32,8 +32,8 @@ def test_volume_table_keeps_raw_targets_behind_display(is_demo: bool, attachment
     ):
         asyncio.run(screen._load_volumes())
     row = table.add_row.call_args.args
-    assert (row[0] != "private-volume") is is_demo
-    assert (row[4] != "12345") is is_demo
+    assert (str(row[0]) != "private-volume") is is_demo
+    assert (str(row[4]) != "12345") is is_demo
     assert screen._attachment_instance_ids(screen._volumes[0]) == ["12345"]
 
 
@@ -116,5 +116,5 @@ def test_ip_route_masks_cloud_project_without_changing_selection(is_demo: bool) 
         patch.object(screen, "query_one", return_value=table),
     ):
         screen._populate_table()
-    assert (table.add_row.call_args.args[2] != project_id) is is_demo
+    assert (str(table.add_row.call_args.args[2]) != project_id) is is_demo
     assert screen._ips[0]["routedTo"]["serviceName"] == project_id

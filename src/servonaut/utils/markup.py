@@ -5,6 +5,7 @@ import re
 import urllib.parse
 from typing import Callable, Union
 
+from rich.text import Text
 from textual.content import Content
 from textual.style import Style as TextualStyle
 
@@ -80,6 +81,15 @@ def web_link(url: str, style: str = "") -> Content:
     if not is_web_url(url):
         return content
     return content.stylize(TextualStyle(link=url))
+
+
+def cell(value: object, style: str = "") -> Text:
+    """*value* as a table cell that is drawn exactly as typed.
+
+    Data tables read a plain string as markup. A name chosen outside the app
+    must not be, so cells that show one are built as ``Text``.
+    """
+    return Text(inert_text(str(value)), style=style)
 
 
 def scrub(value: Union[str, Content], scrubber: Callable[[str], str]) -> Union[str, Content]:
