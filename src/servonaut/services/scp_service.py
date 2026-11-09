@@ -87,15 +87,17 @@ class SCPService(SCPServiceInterface):
             List of command arguments for subprocess.
         """
         check_ssh_target(host, username)
+        sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(
             key_path, proxy_jump, proxy_args, port, extra_options,
             identity_agent, identity_file, certificate_file, known_hosts_file,
+            sftp=sftp,
         )
         # "--" keeps a path that starts with "-" from being read as an scp
         # option (such as "-oProxyCommand=...", which runs a local program).
         cmd.append('--')
         cmd.append(os.path.expanduser(local_path))
-        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, download=False)}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=False)}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
         return cmd
 
@@ -140,12 +142,14 @@ class SCPService(SCPServiceInterface):
             List of command arguments for subprocess.
         """
         check_ssh_target(host, username)
+        sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(
             key_path, proxy_jump, proxy_args, port, extra_options,
             identity_agent, identity_file, certificate_file, known_hosts_file,
+            sftp=sftp,
         )
         cmd.append('--')  # see build_upload_command
-        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, download=True)}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=True)}')
         cmd.append(os.path.expanduser(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))
         return cmd
@@ -193,13 +197,13 @@ class SCPService(SCPServiceInterface):
             return 1, '', str(e)
 
     @staticmethod
-    def _remote_path(remote_path: str, *, download: bool) -> str:
+    def _remote_path(remote_path: str, *, sftp: bool, download: bool) -> str:
         """The remote path as the local client needs it (see ``utils.scp_client``)."""
-        if not scp_client.supports_sftp_flag(_SCP):
+        if not sftp:
             return scp_client.legacy_remote_path(remote_path)
-        # Over SFTP the client reads a source path as a pattern, in which a
-        # backslash escapes the next character; a target is taken as written.
-        return remote_path.replace("\\", "\\\\") if download else remote_path
+        # Over SFTP the client reads a download source as a pattern: escape what
+        # a pattern reads specially. An upload target is taken as written.
+        return scp_client.sftp_source_pattern(remote_path) if download else remote_path
 
     def _build_base_args(
         self,
@@ -212,6 +216,7 @@ class SCPService(SCPServiceInterface):
         identity_file: Optional[str] = None,
         certificate_file: Optional[str] = None,
         known_hosts_file: Optional[str] = None,
+        sftp: bool = False,
     ) -> List[str]:
         """Build base SCP command arguments.
 
@@ -276,7 +281,7 @@ class SCPService(SCPServiceInterface):
                 cmd.extend(['-o', f'CertificateFile={certificate_file}'])
 
         # With -s the path travels as data and no remote shell reads it.
-        if scp_client.supports_sftp_flag(_SCP):
+        if sftp:
             cmd.append('-s')
 
         return cmd

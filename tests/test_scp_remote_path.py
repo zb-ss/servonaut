@@ -24,7 +24,13 @@ OUTSIDE_NAMES = [
     "it's\"; touch marker;'.log",
     "q*?[x].log",
     "back\\slash.log",
+    "r[1].log",
+    "a*b.log",
+    "q?.log",
 ]
+
+# A file with a similar name that a pattern would also match.
+DECOYS = {"r[1].log": "r1.log", "a*b.log": "aXb.log", "q?.log": "qZ.log", "back\\slash.log": "backslash.log"}
 
 
 @pytest.fixture
@@ -62,9 +68,11 @@ def test_a_client_without_it_gets_an_escaped_path_and_no_flag(legacy_client) -> 
     assert _upload("~/my dir/a.log")[-1] == "deploy@9.9.9.9:~/my\\ dir/a.log"
 
 
-def test_sftp_reads_a_download_path_as_a_pattern_so_a_backslash_is_doubled(modern_client) -> None:
+def test_sftp_reads_a_download_source_as_a_pattern_so_its_special_characters_are_escaped(modern_client) -> None:
     assert _download("/srv/a\\b")[-2] == "deploy@9.9.9.9:/srv/a\\\\b"
-    assert _upload("/srv/a\\b")[-1] == "deploy@9.9.9.9:/srv/a\\b"
+    assert _download("/srv/a*b?[1].log")[-2] == "deploy@9.9.9.9:/srv/a\\*b\\?\\[1].log"
+    assert _download("/srv/{a,b}")[-2] == "deploy@9.9.9.9:/srv/{a,b}"
+    assert _upload("/srv/a\\b*[1]")[-1] == "deploy@9.9.9.9:/srv/a\\b*[1]"
 
 
 def test_plain_paths_are_unchanged_in_both_modes(modern_client, legacy_client) -> None:
@@ -202,10 +210,13 @@ def test_download_gets_the_right_file_and_runs_nothing(tmp_path, monkeypatch, cl
     monkeypatch.setattr(scp_client, "_answers", {"scp": client == "modern"})
     (tmp_path / "remote").mkdir()
     (tmp_path / "remote" / name).write_text("real content\n")
+    if name in DECOYS:
+        (tmp_path / "remote" / DECOYS[name]).write_text("decoy\n")
     command = SCPService().build_download_command(name, str(tmp_path / "out"), "h", "u")
     # Drop the host-key and keepalive options; the stand-in transport is not ssh.
     done = _run_scp(tmp_path, command, legacy=client == "legacy")
     assert done.returncode == 0, done.stderr
+    assert (tmp_path / "out").is_file(), "the target must be one file, not a directory of matches"
     assert (tmp_path / "out").read_text() == "real content\n"
     assert not (tmp_path / "remote" / "marker").exists()
 
@@ -222,3 +233,32 @@ def test_legacy_upload_runs_nothing(tmp_path, monkeypatch, name) -> None:
     assert done.returncode == 0, done.stderr
     assert (tmp_path / "remote" / name).read_text() == "uploaded\n"
     assert not (tmp_path / "remote" / "marker").exists()
+
+
+def test_the_client_is_asked_once_for_a_build_and_for_the_process(monkeypatch) -> None:
+    asked = []
+    monkeypatch.setattr(scp_client, "_answers", {})
+    monkeypatch.setattr(scp_client, "_probes", {})
+    monkeypatch.setattr(scp_client, "_probe", lambda executable: asked.append(executable) or True)
+    service = SCPService()
+    seen = []
+    real = scp_client.supports_sftp_flag
+    monkeypatch.setattr(scp_client, "supports_sftp_flag", lambda executable="scp": seen.append(1) or real(executable))
+    service.build_download_command("/srv/a", "/tmp/a", "9.9.9.9", "u")
+    assert len(seen) == 1
+    service.build_upload_command("/tmp/a", "/srv/a", "9.9.9.9", "u")
+    assert asked == ["scp"]
+
+
+def test_the_probe_runs_without_a_console_window(monkeypatch) -> None:
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 1, "", "usage: scp [-346ABCOpqRrsTv]")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert scp_client._probe("scp") is True
+    from servonaut.utils.ssh_utils import background_process_kwargs
+
+    assert all(seen.get(key) == value for key, value in background_process_kwargs().items())

@@ -23,6 +23,8 @@ import subprocess
 import threading
 from typing import Dict
 
+from servonaut.utils.ssh_utils import background_process_kwargs
+
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 5.0
@@ -48,6 +50,8 @@ def _probe(executable: str) -> bool:
         done = subprocess.run(
             [executable], capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
             stdin=subprocess.DEVNULL, check=False,
+            # No console window flashes on Windows when the app has none.
+            **background_process_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("Could not ask %s for its options: %s", executable, exc)
@@ -90,6 +94,15 @@ def forget_answers() -> None:
     with _lock:
         _answers.clear()
         _probes.clear()
+
+
+def sftp_source_pattern(path: str) -> str:
+    """*path* as a download source that matches only that file over SFTP.
+
+    scp reads a source as a pattern: ``*``, ``?``, ``[`` and the backslash
+    that escapes them are special. Braces are literal over SFTP.
+    """
+    return re.sub(r"([\\*?\[])", r"\\\1", path)
 
 
 def legacy_remote_path(path: str) -> str:
