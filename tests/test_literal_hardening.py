@@ -339,15 +339,18 @@ async def test_filler_padding_cannot_push_the_tail_out_of_sight(modal_cls, prefi
 
 
 @pytest.mark.asyncio
-async def test_the_standard_modal_cue_is_true_the_box_scrolls_with_the_arrow_keys() -> None:
+async def test_the_standard_modal_cue_is_true_shift_tab_reaches_the_box() -> None:
     from textual.containers import VerticalScroll
 
     app = _ModalHost(ToolConfirmModal("run_command", _long_args("long")))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.3)
         cue = app.screen.query_one("#tool_confirm_more", Static).visual.plain
-        assert "arrow keys or the mouse" in cue and "more lines below" in cue
+        assert "Shift+Tab" in cue and "arrow keys" in cue and "more lines below" in cue
         scroll = app.screen.query_one("#tool_confirm_scroll", VerticalScroll)
+        # Cancel holds the focus first, so a stray Enter cannot approve.
+        assert app.focused is app.screen.query_one("#btn_tool_cancel")
+        await pilot.press("shift+tab", "shift+tab")
         assert app.focused is scroll
         await pilot.press("down", "down")
         assert scroll.scroll_y > 0

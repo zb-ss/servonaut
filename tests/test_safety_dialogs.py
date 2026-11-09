@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from textual.color import Color
+from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
@@ -208,9 +209,16 @@ async def test_long_safety_details_scroll_without_moving_pinned_controls(
         app.push_screen(screen)
         await pilot.pause()
         assert screen.focused is screen.query_one(f"#{safe_id}")
-        body = screen.query_one(DialogBody)
+        if kind == "remediation":
+            body = screen.query_one(DialogBody)
+            assert screen.query_one(DialogFrame).border_subtitle
+        else:
+            # Tool approvals scroll their arguments in a box of their own,
+            # with a cue below it instead of the frame's border hint.
+            prefix = "dangerous" if kind == "dangerous" else "tool"
+            body = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+            assert screen.query_one(f"#{prefix}_confirm_more", Static).display
         assert body.max_scroll_y > 0
-        assert screen.query_one(DialogFrame).border_subtitle
         buttons = list(screen.query_one(DialogActions).query(Button))
         positions = [button.region for button in buttons]
         body.focus()
