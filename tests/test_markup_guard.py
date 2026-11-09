@@ -115,3 +115,24 @@ def test_watch_restores_the_parsers() -> None:
     with watch():
         assert (textual.markup.to_content, rich.markup.render) != before
     assert (textual.markup.to_content, rich.markup.render) == before
+
+
+def test_suspending_the_backstop_under_a_guard_gives_the_raw_parse(shipped_parsers) -> None:
+    with watch():
+        assert shipped_parsers.installed()
+        with shipped_parsers.suspended():
+            assert not shipped_parsers.installed()
+            with pytest.raises(MarkupError):
+                Text.from_markup("a[/]b")
+            assert Content.from_markup("[@click=app.ran]x[/]").spans[0].style == "@click=app.ran"
+        assert shipped_parsers.installed()
+        assert Text.from_markup("a[/]b").plain == "a[/]b"
+    assert shipped_parsers.installed()
+
+
+def test_uninstall_then_install_under_a_guard_round_trips(shipped_parsers) -> None:
+    with watch():
+        shipped_parsers.uninstall()
+        assert not shipped_parsers.installed()
+        shipped_parsers.install()
+        assert shipped_parsers.installed()

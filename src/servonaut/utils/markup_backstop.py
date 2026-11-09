@@ -42,6 +42,11 @@ from textual.style import Style as TextualStyle
 # test harness watches the parsers) cannot make them call themselves.
 _upstream: dict[str, Callable[..., Any]] = {}
 
+# Off while the backstop is suspended. The wrappers then pass straight through,
+# which also works when a harness checker sits above them and the bindings
+# cannot be put back.
+_enabled = True
+
 
 # ---------------------------------------------------------------------------
 # Cleaning a parsed style
@@ -93,6 +98,8 @@ def _inert_rich_markup(markup: str, args: tuple, kwargs: dict) -> Text:
 
 def safe_rich_render(markup: str, *args: Any, **kwargs: Any) -> Text:
     """``rich.markup.render`` that never raises and never yields meta or links."""
+    if not _enabled:
+        return _upstream["rich"](markup, *args, **kwargs)
     try:
         text = _upstream["rich"](markup, *args, **kwargs)
     except RichMarkupError:
@@ -112,6 +119,8 @@ def _inert_textual_markup(markup: str, args: tuple, kwargs: dict) -> Content:
 
 def safe_to_content(markup: str, *args: Any, **kwargs: Any) -> Content:
     """``textual.markup.to_content`` that never raises and never yields meta or links."""
+    if not _enabled:
+        return _upstream["textual"](markup, *args, **kwargs)
     try:
         content = _upstream["textual"](markup, *args, **kwargs)
     except textual.markup.MarkupError:
@@ -160,7 +169,8 @@ def installed() -> bool:
     A harness checker placed on top of the safe parsers still counts.
     """
     return (
-        _in_chain(textual.markup.to_content, safe_to_content)
+        _enabled
+        and _in_chain(textual.markup.to_content, safe_to_content)
         and _in_chain(rich.markup.render, safe_rich_render)
         and rich.console.render_markup is safe_rich_render
     )
@@ -173,6 +183,8 @@ def install() -> None:
     other (the upstream parser, or a harness checker around it) is wrapped, and
     the wrapper calls it, so installing never hides a layer beneath it.
     """
+    global _enabled
+    _enabled = True
     if not _in_chain(textual.markup.to_content, safe_to_content):
         _upstream["textual"] = textual.markup.to_content
         safe_to_content.__wrapped__ = _upstream["textual"]  # type: ignore[attr-defined]
@@ -186,7 +198,13 @@ def install() -> None:
 
 
 def uninstall() -> None:
-    """Restore the parsers the backstop wrapped (for tests that need the raw behaviour)."""
+    """Make the parsers behave as upstream (for tests that need the raw behaviour).
+
+    The safe parsers are taken out of the bindings when they are on top; under
+    a harness checker they stay in place and pass straight through.
+    """
+    global _enabled
+    _enabled = False
     if textual.markup.to_content is safe_to_content:
         textual.markup.to_content = _upstream["textual"]
     if rich.markup.render is safe_rich_render:
