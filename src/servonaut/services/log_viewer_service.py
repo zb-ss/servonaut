@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 
 from servonaut.services.interfaces import LogViewerServiceInterface
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.remote_shell import shell_word as _shell_word
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 if TYPE_CHECKING:
@@ -219,7 +220,8 @@ class LogViewerService(LogViewerServiceInterface):
 
         # Build a compound shell command: test -r /path && echo /path; ...
         checks = "; ".join(
-            f"test -r {path} && echo {path}" for path in all_paths
+            f"test -r {_shell_word(path)} && echo {_shell_word(path)}"
+            for path in all_paths
         )
 
         ssh_cmd = None
@@ -339,9 +341,10 @@ class LogViewerService(LogViewerServiceInterface):
 
     def get_tail_command(self, log_path: str, num_lines: int = 100, follow: bool = True) -> str:
         """Build tail command string for remote execution."""
+        word = _shell_word(log_path)
         if follow:
-            return f"tail -n {num_lines} -f {log_path}"
-        return f"tail -n {num_lines} {log_path}"
+            return f"tail -n {num_lines} -f {word}"
+        return f"tail -n {num_lines} {word}"
 
     def classify_log_file(self, path: str) -> str:
         """Classify a log file as active, rotated, or compressed."""
@@ -359,19 +362,21 @@ class LogViewerService(LogViewerServiceInterface):
         - active: tail -f
         """
         classification = self.classify_log_file(log_path)
+        # The tool is chosen from the real name; only the argument is quoted.
+        word = _shell_word(log_path)
 
         if classification == "compressed":
             for ext, cmd in _DECOMPRESS_COMMANDS.items():
                 if log_path.endswith(ext):
-                    return f"{cmd} {log_path}"
+                    return f"{cmd} {word}"
             # Fallback for unknown compressed extension
-            return f"zcat {log_path}"
+            return f"zcat {word}"
 
         if classification == "rotated":
-            return f"tail -n {num_lines} {log_path}"
+            return f"tail -n {num_lines} {word}"
 
         # Active file — follow
-        return f"tail -n {num_lines} -f {log_path}"
+        return f"tail -n {num_lines} -f {word}"
 
     async def scan_log_directories(
         self,
@@ -394,7 +399,7 @@ class LogViewerService(LogViewerServiceInterface):
             return []
 
         # Build find command for all directories
-        dir_args = " ".join(directories)
+        dir_args = " ".join(_shell_word(directory) for directory in directories)
         find_cmd = (
             f"find {dir_args} -maxdepth {max_depth} -type f -readable "
             f"2>/dev/null | sort -u"
@@ -472,7 +477,7 @@ class LogViewerService(LogViewerServiceInterface):
             self.set_custom_paths(instance_id, existing)
 
         find_cmd = (
-            f"find {directory} -maxdepth 2 -type f -readable "
+            f"find {_shell_word(directory)} -maxdepth 2 -type f -readable "
             r"\( -name '*.log' -o -name '*.log.*' -o -name 'syslog*' -o -name 'messages*' \) "
             "2>/dev/null | sort -u"
         )
