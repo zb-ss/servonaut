@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 
 from servonaut.services.interfaces import LogViewerServiceInterface
 from servonaut.services.memory.provider import instance_provider
-from servonaut.utils.remote_shell import shell_word as _shell_word
+from servonaut.utils.remote_shell import shell_path as _remote_path
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 if TYPE_CHECKING:
@@ -218,9 +218,9 @@ class LogViewerService(LogViewerServiceInterface):
             self.last_probe_probed_at = None
             return []
 
-        # Build a compound shell command: test -r /path && echo /path; ...
+        # Build a compound shell command: test -r /path && printf path; ...
         checks = "; ".join(
-            f"test -r {_shell_word(path)} && echo {_shell_word(path)}"
+            f"test -r {_remote_path(path)} && printf '%s\\n' {_remote_path(path)}"
             for path in all_paths
         )
 
@@ -341,7 +341,7 @@ class LogViewerService(LogViewerServiceInterface):
 
     def get_tail_command(self, log_path: str, num_lines: int = 100, follow: bool = True) -> str:
         """Build tail command string for remote execution."""
-        word = _shell_word(log_path)
+        word = _remote_path(log_path)
         if follow:
             return f"tail -n {num_lines} -f {word}"
         return f"tail -n {num_lines} {word}"
@@ -363,7 +363,7 @@ class LogViewerService(LogViewerServiceInterface):
         """
         classification = self.classify_log_file(log_path)
         # The tool is chosen from the real name; only the argument is quoted.
-        word = _shell_word(log_path)
+        word = _remote_path(log_path)
 
         if classification == "compressed":
             for ext, cmd in _DECOMPRESS_COMMANDS.items():
@@ -399,7 +399,7 @@ class LogViewerService(LogViewerServiceInterface):
             return []
 
         # Build find command for all directories
-        dir_args = " ".join(_shell_word(directory) for directory in directories)
+        dir_args = " ".join(_remote_path(directory) for directory in directories)
         find_cmd = (
             f"find {dir_args} -maxdepth {max_depth} -type f -readable "
             f"2>/dev/null | sort -u"
@@ -477,7 +477,7 @@ class LogViewerService(LogViewerServiceInterface):
             self.set_custom_paths(instance_id, existing)
 
         find_cmd = (
-            f"find {_shell_word(directory)} -maxdepth 2 -type f -readable "
+            f"find {_remote_path(directory)} -maxdepth 2 -type f -readable "
             r"\( -name '*.log' -o -name '*.log.*' -o -name 'syslog*' -o -name 'messages*' \) "
             "2>/dev/null | sort -u"
         )

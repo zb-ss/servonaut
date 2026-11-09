@@ -36,12 +36,21 @@ def shell_word(value: str) -> str:
     return shell_quote(value)
 
 
-def shell_path(path: str) -> str:
-    """Like ``shell_word``, but a leading ``~`` still means the login home.
+_HOME_PREFIXES = ("$HOME", "${HOME}")
 
-    Quoting stops the remote shell from expanding ``~``, so the home part is
-    written as ``"$HOME"`` (expanded) and only the rest is quoted.
+
+def shell_path(path: str) -> str:
+    """Like ``shell_word``, but a leading ``~`` or ``$HOME`` still means the login home.
+
+    Quoting stops the remote shell from expanding ``~`` or ``$HOME``, so the
+    home part is written as ``"$HOME"`` (expanded) and only the rest is quoted.
+    Configurations written when paths were left to the shell, with ``~/x`` or
+    ``$HOME/x``, keep working; no other variable or glob is expanded.
     """
+    for prefix in _HOME_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            path = "~" + path[len(prefix):]
+            break
     if path == "~":
         return '"$HOME"'
     if path.startswith("~/"):

@@ -145,8 +145,8 @@ def test_probe_command_quotes_configured_and_custom_paths():
 
     asyncio.run(probe_service.probe_log_paths({"id": "i-1"}, MagicMock(), MagicMock(), runner=runner))
     assert seen == [
-        "test -r '/var/log/x;y.log' && echo '/var/log/x;y.log'; "
-        "test -r '/tmp/$(z).log' && echo '/tmp/$(z).log'"
+        "test -r '/var/log/x;y.log' && printf '%s\\n' '/var/log/x;y.log'; "
+        "test -r '/tmp/$(z).log' && printf '%s\\n' '/tmp/$(z).log'"
     ]
 
 
@@ -257,3 +257,25 @@ def test_path_scan_quotes_a_scan_path():
         "ls -la '/srv/a b;c' 2>/dev/null",
         'ls -la "$HOME"/logs 2>/dev/null',
     ]
+
+
+@pytest.mark.parametrize("path", ["$HOME/logs/a b.log", "${HOME}/logs/a b.log", "~/logs/a b.log"])
+def test_a_home_prefix_written_any_of_three_ways_still_means_the_home(tmp_path, path) -> None:
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "a b.log").write_text("home log\n")
+    out = _sh(f"cat {shell_path(path)}", tmp_path, env={**os.environ, "HOME": str(tmp_path)})
+    assert out == "home log\n"
+
+
+def test_only_a_leading_home_is_expanded() -> None:
+    assert shell_path("$HOME") == '"$HOME"'
+    assert shell_path("/srv/$HOME/x") == "'/srv/$HOME/x'"
+    assert shell_path("$HOMEX/y") == "'$HOMEX/y'"
+    assert shell_path("$OTHER/y") == "'$OTHER/y'"
+
+
+def test_the_probe_prints_a_name_with_a_backslash_exactly(tmp_path) -> None:
+    name = "a\\cb"
+    (tmp_path / name).write_text("x")
+    asked = f"test -r {shell_path(str(tmp_path / name))} && printf '%s\\n' {shell_path(str(tmp_path / name))}"
+    assert _sh(asked, tmp_path) == f"{tmp_path / name}\n"
