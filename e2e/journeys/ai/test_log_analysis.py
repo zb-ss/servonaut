@@ -38,7 +38,7 @@ def _probe_command() -> str:
     from servonaut.config.schema import AppConfig
 
     paths = AppConfig().log_viewer_default_paths
-    return "; ".join(f"test -r {path} && echo {path}" for path in paths)
+    return "; ".join(f"test -r {path} && printf '%s\\n' {path}" for path in paths)
 
 
 def _seed(seed, fake_cloud, fake_ai, journey):
