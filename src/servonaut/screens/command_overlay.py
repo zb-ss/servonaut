@@ -1,7 +1,6 @@
 """Command overlay modal for Servonaut v2.0."""
 
 from __future__ import annotations
-import shlex
 import subprocess
 import logging
 import threading
@@ -30,6 +29,7 @@ from servonaut.utils.ssh_utils import (
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
+from servonaut.utils.remote_shell import shell_quote
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +295,7 @@ class CommandOverlay(ModalScreen):
 
         # Use bash -ic (interactive) so .bashrc is fully sourced, including
         # nvm/rbenv/pyenv init blocks guarded by the non-interactive check.
-        login_command = f'bash -ic {shlex.quote(command)}'
+        login_command = f'bash -ic {shell_quote(command)}'
         self.run_worker(
             self._resolve_and_run(login_command, output_widget),
             name=f"resolve_{len(self._history)}",

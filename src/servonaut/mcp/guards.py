@@ -5,6 +5,7 @@ import re
 import logging
 import shlex
 from typing import Callable, Dict, FrozenSet, List, Sequence, Tuple
+from servonaut.utils.remote_shell import shell_quote
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def _check_segment(segment: List[str], allowlist: Sequence[str]) -> Tuple[bool, 
 
 
 def _render_token(token: str) -> str:
-    return token if _PLAIN_TOKEN.match(token) else shlex.quote(token)
+    return token if _PLAIN_TOKEN.match(token) else shell_quote(token)
 
 
 def render_standard_command(command: str) -> str:

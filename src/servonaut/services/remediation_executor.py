@@ -24,8 +24,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
-import shlex
 from typing import Any, Dict, Optional, Tuple
+from servonaut.utils.remote_shell import shell_quote
 
 #: Relay envelopes with this ``source`` route to the remediation path.
 REMEDIATION_SOURCE = "proactive_remediation"
@@ -162,14 +162,14 @@ def _build_certbot_renew(payload: Dict[str, Any]) -> str:
     ]
     if _coerce_dry_run(payload):
         argv.append("--dry-run")
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 # systemd unit names: alnum plus ``: _ . @ -`` (the ``@`` is required for
 # systemd template/instance unit names), with an optional known unit-type
 # suffix. Deliberately excludes ``/``, ``..``, whitespace,
 # and every shell metacharacter — the unit is interpolated into an argv that
-# is shlex-quoted, but the allowlist is the primary guard. Kept in lockstep
+# is shell-quoted, but the allowlist is the primary guard. Kept in lockstep
 # with the server-side unit validator.
 _SAFE_UNIT_RE = re.compile(
     r"^[A-Za-z0-9:_.@-]+"
@@ -201,13 +201,13 @@ def _build_restart_service(payload: Dict[str, Any]) -> str:
         argv_active = ["systemctl", "is-active", unit]
         argv_status = ["systemctl", "status", unit, "--no-pager"]
         return (
-            " ".join(shlex.quote(a) for a in argv_active)
+            " ".join(shell_quote(a) for a in argv_active)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_status)
+            + " ".join(shell_quote(a) for a in argv_status)
             + "; true"
         )
     argv = ["sudo", "-n", "systemctl", "restart", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_enable_service(payload: Dict[str, Any]) -> str:
@@ -220,15 +220,15 @@ def _build_enable_service(payload: Dict[str, Any]) -> str:
         argv_enabled = ["systemctl", "is-enabled", unit]
         argv_active = ["systemctl", "is-active", unit]
         return (
-            " ".join(shlex.quote(a) for a in argv_enabled)
+            " ".join(shell_quote(a) for a in argv_enabled)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_active)
+            + " ".join(shell_quote(a) for a in argv_active)
             + "; true"
         )
     # ``--now`` also starts the unit; idempotent (enabling an enabled unit is
     # a no-op success).
     argv = ["sudo", "-n", "systemctl", "enable", "--now", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_reload_service(payload: Dict[str, Any]) -> str:
@@ -237,16 +237,16 @@ def _build_reload_service(payload: Dict[str, Any]) -> str:
         argv_active = ["systemctl", "is-active", unit]
         argv_status = ["systemctl", "status", unit, "--no-pager"]
         return (
-            " ".join(shlex.quote(a) for a in argv_active)
+            " ".join(shell_quote(a) for a in argv_active)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_status)
+            + " ".join(shell_quote(a) for a in argv_status)
             + "; true"
         )
     # Plain reload (not reload-or-restart): a ``needs_reload`` finding wants a
     # config re-read, not a restart's downtime. A unit with no reload support
     # fails cleanly and is surfaced as reload_unsupported.
     argv = ["sudo", "-n", "systemctl", "reload", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_disable_service(payload: Dict[str, Any]) -> str:
@@ -255,15 +255,15 @@ def _build_disable_service(payload: Dict[str, Any]) -> str:
         argv_enabled = ["systemctl", "is-enabled", unit]
         argv_active = ["systemctl", "is-active", unit]
         return (
-            " ".join(shlex.quote(a) for a in argv_enabled)
+            " ".join(shell_quote(a) for a in argv_enabled)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_active)
+            + " ".join(shell_quote(a) for a in argv_active)
             + "; true"
         )
     # ``--now`` also stops the unit; the Tier-1 inverse of enable_service.
     # Idempotent (disabling a disabled unit is a no-op success).
     argv = ["sudo", "-n", "systemctl", "disable", "--now", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 # Docker/OCI container names: an alphanumeric first char, then up to 127 more
@@ -300,7 +300,7 @@ def _build_container_dry_run(name: str) -> str:
     # ``.RestartCount`` are always present, so the Go template can't hit a nil.
     fmt = "status={{.State.Status}} restarts={{.RestartCount}}"
     argv = ["docker", "inspect", "-f", fmt, name]
-    return " ".join(shlex.quote(a) for a in argv) + "; true"
+    return " ".join(shell_quote(a) for a in argv) + "; true"
 
 
 def _build_restart_container(payload: Dict[str, Any]) -> str:
@@ -308,7 +308,7 @@ def _build_restart_container(payload: Dict[str, Any]) -> str:
     if _coerce_dry_run(payload):
         return _build_container_dry_run(name)
     argv = ["docker", "restart", name]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_start_container(payload: Dict[str, Any]) -> str:
@@ -318,7 +318,7 @@ def _build_start_container(payload: Dict[str, Any]) -> str:
     # Idempotent: ``docker start`` on an already-running container exits 0
     # (goal state reached) — the same idempotence contract as the on-box unban.
     argv = ["docker", "start", name]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 #: Multipliers the ``raise_container_memory`` envelope may request, as strings.
@@ -351,13 +351,13 @@ def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
     restores it. Refuses cleanly (no change) when: the container has no limit,
     it is not compose-managed, or no safe YAML editor is present.
 
-    The container name is validated + shlex-quoted; the multiplier is a single
+    The container name is validated + shell-quoted; the multiplier is a single
     digit from :data:`RAISE_MEM_MULTIPLIERS`. Failure paths echo an uppercase
     token that :func:`classify_failure` maps to a curated slug.
     """
     name = _require_container(payload)
     mult = _require_multiplier(payload)
-    c = shlex.quote(name)
+    c = shell_quote(name)
     inspect_mem = f"docker inspect -f '{{{{.HostConfig.Memory}}}}' {c}"
     inspect_file = (
         f"docker inspect -f "
@@ -469,13 +469,13 @@ def _build_set_config_value(payload: Dict[str, Any]) -> str:
     passes does it reload; a reload failure also restores. Failure paths echo
     an uppercase token that :func:`classify_failure` maps to a curated slug.
 
-    file/key/value are validated + shlex-quoted into shell vars; the argv is
+    file/key/value are validated + shell-quoted into shell vars; the argv is
     built LOCALLY, never from raw server text.
     """
     file, key, value = _require_config_triplet(payload)
     setvars = (
-        f"FILE={shlex.quote(file)}; KEY={shlex.quote(key)}; "
-        f"VAL={shlex.quote(value)}; "
+        f"FILE={shell_quote(file)}; KEY={shell_quote(key)}; "
+        f"VAL={shell_quote(value)}; "
     )
     if _coerce_dry_run(payload):
         # Read-only preview: report the current EFFECTIVE value (sshd -T, the
@@ -530,7 +530,7 @@ def _build_set_config_value(payload: Dict[str, Any]) -> str:
 # from its FIX_PERMISSIONS_TARGETS policy catalog. The CLI holds no perms
 # policy; it re-validates defensively: the path must match a curated candidate
 # category (mirrors the probe list), the mode a 3-4 digit octal, the owner a
-# user or user:group. shlex-quoted, argv built LOCALLY.
+# user or user:group. shell-quoted, argv built LOCALLY.
 _FIX_PERMS_PATH_RE = re.compile(
     r"^/etc/ssh/sshd_config(?:\.d/[A-Za-z0-9._-]+)?$"
     r"|^/etc/ssh/ssh_host_[A-Za-z0-9_]+_key$"
@@ -571,12 +571,12 @@ def _build_fix_permissions(payload: Dict[str, Any]) -> str:
     Captures the prior mode+owner first (the revert handle), then chmod +
     chown to the target and re-stats to confirm. Failure paths echo an
     uppercase token that :func:`classify_failure` maps to a curated slug.
-    path/mode/owner are validated + shlex-quoted; the argv is built LOCALLY.
+    path/mode/owner are validated + shell-quoted; the argv is built LOCALLY.
     """
     path, mode, owner = _require_fix_perms_triplet(payload)
     setvars = (
-        f"P={shlex.quote(path)}; M={shlex.quote(mode)}; "
-        f"O={shlex.quote(owner)}; "
+        f"P={shell_quote(path)}; M={shell_quote(mode)}; "
+        f"O={shell_quote(owner)}; "
     )
     if _coerce_dry_run(payload):
         # Read-only: report the current mode+owner and the planned target;
@@ -615,11 +615,11 @@ def _build_rotate_logs(payload: Dict[str, Any]) -> str:
         # reports exactly what a real run would rotate. sudo is needed to read
         # the root-owned state file and logs.
         argv = ["sudo", "-n", "logrotate", "-d", _LOGROTATE_CONF]
-        return " ".join(shlex.quote(a) for a in argv)
+        return " ".join(shell_quote(a) for a in argv)
     # ``--force`` rotates now regardless of size/age conditions — the point of
     # an operator-triggered rotation under disk pressure.
     argv = ["sudo", "-n", "logrotate", "--force", _LOGROTATE_CONF]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 _VERB_BUILDERS = {

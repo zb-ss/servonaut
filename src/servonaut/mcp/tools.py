@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import secrets
-import shlex
 import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Mapping, Optional
@@ -79,6 +78,7 @@ from servonaut.services.ssh_host_keys import (
     HostKeyVerificationError,
     detect_host_key_problem,
 )
+from servonaut.utils.remote_shell import shell_quote
 
 logger = logging.getLogger(__name__)
 
@@ -1346,7 +1346,7 @@ class ServonautTools:
             )
             return message
         return await self._run_command(
-            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}",
+            instance_id, f"tail -n {count} -- {shell_quote(log_path)}",
             requested_as="reading logs",
         )
 
@@ -6175,7 +6175,7 @@ class ServonautTools:
         top = max(1, min(int(top_n or 15), 100))
 
         if log_path:
-            quoted = shlex.quote(log_path)
+            quoted = shell_quote(log_path)
             remote = f"printf '===VHOST:%s===\\n' {quoted}; tail -n {n} -- {quoted}"
             hint = log_path
         else:
@@ -6512,7 +6512,7 @@ class ServonautTools:
         is_pg = engine.startswith('postgres')
         database = profile.database or ('postgres' if is_pg else '')
 
-        q = shlex.quote
+        q = shell_quote
         env = (
             f"DBH={q(host)}; DBU={q(user)}; DBP={q(password)}; "
             f"DBN={q(database)}; DBPORT={q(str(port))}; DBSQL={q(sql)}; "
@@ -7989,7 +7989,7 @@ class ServonautTools:
                             'validation: invalid_container_name')
             return f"validation: invalid container name: {container!r}"
         n = max(1, min(int(lines or 200), 1000))
-        quoted = shlex.quote(container)
+        quoted = shell_quote(container)
         # 2>&1 — container stderr is half the story for crash loops.
         # Byte-cap defensively; a chatty container can emit MBs in 1000
         # lines and evidence strings are bounded server-side anyway.
@@ -8565,7 +8565,7 @@ class ServonautTools:
             return error
 
         minutes = max(1, min(int(since_minutes or 1440), 10080))
-        quoted = shlex.quote(container)
+        quoted = shell_quote(container)
         remote = (
             self._DOCKER_PRELUDE
             + f'if ! $D inspect {quoted} >/dev/null 2>&1; then '

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import shlex
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,6 +28,7 @@ from servonaut.services.connection_service import server_connection
 from servonaut.services.ssh_host_keys import ensure_known_hosts_file, servonaut_known_hosts_path
 from servonaut.services.ssh_ref_resolver import ResolvedSshRef
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
+from servonaut.utils.remote_shell import shell_quote
 
 from .ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, CommandResult, EnrollmentError, HostExecutor
 from .ssh_agent import PrivateSshAgent
@@ -246,7 +246,7 @@ class SshHostExecutor(HostExecutor):
 
     async def _exec(self, remote_argv: tuple[str, ...], *, stdin: bytes | None = None) -> CommandResult:
         connection, resolved = await self._prepare()
-        remote_command = shlex.join(remote_argv)
+        remote_command = " ".join(shell_quote(word) for word in remote_argv)
         key_path = resolved.local_key_path if resolved and resolved.source == "local" else None
         lease = self.lease or (resolved.lease if resolved else None)
         kwargs: dict[str, Any] = {

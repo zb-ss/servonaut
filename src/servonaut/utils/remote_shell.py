@@ -10,15 +10,30 @@ from __future__ import annotations
 import shlex
 
 
+def shell_quote(value: str) -> str:
+    """Return *value* as one inert word for a POSIX shell and for fish.
+
+    ``shlex.quote`` is exact for POSIX shells, but in fish a backslash is an
+    escape even inside single quotes, so ``'a\\'b'`` ends the quote early. Each
+    backslash-free run is therefore quoted on its own and every backslash is
+    written as ``"\\"`` outside the single quotes, which both shells read as
+    one literal backslash. For input without a backslash the result is exactly
+    ``shlex.quote(value)``.
+    """
+    if "\\" not in value:
+        return shlex.quote(value)
+    return '"\\\\"'.join(shlex.quote(part) if part else "''" for part in value.split("\\"))
+
+
 def shell_word(value: str) -> str:
     """Return *value* as a single inert word of a remote shell command.
 
     A value starting with ``-`` is anchored with ``./`` so the tool cannot
-    read it as an option.
+    read it as an option; that anchor is meant for path words only.
     """
     if value.startswith("-"):
         value = f"./{value}"
-    return shlex.quote(value)
+    return shell_quote(value)
 
 
 def shell_path(path: str) -> str:
