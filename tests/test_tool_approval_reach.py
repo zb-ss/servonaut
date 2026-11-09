@@ -121,3 +121,54 @@ async def test_the_remediation_command_is_drawn_and_reachable(size, long_undo) -
         assert "example step 45 [red]literal[/red]" in _drawn(app)
         for button in app.screen.query(Button):
             assert button.region.area > 0 and button.region.bottom <= app.size.height
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_cls,prefix,rows", [
+    (ToolConfirmModal, "tool", 9), (DangerousToolConfirmModal, "dangerous", 6),
+])
+async def test_the_arguments_use_the_spare_rows_of_a_short_terminal(modal_cls, prefix, rows) -> None:
+    app = _Host(modal_cls("run_command", dict(ARGS)))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settled(pilot, app.screen, prefix)
+        assert app.screen.query_one(f"#{prefix}_confirm_scroll").size.height >= rows
+        # The heading stays below the toast lane's first rows.
+        assert app.screen.query_one(f"#{prefix}_confirm_title").region.y >= 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_cls,prefix", MODALS)
+async def test_an_approval_shows_one_scroll_cue_not_two(modal_cls, prefix) -> None:
+    from servonaut.widgets.dialogs import DialogFrame
+
+    app = _Host(modal_cls("run_command", dict(ARGS)))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settled(pilot, app.screen, prefix)
+        assert app.screen.query_one(DialogFrame).border_subtitle == ""
+        assert "Scroll for all details" not in _drawn(app)
+
+
+@pytest.mark.asyncio
+async def test_other_dialogs_keep_the_border_hint() -> None:
+    from servonaut.screens.remediation_confirm import RemediationConfirmModal
+    from servonaut.widgets.dialogs import DialogFrame
+    from tests.test_safety_dialogs import make_preview
+
+    app = _Host(RemediationConfirmModal(make_preview(long=True), dry_run=False))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.5)
+        assert app.screen.query_one(DialogFrame).border_subtitle == "Scroll for all details"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size,undo_rows", [((80, 24), 1), ((80, 29), 1), ((100, 30), 3), ((160, 50), 3)])
+async def test_the_undo_box_shrinks_only_on_a_short_terminal(size, undo_rows) -> None:
+    from servonaut.screens.remediation_confirm import RemediationConfirmModal
+    from tests.test_safety_dialogs import make_preview
+
+    app = _Host(RemediationConfirmModal(make_preview(long=False, long_undo=True), dry_run=False))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause(0.5)
+        undo = app.screen.query_one("#remediation_confirm_revert").parent
+        assert undo.size.height == undo_rows
+        assert app.screen.query_one("#remediation_confirm_scroll").size.height >= 3

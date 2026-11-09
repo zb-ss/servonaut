@@ -37,6 +37,10 @@ from servonaut.widgets.dialogs import (
 #: The literal the user must type to arm the Execute button.
 CONFIRM_PHRASE = "RUN"
 
+# Below this many rows the undo box shrinks to one line so the command being
+# approved keeps its room.
+_UNDO_COMPACT_BELOW_ROWS = 30
+
 #: Shown when the preview carries no usable undo plan. Silence would
 #: read as "reversible" — say so explicitly instead.
 NO_REVERT_TEXT = "no clean revert — this cannot be undone automatically"
@@ -91,24 +95,9 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
     AUTO_FOCUS = "#remediation_confirm_input"
     VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
-    DEFAULT_CSS = """
-    RemediationConfirmModal .remediation-undo {
-        height: auto;
-        max-height: 3;
-        overflow-x: hidden;
-    }
-
-    /* The command being approved always keeps a few rows; the undo box,
-       which is capped above, gives way first. */
-    RemediationConfirmModal #remediation_confirm_scroll {
-        min-height: 3;
-    }
-
-    RemediationConfirmModal.-dialog-tight .remediation-undo,
-    RemediationConfirmModal.-dialog-minimal .remediation-undo {
-        max-height: 1;
-    }
-    """
+    def on_resize(self) -> None:
+        # The undo box gives way first, and only when the terminal is short.
+        self.set_class(self.size.height < _UNDO_COMPACT_BELOW_ROWS, "-undo-compact")
 
     def __init__(
         self, preview: Dict[str, Any], *, dry_run: bool,

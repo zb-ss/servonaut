@@ -261,3 +261,22 @@ DialogFrame .dialog-status .dialog-scroll-cue {
     color: $text-warning;
     display: none;
 }
+
+/* Tool approvals on short terminals: the body also takes the bottom slack and
+   the frame's bottom padding. The top offset stays, so the heading is never
+   under the toast lane. */
+.dialog-approval.-dialog-tight > DialogFrame {
+    max-height: 100%;
+    margin-top: 1;
+    padding: 1 2 0 2;
+}
+
+/* Remediation approval: the undo box is capped, and shrinks first when the
+   terminal is short. */
+RemediationConfirmModal .remediation-undo {
+    height: auto;
+    max-height: 3;
+    overflow-x: hidden;
+}
+
+RemediationConfirmModal.-undo-compact .remediation-undo { max-height: 1; }

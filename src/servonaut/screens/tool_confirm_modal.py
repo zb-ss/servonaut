@@ -159,7 +159,7 @@ class ToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
     VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
-        super().__init__(classes="dialog-screen")
+        super().__init__(classes="dialog-screen dialog-approval")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
 
@@ -186,6 +186,7 @@ class ToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
                 id="tool_confirm_buttons",
             ),
             id="tool_confirm_container",
+            overflow_hint=False,
         )
         yield Footer()
 
@@ -245,7 +246,7 @@ class DangerousToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
     """
 
     def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
-        super().__init__(classes="dialog-screen")
+        super().__init__(classes="dialog-screen dialog-approval")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
 
@@ -281,6 +282,7 @@ class DangerousToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
                 id="dangerous_confirm_buttons",
             ),
             id="dangerous_confirm_container",
+            overflow_hint=False,
             severity="danger",
         )
         yield Footer()

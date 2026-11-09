@@ -44,6 +44,8 @@ class DialogFrame(Vertical):
     Use DialogBody for scrollable copy, DialogContent for an editor, or pass
     a native scroll widget such as OptionList directly as the body.
     Add ``dialog-screen`` to the owning ModalScreen for centered positioning.
+    A dialog that explains its own scrolling passes ``overflow_hint=False`` to
+    drop the border hint.
 
     A dialog with a lot of content opts in to compact chrome on short terminals
     by setting ``VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS`` on its
@@ -68,6 +70,7 @@ class DialogFrame(Vertical):
         status: Widget | None = None,
         size: Literal["compact", "standard", "large", "fill"] = "standard",
         severity: Literal["neutral", "warning", "danger"] = "neutral",
+        overflow_hint: bool = True,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id, classes=f"dialog-{size} dialog-{severity}")
@@ -79,6 +82,7 @@ class DialogFrame(Vertical):
         self._body = body
         self._actions = actions
         self._status = status
+        self._overflow_hint = overflow_hint
 
     def compose(self) -> ComposeResult:
         yield self._heading
@@ -105,7 +109,7 @@ class DialogFrame(Vertical):
             return
         hint = (
             "Scroll for all details"
-            if self._body.allow_vertical_scroll and self._body.max_scroll_y > 0
+            if self._overflow_hint and self._body.allow_vertical_scroll and self._body.max_scroll_y > 0
             else ""
         )
         if self.border_subtitle != hint:

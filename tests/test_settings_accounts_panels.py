@@ -141,7 +141,7 @@ def _screen_text(app: App) -> str:
     return "\n".join(parts)
 
 
-async def _answer_confirmation(pilot, app, button_id: str) -> None:
+async def _answer_confirmation(app, button_id: str) -> None:
     """Press a button of the confirmation once it has been built and shown."""
 
     def ready() -> bool:
@@ -300,7 +300,7 @@ class TestAwsAccounts:
             await pilot.pause()
             await _select_row(pilot, app.panel, "aws", 1)
             await _press(pilot, app.panel, "btn_aws_account_remove")
-            await _answer_confirmation(pilot, app, "confirm_yes_btn")
+            await _answer_confirmation(app, "confirm_yes_btn")
             await pilot.pause()
             await pilot.pause()
             assert app.rebuilds == 1
@@ -313,7 +313,7 @@ class TestAwsAccounts:
             await pilot.pause()
             await _select_row(pilot, app.panel, "aws", 1)
             await _press(pilot, app.panel, "btn_aws_account_remove")
-            await _answer_confirmation(pilot, app, "confirm_no_btn")
+            await _answer_confirmation(app, "confirm_no_btn")
             await pilot.pause()
             assert app.rebuilds == 0
         assert len(_reread(tmp_path).aws.accounts) == 1
@@ -554,7 +554,7 @@ class TestHetznerAccounts:
             await pilot.pause()
             await _select_row(pilot, app.panel, "hetzner", 1)
             await _press(pilot, app.panel, "btn_hetzner_account_remove")
-            await _answer_confirmation(pilot, app, "confirm_yes_btn")
+            await _answer_confirmation(app, "confirm_yes_btn")
             await pilot.pause()
             await pilot.pause()
             assert app.rebuilds == 1
@@ -675,7 +675,7 @@ class TestOvhAccounts:
             await pilot.pause()
             await _select_row(pilot, app.panel, "ovh", 1)
             await _press(pilot, app.panel, "btn_ovh_account_remove")
-            await _answer_confirmation(pilot, app, "confirm_yes_btn")
+            await _answer_confirmation(app, "confirm_yes_btn")
             await pilot.pause()
             await pilot.pause()
             assert app.rebuilds == 1
