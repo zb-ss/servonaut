@@ -8379,9 +8379,8 @@ class ServonautTools:
             'echo "===CERT:$f==="; '
             'if [ -r "$f" ]; then '
             'openssl x509 -noout -subject -issuer -enddate -in "$f" 2>/dev/null; '
-            'else sudo -n sh -c '
-            '"openssl x509 -noout -subject -issuer -enddate -in \\"$f\\"" '
-            '2>/dev/null; fi; done; true'
+            'else sudo -n openssl x509 -noout -subject -issuer -enddate '
+            '-in "$f" 2>/dev/null; fi; done; true'
         )
         try:
             stdout, _stderr = await self._exec_ssh(instance, remote, timeout=60)
