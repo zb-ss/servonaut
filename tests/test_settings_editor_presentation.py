@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,17 @@ def _widget_paint(app: _EditorHost, widget: Widget) -> str:
                      for y in range(region.y, region.bottom))
 
 
+async def _settled_scroll(body: Widget) -> None:
+    """Wait until the body has stopped scrolling (animations included)."""
+    steady = 0
+    last = None
+    while steady < 6:
+        await asyncio.sleep(0.05)
+        current = (body.scroll_y, body.scroll_x)
+        steady = steady + 1 if current == last else 0
+        last = current
+
+
 async def _reveal_literal(
     app: _EditorHost, pilot: Pilot, body: Widget, widget: Static,
     expected: str, scroll_target: Widget | None = None,
@@ -117,7 +129,7 @@ async def _reveal_literal(
         and app.screen.region.contains_region(widget.region)
         and _compact(_widget_paint(app, widget)) == _compact(expected)
     ))
-    await pilot.pause()
+    await _settled_scroll(body)
     assert body.scrollable_content_region.contains_region(widget.region)
     for row in range(widget.region.y, widget.region.bottom):
         hit = app.get_widget_at(widget.region.center[0], row)[0]
@@ -257,3 +269,25 @@ async def test_log_invalid_limit_focuses_visible_field_and_keeps_disk_unchanged(
         assert _exposed(app, field)
         assert manager._config_path.read_bytes() == before
         assert "Saved" not in app.notes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("navigation", [True, False])
+async def test_removing_the_last_blocklist_entry_keeps_the_new_warning_in_view(
+    manager, size, navigation,
+) -> None:
+    app = _EditorHost(manager, "mcp", navigation)
+    async with app.run_test(size=size) as pilot:
+        panel = await _ready(app, pilot)
+        body = panel.query_one(".panel-body")
+        editor = panel.query_one("#mcp_blocklist", StringListEditor)
+        remove = editor.query_one(".list-remove", Button)
+        remove.scroll_visible(animate=False, immediate=True)
+        await _settled_scroll(body)
+        await _click(app, pilot, remove)
+        warning = panel.query_one("#mcp_blocklist_warn", Static)
+        await wait_until(lambda: bool(warning.render().plain))
+        await _settled_scroll(body)
+        assert app.focused is editor.query_one(".list-new", Input)
+        assert body.scrollable_content_region.contains_region(warning.region)

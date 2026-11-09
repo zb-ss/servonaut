@@ -310,6 +310,9 @@ class StringListEditor(Vertical):
             event.stop()
             row = event.button.parent
             if row is not None:
+                # Keep the focus here: left alone, it falls back to a control
+                # far above and scrolls the panel away from the change.
+                self._new.focus(scroll_visible=False)
                 await row.remove()
                 self.post_message(self.Changed(self))
 
