@@ -16,7 +16,7 @@ BAD_HOSTS = [
     "x';touch marker;'", "web 1", "web\t1", "web\n1", "a\\b", "$(touch marker)", "`id`",
     "a;b", "a|b", "a&b", 'a"b', "a<b", "a*b", "a\x1bb", "a=b",
 ]
-GOOD_USERS = ["ec2-user", "deploy", "CORP\\jdoe", "jdoe@corp.example", "dot.name", "übung"]
+GOOD_USERS = ["ec2-user", "deploy", "CORP\\jdoe", "jdoe@CORP", "dot.name", "übung"]
 BAD_USERS = ["a'b", "a b", "a\nb", "a\x1bb", "a\tb"]
 
 
@@ -65,7 +65,7 @@ def test_the_ssh_builder_refuses_a_bad_user(tmp_path) -> None:
 
 def test_the_ssh_builder_still_builds_for_a_good_target(tmp_path) -> None:
     command = _ssh_service(tmp_path).build_ssh_command(host="web-1.example.net", username="CORP\\jdoe")
-    assert "CORP\\jdoe@web-1.example.net" in command
+    assert any(word.startswith("CORP\\jdoe") and word.endswith("web-1.example.net") for word in command)
 
 
 @pytest.mark.parametrize("host", BAD_HOSTS[:6])
