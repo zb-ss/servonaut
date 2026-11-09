@@ -45,5 +45,6 @@ def shell_path(path: str) -> str:
     if path == "~":
         return '"$HOME"'
     if path.startswith("~/"):
-        return '"$HOME"/' + shell_word(path[2:])
+        rest = path[2:]
+        return '"$HOME"/' + (shell_word(rest) if rest else "")
     return shell_word(path)
