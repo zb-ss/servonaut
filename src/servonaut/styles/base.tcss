@@ -8,6 +8,8 @@
 
 * {
     scrollbar-background: transparent;
+    /* The square where two scrollbars meet takes the screen surface, not black. */
+    scrollbar-corner-color: $surface;
     scrollbar-color: $panel-lighten-2;
     scrollbar-color-hover: $primary;
     scrollbar-color-active: $accent;
