@@ -338,6 +338,15 @@ def _require_multiplier(payload: Dict[str, Any]) -> str:
     return m
 
 
+def _plain_address(ip: str):
+    """The address *ip* names, refusing one that carries a scope id (``fe80::1%eth0``)."""
+    if "%" in ip:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {ip!r} names a network interface (a scope id)",
+        )
+    return ipaddress.ip_address(ip)
+
+
 def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
     """Raise a compose-managed container's memory limit by a multiplier and
     recreate it. A Tier-2 config-edit primitive, so the whole thing is a
@@ -673,6 +682,11 @@ def validate_block_ip_payload(
             f"invalid_block_ip_address: {candidate!r} is a network — "
             f"block_ip takes exactly one address (no CIDR in v1)",
         )
+    if "%" in candidate:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {candidate!r} names a network interface "
+            f"(a scope id); give the plain address",
+        )
     try:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
@@ -727,20 +741,22 @@ def build_onbox_block_command(method: str, ip: str) -> str:
             f"invalid_block_ip_method: {method!r} is not an on-box "
             f"firewall method",
         )
-    is_v6 = ipaddress.ip_address(ip).version == 6
+    is_v6 = _plain_address(ip).version == 6
+    quoted_ip = shell_quote(ip)
+    grep_ip = f"'{ip}'" if quoted_ip == ip else quoted_ip
     if method == "ufw":
         # ufw takes v4/v6 transparently; it skips a duplicate rule (exit 0).
         return (
-            f"sudo -n ufw deny from {ip} to any; "
-            f"sudo -n ufw status | grep -qF '{ip}'"
+            f"sudo -n ufw deny from {quoted_ip} to any; "
+            f"sudo -n ufw status | grep -qF {grep_ip}"
         )
     if method == "firewalld":
         fam = "ipv6" if is_v6 else "ipv4"
-        rule = f'rule family="{fam}" source address="{ip}" drop'
+        rule = shell_quote(f'rule family="{fam}" source address="{ip}" drop')
         return (
-            f"sudo -n firewall-cmd --add-rich-rule='{rule}'; "
-            f"sudo -n firewall-cmd --permanent --add-rich-rule='{rule}'; "
-            f"sudo -n firewall-cmd --list-rich-rules | grep -qF '{ip}'"
+            f"sudo -n firewall-cmd --add-rich-rule={rule}; "
+            f"sudo -n firewall-cmd --permanent --add-rich-rule={rule}; "
+            f"sudo -n firewall-cmd --list-rich-rules | grep -qF {grep_ip}"
         )
     # nftables: a dedicated servonaut_ban table/set/chain/drop-rule,
     # bootstrapped ONCE (guarded on table existence so a repeat ban never
@@ -762,9 +778,9 @@ def build_onbox_block_command(method: str, ip: str) -> str:
         "if ! sudo -n nft list table inet servonaut_ban "
         f">/dev/null 2>&1; then {bootstrap}fi; "
         f"sudo -n nft add element inet servonaut_ban {set_name} "
-        f"'{{ {ip} }}' 2>/dev/null; "
+        f"{shell_quote('{ ' + ip + ' }')} 2>/dev/null; "
         f"sudo -n nft list set inet servonaut_ban {set_name} "
-        f"| grep -qF '{ip}'"
+        f"| grep -qF {grep_ip}"
     )
 
 
@@ -794,6 +810,11 @@ def validate_unblock_ip_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
         raise RemediationValidationError(
             f"invalid_unblock_ip_address: {candidate!r} is a network — "
             f"unblock_ip takes exactly one address (no CIDR)",
+        )
+    if "%" in candidate:
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_address: {candidate!r} names a network interface "
+            f"(a scope id); give the plain address",
         )
     try:
         addr = ipaddress.ip_address(candidate)
@@ -840,21 +861,23 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
             f"invalid_unblock_ip_method: {method!r} is not an on-box "
             f"firewall method",
         )
-    is_v6 = ipaddress.ip_address(ip).version == 6
+    is_v6 = _plain_address(ip).version == 6
+    quoted_ip = shell_quote(ip)
+    grep_ip = f"'{ip}'" if quoted_ip == ip else quoted_ip
     if method == "ufw":
         return (
-            f"sudo -n ufw delete deny from {ip} to any 2>/dev/null; "
-            f"! sudo -n ufw status | grep -qF '{ip}'"
+            f"sudo -n ufw delete deny from {quoted_ip} to any 2>/dev/null; "
+            f"! sudo -n ufw status | grep -qF {grep_ip}"
         )
     if method == "firewalld":
         fam = "ipv6" if is_v6 else "ipv4"
-        rule = f'rule family="{fam}" source address="{ip}" drop'
+        rule = shell_quote(f'rule family="{fam}" source address="{ip}" drop')
         return (
-            f"sudo -n firewall-cmd --remove-rich-rule='{rule}' 2>/dev/null; "
-            f"sudo -n firewall-cmd --permanent --remove-rich-rule='{rule}' "
+            f"sudo -n firewall-cmd --remove-rich-rule={rule} 2>/dev/null; "
+            f"sudo -n firewall-cmd --permanent --remove-rich-rule={rule} "
             f"2>/dev/null; "
             f"! sudo -n firewall-cmd --list-rich-rules 2>/dev/null "
-            f"| grep -qF '{ip}'"
+            f"| grep -qF {grep_ip}"
         )
     # nftables: drop the ip from the servonaut_ban set (the ban added it as
     # a set element). The set/table may not exist if the ip was never banned
@@ -863,9 +886,9 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
     set_name = "banned6" if is_v6 else "banned4"
     return (
         f"sudo -n nft delete element inet servonaut_ban {set_name} "
-        f"'{{ {ip} }}' 2>/dev/null; "
+        f"{shell_quote('{ ' + ip + ' }')} 2>/dev/null; "
         f"! sudo -n nft list set inet servonaut_ban {set_name} 2>/dev/null "
-        f"| grep -qF '{ip}'"
+        f"| grep -qF {grep_ip}"
     )
 
 
