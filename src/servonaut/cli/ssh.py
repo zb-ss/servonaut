@@ -33,6 +33,8 @@ from servonaut.services.connection_service import (
 from servonaut.services.ssh_credentials import VaultCredentialError, bastion_hop_hint, bastion_lease
 from servonaut.utils.instance_resolver import describe_candidate, match_instances, qualified_reference
 
+from servonaut.utils.ssh_names import SSHNameError
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -329,7 +331,11 @@ def handle_ssh_command(args: Any) -> int:
 
     Returns an integer exit code suitable for ``sys.exit()``.
     """
-    return _run_async(_handle_ssh_async(args))
+    try:
+        return _run_async(_handle_ssh_async(args))
+    except SSHNameError as exc:
+        print(exc, file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
 
 
 async def _handle_ssh_async(args: Any) -> int:

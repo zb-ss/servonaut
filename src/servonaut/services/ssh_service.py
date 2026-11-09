@@ -11,6 +11,7 @@ from typing import List, Optional
 from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
 from servonaut.services.ssh_host_keys import HostKeyPolicy, ensure_known_hosts_file, identity_file_args, pinned_host_key_options
 from servonaut.config.manager import ConfigManager
+from servonaut.utils.ssh_names import check_ssh_target
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +571,7 @@ class SSHService(SSHServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
+        check_ssh_target(host, username)
         try:
             ssh_cfg = self._config_manager.get().ssh
         except Exception:
