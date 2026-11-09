@@ -6535,7 +6535,7 @@ class ServonautTools:
         else:
             native = (
                 'MYSQL_PWD="$DBP" mysql -h "$DBH" -P "$DBPORT" -u "$DBU" '
-                '${DBN:+"$DBN"} --batch --table -e "$DBSQL"'
+                '${DBN:+--database="$DBN"} --batch --table -e "$DBSQL"'
             )
             php = f"php -r {q(self._PHP_MYSQLI_FALLBACK)}"
             client = "mysql"

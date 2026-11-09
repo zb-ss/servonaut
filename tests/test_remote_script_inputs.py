@@ -1,4 +1,4 @@
-"""The remote script of ``tls_cert_check`` never runs text read from a config file.
+"""Remote scripts never act on text read from a file on the server.
 
 A certificate path comes from a web server configuration file, which is not
 the operator's to trust. The script is run for real under ``sh`` against a
@@ -67,3 +67,25 @@ def test_the_script_has_no_second_shell() -> None:
     source = inspect.getsource(ServonautTools.tls_cert_check)
     # The only nested shell is the constant certbot glob, which names no variable.
     assert source.count("sh -c") == 1
+
+
+def test_a_database_name_that_looks_like_an_option_stays_a_value(tmp_path) -> None:
+    """The name read from a site's config reaches mysql as ``--database=<name>``."""
+    from types import SimpleNamespace
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    client = stub / "mysql"
+    client.write_text("#!/bin/sh\nfor a in \"$@\"; do printf '[%s]\\n' \"$a\"; done\n")
+    client.chmod(0o755)
+    profile = SimpleNamespace(
+        host="127.0.0.1", port=3306, user="app", database="--init-command=touch marker", engine="mysql",
+    )
+    tools = ServonautTools.__new__(ServonautTools)
+    command = tools._build_db_command(profile, "SELECT 1", "secret")
+    done = subprocess.run(
+        ["sh", "-c", command], env={"PATH": f"{stub}:/usr/bin:/bin"}, cwd=tmp_path,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert "[--database=--init-command=touch marker]" in done.stdout
+    assert "[--init-command=touch marker]" not in done.stdout
