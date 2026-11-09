@@ -125,12 +125,18 @@ def _chat_panel_class():
 
 
 @pytest.fixture(autouse=True)
-def _restore_chat_panel_app():
+def _chat_panel_app_restore():
     """Undo a test pointing ``ChatPanel.app`` at a mock app for the whole class.
 
     Several unmounted-panel tests set ``type(panel).app`` to reach a mock app.
     Left in place, it makes every later mounted chat panel render from that
     mock, so it is put back after each test.
+
+    Autouse fixtures are set up in alphabetical order, and this name sorts
+    before the ones that request ``monkeypatch``. It is therefore torn down
+    after them, so tests that patch ``ChatPanel.app`` through ``monkeypatch``
+    have already had that patch undone, and tests that assign it directly are
+    cleaned up here.
     """
     panel_class = _chat_panel_class()
     saved = panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
