@@ -537,7 +537,7 @@ async def test_clear_prompt_escapes_selected_module_without_changing_raw_target(
         await wait_until(lambda: isinstance(app.screen, SimpleConfirmModal))
         message = app.screen.query_one("#confirm_message", Static)
         assert message.render().plain == f"Clear module {module_name}?"
-        assert module_name in _painted(app, message)
+        await wait_until(lambda: module_name in _painted(app, message))
         await _click(pilot, "#confirm_yes_btn")
         await wait_until(lambda: app.screen is screen)
         await wait_until(lambda: app.memory_service.clear.called)
