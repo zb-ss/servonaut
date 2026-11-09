@@ -253,20 +253,11 @@ ConfirmActionScreen #severity_message:ansi {
     color: $foreground;
 }
 
-/* Tool approvals: the model's arguments scroll in a box of their own, so a
-   long value can never hide its tail. The cue below the box keeps its row
-   (it is hidden, not removed) so scrolling never moves the layout. */
-DialogFrame .dialog-body .dialog-arg-scroll {
-    height: auto;
-    max-height: 12;
-}
-
-DialogFrame.dialog-danger .dialog-body .dialog-arg-scroll { max-height: 10; }
-
-DialogFrame .dialog-body .dialog-scroll-cue {
+/* Tool approvals: the model's arguments scroll in the frame's own body, and
+   the cue beside the actions says how much is still below it. The cue is
+   hidden, not removed, while everything fits. */
+DialogFrame .dialog-status .dialog-scroll-cue {
     height: 1;
     color: $text-warning;
     display: none;
 }
-
-.dialog-screen.-dialog-minimal DialogFrame .dialog-body .dialog-arg-scroll { max-height: 4; }

@@ -31,7 +31,7 @@ from servonaut.utils.markup import literal
 from servonaut.widgets.dialogs import (
     DIALOG_VERTICAL_BREAKPOINTS,
     DialogActions,
-    DialogContent,
+    DialogBody,
     DialogFrame,
     DialogNotificationSpace,
 )
@@ -40,13 +40,16 @@ from servonaut.widgets.safe_header import SafeHeader
 logger = logging.getLogger(__name__)
 
 
-# How to reach the rest, per modal. Both start with a button or the
-# typed-confirm input focused, so the text box is one Shift+Tab away from the
-# input and two from the standard modal's Cancel button.
-_CUE_HOW = {
-    "tool": "Shift+Tab until the text is focused, then the arrow keys, or the mouse.",
-    "dangerous": "Shift+Tab, then the arrow keys, or the mouse.",
-}
+# How to reach the rest. The modal binds these keys itself, so they scroll the
+# argument box whichever control has the focus.
+_CUE_HOW = "Down or Page Down, or the mouse."
+
+_ARG_SCROLL_BINDINGS = [
+    Binding("down", "scroll_args(1)", "Scroll", show=False),
+    Binding("up", "scroll_args(-1)", "Scroll", show=False),
+    Binding("pagedown", "page_args(1)", "Scroll", show=False),
+    Binding("pageup", "page_args(-1)", "Scroll", show=False),
+]
 
 
 def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
@@ -64,7 +67,7 @@ def _show_overflow_cue(screen: ModalScreen, prefix: str) -> None:
     cue.display = scroll.max_scroll_y > 0
     remaining = math.ceil(scroll.max_scroll_y - scroll.scroll_y)
     if remaining > 0:
-        cue.update(f"{remaining} more lines below: {_CUE_HOW[prefix]}")
+        cue.update(f"{remaining} more lines below: {_CUE_HOW}")
     else:
         cue.update("End of the text.")
 
@@ -76,16 +79,33 @@ def _follow_scroll(screen: ModalScreen, prefix: str) -> None:
     screen.call_after_refresh(_show_overflow_cue, screen, prefix)
 
 
-def _arguments_box(args: Dict[str, Any], prefix: str) -> list:
-    """The scrolling argument text and the cue that follows its position."""
-    return [
-        VerticalScroll(
-            Static(_format_args(args), id=f"{prefix}_confirm_args"),
-            id=f"{prefix}_confirm_scroll",
-            classes="dialog-arg-scroll",
-        ),
-        Static("", id=f"{prefix}_confirm_more", classes="dialog-scroll-cue"),
-    ]
+def _arguments_box(args: Dict[str, Any], prefix: str) -> DialogBody:
+    """The frame-sized, scrolling argument text."""
+    return DialogBody(
+        Static(_format_args(args), id=f"{prefix}_confirm_args"),
+        id=f"{prefix}_confirm_scroll",
+    )
+
+
+def _overflow_cue(prefix: str) -> Static:
+    """The line, pinned beside the actions, that follows the scroll position."""
+    return Static("", id=f"{prefix}_confirm_more", classes="dialog-scroll-cue")
+
+
+class _ArgumentScrollMixin:
+    """Scroll the argument box from the keyboard whatever has the focus."""
+
+    _prefix = "tool"
+
+    def _argument_box(self) -> VerticalScroll:
+        return self.query_one(f"#{self._prefix}_confirm_scroll", VerticalScroll)  # type: ignore[attr-defined]
+
+    def action_scroll_args(self, delta: int) -> None:
+        self._argument_box().scroll_relative(y=delta, animate=False)
+
+    def action_page_args(self, delta: int) -> None:
+        box = self._argument_box()
+        box.scroll_relative(y=delta * max(1, box.size.height - 1), animate=False)
 
 
 # Typed-confirm magic word for dangerous tools. Match is case-sensitive;
@@ -121,7 +141,7 @@ def _format_args(args: Dict[str, Any]) -> Content:
 # ---------------------------------------------------------------------------
 
 
-class ToolConfirmModal(ModalScreen[bool]):
+class ToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
     """Single-line y/n confirm for ``standard`` guard-level tools.
 
     Returns ``True`` when the user clicks "Confirm" or presses ``y``;
@@ -132,6 +152,7 @@ class ToolConfirmModal(ModalScreen[bool]):
         Binding("escape", "deny", "Cancel", show=True),
         Binding("y", "approve", "Yes", show=True),
         Binding("n", "deny", "No", show=True),
+        *_ARG_SCROLL_BINDINGS,
     ]
 
     AUTO_FOCUS = "#btn_tool_cancel"
@@ -150,14 +171,14 @@ class ToolConfirmModal(ModalScreen[bool]):
                 literal(self._tool, "bold $text-accent"),
                 id="tool_confirm_title",
             ),
-            body=DialogContent(
+            body=_arguments_box(self._args, "tool"),
+            status=Vertical(
+                _overflow_cue("tool"),
                 Static(
                     "Servonaut AI wants to run this tool. "
                     "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
                     id="tool_confirm_body",
-                    classes="dialog-description",
                 ),
-                *_arguments_box(self._args, "tool"),
             ),
             actions=DialogActions(
                 Button("Confirm", id="btn_tool_confirm", variant="primary"),
@@ -192,7 +213,7 @@ class ToolConfirmModal(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 
 
-class DangerousToolConfirmModal(ModalScreen[bool]):
+class DangerousToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
     """Typed-confirm "RUN" modal for ``dangerous`` guard-level tools.
 
     The user must type case-sensitive ``RUN``, with optional surrounding
@@ -204,8 +225,10 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
 
     BINDINGS = [
         Binding("escape", "deny", "Cancel", show=True),
+        *_ARG_SCROLL_BINDINGS,
     ]
 
+    _prefix = "dangerous"
     AUTO_FOCUS = "#dangerous_confirm_input"
     VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
@@ -238,8 +261,9 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
                 ),
                 id="dangerous_confirm_title",
             ),
-            body=DialogContent(*_arguments_box(self._args, "dangerous")),
+            body=_arguments_box(self._args, "dangerous"),
             status=Vertical(
+                _overflow_cue("dangerous"),
                 Static(
                     "Servonaut AI wants to run a [bold]potentially destructive[/bold] tool. "
                     f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
