@@ -17,6 +17,7 @@ This module must not import ``servonaut`` (see the package docstring).
 from __future__ import annotations
 
 import contextlib
+import inspect
 import re
 import traceback
 from dataclasses import dataclass, field
@@ -89,7 +90,11 @@ def watch() -> Iterator[Watcher]:
     import rich.markup as rich_markup
     import textual.markup as textual_markup
 
-    textual_parse, rich_parse = textual_markup.to_content, rich_markup.render
+    # Wrap the upstream parsers, not the app's backstop: the guard exists to
+    # see a malformed tag raise, which the backstop would turn into plain text.
+    saved = textual_markup.to_content, rich_markup.render
+    textual_parse = inspect.unwrap(textual_markup.to_content)
+    rich_parse = inspect.unwrap(rich_markup.render)
     watcher = Watcher()
 
     def textual_checked(markup, *args, **kwargs):
@@ -110,4 +115,4 @@ def watch() -> Iterator[Watcher]:
     try:
         yield watcher
     finally:
-        textual_markup.to_content, rich_markup.render = textual_parse, rich_parse
+        textual_markup.to_content, rich_markup.render = saved
