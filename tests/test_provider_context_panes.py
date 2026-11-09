@@ -16,7 +16,7 @@ from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
 from servonaut.styles.themes import SERVONAUT_THEMES
 
 CLICK_NAME = "[@click=app.quit]key-1[/]"
-LINK_NAME = "[link=x"
+LINK_NAME = "[link=x -1"
 
 
 class _Host(ServonautApp):
