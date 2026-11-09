@@ -959,6 +959,9 @@ class RelayExecutors:
                     known_hosts_file=getattr(lease, "known_hosts_path", None),
                 )
             returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+        except ValueError as exc:
+            # The remote path cannot be sent safely by this scp client.
+            return CommandResponse(request_id=request.id, status="rejected", error_message=str(exc))
         finally:
             self._close_lease(hop)
             self._close_lease(lease)

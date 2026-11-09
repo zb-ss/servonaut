@@ -42,6 +42,20 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
     )
 
 
+@pytest.fixture(autouse=True)
+def _scp_client_answers(monkeypatch: pytest.MonkeyPatch):
+    """Answer the scp service's question about its client without starting it.
+
+    The service asks the local ``scp`` once and keeps the answer; unit tests
+    must not start it. The default answer is "no ``-s``", the argv the service
+    always built; tests of the question, or of the ``-s`` argv, set their own.
+    """
+    from servonaut.utils import scp_client
+
+    monkeypatch.setattr(scp_client, "_answers", {"scp": False})
+    monkeypatch.setattr(scp_client, "_probes", {})
+
+
 SSH_PROGRAMS = ("ssh", "scp", "sftp")
 #: Launches of an ssh client the guard refused in the running test (the test fails at teardown).
 SSH_LAUNCH_VIOLATIONS: list[str] = []

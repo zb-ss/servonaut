@@ -9,10 +9,13 @@ from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
 from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
+from servonaut.utils import scp_client
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
 
 logger = logging.getLogger(__name__)
+
+_SCP = "scp"
 
 
 class SCPService(SCPServiceInterface):
@@ -39,6 +42,8 @@ class SCPService(SCPServiceInterface):
     ) -> None:
         self._ssh_config = ssh_config if ssh_config is not None else SSHConfig()
         self._transfer_timeout_seconds = transfer_timeout_seconds
+        # Ask the client about -s now, off the thread that draws the screen.
+        scp_client.warm_up(_SCP)
 
     def build_upload_command(
         self,
@@ -88,7 +93,7 @@ class SCPService(SCPServiceInterface):
         # option (such as "-oProxyCommand=...", which runs a local program).
         cmd.append('--')
         cmd.append(os.path.expanduser(local_path))
-        cmd.append(f'{username}@{host}:{remote_path}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, download=False)}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
         return cmd
 
@@ -137,7 +142,7 @@ class SCPService(SCPServiceInterface):
             identity_agent, identity_file, certificate_file, known_hosts_file,
         )
         cmd.append('--')  # see build_upload_command
-        cmd.append(f'{username}@{host}:{remote_path}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, download=True)}')
         cmd.append(os.path.expanduser(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))
         return cmd
@@ -183,6 +188,15 @@ class SCPService(SCPServiceInterface):
         except Exception as e:
             logger.error("SCP transfer error: %s", e)
             return 1, '', str(e)
+
+    @staticmethod
+    def _remote_path(remote_path: str, *, download: bool) -> str:
+        """The remote path as the local client needs it (see ``utils.scp_client``)."""
+        if not scp_client.supports_sftp_flag(_SCP):
+            return scp_client.legacy_remote_path(remote_path)
+        # Over SFTP the client reads a source path as a pattern, in which a
+        # backslash escapes the next character; a target is taken as written.
+        return remote_path.replace("\\", "\\\\") if download else remote_path
 
     def _build_base_args(
         self,
@@ -257,5 +271,9 @@ class SCPService(SCPServiceInterface):
                 cmd.extend(['-o', f'IdentityFile={os.path.expanduser(identity_file)}'])
             if certificate_file:
                 cmd.extend(['-o', f'CertificateFile={certificate_file}'])
+
+        # With -s the path travels as data and no remote shell reads it.
+        if scp_client.supports_sftp_flag(_SCP):
+            cmd.append('-s')
 
         return cmd

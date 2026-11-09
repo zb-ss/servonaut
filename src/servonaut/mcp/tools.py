@@ -1537,6 +1537,13 @@ class ServonautTools:
                     _build_scp(None)
                 )
                 key_extras = {'key_source': 'ssh_agent'}
+        except ValueError as exc:
+            # The remote path cannot be sent safely by this scp client.
+            self._audit.log('transfer_file', {
+                'instance_id': instance_id, 'local_path': local_path,
+                'remote_path': remote_path, 'direction': direction,
+            }, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
         finally:
             if cleanup is not None:
                 await cleanup()
