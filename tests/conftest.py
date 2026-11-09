@@ -124,30 +124,42 @@ def _chat_panel_class():
     return module.ChatPanel if module is not None else None
 
 
-@pytest.fixture(autouse=True)
-def _chat_panel_app_restore():
-    """Undo a test pointing ``ChatPanel.app`` at a mock app for the whole class.
+_CHAT_PANEL_APP = pytest.StashKey[object]()
 
-    Several unmounted-panel tests set ``type(panel).app`` to reach a mock app.
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item: pytest.Item):
+    """Remember ``ChatPanel.app`` before any fixture of the test is set up.
+
+    Several unmounted-panel tests point ``type(panel).app`` at a mock app.
     Left in place, it makes every later mounted chat panel render from that
     mock, so it is put back after each test.
-
-    Autouse fixtures are set up in alphabetical order, and this name sorts
-    before the ones that request ``monkeypatch``. It is therefore torn down
-    after them, so tests that patch ``ChatPanel.app`` through ``monkeypatch``
-    have already had that patch undone, and tests that assign it directly are
-    cleaned up here.
     """
     panel_class = _chat_panel_class()
-    saved = panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
-    yield
-    panel_class = _chat_panel_class()
-    if panel_class is None:
-        return
-    if saved is not _NO_CLASS_APP:
-        panel_class.app = saved
-    elif "app" in panel_class.__dict__:
-        delattr(panel_class, "app")
+    item.stash[_CHAT_PANEL_APP] = (
+        panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
+    )
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem):
+    """Put ``ChatPanel.app`` back once every fixture is finalised.
+
+    The restore runs after ``yield``, that is after every fixture has been torn
+    down (``monkeypatch`` undoes its own patch of the attribute first), so it
+    never depends on how fixtures are ordered.
+    """
+    try:
+        return (yield)
+    finally:
+        panel_class = _chat_panel_class()
+        saved = item.stash.get(_CHAT_PANEL_APP, _NO_CLASS_APP)
+        if panel_class is not None:
+            if saved is not _NO_CLASS_APP:
+                panel_class.app = saved
+            elif "app" in panel_class.__dict__:
+                delattr(panel_class, "app")
 
 
 # ---------------------------------------------------------------------------
