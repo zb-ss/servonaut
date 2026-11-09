@@ -342,6 +342,13 @@ async def test_memory_gates_preserve_hidden_or_disabled_controls(
         await _settled(panel)
         section = panel.query_one("#settings_msync_section")
         assert section.display is entitled
+        note = panel.query_one("#settings_msync_gate_note")
+        assert note.display is (not entitled)
+        if not entitled:
+            assert "available with the Solo plan" in _text(panel, "#settings_msync_gate_note")
+            note.scroll_visible(animate=False)
+            await pilot.pause()
+            assert _exposed(app, note)
         assert not remote.loads and not remote.saves
         assert not panel.is_dirty()
         if entitled:

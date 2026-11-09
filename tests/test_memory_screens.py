@@ -759,7 +759,8 @@ class TestSettingsScreenMemorySync:
 
     Gate: the form section is visible ONLY for authenticated users with the
     ``memory_sync`` entitlement. Non-entitled users get the discovery
-    affordance via the sidebar, not via an upsell in the settings panel.
+    affordance via the sidebar, and the panel itself says why the form is missing, in the same words as the
+    Memory screen's banner.
     """
 
     @pytest.mark.asyncio
@@ -770,6 +771,9 @@ class TestSettingsScreenMemorySync:
             await _open_memory_sync_panel(app, pilot)
             section = app.screen.query_one("#settings_msync_section")
             assert section.display is False
+            note = app.screen.query_one("#settings_msync_gate_note")
+            assert note.display is True
+            assert "available with the Solo plan" in note.render().plain
 
     @pytest.mark.asyncio
     async def test_section_visible_but_disabled_when_entitled_not_configured(self):

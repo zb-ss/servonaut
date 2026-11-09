@@ -53,6 +53,15 @@ _AI_CONSENT_OPTIONS: list[tuple[str, str]] = [
 _SELECT_BLANK = Select.NULL  # sentinel for un-set Select values
 
 
+# Shown instead of the form when the account has no Memory Sync. Same wording as
+# the Memory screen's banner and the feature prompt.
+_NOT_AVAILABLE_NOTE = (
+    "Memory Sync is off. It is available with the Solo plan: encrypted backup, "
+    "drift detection and AI-queryable history, so server memory can be reached "
+    "from other devices. Upgrade your plan to enable it."
+)
+
+
 class MemorySyncPanel(SettingsPanel):
     """Server-side digest, push, auto-sync, and AI-consent settings.
 
@@ -114,6 +123,14 @@ class MemorySyncPanel(SettingsPanel):
         entitlement gate can hide it independently of the panel's root
         ``display`` (which the shell owns for active/inactive switching).
         """
+        gate_note = Static(
+            _NOT_AVAILABLE_NOTE,
+            id="settings_msync_gate_note",
+            classes="note",
+            markup=False,
+        )
+        gate_note.display = False
+        yield gate_note
         yield Container(
             Container(
                 Static(
@@ -345,6 +362,7 @@ class MemorySyncPanel(SettingsPanel):
         """
         try:
             self.query_one("#settings_msync_section").display = visible
+            self.query_one("#settings_msync_gate_note").display = not visible
         except Exception:
             pass
 
