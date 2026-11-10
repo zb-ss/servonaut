@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
@@ -103,6 +104,10 @@ class AWSService(InstanceServiceInterface):
         self._listing_deadline: Optional[float] = None
         # Regions of the last listing skipped because its time was up.
         self._late_regions: List[str] = []
+        # The region being listed now (read by the UI while a listing runs),
+        # and the signal that tells a listing thread nobody wants its answer.
+        self.listing_region: str = ""
+        self._listing_abandoned = threading.Event()
 
     def get_cached_instances(self) -> List[dict]:
         """Return the cached AWS instances synchronously, regardless of TTL.
@@ -208,7 +213,12 @@ class AWSService(InstanceServiceInterface):
         # Run blocking boto3 calls in thread pool
         # Python 3.8 compat: use run_in_executor instead of to_thread
         loop = asyncio.get_event_loop()
-        instances = await loop.run_in_executor(None, self._fetch_all_regions)
+        try:
+            instances = await loop.run_in_executor(None, self._fetch_all_regions)
+        except asyncio.CancelledError:
+            # A thread cannot be interrupted; it stops at the next region.
+            self._listing_abandoned.set()
+            raise
 
         logger.info(f"Fetched {len(instances)} instances from AWS")
         return instances
@@ -303,6 +313,7 @@ class AWSService(InstanceServiceInterface):
         """
         self._failed_regions = []
         self._late_regions = []
+        self._listing_abandoned.clear()
         configured = list(self.account.regions) if self.account is not None else []
         if configured:
             regions = configured
@@ -321,6 +332,9 @@ class AWSService(InstanceServiceInterface):
         last_error: Optional[Exception] = None
         errors: List[Exception] = []
         for region in regions:
+            if self._listing_abandoned.is_set():
+                break
+            self.listing_region = region
             if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
                 self._failed_regions.append(region)
                 self._late_regions.append(region)
@@ -334,6 +348,7 @@ class AWSService(InstanceServiceInterface):
                 self._failed_regions.append(region)
                 last_error = e
                 errors.append(e)
+        self.listing_region = ""
 
         if regions and len(self._failed_regions) == len(regions):
             if errors and len(errors) == len(regions) and all(isinstance(e, NoCredentialsError) for e in errors):

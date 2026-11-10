@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from servonaut.config.accounts import AccountRef
+from servonaut.services.load_progress import LoadProgress
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,8 @@ class AccountFleet:
         # (the same account configured twice): {later label: earlier label}.
         self.duplicate_accounts: Dict[str, str] = {}
         self._account_ids: Dict[str, str] = {}
+        # Accounts that have answered in the refresh now running.
+        self._answered: set[str] = set()
 
     # ------------------------------------------------------------------
     # Introspection
@@ -112,6 +115,18 @@ class AccountFleet:
     @property
     def refs(self) -> List[AccountRef]:
         return [b.ref for b in self.bindings]
+
+    @property
+    def load_progress(self) -> LoadProgress:
+        """The account the running refresh is waiting on, and the region it lists."""
+        waiting = [b for b in self.bindings if b.ref.key not in self._answered]
+        total = len(self.bindings)
+        if not waiting:
+            return LoadProgress(total, total, "")
+        region = getattr(waiting[0].service, "listing_region", "")
+        return LoadProgress(
+            total - len(waiting) + 1, total, region if isinstance(region, str) else "",
+        )
 
     def binding(self, account: Optional[str] = None) -> Optional[AccountBinding]:
         """The binding for *account* (label, case-insensitive); None = default."""
@@ -158,6 +173,7 @@ class AccountFleet:
         label. Only when EVERY account raised does this raise too, with the
         first error, which is what a single-account provider always did.
         """
+        self._answered = set()
         results = await asyncio.gather(
             *(self._fetch_one(b, force_refresh) for b in self.bindings),
             return_exceptions=True,
@@ -198,7 +214,10 @@ class AccountFleet:
         return self._dedupe(rows)
 
     async def _fetch_one(self, binding: AccountBinding, force_refresh: bool) -> List[dict]:
-        rows = await binding.service.fetch_instances_cached(force_refresh=force_refresh)
+        try:
+            rows = await binding.service.fetch_instances_cached(force_refresh=force_refresh)
+        finally:
+            self._answered.add(binding.ref.key)
         if self.multi and binding.account_id is not None and binding.ref.key not in self._account_ids:
             account_id = await asyncio.to_thread(binding.account_id)
             if account_id:  # a failed lookup (expired SSO, say) is retried next time

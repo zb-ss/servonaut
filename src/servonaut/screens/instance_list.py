@@ -21,6 +21,7 @@ from servonaut.screens._fleet_filter import (
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
+from servonaut.widgets.fleet_skeleton import FleetSkeleton
 from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.safe_header import SafeHeader
@@ -162,6 +163,10 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Check that the selected server's SSH key works"),
         Binding("y", "copy_row", "Copy", show=True,
                 tooltip="Copy the selected server's details"),
+        # Only while providers are answering (see check_action); otherwise the
+        # key goes on to the focused widget as before.
+        Binding("escape", "cancel_slow_providers", "Cancel slow", show=False,
+                tooltip="Stop waiting for the providers that have not answered"),
     ]
 
     # The screen opens on the fleet table, so the arrow keys and every
@@ -197,7 +202,12 @@ class InstanceListScreen(WorkspaceScreen):
     # How long a refresh marks the servers it added or changed (seconds).
     _MARK_SECONDS = 6.0
 
+    # How often the spinner turns and the providers' progress is read (seconds).
+    _SPINNER_SECONDS = 0.15
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "cancel_slow_providers":
+            return self._load.active
         if self.navigation_focused:
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
@@ -231,6 +241,7 @@ class InstanceListScreen(WorkspaceScreen):
         # What the last refreshes did to each server, shown for a few seconds.
         self._marks: Dict[str, str] = {}
         self._marks_timer: Optional[Timer] = None
+        self._load_timer: Optional[Timer] = None
         self._last_updated: Optional[float] = None
         self._refresh_failed = False
         self._cache_written_at: Optional[float] = None
@@ -269,7 +280,9 @@ class InstanceListScreen(WorkspaceScreen):
                 yield Static("", id="fleet_load_status", markup=False)
                 yield from self._compose_filters()
                 with Horizontal(id="fleet_workspace_row", classes="fleet-workspace-row"):
-                    yield InstanceTable()
+                    with Vertical(id="fleet_table_column"):
+                        yield InstanceTable()
+                        yield FleetSkeleton(id="fleet_skeleton")
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
                         yield Static(
                             "[bold]Selected Server[/bold]\n[dim]No server selected[/dim]",
@@ -621,6 +634,7 @@ class InstanceListScreen(WorkspaceScreen):
         Args:
             event: Worker state changed event.
         """
+        self._note_load_started(event)
         self._settle_team_memory_load(event)
         self._handle_worker_state(event)
         self._record_load_outcome(event)
@@ -1108,17 +1122,29 @@ class InstanceListScreen(WorkspaceScreen):
         accounts = len(getattr(inventory, "bindings", None) or ())
         self._load.start(
             key, accounts=accounts, has_rows=bool(self._instances),
-            cached_age=self._cached_age_text(),
+            cached_age=self._cached_age_text(), waiting=True,
         )
         self._render_load()
 
     def _cached_age_text(self) -> str:
         return self._cache_ago()
 
+    def _note_load_started(self, event: Worker.StateChanged) -> None:
+        """A provider's worker began running: it is no longer waiting."""
+        key = self._LOAD_NAMES.get(event.worker.name)
+        if key is not None and event.state == WorkerState.RUNNING:
+            self._load.running(key)
+            self._render_load()
+
     def _record_load_outcome(self, event: Worker.StateChanged) -> None:
         """A provider's worker ended: record its count, or why its rows are stale."""
         key = self._LOAD_NAMES.get(event.worker.name)
-        if key is None or event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
+        if key is None:
+            return
+        if event.state == WorkerState.CANCELLED:
+            self._record_cancelled(key)
+            return
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return
         if key == "shared":
             self._load.drop("shared")
@@ -1129,6 +1155,24 @@ class InstanceListScreen(WorkspaceScreen):
         if not self._load.active:
             self._cycle_ended()
         self._render_load()
+
+    def _record_cancelled(self, key: str) -> None:
+        """A provider's worker was cancelled: its cached rows stay, marked stale."""
+        if key == "shared":
+            self._load.drop("shared")
+        else:
+            count = sum(1 for row in self._instances if row_source(row) == key)
+            self._load.cancel(key, count=count)
+        if not self._load.active:
+            self._cycle_ended()
+        self._render_load()
+
+    def action_cancel_slow_providers(self) -> None:
+        """Stop waiting for the providers that have not answered; the others keep their rows."""
+        pending = {load.key for load in self._load.pending}
+        for worker in list(self.workers):
+            if self._LOAD_NAMES.get(worker.name) in pending and not worker.is_finished:
+                worker.cancel()
 
     def _cycle_ended(self) -> None:
         """Claim "Updated" only if some provider really answered with fresh rows."""
@@ -1164,7 +1208,38 @@ class InstanceListScreen(WorkspaceScreen):
         status.display = content is not None
         if content is not None:
             status.update(content)
+        self._sync_load_timer()
+        self._sync_skeleton()
         self._sync_updated()
+
+    def _sync_load_timer(self) -> None:
+        """Turn the spinner while a provider is answering, and only then."""
+        if self._load.active and self._load_timer is None:
+            self._load_timer = self.set_interval(self._SPINNER_SECONDS, self._tick_load)
+        elif not self._load.active and self._load_timer is not None:
+            self._load_timer.stop()
+            self._load_timer = None
+
+    def _tick_load(self) -> None:
+        """Turn the spinner one step and read where each provider's listing is."""
+        moved = self.app.animation_level != "none"
+        if moved:
+            self._load.frame += 1
+        for load in self._load.pending:
+            inventory = self.app.provider_inventory(load.key) if load.key != "shared" else None
+            progress = getattr(inventory, "load_progress", None)
+            moved = self._load.note_progress(load.key, progress) or moved
+        if moved:
+            self._render_load()
+
+    def _sync_skeleton(self) -> None:
+        """Show placeholder rows below the servers while the first listing fills."""
+        waiting = self._load.active and self._load.first_run
+        try:
+            self.query_one(FleetSkeleton).display = waiting
+            self.query_one(InstanceTable).set_class(waiting, "--loading")
+        except NoMatches:
+            return
 
     def on_data_table_row_highlighted(self, event) -> None:
         """Update detail panel when table cursor moves."""

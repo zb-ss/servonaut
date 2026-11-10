@@ -12,10 +12,34 @@
     margin-top: 0;
 }
 
+#fleet_table_column {
+    width: 1fr;
+    height: 100%;
+}
+
 #instance_list_container InstanceTable {
     width: 1fr;
     height: 100%;
     margin-top: 0;
+}
+
+/* The first listing: the table is only as tall as the servers listed so far,
+   and the placeholder rows continue its frame down to the bottom. */
+#instance_list_container InstanceTable.--loading {
+    height: auto;
+    max-height: 100%;
+    border-bottom: none;
+}
+
+#fleet_skeleton {
+    display: none;
+    width: 1fr;
+    height: 1fr;
+    margin: 0;
+    padding: 0 1;
+    border: round $panel-lighten-2;
+    border-top: none;
+    background: transparent;
 }
 
 #fleet_inspector {
