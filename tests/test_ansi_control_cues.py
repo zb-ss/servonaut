@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 
 import pytest
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
+from textual.geometry import Region
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 
+from servonaut.screens.instance_list import FleetChip
+from servonaut.styles import CSS_FILES
+from servonaut.styles.themes import SERVONAUT_THEMES
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from tests._async_bounds import wait_until
 from tests.test_ansi_chat_dialog_contrast import _NativeStateDialog, _painted_glyphs
@@ -371,3 +375,40 @@ async def test_native_action_hover_press_and_disabled_adjacency(theme, variant, 
             'failures': failures,
         }))
     assert not failures, json.dumps(failures)
+
+
+class _ChipHost(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield Button('Holder', id='chip_holder')
+        yield FleetChip('state', 'all', 'All')
+        yield FleetChip('state', 'running', 'Running')
+
+
+def _chip_style(chip: Button) -> tuple[bool, bool, bool]:
+    styles = [segment.style for strip in chip.render_lines(Region(0, 0, chip.size.width, chip.size.height))
+              for segment in strip if segment.text.strip() and segment.style]
+    return (any(s.bold for s in styles), any(s.underline for s in styles), any(s.reverse for s in styles))
+
+
+@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('chosen', [True, False])
+@pytest.mark.asyncio
+async def test_a_focused_fleet_chip_differs_from_an_idle_one(theme: str, chosen: bool) -> None:
+    app = _ChipHost()
+    app.theme = theme
+    async with app.run_test(size=(60, 12)) as pilot:
+        chip = app.query_one('#chip_state_all', Button)
+        chip.set_class(chosen, '--chosen')
+        app.query_one('#chip_holder').focus()
+        await pilot.pause()
+        idle = _chip_style(chip)
+        chip.focus()
+        await pilot.pause()
+        assert _chip_style(chip) != idle

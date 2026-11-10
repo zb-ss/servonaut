@@ -711,10 +711,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # _display_error. Invoice rendering has its own directly detectable guard.
     AllowlistEntry("screens/ovh_billing.py", "_load_current_usage", "update",
                    "Passes demo_mode to _format_current_usage, which hides totals; "
-                   "provider errors go through _display_error."),
-    AllowlistEntry("screens/ovh_billing.py", "_load_spend_history", "update",
+                   "provider errors are shown as a fixed message."),
+    AllowlistEntry("screens/ovh_billing.py", "_load_invoices", "update",
                    "Passes demo_mode to _format_spend_history, which hides totals "
-                   "and bars; provider errors go through _display_error."),
+                   "and bars; provider errors are shown as a fixed message."),
+    AllowlistEntry("screens/ovh_billing.py", "_show_card_error", "update",
+                   "Writes a fixed message built from a literal label; the "
+                   "provider's error text is only logged."),
     AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
                    "Only writes the literal Loading placeholder while clearing "
                    "old billing values before guarded reloads."),
@@ -806,11 +809,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes 'Scan completed: N results found' (count integer) or "
                    "hard-coded failure/empty strings — no raw content."),
 
-    # secrets.py — _render_state writes hard-coded card-placeholder markup;
+    # secrets.py — _render_cards writes hard-coded card-placeholder markup;
     # _render_unauthenticated / _render_free_tier / _render_bitwarden /
     # _render_local write hard-coded configuration-state labels (no secret values,
     # only provider/plan indicators).
-    AllowlistEntry("screens/secrets.py", "_render_state", "update",
+    AllowlistEntry("screens/secrets.py", "_render_cards", "update",
                    "Writes hard-coded card-placeholder markup for the secrets "
                    "provider state — no secret values, only status labels."),
     AllowlistEntry("screens/secrets.py", "_render_unauthenticated", "update",

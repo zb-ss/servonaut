@@ -294,7 +294,7 @@ async def test_fleet_full_value_copy_affordance_stays_visible_with_chat(
         await _open_chat(app, pilot)
         bar = app.screen.query_one("#fleet_value_bar")
         painted = _painted(app, bar)
-        assert "Copy row (y)" in painted and "192.0.2.10" in painted
+        assert "Copy row" in painted and "192.0.2.10" in painted
         clipboard.calls.clear()
         await _click(pilot, "#fleet_copy_row_line")
         await wait_until(lambda: bool(clipboard.calls))

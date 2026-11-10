@@ -399,9 +399,8 @@ class SettingsScreen(WorkspaceScreen):
             pass
         spec = self._spec_of.get(target_id)
         if spec is not None:
-            for context in self.query("#workspace_context"):
-                if isinstance(context, Static):
-                    context.update(f"Settings / {spec.title}")
+            for controls in self.query(WorkspaceControls):
+                controls.set_context(f"Settings › {spec.title}")
 
     def _search_query(self) -> str:
         """Current lowercased search text, or ``""`` if the box is empty/absent."""

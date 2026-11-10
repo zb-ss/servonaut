@@ -124,16 +124,3 @@ Sidebar .error-button {
     color: $error;
     margin: 0;
 }
-
-Sidebar #nav_update {
-    color: $text-accent;
-    text-style: underline;
-}
-
-Sidebar #nav_update:focus {
-    text-style: bold underline;
-}
-
-Sidebar #nav_update:ansi {
-    color: $text;
-}

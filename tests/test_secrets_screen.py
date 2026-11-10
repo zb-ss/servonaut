@@ -30,6 +30,7 @@ from textual.app import App
 from textual.widgets import Static
 
 from servonaut.config.schema import SecretsConfig
+from servonaut.widgets.action_button import ActionButton
 from servonaut.screens.secrets import SecretsScreen
 from servonaut.services.secrets_status import (
     SecretsStatusSummary,
@@ -227,6 +228,7 @@ def _collect_rendered_text(app: App) -> str:
             out.append(str(r))
         except Exception:  # noqa: BLE001
             continue
+    out.extend(button.words for button in app.screen.query(ActionButton))
     return "\n".join(out)
 
 
@@ -241,7 +243,7 @@ class TestSecretsScreenStates:
             await pilot.pause(0.05)
             text = _collect_rendered_text(app)
             assert "Not signed in" in text
-            assert "Open Login" in text
+            assert "Open login" in text
 
     @pytest.mark.asyncio
     async def test_free_tier_state(self):
@@ -253,7 +255,7 @@ class TestSecretsScreenStates:
             await pilot.pause(0.05)
             text = _collect_rendered_text(app)
             assert "Upgrade required" in text
-            assert "Open Pricing" in text
+            assert "Open pricing" in text
 
     @pytest.mark.asyncio
     async def test_local_provider_state(self):

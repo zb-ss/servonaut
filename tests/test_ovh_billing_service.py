@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from servonaut.services.ovh_billing_service import usage_figures, usage_total
+
 from servonaut.config.schema import OVHConfig
 from servonaut.services.ovh_billing_service import OVHBillingService
 from servonaut.services.ovh_service import OVHService
@@ -245,12 +247,11 @@ class TestGetInvoices:
 
         assert result == []
 
-    def test_api_error_listing_bills_returns_empty(self, billing_service, mock_ovh_client):
+    def test_api_error_listing_bills_is_reported(self, billing_service, mock_ovh_client):
         mock_ovh_client.get.side_effect = Exception("403 Forbidden")
 
-        result = asyncio.run(billing_service.get_invoices())
-
-        assert result == []
+        with pytest.raises(Exception, match="403"):
+            asyncio.run(billing_service.get_invoices())
 
     def test_individual_bill_fetch_error_skipped(self, billing_service, mock_ovh_client):
         def side_effect(path):
@@ -662,3 +663,173 @@ class TestGetCloudCostForecast:
         mock_ovh_client.get.assert_called_once_with(
             "/cloud/project/my-cloud-proj/forecast"
         )
+
+
+# ---------------------------------------------------------------------------
+# consumption payload shapes and bill fetching
+# ---------------------------------------------------------------------------
+
+class TestUsageTotal:
+
+    def test_single_record_with_price(self):
+        assert usage_total({"price": {"value": 4.5, "currencyCode": "EUR"}}) == (4.5, "EUR")
+
+    def test_single_record_with_total(self):
+        assert usage_total({"total": {"value": 7, "currencyCode": "EUR"}}) == (7.0, "EUR")
+
+    def test_list_of_records_is_summed(self):
+        payload = [
+            {"price": {"value": 1.25, "currencyCode": "EUR"}},
+            {"price": {"value": 2.5, "currencyCode": "EUR"}},
+        ]
+        assert usage_total(payload) == (3.75, "EUR")
+
+    def test_empty_list_means_zero_consumption(self):
+        assert usage_total([]) == (0.0, "")
+
+    @pytest.mark.parametrize("payload", [{}, None, [None, "x"], [{"price": {}}]])
+    def test_unreadable_payload_gives_none(self, payload):
+        assert usage_total(payload) is None
+
+
+class TestCurrentUsageShapes:
+
+    def test_list_payload_does_not_crash_and_flags_are_clear(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = [{"price": {"value": 3.0, "currencyCode": "EUR"}}]
+        result = asyncio.run(billing_service.get_current_usage())
+        assert result["current_failed"] is False
+        assert result["forecast_failed"] is False
+
+    def test_failed_call_is_flagged(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("403")
+        result = asyncio.run(billing_service.get_current_usage())
+        assert result["current_failed"] is True
+        assert result["forecast_failed"] is True
+
+
+class TestInvoiceFetching:
+
+    def test_bills_are_fetched_concurrently_and_sorted(self, billing_service, mock_ovh_client):
+        import threading
+
+        active = []
+        peak = [0]
+        lock = threading.Lock()
+        full = threading.Event()
+
+        def get(path):
+            if path == "/me/bill":
+                return [f"B{i}" for i in range(10)]
+            with lock:
+                active.append(1)
+                peak[0] = max(peak[0], len(active))
+                if len(active) >= 5:
+                    full.set()
+            full.wait(5)
+            with lock:
+                active.pop()
+            return {"billId": path.rsplit("/", 1)[1], "date": f"2026-01-{int(path[-1]) + 10}"}
+
+        mock_ovh_client.get.side_effect = get
+        invoices = asyncio.run(billing_service.get_invoices())
+        assert len(invoices) == 10
+        assert peak[0] == 5
+        assert invoices[0]["date"] > invoices[-1]["date"]
+
+    def test_one_failed_bill_does_not_drop_the_rest(self, billing_service, mock_ovh_client):
+        def get(path):
+            if path == "/me/bill":
+                return ["A", "B"]
+            if path.endswith("A"):
+                raise Exception("boom")
+            return {"billId": "B", "date": "2026-01-01"}
+
+        mock_ovh_client.get.side_effect = get
+        assert [i["billId"] for i in asyncio.run(billing_service.get_invoices())] == ["B"]
+
+
+class TestSharedBillFetch:
+
+    def test_concurrent_callers_share_one_fetch(self, billing_service, mock_ovh_client):
+        def get(path):
+            if path == "/me/bill":
+                return ["A", "B", "C"]
+            return {"billId": path[-1], "date": "2026-01-01"}
+
+        mock_ovh_client.get.side_effect = get
+
+        async def run():
+            return await asyncio.gather(
+                billing_service.get_invoices(), billing_service.get_invoices(),
+            )
+
+        first, second = asyncio.run(run())
+        assert first == second
+        bill_calls = [c for c in mock_ovh_client.get.call_args_list if c.args[0] != "/me/bill"]
+        assert len(bill_calls) == 3
+
+    def test_every_bill_failing_is_an_error(self, billing_service, mock_ovh_client):
+        def get(path):
+            if path == "/me/bill":
+                return ["A"]
+            raise Exception("boom")
+
+        mock_ovh_client.get.side_effect = get
+        with pytest.raises(RuntimeError):
+            asyncio.run(billing_service.get_invoices())
+
+    def test_fetch_survives_a_cancelled_caller(self, billing_service, mock_ovh_client):
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def get(path):
+            if path == "/me/bill":
+                return ["A"]
+            started.set()
+            release.wait(5)
+            return {"billId": "A", "date": "2026-01-01"}
+
+        mock_ovh_client.get.side_effect = get
+
+        async def run():
+            first = asyncio.ensure_future(billing_service.get_invoices())
+            assert await asyncio.to_thread(started.wait, 5)
+            first.cancel()
+            release.set()
+            return await billing_service.get_invoices()
+
+        assert asyncio.run(run())[0]["billId"] == "A"
+        bill_calls = [c for c in mock_ovh_client.get.call_args_list if c.args[0] != "/me/bill"]
+        assert len(bill_calls) == 1
+
+    def test_service_can_be_reused_from_another_event_loop(self, billing_service, mock_ovh_client):
+        def get(path):
+            if path == "/me/bill":
+                return [f"B{i}" for i in range(8)]
+            return {"billId": path.rsplit("/", 1)[1], "date": "2026-01-01"}
+
+        mock_ovh_client.get.side_effect = get
+        assert len(asyncio.run(billing_service.get_invoices())) == 8
+        assert len(asyncio.run(billing_service.get_invoices())) == 8
+
+
+class TestUsageFigures:
+
+    def test_sums_and_formats(self):
+        usage = {"current_spend": [{"price": {"value": 1, "currencyCode": "EUR"}},
+                                   {"price": {"value": 2.5, "currencyCode": "EUR"}}],
+                 "forecast": [{"price": {"value": 9, "currencyCode": "EUR"}}]}
+        assert usage_figures(usage) == ("3.50 EUR", "9.00 EUR")
+
+    def test_empty_list_is_zero_and_borrows_the_currency(self):
+        usage = {"current_spend": [], "forecast": [{"price": {"value": 9, "currencyCode": "EUR"}}]}
+        assert usage_figures(usage) == ("0.00 EUR", "9.00 EUR")
+
+    def test_empty_lists_without_currency_show_a_plain_zero(self):
+        assert usage_figures({"current_spend": [], "forecast": []}) == ("0.00", "0.00")
+
+    def test_failed_and_unreadable(self):
+        usage = {"current_spend": {}, "forecast": {}, "current_failed": True}
+        assert usage_figures(usage) == ("unavailable", "n/a")

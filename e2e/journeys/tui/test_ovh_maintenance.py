@@ -327,6 +327,7 @@ async def test_billing_dashboard_is_read_only(tui, seed, providers):
         invoices = t.table_rows("#invoices_table")
         assert [row[1] for row in invoices] == ["FR00000002", "FR00000001"]  # newest first
         assert invoices[0][2] == "21.0 EUR"
+        await t.wait_for_text("12.00 EUR", "20.00 EUR")
         await t.wait_until(lambda: len(t.table_rows("#services_table")) == 3, desc="services")
         services = {plain(row[0]): plain(row[1]) for row in t.table_rows("#services_table")}
         assert services == {

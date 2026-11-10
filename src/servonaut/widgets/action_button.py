@@ -15,6 +15,7 @@ from typing import Literal
 
 from textual.containers import Horizontal
 from textual.content import Content, ContentText
+from textual.css.scalar import Scalar
 from textual.events import Resize
 from textual.widget import Widget
 from textual.widgets import Button
@@ -30,6 +31,8 @@ _FULL_CHROME = 6
 _MARGIN = 1
 # Cells between two columns of a wrapped row (grid-gutter of ActionRow.-wrap).
 _WRAP_GUTTER = 1
+# A wrapped row keeps its key hints while it needs no more lines than this.
+_MAX_HINTED_LINES = 2
 
 
 def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
@@ -92,6 +95,12 @@ class ActionButton(Button):
         if self.parent is not None:
             self.parent.refresh(layout=True)
 
+    def on_mount(self) -> None:
+        """Tell the row this button joined, so it fits with it counted."""
+        row = self.parent
+        if isinstance(row, ActionRow):
+            row.request_fit()
+
     def watch_compact(self, compact: bool) -> None:
         """Use the short words when only one row is available."""
         self._refresh_label()
@@ -129,38 +138,130 @@ class ActionRow(Horizontal):
     row of a screen shows the same hint state.
     """
 
-    def __init__(self, *children: Widget, keep_hints: bool = False, **kwargs) -> None:
+    def __init__(
+        self, *children: Widget, keep_hints: bool = False, prefer_one_line: bool = False, **kwargs,
+    ) -> None:
         super().__init__(*children, **kwargs)
         self._keep_hints = keep_hints
+        self._prefer_one_line = prefer_one_line
+        self._fit_requested = False
 
     def on_resize(self, event: Resize) -> None:
         self.fit()
 
+    def on_mount(self) -> None:
+        self.request_fit()
+
+    def request_fit(self) -> None:
+        """Fit once the pending layout is done; many requests make one fit.
+
+        The first Resize of a freshly mounted row can arrive before its
+        buttons are mounted, so the row also fits when the row or one of its
+        buttons mounts, not only when its size changes.
+        """
+        if self._fit_requested:
+            return
+        self._fit_requested = True
+        self.call_after_refresh(self._fit_requested_now)
+
+    def _fit_requested_now(self) -> None:
+        self._fit_requested = False
+        if self.is_attached:
+            self.fit()
+
+    def available_width(self) -> int:
+        """Cells the buttons may use: the row's own width, or the parent's for an auto-width row.
+
+        An auto-width row is as wide as its buttons, so its own width only
+        echoes the layout it already has (a wrapped auto-width grid measures
+        nothing). What it may grow to is what its parent leaves it.
+        """
+        parent = self.parent
+        if self.styles.width is not None and self.styles.width.is_auto and isinstance(parent, Widget):
+            return max(0, parent.content_size.width - self.styles.margin.width - self.gutter.width)
+        return self.content_size.width
+
     def fit(self) -> None:
-        """Choose words, hints and wrapping for the width the row has now."""
-        width = self.content_size.width
-        buttons = list(self.query(ActionButton))
+        """Choose words, hints and wrapping for the width the row may use.
+
+        Order: one row with full words, one row with short words, then wrapped
+        rows that keep the hints (up to two lines), then one row
+        without hints, then wrapped rows without them.
+        """
+        width = self.available_width()
+        # A button that is not shown takes no room, so it must not force a wrap.
+        buttons = [button for button in self.query(ActionButton) if button.display]
         if width <= 0 or not buttons:
             return
-        levels = ((False, True), (True, True)) + (() if self._keep_hints else ((True, False),))
-        for short, hint in levels:
-            if sum(b.natural_width(short=short, hint=hint) for b in buttons) <= width:
-                self._apply(buttons, short=short, hint=hint, wrap=False)
+        for short in (False, True):
+            if sum(b.natural_width(short=short, hint=True) for b in buttons) <= width:
+                self._apply(buttons, short=short, hint=True, wrap=False)
                 return
-        self._apply(buttons, short=True, hint=self._keep_hints, wrap=True)
+        one_line_without_hints = (
+            not self._keep_hints
+            and sum(b.natural_width(short=True, hint=False) for b in buttons) <= width
+        )
+        # A wrapped line of bordered buttons costs three rows, so for those
+        # (and for a row that asks for one line) losing the hints is cheaper.
+        bordered = any(not b.compact for b in buttons)
+        if one_line_without_hints and (bordered or self._prefer_one_line):
+            self._apply(buttons, short=True, hint=False, wrap=False)
+            return
+        columns = self._column_count(buttons, hint=True, width=width)
+        if -(-len(buttons) // columns) <= _MAX_HINTED_LINES or len(buttons) == 1:
+            self._apply(buttons, short=True, hint=True, wrap=True)
+        elif one_line_without_hints:
+            self._apply(buttons, short=True, hint=False, wrap=False)
+        else:
+            self._apply(buttons, short=True, hint=self._keep_hints, wrap=True)
+
+    @staticmethod
+    def _column_widths(buttons: list[ActionButton], columns: int, *, hint: bool) -> list[int]:
+        """Width each column needs when the buttons fill it row by row."""
+        natural = [b.natural_width(short=True, hint=hint) for b in buttons]
+        return [max(natural[start::columns]) for start in range(columns)]
+
+    @classmethod
+    def _column_count(cls, buttons: list[ActionButton], *, hint: bool, width: int) -> int:
+        """Most balanced column count whose columns, sized by content, fit *width*.
+
+        Starts from as many columns as could fit; the lines that needs are then
+        shared out evenly (five buttons on two lines are 3 + 2, not 4 + 1).
+        """
+        count = len(buttons)
+        for columns in range(count, 1, -1):
+            lines = -(-count // columns)
+            balanced = -(-count // lines)
+            widths = cls._column_widths(buttons, balanced, hint=hint)
+            if sum(widths) + (balanced - 1) * _WRAP_GUTTER <= width + _MARGIN:
+                return balanced
+        return 1
 
     def wrapped_columns(self, buttons: list[ActionButton], *, hint: bool) -> int:
-        """Equal columns for a wrapped row, each wide enough for the widest button."""
-        widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
-        columns = (self.content_size.width + _WRAP_GUTTER) // (widest + _WRAP_GUTTER)
-        return max(1, min(len(buttons), columns))
+        """Columns a wrapped row would have at the width it may use now."""
+        return self._column_count(buttons, hint=hint, width=self.available_width())
 
-    def _apply(self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool) -> None:
+    def _apply(
+        self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool,
+    ) -> None:
+        width = self.available_width()
         for button in buttons:
             button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
+        # An id rule that fixes the layout (a toolbar kept horizontal) would
+        # out-rank the class rule, leaving a "wrapped" row on one line.
+        self.styles.layout = "grid" if wrap else None
         # Columns follow the labels as they are now shown, so none is squeezed.
-        self.styles.grid_size_columns = self.wrapped_columns(buttons, hint=hint) if wrap else None
+        columns = self._column_count(buttons, hint=hint, width=width) if wrap else None
+        self.styles.grid_size_columns = columns
+        # Each column is as wide as its own widest button, so the lines align
+        # on one grid without every column taking the widest label's width.
+        # A single column takes the width there is, so a label too long for
+        # the row is squeezed rather than pushed past the edge.
+        track = "auto" if columns and columns > 1 else "1fr"
+        self.styles.grid_columns = (
+            tuple(Scalar.parse(track) for _ in range(columns)) if columns else None
+        )
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.
         self.call_after_refresh(self._remeasure)

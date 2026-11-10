@@ -12,10 +12,34 @@
     margin-top: 0;
 }
 
+#fleet_table_column {
+    width: 1fr;
+    height: 100%;
+}
+
 #instance_list_container InstanceTable {
     width: 1fr;
     height: 100%;
     margin-top: 0;
+}
+
+/* The first listing: the table is only as tall as the servers listed so far,
+   and the placeholder rows continue its frame down to the bottom. */
+#instance_list_container InstanceTable.--loading {
+    height: auto;
+    max-height: 100%;
+    border-bottom: none;
+}
+
+#fleet_skeleton {
+    display: none;
+    width: 1fr;
+    height: 1fr;
+    margin: 0;
+    padding: 0 1;
+    border: round $panel-lighten-2;
+    border-top: none;
+    background: transparent;
 }
 
 #fleet_inspector {
@@ -90,19 +114,11 @@ InstanceListScreen.-chat-open #fleet_inspector {
     text-style: bold;
 }
 
-/* A link-style button like the list's Refresh: one row, no box. */
-#fleet_inspector Button.fleet-copy-row,
-Button.fleet-copy-row {
+/* The inspector's blanket button size would stretch the link. */
+#fleet_inspector Button.fleet-copy-row {
     width: auto;
-    min-width: 0;
     height: 1;
     min-height: 1;
-    margin: 0;
-    padding: 0 1;
-    border: none;
-    background: transparent;
-    color: $text-accent;
-    text-style: underline;
 }
 
 #fleet_inspector #fleet_values {
@@ -171,15 +187,10 @@ InstanceListScreen.-chat-open #fleet_value_bar {
     display: block;
 }
 
-#fleet_value_bar .fleet-copy-row {
-    dock: left;
-}
-
 #fleet_value_line {
     width: 1fr;
     height: auto;
     max-height: 2;
-    margin-left: 15;
     grid-size: 4;
     grid-columns: 1fr;
     grid-rows: 1;

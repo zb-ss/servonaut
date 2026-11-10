@@ -19,6 +19,7 @@ from servonaut.screens._ca_text import audit_text, enroll_text, report_text, sta
 from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
 from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, is_feature_disabled, vault_failure_reason
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.widgets.safe_header import SafeHeader
@@ -160,7 +161,15 @@ class CaScreen(WorkspaceScreen):
     }
     """
 
-    BINDINGS = [Binding("escape", "back", "Back", show=True), Binding("r", "refresh", "Refresh", show=True)]
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=True),
+        Binding("r", "refresh", "Refresh", show=True),
+        Binding("s", "press('ca_enable')", "Switch on", show=False),
+        Binding("a", "press('ca_audit')", "Audit", show=False),
+        Binding("e", "press('ca_enroll')", "Enroll", show=False),
+        Binding("k", "press('ca_krl')", "Deliver KRL", show=False),
+        Binding("b", "press('ca_break_glass_scan')", "Scan break-glass use", show=False),
+    ]
 
     # The team picker focuses itself once its teams load. Auto focus would land on
     # the first enabled button instead and scroll the pickers away on short terminals.
@@ -233,15 +242,15 @@ class CaScreen(WorkspaceScreen):
                                 yield Static(_CHOOSE_TEAM_STATUS, id="ca_status")
                             with Vertical(id="ca_actions"):
                                 yield Static("Inspect", classes="credential_action_heading")
-                                with Horizontal(id="ca_inspect_actions"):
-                                    yield Button("Switch on SSH certificates", id="ca_enable", variant="primary")
-                                    yield Button("Refresh status", id="ca_refresh")
-                                    yield Button("Audit issuance chain", id="ca_audit")
+                                with ActionRow(id="ca_inspect_actions", keep_hints=True):
+                                    yield ActionButton("Switch on SSH certificates", "s", role="primary", id="ca_enable")
+                                    yield ActionButton("Refresh status", "r", id="ca_refresh")
+                                    yield ActionButton("Audit issuance chain", "a", id="ca_audit")
                                 yield Static("Server operations", classes="credential_action_heading")
-                                with Horizontal(id="ca_server_actions"):
-                                    yield Button("Enroll server", id="ca_enroll")
-                                    yield Button("Deliver KRL", id="ca_krl")
-                                    yield Button("Scan break-glass use", id="ca_break_glass_scan")
+                                with ActionRow(id="ca_server_actions", keep_hints=True):
+                                    yield ActionButton("Enroll server", "e", id="ca_enroll")
+                                    yield ActionButton("Deliver KRL", "k", id="ca_krl")
+                                    yield ActionButton("Scan break-glass use", "b", id="ca_break_glass_scan")
                     yield BusyIndicator(id="ca_busy")
         yield Footer()
 
@@ -543,6 +552,7 @@ class CaScreen(WorkspaceScreen):
         enable = self.query_one("#ca_enable", Button)
         enable.display = not_enabled and self._switched_off_team is None
         enable.disabled = self._action_running
+        self.query_one("#ca_inspect_actions", ActionRow).request_fit()
 
     def _set_not_enabled(self, team: str | None) -> None:
         self._not_enabled_team = team
@@ -568,8 +578,16 @@ class CaScreen(WorkspaceScreen):
             return
         self.app.notify(f"{action} failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
 
+    def action_press(self, button_id: str) -> None:
+        """Run an action from its key, as long as its button could be clicked."""
+        button = self.query_one(f"#{button_id}", Button)
+        if button.display and not button.disabled:
+            self._run_button(button_id)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
+        self._run_button(event.button.id)
+
+    def _run_button(self, button_id: str | None) -> None:
         if button_id == "ca_refresh":
             self.action_refresh()
             return

@@ -3,9 +3,27 @@
    Theme cards, the preview beside them and the readability readout.
    =================================================================== */
 
-AppearancePanel #appearance_actions {
+AppearancePanel #appearance_header {
     height: auto;
-    margin-bottom: 1;
+    layout: vertical;
+    padding: 0 1;
+}
+AppearancePanel #appearance_header.-wide {
+    layout: horizontal;
+}
+AppearancePanel #appearance_heading {
+    width: 100%;
+    height: auto;
+}
+AppearancePanel #appearance_header.-wide #appearance_heading {
+    width: 1fr;
+}
+AppearancePanel #appearance_description {
+    margin: 0;
+}
+AppearancePanel #appearance_actions {
+    width: auto;
+    height: auto;
 }
 AppearancePanel #appearance_new,
 AppearancePanel #appearance_open,
@@ -14,19 +32,13 @@ AppearancePanel #appearance_reload {
     min-width: 10;
     margin: 0 1 0 0;
 }
+AppearancePanel #appearance_header.-wide #appearance_reload {
+    margin: 0;
+}
 AppearancePanel #appearance_actions Button.-textual-compact {
     min-width: 0;
     height: 1;
     border: none;
-}
-AppearancePanel #appearance_verdict {
-    height: auto;
-    margin-bottom: 1;
-}
-AppearancePanel #appearance_folder {
-    height: auto;
-    color: $text-muted;
-    margin-bottom: 1;
 }
 AppearancePanel #appearance_layout {
     height: 1fr;
@@ -66,11 +78,18 @@ AppearancePanel .theme-card:focus {
 AppearancePanel .theme-card.-active {
     border: round $accent;
 }
+AppearancePanel .theme-card.-warning {
+    border: round $warning;
+}
 AppearancePanel .theme-card.-error {
     border: round $error;
 }
 AppearancePanel .theme-card-title {
     height: auto;
+}
+/* After the state rules: the border carries the state colour, so focus is shown on the title. */
+AppearancePanel .theme-card:focus .theme-card-title {
+    text-style: bold underline;
 }
 AppearancePanel .theme-card-swatches {
     height: 1;
@@ -79,17 +98,30 @@ AppearancePanel .theme-card-detail {
     height: auto;
     color: $text-muted;
 }
-AppearancePanel .theme-edit-file {
+AppearancePanel .theme-card-path {
+    height: auto;
+}
+AppearancePanel .theme-card-path .theme-card-detail {
+    width: 1fr;
+}
+AppearancePanel .theme-card-warning {
+    height: auto;
+}
+AppearancePanel .theme-card-path .theme-edit-file {
     width: auto;
-    min-width: 12;
-    margin: 0;
+    min-width: 0;
+    height: 1;
+    margin: 0 0 0 2;
+    border: none;
+    padding: 0;
+    text-style: underline;
 }
 AppearancePanel #appearance_details {
     height: auto;
     width: 100%;
 }
 AppearancePanel #appearance_layout.-side #appearance_details {
-    width: 44;
+    width: 36;
     height: 1fr;
     overflow-y: auto;
 }
@@ -109,7 +141,7 @@ AppearancePanel .appearance-section-title {
 }
 AppearancePanel #appearance_preview {
     height: auto;
-    padding: 1;
+    padding: 0;
 }
 AppearancePanel #appearance_readability {
     height: auto;

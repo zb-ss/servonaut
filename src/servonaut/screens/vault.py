@@ -1133,7 +1133,7 @@ class VaultScreen(WorkspaceScreen):
                         with Horizontal(id="vault_busy_row"):
                             yield BusyIndicator(id="vault_busy")
                             yield ActionButton("Stop waiting", id="vault_cancel_wait", role="error", disabled=True)
-                    with ActionRow(id="vault_views"):
+                    with ActionRow(id="vault_views", prefer_one_line=True):
                         for button_id, text, key, short in _VIEW_TABS:
                             yield ActionButton(text, key, short=short, id=button_id, classes="vault_view")
                     with Horizontal(id="vault_workspace"):
@@ -1149,17 +1149,17 @@ class VaultScreen(WorkspaceScreen):
                             yield DataTable(id="vault_table", cursor_type="row", zebra_stripes=True)
                         with VerticalScroll(id="vault_action_scroll"):
                             with Vertical(id="vault_inspector", classes="vault_action_group"):
-                                yield Static("SELECTED VAULT", id="vault_inspector_heading", classes="vault_group_heading")
+                                yield Static("Selected vault", id="vault_inspector_heading", classes="vault_group_heading")
                                 yield Static("", id="vault_inspector_facts")
                             with Vertical(id="vault_actions"):
                                 with Vertical(id="vault_onboarding_group", classes="vault_action_group"):
-                                    yield Static("IDENTITY AND DEVICES", classes="vault_group_heading")
+                                    yield Static("Identity and devices", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Setup", id="vault_setup")
                                         yield ActionButton("Add device", id="vault_add_device")
                                         yield ActionButton("Recover", id="vault_recover")
                                 with Vertical(id="vault_keys_group", classes="vault_action_group"):
-                                    yield Static("KEYS AND ITEMS", classes="vault_group_heading")
+                                    yield Static("Keys and items", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Create vault", id="vault_create")
                                         yield ActionButton("Import SSH", id="vault_import")
@@ -1171,20 +1171,20 @@ class VaultScreen(WorkspaceScreen):
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Auto-bind keys", id="vault_auto_bind")
                                 with Vertical(id="vault_identity_group", classes="vault_action_group"):
-                                    yield Static("IDENTITY AND ACCESS", classes="vault_group_heading")
+                                    yield Static("Identity and access", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Confirm identity", short="Confirm ID", id="vault_confirm_identity")
                                         yield ActionButton("Approve device", short="Approve", id="vault_approve")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Process grants", "g", id="vault_grants")
                                 with Vertical(id="vault_maintenance_group", classes="vault_action_group"):
-                                    yield Static("EXPOSURES", classes="vault_group_heading")
+                                    yield Static("Exposures", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Resolve exposure", short="Resolve", id="vault_resolve_exposure")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Rotate exposed SSH key", short="Rotate key", id="vault_rotate_exposure", role="warning")
                                 with Vertical(id="vault_danger_group", classes="vault_action_group"):
-                                    yield Static("IRREVERSIBLE", classes="vault_group_heading")
+                                    yield Static("Irreversible", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Rotate vault key", short="Rotate vault", id="vault_rotate", role="error")
                                         yield ActionButton("Reset identity", id="vault_reset", role="error")
@@ -1569,7 +1569,6 @@ class VaultScreen(WorkspaceScreen):
             self._facts_timer.stop()
             self._facts_timer = None
         heading, facts = self._inspector_facts()
-        heading = heading.upper()
         if heading != self._facts_heading:
             self._facts_heading = heading
             self.query_one("#vault_inspector_heading", Static).update(heading)
