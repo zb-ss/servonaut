@@ -72,3 +72,65 @@ def test_the_age_and_refresh_stay_inside_the_row_at_every_width_with_a_long_age(
             assert refresh.region.right <= filters.region.right, (width, refresh.region, filters.region)
 
     _run(scenario, hide_navigation=True)
+
+
+def _verified_fleet() -> list[dict]:
+    rows = [dict(r) for r in _harness.AWS_ROWS]
+    rows[0].update(ssh_verify_status="verified", ssh_verified_at="2026-03-02T08:30:00+00:00")
+    return rows
+
+
+def test_the_summary_drops_its_key_reminder_before_it_is_cut() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        for width in (100, 112, 125, 132, 140, 160, 200):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            await pilot.pause()
+            line = screen.query_one("#fleet_summary", Static)
+            text = line.visual.plain
+            assert text.startswith("Showing 7 of 7 · filters: none")
+            assert cell_len(text) <= line.size.width, (width, text)
+            if "f cycle state filter" not in text:
+                assert "p cycle provider" not in text
+
+    _run(scenario)
+
+
+def test_the_ssh_column_steps_aside_instead_of_making_the_table_scroll() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        screen._instances = _verified_fleet()
+        screen._update_table()
+        table = screen.query_one(InstanceTable)
+        stepped_aside = False
+        for width in range(120, 200, 2):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            await pilot.pause()
+            keys = [str(c.key.value) for c in table.columns.values()]
+            scrolls = table.virtual_size.width > table.scrollable_content_region.width
+            if "ssh" in keys and scrolls:
+                # Dropping the column must not have helped: without it, it still scrolls.
+                ssh = next(c for c in table.columns.values() if str(c.key.value) == "ssh")
+                without = table.virtual_size.width - ssh.get_render_width(table)
+                assert without > table.scrollable_content_region.width, width
+            elif not scrolls:
+                stepped_aside = True
+        assert stepped_aside
+
+    _run(scenario)
+
+
+def test_the_ssh_column_is_shown_when_there_is_room() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        await pilot.resize_terminal(220, 44)
+        screen._instances = _verified_fleet()
+        screen._update_table()
+        await pilot.pause()
+        await pilot.pause()
+        keys = [str(c.key.value) for c in screen.query_one(InstanceTable).columns.values()]
+        assert "ssh" in keys
+
+    _run(scenario)

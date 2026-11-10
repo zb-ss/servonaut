@@ -53,6 +53,9 @@ COLUMNS: Sequence[_Column] = (
     _Column("ssh", "SSH", optional=True),
 )
 
+# Cells the SSH-verify column needs at most ("✗ auth failed").
+_OPTIONAL_WIDTH = 13
+
 # Shown in the table's bottom border while some columns are out of view.
 SCROLL_HINT = "← → more columns"
 
@@ -141,6 +144,8 @@ class InstanceTable(DataTable):
         # Row identity -> what the last refresh did to it (see ``set_marks``).
         self._marks: Dict[str, str] = {}
         self._shown_columns: List[_Column] = []
+        # An optional column steps aside when its room would make the table scroll.
+        self._optional_fits = True
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
     def _setup_columns(self, columns: Sequence[_Column]) -> None:
@@ -152,6 +157,24 @@ class InstanceTable(DataTable):
     def on_resize(self) -> None:
         """Re-check the scroll hint: the view got wider or narrower."""
         self._sync_scroll_hint()
+        self._sync_optional_fit()
+
+    def _sync_optional_fit(self) -> None:
+        """Drop an optional column that would make the table scroll; bring it back when it fits."""
+        available = self.scrollable_content_region.width
+        extra = next((c for c in self.columns.values() if str(c.key.value) == "ssh"), None)
+        if available <= 0:
+            return
+        if extra is not None:
+            width = self.virtual_size.width
+            if width > available and width - extra.get_render_width(self) <= available:
+                self._optional_fits = False
+                self.call_after_refresh(self.redraw)
+        elif not self._optional_fits:
+            estimate = _OPTIONAL_WIDTH + 2 * self.cell_padding
+            if self.virtual_size.width + estimate <= available:
+                self._optional_fits = True
+                self.call_after_refresh(self.redraw)
 
     def _sync_scroll_hint(self) -> None:
         """Say so in the bottom border while columns are out of view."""
@@ -174,6 +197,7 @@ class InstanceTable(DataTable):
         widths_before = self._render_widths()
         super()._update_dimensions(*args, **kwargs)
         self._sync_scroll_hint()
+        self._sync_optional_fit()
         if self._render_widths() == widths_before:
             return
         clear_caches = getattr(self, "_clear_caches", None)
@@ -343,7 +367,8 @@ class InstanceTable(DataTable):
             column
             for column in COLUMNS
             if not column.optional
-            or any(self._optional_cell(column.key, i) for i in self._all_instances)
+            or (self._optional_fits
+                and any(self._optional_cell(column.key, i) for i in self._all_instances))
         ]
         if columns == self._shown_columns:
             self.clear()

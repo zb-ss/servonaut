@@ -77,6 +77,15 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
+class FleetSummaryLine(Static):
+    """The summary under the table; it tells the screen when its width changes."""
+
+    def on_resize(self) -> None:
+        screen = self.screen
+        if isinstance(screen, InstanceListScreen):
+            screen.call_after_refresh(screen._draw_summary)
+
+
 class FleetChip(Button):
     """A quick-filter chip: one state or provider choice, with its live count."""
 
@@ -228,6 +237,7 @@ class InstanceListScreen(WorkspaceScreen):
         """Re-fit the footer to the new width."""
         self.refresh_bindings()
         self.call_after_refresh(self._sync_roomy)
+        self.call_after_refresh(self._draw_summary)
 
     def on_mouse_up(self) -> None:
         """A drag that began in a value may end anywhere: the value hands the focus back."""
@@ -313,6 +323,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._cache_written_at: Optional[float] = None
         self._updated_shown: Optional[str] = None
         self._fresh_inline = False
+        self._summary_counts = (0, 0)
         self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
@@ -351,7 +362,7 @@ class InstanceListScreen(WorkspaceScreen):
                     with Vertical(id="fleet_table_column"):
                         yield InstanceTable()
                         yield FleetSkeleton(id="fleet_skeleton")
-                        yield Static("", id="fleet_summary", markup=False)
+                        yield FleetSummaryLine("", id="fleet_summary", markup=False)
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
                         yield Static(
                             "[bold]Selected server[/bold]\n[dim]No server selected[/dim]",
@@ -1073,10 +1084,21 @@ class InstanceListScreen(WorkspaceScreen):
         return Content.assemble(literal(glyph[0], glyph[1]), " ", text)
 
     def _sync_summary(self, shown: int, total: int) -> None:
-        query = self.query_one("#search_input", Input).value.strip()
-        self.query_one("#fleet_summary", Static).update(
-            summary(shown, total, self._filter, query)
-        )
+        self._summary_counts = (shown, total)
+        self._draw_summary()
+
+    def _draw_summary(self) -> None:
+        """The summary line; the key reminder goes first when the line is too narrow."""
+        try:
+            line = self.query_one("#fleet_summary", Static)
+            query = self.query_one("#search_input", Input).value.strip()
+        except NoMatches:
+            return
+        shown, total = self._summary_counts
+        full = summary(shown, total, self._filter, query)
+        room = line.size.width - 2
+        fits = line.size.width == 0 or cell_len(full) <= room
+        line.update(full if fits else summary(shown, total, self._filter, query, hint=False))
 
     def _sync_updated(self) -> None:
         """Say how fresh the list is, redrawing only when the words change.
