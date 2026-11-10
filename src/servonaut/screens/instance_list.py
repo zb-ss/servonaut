@@ -896,18 +896,16 @@ class InstanceListScreen(WorkspaceScreen):
             self._update_status_bar()
 
     def refresh_memory_status(self) -> None:
-        """Refresh the instance table's memory column after a fleet auto-scan.
+        """Redraw the memory line of the inspector after a fleet auto-scan.
 
         Called duck-typed by ``app._refresh_fleet_panels_after_scan`` when a
         background auto-scan cycle completes while this screen is mounted, so
-        the "Mem" status column reflects freshly-probed servers in real time.
-        Exception-safe: a no-op if the table isn't mounted yet.
+        the status reflects freshly-probed servers in real time.
         """
         try:
-            table = self.query_one(InstanceTable)
-        except Exception:
+            self._update_detail_panel()
+        except NoMatches:
             return
-        table.refresh_memory_status()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fleet, status bar and detail pane after a demo toggle."""
@@ -1317,7 +1315,29 @@ class InstanceListScreen(WorkspaceScreen):
             self._inspector_state_badge(instance),
             "\n",
             literal(f"{provider} · {address}", "dim"),
+            "\n",
+            self._memory_line(instance),
         ))
+
+    def _memory_line(self, instance: dict) -> Content:
+        """Whether the server's memory (cached facts) is fresh, stale, off or missing."""
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return literal("Memory unavailable", "dim")
+        from servonaut.screens.fleet_memory import (
+            STATUS_FRESH, STATUS_OPT_OUT, STATUS_STALE, compute_memory_status,
+        )
+        try:
+            status = compute_memory_status(instance, memory_service)
+        except Exception:  # noqa: BLE001 - a broken memory store must not hide the server
+            return literal("Memory unavailable", "dim")
+        words = {
+            STATUS_FRESH: ("● Memory fresh", "$text-success"),
+            STATUS_STALE: ("● Memory stale", "$text-warning"),
+            STATUS_OPT_OUT: ("⛔ Memory off", "$text-error"),
+        }
+        text, style = words.get(status, ("○ No memory yet", "dim"))
+        return literal(text, style)
 
     @staticmethod
     def _inspector_state_badge(instance: dict) -> Content:

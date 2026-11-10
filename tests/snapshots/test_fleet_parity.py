@@ -232,3 +232,41 @@ def test_inspector_buttons_are_action_buttons_with_quiet_key_hints() -> None:
         assert all(b.variant == "default" for b in others)
 
     _run(scenario)
+
+
+# --- columns ---------------------------------------------------------------
+
+
+def test_the_table_does_not_scroll_sideways_at_160x50() -> None:
+    async def scenario(pilot: Any) -> None:
+        table = _screen(pilot).query_one(InstanceTable)
+        assert table.virtual_size.width <= table.scrollable_content_region.width
+        assert table.border_subtitle == ""
+        assert [str(c.label) for c in table.columns.values()] == [
+            "#", "Name", "State", "Provider", "Public IP", "Type", "Region",
+        ]
+
+    _run(scenario)
+
+
+def test_the_memory_status_moved_to_the_inspector() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        header = screen.query_one("#fleet_inspector_header", Static)
+        for name in ("app-1", "mail-1", "db-1"):
+            await _harness.select_fleet_row(pilot, name)
+            assert "emory" in header.visual.plain, header.visual.plain
+
+    _run(scenario)
+
+
+def test_the_inspector_list_always_has_the_values_the_table_dropped() -> None:
+    from servonaut.widgets.fleet_values import ValueRow
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        await _harness.select_fleet_row(pilot, "app-1")
+        fields = {r.field for r in screen.query_one("#fleet_values").query(ValueRow) if r.display}
+        assert {"private_ip", "id", "key_name"} <= fields
+
+    _run(scenario)
