@@ -317,7 +317,7 @@ def test_demo_mode_provider_column_and_summary_use_only_stand_ins() -> None:
 
 
 @sizes
-def test_the_search_box_reads_the_boards_words(size: str) -> None:
+def test_the_search_box_reads_its_placeholder_and_label(size: str) -> None:
     from textual.widgets import Input
 
     async def scenario(pilot: Any) -> None:
@@ -384,3 +384,164 @@ def test_y_copies_exactly_the_values_the_inspector_lists(size: str) -> None:
         assert copied == ["  ".join(shown)]
 
     _run(scenario, size)
+
+
+# --- round 2: terminal-colour themes, measured freshness, status note -------
+
+
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+def test_a_one_row_chip_keeps_its_row_when_hovered_or_focused_in_a_terminal_theme(theme: str) -> None:
+    async def scenario(pilot: Any) -> None:
+        pilot.app.theme = theme
+        await pilot.pause()
+        chips = _chips(pilot)
+        assert chips and not _screen(pilot).has_class("-roomy")
+        for chip in chips[:3]:
+            await pilot.hover(chip)
+            await pilot.pause()
+            assert chip.region.height == 1 and chip.styles.border_top[0] in ("", "none"), chip.id
+            chip.focus()
+            await pilot.pause()
+            assert chip.region.height == 1 and chip.styles.border_top[0] in ("", "none"), chip.id
+
+    _run(scenario, "100x30")
+
+
+def test_a_hovered_or_focused_pill_is_not_drawn_like_the_chosen_one() -> None:
+    async def scenario(pilot: Any) -> None:
+        chips = _chips(pilot)
+        chosen = next(c for c in chips if c.has_class("--chosen"))
+        other = next(c for c in chips if not c.has_class("--chosen"))
+        await pilot.hover(other)
+        await pilot.pause()
+        assert other.styles.border_top[1] != chosen.styles.border_top[1]
+        other.focus()
+        await pilot.pause()
+        assert other.styles.border_top[1] != chosen.styles.border_top[1]
+
+    _run(scenario)
+
+
+def _fresh_is_whole(pilot: Any) -> None:
+    from rich.cells import cell_len
+
+    screen = _screen(pilot)
+    width = pilot.app.size.width
+    refresh = screen.query_one("#fleet_refresh")
+    assert refresh.region.width > 0 and 0 <= refresh.region.x and refresh.region.right <= width
+    label = screen.query_one("#fleet_updated", Static)
+    text = label.visual.plain
+    assert cell_len(text) <= label.region.width, (text, label.region)
+    assert label.region.right <= width
+
+
+@pytest.mark.parametrize("navigation_hidden", [False, True])
+def test_refresh_and_the_age_are_whole_and_on_screen_at_every_width(navigation_hidden: bool) -> None:
+    async def scenario(pilot: Any) -> None:
+        if navigation_hidden:
+            await pilot.click("#workspace_navigation")
+            await pilot.pause()
+        for width in (100, 112, 120, 130, 136, 143, 150, 157, 160, 180, 200):
+            await pilot.resize_terminal(width, 44)
+            await _harness.wait_until(pilot, lambda: _screen(pilot).query_one("#fleet_updated").visual.plain != "", "the age")
+            await pilot.pause()
+            _fresh_is_whole(pilot)
+
+    _run(scenario)
+
+
+def test_refresh_and_the_age_are_whole_with_the_chat_open() -> None:
+    async def scenario(pilot: Any) -> None:
+        await pilot.press("f2")
+        await _harness.wait_until(pilot, lambda: _screen(pilot).has_class("-chat-open"), "the chat")
+        for width in (112, 160, 200):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            # The chat replaces the list altogether when there is no room for both.
+            if _screen(pilot).query_one("#instance_list_container").display:
+                _fresh_is_whole(pilot)
+
+    _run(scenario)
+
+
+def test_the_inline_age_drops_the_label_and_the_tooltip_keeps_it() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        label = screen.query_one("#fleet_updated", Static)
+        assert screen.query_one("#fleet_filters").has_class("-fresh-inline")
+        assert label.visual.plain == "5 min ago ·"
+        assert str(label.tooltip) == "Cached 5 min ago"
+
+    _run(scenario)
+
+
+def test_the_age_has_its_full_words_on_its_own_row() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        assert not screen.query_one("#fleet_filters").has_class("-fresh-inline")
+        assert screen.query_one("#fleet_updated", Static).visual.plain == "Cached 5 min ago ·"
+
+    _run(scenario, "100x30")
+
+
+def test_a_failed_refresh_reads_refresh_failed_inline() -> None:
+    from servonaut.screens.instance_list import InstanceListScreen
+
+    assert InstanceListScreen._inline_age("Refresh failed · cached 5 min ago") == "Refresh failed"
+    assert InstanceListScreen._inline_age("Updated 12 s ago") == "12 s ago"
+    assert InstanceListScreen._inline_age("") == ""
+
+
+def test_the_memory_status_shows_in_the_status_bar_while_the_inspector_is_hidden() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        await _harness.select_fleet_row(pilot, "app-1")
+        await pilot.pause()
+        assert not screen.query_one("#fleet_inspector").display
+        assert "Memory" in screen.query_one(StatusBar).visual.plain
+
+    _run(scenario, "100x30")
+
+
+def test_the_memory_status_is_not_repeated_in_the_status_bar_beside_the_inspector() -> None:
+    async def scenario(pilot: Any) -> None:
+        await _harness.select_fleet_row(pilot, "app-1")
+        await pilot.pause()
+        assert "Memory" not in _screen(pilot).query_one(StatusBar).visual.plain
+
+    _run(scenario)
+
+
+def test_the_inspector_header_uses_the_provider_label_and_sentence_case() -> None:
+    async def scenario(pilot: Any) -> None:
+        header = _screen(pilot).query_one("#fleet_inspector_header", Static)
+        await _harness.select_fleet_row(pilot, "cache-1")
+        assert "Hetzner ·" in header.visual.plain and "hetzner ·" not in header.visual.plain
+        pilot.app.screen.query_one("#search_input").value = "no-such-server"
+        await pilot.pause(0.5)
+        assert "Selected server" in header.visual.plain
+
+    _run(scenario)
+
+
+def test_a_verified_ssh_result_keeps_the_table_from_scrolling_sideways() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        row = dict(_harness.AWS_ROWS[0])
+        row.update(ssh_verify_status="verified", ssh_verified_at="2026-03-02T08:30:00+00:00")
+        screen._instances = [row, *_harness.AWS_ROWS[1:]]
+        screen._update_table()
+        await pilot.pause()
+        table = screen.query_one(InstanceTable)
+        assert "SSH" in [str(c.label) for c in table.columns.values()]
+        assert table.virtual_size.width <= table.scrollable_content_region.width
+
+    _run(scenario)
+
+
+def test_the_compact_ssh_cell_is_short() -> None:
+    from servonaut.utils.formatting import format_ssh_verify_state
+
+    args = ("verified", "2026-03-02T08:30:00+00:00")
+    assert format_ssh_verify_state(*args) == "[green]✓ verified[/green] (1h ago)"
+    assert format_ssh_verify_state(*args, compact=True) == "[green]✓ 1h ago[/green]"

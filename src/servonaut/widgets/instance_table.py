@@ -429,6 +429,7 @@ class InstanceTable(DataTable):
         return format_ssh_verify_state(
             instance.get("ssh_verify_status"),
             instance.get("ssh_verified_at"),
+            compact=True,
         )
 
     def _colorize_state(self, state: str) -> str:

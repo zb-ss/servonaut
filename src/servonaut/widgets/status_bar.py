@@ -14,7 +14,14 @@ class StatusBar(Static):
         """Initialize status bar."""
         super().__init__("")
         self._cache_age: Optional[timedelta] = None
+        self._note = ""
         self._update_display()
+
+    def set_note(self, note: str) -> None:
+        """Show a short fixed-words note, or nothing for ``""``."""
+        if note != self._note:
+            self._note = note
+            self._update_display()
 
     def update_cache_age(self, age: Optional[timedelta]) -> None:
         """Update cache age display.
@@ -30,6 +37,9 @@ class StatusBar(Static):
         parts = []
 
         # The count and the filter live in the list's own summary line.
+        if self._note:
+            parts.append(self._note)
+
         # Cache age
         if self._cache_age is not None:
             age_str = self._format_age(self._cache_age)

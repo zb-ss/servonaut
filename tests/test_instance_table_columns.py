@@ -91,7 +91,7 @@ async def test_cells_are_plain_text_not_markup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_default_columns_are_the_boards_seven() -> None:
+async def test_the_default_columns_are_the_seven() -> None:
     app = _Host()
     async with app.run_test(size=(220, 16)) as pilot:
         table = app.query_one(InstanceTable)

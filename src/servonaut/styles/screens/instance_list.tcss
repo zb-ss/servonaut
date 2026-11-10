@@ -51,7 +51,23 @@ StatusBar {
 
 /* Quick filters: state chips, then provider chips. */
 #fleet_filters {
+    layout: grid;
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-rows: auto;
+    grid-gutter: 0;
     width: 100%;
+    height: auto;
+}
+
+/* The age and the Refresh link fit on the chip row: a second column. */
+#fleet_filters.-fresh-inline {
+    grid-size: 2;
+    grid-columns: auto 1fr;
+}
+
+#fleet_chip_row {
+    width: auto;
     height: auto;
 }
 
@@ -67,9 +83,9 @@ StatusBar {
     color: $border-blurred;
 }
 
-InstanceListScreen.-narrow #fleet_filters,
-InstanceListScreen.-content-narrow #fleet_filters,
-InstanceListScreen.-chat-open #fleet_filters {
+InstanceListScreen.-narrow #fleet_chip_row,
+InstanceListScreen.-content-narrow #fleet_chip_row,
+InstanceListScreen.-chat-open #fleet_chip_row {
     layout: vertical;
 }
 
@@ -113,6 +129,11 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
 
 /* Roomy terminals (wide, tall, nothing beside the table): outlined pills. The
    chosen one has an accent outline and accent text, the others a dim outline. */
+InstanceListScreen.-roomy .fleet-chip-divider {
+    height: 3;
+    content-align: center middle;
+}
+
 InstanceListScreen.-roomy #fleet_state_chips,
 InstanceListScreen.-roomy #fleet_provider_chips {
     height: 3;
@@ -126,14 +147,18 @@ InstanceListScreen.-roomy .fleet-chip {
     color: $text;
 }
 
+/* Hover and focus are a brighter neutral outline: only the chosen pill is accent. */
 InstanceListScreen.-roomy .fleet-chip:hover,
 InstanceListScreen.-roomy .fleet-chip:focus {
-    border: round $accent;
+    border: round $border;
     background: transparent;
-    color: $text-accent;
+    color: $text;
+    text-style: bold;
 }
 
-InstanceListScreen.-roomy .fleet-chip.--chosen {
+InstanceListScreen.-roomy .fleet-chip.--chosen,
+InstanceListScreen.-roomy .fleet-chip.--chosen:hover,
+InstanceListScreen.-roomy .fleet-chip.--chosen:focus {
     border: round $accent;
     background: transparent;
     color: $text-accent;
@@ -176,33 +201,28 @@ InstanceListScreen.-roomy .fleet-chip:ansi:focus {
     text-style: bold underline;
 }
 
-/* Freshness and Refresh sit at the right of the chip row. */
+/* Freshness and Refresh: right-aligned on a row of their own, or on the chip
+   row when the screen measured enough room (see _sync_fresh_layout). */
 #fleet_fresh {
-    width: 1fr;
-    min-width: 12;
+    width: 100%;
     height: 1;
     align-horizontal: right;
 }
 
-InstanceListScreen.-roomy #fleet_fresh {
+#fleet_filters.-fresh-inline #fleet_fresh {
+    width: 100%;
+}
+
+InstanceListScreen.-roomy #fleet_filters.-fresh-inline #fleet_fresh {
     height: 3;
     align-vertical: middle;
 }
 
-InstanceListScreen.-narrow #fleet_fresh,
-InstanceListScreen.-content-narrow #fleet_fresh,
-InstanceListScreen.-chat-open #fleet_fresh {
-    width: 100%;
-    height: 1;
-}
-
 #fleet_updated {
-    width: 1fr;
+    width: auto;
     padding: 0;
     color: $text-muted;
-    text-align: right;
     text-wrap: nowrap;
-    text-overflow: ellipsis;
 }
 
 /* One row under the table at any width: a long summary is cut, not wrapped. */
