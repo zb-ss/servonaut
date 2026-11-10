@@ -67,7 +67,7 @@ class TestSshVerifyCell:
             "ssh_verified_at": "2026-05-24T10:00:00+00:00",
         })
         assert "[green]" in result
-        assert "verified" in result
+        assert "✓" in result and "ago" in result
 
     def test_not_found_status_shows_red(self):
         result = self._cell({"ssh_verify_status": "not_found"})

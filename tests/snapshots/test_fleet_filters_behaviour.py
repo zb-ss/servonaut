@@ -555,8 +555,10 @@ def test_a_refresh_where_every_provider_fails_says_so() -> None:
             gate.release(error="offline")
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
-        text = screen.query_one("#fleet_updated", Static).visual.plain
-        assert text.startswith("Refresh failed") and "cached" in text
+        label = screen.query_one("#fleet_updated", Static)
+        # Inline only the verdict fits; the tooltip keeps the cache age.
+        assert label.visual.plain.startswith("Refresh failed")
+        assert "cached" in str(label.tooltip)
         assert pilot.app.workspace_state.fleet_updated_at is None
 
     _run(scenario)
@@ -581,7 +583,7 @@ def test_the_cache_age_is_shown_in_one_place_at_a_time() -> None:
     async def scenario(pilot: Any) -> None:
         screen = _screen(pilot)
         updated = screen.query_one("#fleet_updated", Static)
-        assert updated.visual.plain == "Cached 5 min ago ·"
+        assert updated.visual.plain == "5 min ago ·"
         assert "Cache:" not in screen.query_one("StatusBar").render().plain
         gates = _harness.gate_providers(pilot.app)
         screen.action_refresh()
@@ -593,7 +595,7 @@ def test_the_cache_age_is_shown_in_one_place_at_a_time() -> None:
             gate.release()
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
-        assert updated.visual.plain == "Updated just now ·"
+        assert updated.visual.plain == "just now ·"
 
     _run(scenario)
 
