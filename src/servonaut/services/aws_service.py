@@ -104,10 +104,8 @@ class AWSService(InstanceServiceInterface):
         self._listing_deadline: Optional[float] = None
         # Regions of the last listing skipped because its time was up.
         self._late_regions: List[str] = []
-        # The region being listed now (read by the UI while a listing runs),
-        # and the signal that tells a listing thread nobody wants its answer.
+        # The region being listed now (read by the UI while a listing runs).
         self.listing_region: str = ""
-        self._listing_abandoned = threading.Event()
 
     def get_cached_instances(self) -> List[dict]:
         """Return the cached AWS instances synchronously, regardless of TTL.
@@ -213,11 +211,14 @@ class AWSService(InstanceServiceInterface):
         # Run blocking boto3 calls in thread pool
         # Python 3.8 compat: use run_in_executor instead of to_thread
         loop = asyncio.get_event_loop()
+        # One token per listing: this service is shared with other screens and
+        # tools, and cancelling one caller must not cut another's listing short.
+        abandoned = threading.Event()
         try:
-            instances = await loop.run_in_executor(None, self._fetch_all_regions)
+            instances = await loop.run_in_executor(None, self._fetch_all_regions, abandoned)
         except asyncio.CancelledError:
             # A thread cannot be interrupted; it stops at the next region.
-            self._listing_abandoned.set()
+            abandoned.set()
             raise
 
         logger.info(f"Fetched {len(instances)} instances from AWS")
@@ -305,15 +306,18 @@ class AWSService(InstanceServiceInterface):
             parts.append(f"{len(late)} region(s) not listed in the time allowed")
         return "; ".join(parts)
 
-    def _fetch_all_regions(self) -> List[dict]:
+    def _fetch_all_regions(self, abandoned: Optional[threading.Event] = None) -> List[dict]:
         """Blocking fetch of instances across all AWS regions.
+
+        An *abandoned* listing (its caller was cancelled) stops at the next
+        region and leaves this service's shared progress state alone.
 
         Returns:
             List of instance dictionaries.
         """
         self._failed_regions = []
         self._late_regions = []
-        self._listing_abandoned.clear()
+        abandoned = abandoned or threading.Event()
         configured = list(self.account.regions) if self.account is not None else []
         if configured:
             regions = configured
@@ -332,8 +336,8 @@ class AWSService(InstanceServiceInterface):
         last_error: Optional[Exception] = None
         errors: List[Exception] = []
         for region in regions:
-            if self._listing_abandoned.is_set():
-                break
+            if abandoned.is_set():
+                return instances
             self.listing_region = region
             if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
                 self._failed_regions.append(region)
@@ -344,10 +348,14 @@ class AWSService(InstanceServiceInterface):
                 logger.debug(f"Fetching instances from region: {region}")
                 instances.extend(self._fetch_region(region))
             except Exception as e:
+                if abandoned.is_set():
+                    return instances
                 logger.error(f"Error fetching instances from {region}: {e}")
                 self._failed_regions.append(region)
                 last_error = e
                 errors.append(e)
+        if abandoned.is_set():
+            return instances
         self.listing_region = ""
 
         if regions and len(self._failed_regions) == len(regions):

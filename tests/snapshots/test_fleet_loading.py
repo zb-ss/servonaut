@@ -41,7 +41,7 @@ async def _wait(pilot: Any, predicate: Callable[[], Any], what: str) -> None:
 
 
 async def _first_run_mid_load(pilot: Any) -> None:
-    """Hetzner answered, AWS is reading its first account, OVH has not started."""
+    """Hetzner answered, AWS is reading its first account, OVH is still loading."""
     screen = pilot.app.screen
     await _harness.empty_fleet(pilot)
     gates = _harness.gate_providers(pilot.app, cached=False)
@@ -51,8 +51,6 @@ async def _first_run_mid_load(pilot: Any) -> None:
     await _wait(pilot, lambda: table_rows(pilot) == 1, "Hetzner's row")
     gates["aws"].load_progress = LoadProgress(1, 2, "us-east-1")
     screen._tick_load()
-    screen._load.providers["ovh"].phase = Phase.WAITING
-    screen._render_load()
     await pilot.pause()
 
 
@@ -78,7 +76,7 @@ async def _refresh_mid_load(pilot: Any) -> None:
 
 @sizes
 def test_fleet_first_run_mid_load(screen_snapshot, size: str) -> None:
-    """First run: one provider listed, one reading an account, one waiting; placeholder rows below."""
+    """First run: one provider listed, one reading an account, one still loading; placeholder rows below."""
     _capture(screen_snapshot, size, _first_run_mid_load)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Callable
 from unittest.mock import MagicMock, patch
@@ -37,35 +38,104 @@ def _boto3(*regions: str) -> MagicMock:
     return boto3
 
 
-@pytest.mark.asyncio
-async def test_a_cancelled_aws_listing_leaves_the_cache_alone_and_stops_listing() -> None:
+def _service(cache_rows=CACHED) -> tuple[AWSService, MagicMock]:
     cache = MagicMock(spec=CacheService)
     cache.load.return_value = None
-    cache.load_any.return_value = CACHED
-    service = AWSService(cache)
-    first_region_open = threading.Event()
-    let_it_finish = threading.Event()
-    listed: list[str] = []
+    cache.load_any.return_value = cache_rows
+    return AWSService(cache), cache
 
-    def fetch_region(region: str) -> list:
-        listed.append(region)
-        first_region_open.set()
-        let_it_finish.wait(timeout=10)
+
+class _Regions:
+    """A fake region listing whose first region waits until the test lets it go."""
+
+    def __init__(self) -> None:
+        self.hold = threading.Event()
+        self.started = threading.Semaphore(0)
+        self.listed: list[tuple[str, str]] = []
+
+    def __call__(self, region: str) -> list:
+        self.listed.append((threading.current_thread().name, region))
+        if region == "us-east-1":
+            self.started.release()
+            self.hold.wait(timeout=10)
         return [{"id": f"i-{region}", "name": region}]
 
-    with patch("servonaut.services.aws_service.boto3", _boto3("us-east-1", "eu-west-1")), \
-            patch.object(service, "_fetch_region", fetch_region):
+    async def first_region_open(self, count: int = 1) -> None:
+        for _ in range(count):
+            await _until(lambda: self.started.acquire(blocking=False))
+
+
+REGIONS = ("us-east-1", "eu-west-1", "ap-south-1")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_aws_listing_leaves_the_cache_alone_and_stops_listing() -> None:
+    service, cache = _service()
+    regions = _Regions()
+    pool = ThreadPoolExecutor(max_workers=2)
+    asyncio.get_running_loop().set_default_executor(pool)
+    with patch("servonaut.services.aws_service.boto3", _boto3(*REGIONS)), \
+            patch.object(service, "_fetch_region", regions):
         task = asyncio.create_task(service.fetch_instances_cached(force_refresh=True))
-        await _until(first_region_open.is_set)
+        await regions.first_region_open()
         assert service.listing_region == "us-east-1"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        let_it_finish.set()
-        await _until(lambda: service.listing_region == "")
+        regions.hold.set()
+        pool.shutdown(wait=True)
 
-    assert listed == ["us-east-1"]  # the thread did not go on to the next region
+    assert [region for _thread, region in regions.listed] == ["us-east-1"]
     cache.save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_listing_does_not_cut_another_listing_short() -> None:
+    service, cache = _service(cache_rows=[{"id": f"i-{r}"} for r in REGIONS])
+    regions = _Regions()
+    pool = ThreadPoolExecutor(max_workers=4)
+    asyncio.get_running_loop().set_default_executor(pool)
+    with patch("servonaut.services.aws_service.boto3", _boto3(*REGIONS)), \
+            patch.object(service, "_fetch_region", regions):
+        cancelled = asyncio.create_task(service.fetch_instances_cached(force_refresh=True))
+        survivor = asyncio.create_task(service.fetch_instances_cached(force_refresh=True))
+        await regions.first_region_open(2)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        regions.hold.set()
+        rows = await survivor
+        pool.shutdown(wait=True)
+
+    assert [row["id"] for row in rows] == [f"i-{r}" for r in REGIONS]
+    cache.save.assert_called_once()
+    assert [row["id"] for row in cache.save.call_args.args[0]] == [f"i-{r}" for r in REGIONS]
+
+
+@pytest.mark.asyncio
+async def test_a_new_listing_does_not_revive_the_cancelled_one() -> None:
+    service, cache = _service()
+    regions = _Regions()
+    pool = ThreadPoolExecutor(max_workers=4)
+    asyncio.get_running_loop().set_default_executor(pool)
+    with patch("servonaut.services.aws_service.boto3", _boto3(*REGIONS)), \
+            patch.object(service, "_fetch_region", regions):
+        old = asyncio.create_task(service.fetch_instances_cached(force_refresh=True))
+        await regions.first_region_open()
+        old.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old
+        new = asyncio.create_task(service.fetch_instances_cached(force_refresh=True))
+        await regions.first_region_open()
+        regions.hold.set()
+        rows = await new
+        pool.shutdown(wait=True)
+
+    assert len(rows) == 3
+    threads = {thread for thread, _region in regions.listed}
+    per_thread = {t: [r for th, r in regions.listed if th == t] for t in threads}
+    assert sorted(len(v) for v in per_thread.values()) == [1, 3]  # the old one stopped
+    cache.save.assert_called_once()
 
 
 def _account(label: str, gate: asyncio.Event, region: str) -> AccountBinding:
@@ -117,19 +187,20 @@ async def test_cancelling_a_fleet_cancels_every_account_and_raises() -> None:
     assert fleet.last_fetch_error is None  # a cancel is not a failure
 
 
-def _tracker(*keys: str, waiting: bool = False) -> FleetLoad:
+def _tracker(*keys: str) -> FleetLoad:
     load = FleetLoad()
     for key in keys:
-        load.start(key, accounts=2 if key == "aws" else 1, has_rows=False, waiting=waiting)
+        load.start(key, accounts=2 if key == "aws" else 1, has_rows=False)
     return load
 
 
-def test_a_waiting_provider_is_pending_until_it_runs() -> None:
-    load = _tracker("aws", "ovh", waiting=True)
-    assert load.active and load.providers["ovh"].phase is Phase.WAITING
-    assert "○ OVH · waiting" in render_load(load).plain
-    load.running("ovh")
-    assert load.providers["ovh"].phase is Phase.LOADING
+def test_the_loading_lines_say_how_to_stop() -> None:
+    assert "esc stop" in render_load(_tracker("aws")).plain.splitlines()[0]
+    refresh = FleetLoad()
+    refresh.start("aws", has_rows=True)
+    assert render_load(refresh).plain.endswith("esc stop")
+    refresh.finish("aws", count=1)
+    assert render_load(refresh) is None  # nothing left to stop, nothing to say
 
 
 def test_progress_changes_what_a_loading_line_says() -> None:

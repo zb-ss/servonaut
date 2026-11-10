@@ -207,7 +207,8 @@ class InstanceListScreen(WorkspaceScreen):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "cancel_slow_providers":
-            return self._load.active
+            # While typing, Esc keeps its usual meaning.
+            return self._load.active and not isinstance(self.focused, (Input, TextArea))
         if self.navigation_focused:
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
@@ -242,6 +243,9 @@ class InstanceListScreen(WorkspaceScreen):
         self._marks: Dict[str, str] = {}
         self._marks_timer: Optional[Timer] = None
         self._load_timer: Optional[Timer] = None
+        # The worker each provider's current load runs in: a worker replaced by
+        # a newer refresh reports "cancelled" for a load that is still going.
+        self._load_workers: Dict[str, Worker] = {}
         self._last_updated: Optional[float] = None
         self._refresh_failed = False
         self._cache_written_at: Optional[float] = None
@@ -455,7 +459,7 @@ class InstanceListScreen(WorkspaceScreen):
             return
         self._begin_load("aws")
         self._expect_team_memory_load("aws")
-        self.run_worker(
+        self._run_load("aws",
             inventory.fetch_instances_cached(force_refresh=force_refresh),
             name="fetch_instances",
             exclusive=True,
@@ -478,7 +482,7 @@ class InstanceListScreen(WorkspaceScreen):
         if inventory is not None:
             self._begin_load("aws")
             self._expect_team_memory_load("aws")
-            self.run_worker(
+            self._run_load("aws",
                 inventory.fetch_instances_cached(force_refresh=True),
                 name="background_refresh",
                 exclusive=True,
@@ -498,7 +502,7 @@ class InstanceListScreen(WorkspaceScreen):
         logger.info("Starting OVH instance refresh")
         self._begin_load("ovh")
         self._expect_team_memory_load("ovh")
-        self.run_worker(
+        self._run_load("ovh",
             inventory.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
             exclusive=False,
@@ -520,7 +524,7 @@ class InstanceListScreen(WorkspaceScreen):
         logger.info("Starting Hetzner instance refresh")
         self._begin_load("hetzner")
         self._expect_team_memory_load("hetzner")
-        self.run_worker(
+        self._run_load("hetzner",
             inventory.fetch_instances_cached(force_refresh=True),
             name="hetzner_refresh",
             exclusive=False,
@@ -549,7 +553,7 @@ class InstanceListScreen(WorkspaceScreen):
             return
         self._begin_load("shared")
         self._expect_team_memory_load("shared")
-        self.run_worker(
+        self._run_load("shared",
             load_shared_servers(team_service),
             name="shared_refresh",
             group="shared_servers",
@@ -634,7 +638,6 @@ class InstanceListScreen(WorkspaceScreen):
         Args:
             event: Worker state changed event.
         """
-        self._note_load_started(event)
         self._settle_team_memory_load(event)
         self._handle_worker_state(event)
         self._record_load_outcome(event)
@@ -1122,19 +1125,16 @@ class InstanceListScreen(WorkspaceScreen):
         accounts = len(getattr(inventory, "bindings", None) or ())
         self._load.start(
             key, accounts=accounts, has_rows=bool(self._instances),
-            cached_age=self._cached_age_text(), waiting=True,
+            cached_age=self._cached_age_text(),
         )
         self._render_load()
 
     def _cached_age_text(self) -> str:
         return self._cache_ago()
 
-    def _note_load_started(self, event: Worker.StateChanged) -> None:
-        """A provider's worker began running: it is no longer waiting."""
-        key = self._LOAD_NAMES.get(event.worker.name)
-        if key is not None and event.state == WorkerState.RUNNING:
-            self._load.running(key)
-            self._render_load()
+    def _run_load(self, key: str, work, **kwargs) -> None:
+        """Start *key*'s load in a worker and remember it as the one that owns the load."""
+        self._load_workers[key] = self.run_worker(work, **kwargs)
 
     def _record_load_outcome(self, event: Worker.StateChanged) -> None:
         """A provider's worker ended: record its count, or why its rows are stale."""
@@ -1142,7 +1142,8 @@ class InstanceListScreen(WorkspaceScreen):
         if key is None:
             return
         if event.state == WorkerState.CANCELLED:
-            self._record_cancelled(key)
+            if self._load_workers.get(key) is event.worker:
+                self._record_cancelled(key)
             return
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return

@@ -64,24 +64,13 @@ def test_first_run_names_each_provider_and_shows_placeholder_rows() -> None:
     async def scenario(pilot: Any) -> None:
         gates = await _first_run(pilot)
         lines = _status(pilot).splitlines()
-        assert lines[0] == "Loading servers from 3 providers…"
+        assert lines[0] == "Loading servers from 3 providers…  esc stop"
         assert any(line.endswith("AWS · 2 accounts") for line in lines)
         assert _skeleton(pilot).display
         gates["hetzner"].release()
         await _harness.wait_until(pilot, lambda: _phase(pilot, "hetzner") is Phase.DONE, "Hetzner")
         assert "✓ Hetzner · 1 server" in _status(pilot)
         assert _skeleton(pilot).display  # AWS and OVH are still answering
-
-    _run(scenario)
-
-
-def test_a_provider_that_has_not_started_reads_waiting() -> None:
-    async def scenario(pilot: Any) -> None:
-        screen = _screen(pilot)
-        await _first_run(pilot)
-        screen._load.providers["ovh"].phase = Phase.WAITING
-        screen._render_load()
-        assert "○ OVH · waiting" in _status(pilot)
 
     _run(scenario)
 
@@ -161,8 +150,8 @@ def test_placeholder_rows_are_not_servers() -> None:
         assert table.get_selected_instance()["name"] == "cache-1"
         # A search that matches nothing lists nothing; the placeholders stay out of it.
         screen.query_one("#search_input").value = "mail"
-        await pilot.pause(InstanceListScreen._SEARCH_DEBOUNCE + 0.2)
-        assert table.row_count == 0 and table.get_selected_instance() is None
+        await _harness.wait_until(pilot, lambda: table.row_count == 0, "the empty search result")
+        assert table.get_selected_instance() is None
 
     _run(scenario)
 
@@ -299,5 +288,39 @@ def test_marks_survive_a_filter_and_clear_when_their_timer_fires() -> None:
         screen._clear_marks()
         assert screen._marks == {} and _table(pilot)._marks == {}
         assert screen._marks_timer is None
+
+    _run(scenario)
+
+
+def test_pressing_r_again_mid_load_keeps_every_provider_loading() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        await _first_run(pilot)
+        screen.action_refresh()  # replaces the workers still running
+        await _harness.wait_until(
+            pilot,
+            lambda: all(w.state is not WorkerState.PENDING for w in screen.workers),
+            "the new workers to start",
+        )
+        await pilot.pause()
+        assert {key: load.phase for key, load in screen._load.providers.items()} == {
+            "aws": Phase.LOADING, "ovh": Phase.LOADING, "hetzner": Phase.LOADING,
+        }
+        assert screen._load.active and screen._load_timer is not None
+        assert _skeleton(pilot).display
+        assert screen.check_action("cancel_slow_providers", ()) is True
+
+    _run(scenario)
+
+
+def test_escape_while_typing_in_the_search_box_does_not_cancel_the_load() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        await _first_run(pilot)
+        await pilot.press("slash", *"app")
+        assert screen.check_action("cancel_slow_providers", ()) is False
+        await pilot.press("escape")
+        assert screen._load.active
+        assert {load.phase for load in screen._load.providers.values()} == {Phase.LOADING}
 
     _run(scenario)

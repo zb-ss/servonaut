@@ -35,7 +35,6 @@ SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 
 
 class Phase(enum.Enum):
-    WAITING = "waiting"
     LOADING = "loading"
     DONE = "done"
     STALE = "stale"
@@ -95,30 +94,14 @@ class FleetLoad:
             if p.phase in (Phase.STALE, Phase.FAILED, Phase.CANCELLED)
         ]
 
-    def start(
-        self, key: str, *, accounts: int = 1, has_rows: bool, cached_age: str = "",
-        waiting: bool = False,
-    ) -> None:
-        """A provider began fetching. The first one after a quiet period opens a cycle.
-
-        With *waiting* the fetch is only scheduled: the provider shows as
-        waiting until :meth:`running` says it has begun.
-        """
+    def start(self, key: str, *, accounts: int = 1, has_rows: bool, cached_age: str = "") -> None:
+        """A provider began fetching. The first one after a quiet period opens a cycle."""
         if not self.active:
             self.providers = {}
             self.delivered = False
             self.first_run = not has_rows
             self.cached_age = cached_age
-        self.providers[key] = ProviderLoad(
-            key=key, phase=Phase.WAITING if waiting else Phase.LOADING,
-            accounts=max(1, accounts),
-        )
-
-    def running(self, key: str) -> None:
-        """A provider's fetch began."""
-        load = self.providers.get(key)
-        if load is not None and load.phase is Phase.WAITING:
-            load.phase = Phase.LOADING
+        self.providers[key] = ProviderLoad(key=key, accounts=max(1, accounts))
 
     def note_progress(self, key: str, progress: Optional[LoadProgress]) -> bool:
         """Remember where a provider's listing is; True when that changed what shows."""
@@ -154,7 +137,7 @@ class FleetLoad:
             load.phase = Phase.STALE if count else Phase.FAILED
 
 
-_PENDING = (Phase.WAITING, Phase.LOADING)
+_PENDING = (Phase.LOADING,)
 
 
 def format_ago(seconds: float) -> str:
@@ -176,6 +159,11 @@ def _name(load: ProviderLoad) -> str:
 def _clip(reason: str, redact: Callable[[str], str]) -> str:
     text = " ".join(redact(reason).split())
     return text if len(text) <= _REASON_WIDTH else text[: _REASON_WIDTH - 1] + "…"
+
+
+# Said while a provider is answering; the screen turns the key off while the
+# user types, where Esc keeps its usual meaning.
+STOP_HINT = "esc stop"
 
 
 def _servers(count: int) -> str:
@@ -202,8 +190,6 @@ def _line(load: ProviderLoad, redact: Callable[[str], str], spinner: str = "◐"
         return Content.assemble(literal("✓", "$text-success"), f" {name} · {_servers(load.count)}")
     if load.phase is Phase.LOADING:
         return Content.assemble(literal(spinner, "$text-accent"), f" {name}{_where(load)}")
-    if load.phase is Phase.WAITING:
-        return Content.assemble(literal("○", "$text-muted"), f" {name} · waiting")
     if load.phase is Phase.CANCELLED:
         return _cancelled_line(load, name)
     glyph, word = ("⚠", "stale") if load.phase is Phase.STALE else ("✗", "failed")
@@ -225,7 +211,7 @@ def _cancelled_line(load: ProviderLoad, name: str) -> Content:
 
 def _mark(load: ProviderLoad) -> str:
     return {
-        Phase.DONE: "✓", Phase.LOADING: "…", Phase.WAITING: "…", Phase.STALE: "stale",
+        Phase.DONE: "✓", Phase.LOADING: "…", Phase.STALE: "stale",
         Phase.FAILED: "failed", Phase.CANCELLED: "stale",
     }[load.phase]
 
@@ -238,6 +224,8 @@ def _pill(tracker: FleetLoad, redact: Callable[[str], str]) -> Content:
     pieces: List[Content | str] = [pill]
     if tracker.active and tracker.cached_age:
         pieces += ["  ", literal(f"cached {tracker.cached_age}", "dim")]
+    if tracker.active:
+        pieces += ["  ", literal(STOP_HINT, "dim")]
     for note in tracker.notes:
         pieces += ["\n", _line(note, redact)]
     return Content.assemble(*pieces)
@@ -246,7 +234,10 @@ def _pill(tracker: FleetLoad, redact: Callable[[str], str]) -> Content:
 def _block(tracker: FleetLoad, redact: Callable[[str], str]) -> Content:
     count = len(tracker.providers)
     plural = "provider" if count == 1 else "providers"
-    pieces: List[Content | str] = [literal(f"Loading servers from {count} {plural}…", "bold")]
+    pieces: List[Content | str] = [
+        literal(f"Loading servers from {count} {plural}…", "bold"), "  ",
+        literal(STOP_HINT, "dim"),
+    ]
     for load in tracker.providers.values():
         pieces += ["\n", _line(load, redact, tracker.spinner)]
     return Content.assemble(*pieces)
