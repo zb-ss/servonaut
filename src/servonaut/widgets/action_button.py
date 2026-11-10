@@ -166,7 +166,8 @@ class ActionRow(Horizontal):
     def fit(self) -> None:
         """Choose words, hints and wrapping for the width the row has now."""
         width = self.content_size.width
-        buttons = list(self.query(ActionButton))
+        # A button that is not shown takes no room, so it must not force a wrap.
+        buttons = [button for button in self.query(ActionButton) if button.display]
         if width <= 0 or not buttons:
             return
         levels = ((False, True), (True, True)) + (() if self._keep_hints else ((True, False),))
