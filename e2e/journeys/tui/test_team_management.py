@@ -50,6 +50,10 @@ def _seed(seed, fake_cloud, **config) -> str:
 
 
 async def _open_team(t) -> None:
+    if not t.nav_reachable("nav_teams"):
+        # A narrow terminal starts with the navigation hidden: show it, as a user does.
+        await t.click(t.on_screen("#workspace_navigation"))
+        await t.wait_until(lambda: t.nav_reachable("nav_teams"), desc="navigation shown")
     await t.nav("nav_teams")
     await t.wait_for_screen("TeamManagementScreen")
     await t.wait_until(lambda: t.table_rows("#teams_table") == [[TEAM, "owner", "1"]], desc="team listed")

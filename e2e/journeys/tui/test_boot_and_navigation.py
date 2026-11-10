@@ -109,6 +109,12 @@ async def test_seeded_home_shows_the_fleet_at_once(tui, seed):
 async def test_sidebar_tour_reaches_every_destination(tui, seed, size, leg):
     _seed_fleet(seed)
     async with tui(size=size) as t:
+        if size == SMALL_SIZE:
+            # Below about 110 columns the navigation starts hidden: the user
+            # opens it with the "Show navigation" control.
+            assert not t.nav_reachable("nav_list")
+            await t.click(t.on_screen("#workspace_navigation"))
+            await t.wait_until(lambda: t.nav_reachable("nav_list"), desc="navigation shown")
         for nav_id in HIDDEN_WHEN_SIGNED_OUT + HIDDEN_WITHOUT_PROVIDERS:
             assert not t.nav_reachable(nav_id), f"{nav_id} should be hidden"
 
