@@ -1007,3 +1007,26 @@ async def test_demo_mode_hides_the_waiting_members_name_and_address() -> None:
         assert "12345 67890 13579" in text  # the number to compare is never hidden
         await pilot.press("escape")
         await wait_until(lambda: service.decisions == [False])
+
+
+@pytest.mark.asyncio
+async def test_bound_vault_actions_show_their_key_and_headings_are_sentence_case() -> None:
+    from servonaut.widgets.action_button import ActionButton
+    from tests.test_vault_workspace_views import _Service
+
+    app = _StyledVaultHost(_Service(local=True))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        bound = {b.action: b.key for b in screen.BINDINGS}
+        buttons = {
+            "refresh": "vault_refresh", "reveal": "vault_reveal", "grants": "vault_grants",
+            "vaults": "vault_vaults", "items": "vault_items", "devices": "vault_devices",
+            "roster": "vault_roster", "exposures": "vault_exposures",
+        }
+        for action, button_id in buttons.items():
+            label = screen.query_one(f"#{button_id}", ActionButton).label.plain
+            assert label.endswith(bound[action]), button_id
+        for heading in screen.query(".vault_group_heading"):
+            text = heading.render().plain
+            assert text[0].isupper() and text[1:] == text[1:].lower(), text

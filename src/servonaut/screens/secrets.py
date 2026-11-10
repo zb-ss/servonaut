@@ -38,6 +38,7 @@ from servonaut.services.secrets_status import (
     compute_secrets_status,
     format_relative_age,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRole, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -66,9 +67,32 @@ class SecretsScreen(WorkspaceScreen):
     # Body and card padding, border and scrollbar (14) plus the 22-column
     # key/value label and a readable value beside the chat column.
     CHAT_MIN_CONTENT_WIDTH = 60
-    # Keep each selectable action description readable beside its native key.
+    # Below this width the key/value rows stack and the action row wraps.
     CONTENT_NARROW_WIDTH = 96
 
+    # Compact words for a row that is too narrow for the full ones, by label.
+    _ACTION_SHORT = {
+        "Guided Bitwarden setup": "Set up Bitwarden",
+        "Set up Bitwarden": "Set up Bitwarden",
+        "DB-vault coverage": "DB coverage",
+        "Refresh from server": "Refresh",
+        "List stored secrets": "List secrets",
+        "Open team settings": "Open settings",
+        "Install bws": "Install bws",
+        "Clear cached config": "Clear cache",
+        "Upgrade for team secrets": "Upgrade",
+    }
+    _ACTION_TIPS = {
+        "Guided Bitwarden setup": "Pick a project and test the connection",
+        "Set up Bitwarden": "Pick a project and test the connection",
+        "DB-vault coverage": "See which servers are stored",
+        "List stored secrets": "Names only; values stay hidden",
+        "Open team settings": "Opens the team settings on the web",
+        "Open docs": "Opens the documentation in your browser",
+        "Open pricing": "Opens the pricing page in your browser",
+        "Install bws": "Install or re-install the Bitwarden Secrets CLI",
+        "Upgrade for team secrets": "Opens the pricing page in your browser",
+    }
     _ACTION_NAMES = {
         "r": "refresh", "l": "list_secrets", "c": "clear_cache",
         "o": "open_team_settings", "u": "open_upgrade", "i": "install_bws",
@@ -166,30 +190,36 @@ class SecretsScreen(WorkspaceScreen):
             classes="secrets_kv_grid",
         )
 
-    def _actions(self, *items: tuple[str, str]) -> Vertical:
-        """Pair the existing hotkeys with native mouse and keyboard controls."""
-        return Vertical(
+    def _actions(self, *items: tuple[str, str]) -> ActionRow:
+        """One standard button per action, each showing its own hotkey."""
+        return ActionRow(
             *[
-                Horizontal(
-                    Button(
-                        key, name=self._ACTION_NAMES[key], compact=True,
-                        id=f"secrets_action_{key}",
-                        classes="secrets_action_key", tooltip=label,
-                    ),
-                    Static(label, classes="secrets_action_label"),
-                    classes="secrets_action_row",
+                ActionButton(
+                    label, key, role=self._action_role(index, key),
+                    short=self._ACTION_SHORT.get(label),
+                    tooltip=self._ACTION_TIPS.get(label, label), id=f"secrets_action_{key}",
+                    classes="secrets_action",
                 )
-                for key, label in items
+                for index, (key, label) in enumerate(items)
             ],
+            keep_hints=True,
             classes="secrets_actions",
         )
 
+    @staticmethod
+    def _action_role(index: int, key: str) -> ActionRole:
+        """The first action leads; clearing the cache is the one risky step."""
+        if key == "c":
+            return "warning"
+        return "primary" if index == 0 else "default"
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if (
-            event.button.has_class("secrets_action_key")
-            and event.button.name in self._ACTION_NAMES.values()
-        ):
-            getattr(self, f"action_{event.button.name}")()
+        button = event.button
+        if not button.has_class("secrets_action") or button.id is None:
+            return
+        name = self._ACTION_NAMES.get(button.id.removeprefix("secrets_action_"))
+        if name is not None:
+            getattr(self, f"action_{name}")()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -223,6 +253,26 @@ class SecretsScreen(WorkspaceScreen):
             return None
 
     def _render_state(self) -> None:
+        """Repaint the status pill + body, then fit the rebuilt action rows."""
+        self._mounting = []
+        self._render_cards()
+        self.call_later(self._fit_when_mounted, list(self._mounting))
+
+    def _mount_card(self, body: VerticalScroll, card: Container) -> None:
+        self._mounting.append(body.mount(card))
+
+    async def _fit_when_mounted(self, mounting: list) -> None:
+        """Fit each rebuilt action row once its buttons exist.
+
+        A new row can be sized before its buttons are mounted, so it would
+        otherwise keep the unwrapped layout and run past the right edge.
+        """
+        for pending in mounting:
+            await pending
+        for row in self.query(ActionRow):
+            row.fit()
+
+    def _render_cards(self) -> None:
         """Repaint the status pill + body for the current snapshot."""
         body = self.query_one("#secrets_body", VerticalScroll)
         pill = self.query_one("#secrets_status_pill", Static)
@@ -231,7 +281,7 @@ class SecretsScreen(WorkspaceScreen):
         summary = self._summary()
         if summary is None:
             pill.update("[bold $text-error]✕ Unavailable[/bold $text-error]")
-            body.mount(self._card(
+            self._mount_card(body, self._card(
                 "Unavailable",
                 Static(
                     "Could not read the secrets-management state. "
@@ -257,7 +307,7 @@ class SecretsScreen(WorkspaceScreen):
         # Fallback — resolver returned None but the user IS entitled
         # (e.g. transient resolver hiccup). Surface what we can.
         pill.update("[bold $text-warning]⚠ No active provider[/bold $text-warning]")
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "No active provider",
             Static(
                 "SSH falls back to [dim]~/.ssh[/dim] discovery. "
@@ -266,7 +316,7 @@ class SecretsScreen(WorkspaceScreen):
             ),
             warning=True,
         ))
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Actions",
             self._actions(
                 ("r", "Refresh from server"),
@@ -277,7 +327,7 @@ class SecretsScreen(WorkspaceScreen):
 
     def _render_unauthenticated(self, pill: Static, body: VerticalScroll) -> None:
         pill.update("[bold $text-warning]⚪ Not signed in[/bold $text-warning]")
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Sign in required",
             Static(
                 "Sign in to your Servonaut account to manage SSH keys and "
@@ -285,10 +335,10 @@ class SecretsScreen(WorkspaceScreen):
             ),
             primary=True,
         ))
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Actions",
             self._actions(
-                ("s", "Open Login"),
+                ("s", "Open login"),
                 ("o", "Open docs"),
             ),
         ))
@@ -297,7 +347,7 @@ class SecretsScreen(WorkspaceScreen):
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
         pill.update("[bold $text-warning]⚠ Upgrade required[/bold $text-warning]")
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Upgrade required",
             Static(
                 "Secrets management is available on the Solo and Teams plans.",
@@ -316,10 +366,10 @@ class SecretsScreen(WorkspaceScreen):
             ),
             primary=True,
         ))
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Actions",
             self._actions(
-                ("u", "Open Pricing"),
+                ("u", "Open pricing"),
                 ("o", "Open docs"),
             ),
         ))
@@ -384,7 +434,7 @@ class SecretsScreen(WorkspaceScreen):
                 "[$text-warning]— invalid, using your personal config[/$text-warning]",
             ))
 
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Provider",
             self._kv_grid(*rows),
             primary=not s.has_health_warning,
@@ -422,20 +472,20 @@ class SecretsScreen(WorkspaceScreen):
                 "Using your personal config — attention: " if usable
                 else "The CLI is falling back to ~/.ssh discovery: "
             )
-            body.mount(self._card(
+            self._mount_card(body, self._card(
                 "Needs attention",
                 Static("[$text-warning]" + lead + "; ".join(problems) + ".[/$text-warning]"),
                 warning=True,
             ))
-        body.mount(self._card(
+        self._mount_card(body, self._card(
             "Actions",
             self._actions(
-                ("g", "Guided Bitwarden setup (pick project + test)"),
-                ("v", "DB-vault coverage (which servers are stored)"),
+                ("g", "Guided Bitwarden setup"),
+                ("v", "DB-vault coverage"),
                 ("r", "Refresh from server"),
-                ("l", "List stored secrets (names only)"),
-                ("o", "Open team settings (web)"),
-                ("i", "Install / re-install bws"),
+                ("l", "List stored secrets"),
+                ("o", "Open team settings"),
+                ("i", "Install bws"),
                 ("c", "Clear cached config"),
             ),
         ))
@@ -469,13 +519,13 @@ class SecretsScreen(WorkspaceScreen):
                 "require a Teams plan.[/dim]",
                 classes="secrets_card_note",
             ))
-        body.mount(self._card("Provider", *children, primary=True))
+        self._mount_card(body, self._card("Provider", *children, primary=True))
         if s.project_id_invalid:
             # The cached config wanted Bitwarden but its project id is
             # unusable (placeholder / malformed) — the resolver fell back
             # to the local store. Say so instead of a clean bill of health.
             invalid_id = escape(s.bitwarden_project_id or "(empty)")
-            body.mount(self._card(
+            self._mount_card(body, self._card(
                 "Needs attention",
                 Static(
                     f"[$text-warning]A Bitwarden config exists but its project id "
@@ -487,10 +537,10 @@ class SecretsScreen(WorkspaceScreen):
                 warning=True,
             ))
         actions = [
-            ("g", "Set up Bitwarden (guided)"),
-            ("v", "DB-vault coverage (which servers are stored)"),
-            ("l", "List stored secrets (names only)"),
-            ("u", "Upgrade for team-shared secrets"),
+            ("g", "Set up Bitwarden"),
+            ("v", "DB-vault coverage"),
+            ("l", "List stored secrets"),
+            ("u", "Upgrade for team secrets"),
             ("o", "Open docs"),
         ]
         # If a server-supplied config is cached (e.g. a broken team config that
@@ -498,7 +548,7 @@ class SecretsScreen(WorkspaceScreen):
         # only way to drop the poisoned cache is an undiscoverable key press.
         if s.project_id_invalid or s.config_source is not None:
             actions.append(("c", "Clear cached config"))
-        body.mount(self._card("Actions", self._actions(*actions)))
+        self._mount_card(body, self._card("Actions", self._actions(*actions)))
 
     # ------------------------------------------------------------------
     # Actions
