@@ -1661,6 +1661,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         try:
             with self._busy.running("Sampling over SSH…"):
                 stats = await service.collect(self._instance)
+            text = format_live_stats(stats, note=f"sampled {datetime.now().strftime('%H:%M:%S')}")
         except LiveStatsError as exc:
             self._show_sample_error(str(exc))
         except Exception as exc:  # noqa: BLE001 - a sample must never take the app down
@@ -1668,9 +1669,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             self._show_sample_error("The sample failed. See the log for details.")
         else:
             self._cancel_sample_timer()
-            self._set_live_text(format_live_stats(
-                stats, note=f"sampled {datetime.now().strftime('%H:%M:%S')}",
-            ))
+            self._set_live_text(text)
         finally:
             self._sampling = False
             if self.is_attached:
@@ -1723,6 +1722,14 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         except LiveStatsError as exc:
             self._set_live_text(Content.assemble(
                 literal(str(exc), "$text-error"), "\n", Content.styled("Press l to retry.", "dim"),
+            ))
+            self._live_on = False
+            self._sync_live_button()
+        except Exception as exc:  # noqa: BLE001 - a poll must never take the app down
+            logger.warning("Live stats poll failed: %s", type(exc).__name__, exc_info=True)
+            self._set_live_text(Content.assemble(
+                literal("The poll failed. See the log for details.", "$text-error"),
+                "\n", Content.styled("Press l to retry.", "dim"),
             ))
             self._live_on = False
             self._sync_live_button()

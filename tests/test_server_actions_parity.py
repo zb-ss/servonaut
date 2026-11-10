@@ -357,3 +357,23 @@ async def test_card_rows_stay_on_one_line(width: int, height: int) -> None:
         for row in screen.query(".sa-card-actions"):
             ys = {button.region.y for button in row.query(ActionButton) if button.display}
             assert len(ys) == 1, (row.parent.id, ys)
+
+
+async def test_an_unexpected_error_while_monitoring_stops_it_and_keeps_the_app() -> None:
+    app = _LayoutHost()
+
+    class _Service:
+        async def watch(self, instance):
+            raise RuntimeError("boom [b]")
+            yield  # pragma: no cover - makes this an async generator
+
+    app.live_stats_service = _Service()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await pilot.press("l")
+        await wait_until(lambda: "poll failed" in str(screen.query_one("#live_stats", Static).content))
+        assert "boom" not in str(screen.query_one("#live_stats", Static).content)
+        assert app.is_running
+        assert not screen._live_on
+        assert _button(screen, "btn_live").label.plain.startswith("Start monitoring")
+        assert not _button(screen, "btn_live_refresh").disabled
