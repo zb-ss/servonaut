@@ -172,3 +172,26 @@ ActionRow.-wrap {
     grid-rows: auto;
     grid-gutter: 0 1;
 }
+
+/* A disabled action looks the same in every role: a role colour on the border
+   would make a disabled primary or error action read as available. Declared
+   after the role and hover rules so it wins their ties. */
+ActionButton:disabled,
+ActionButton.-primary:disabled,
+ActionButton.-warning:disabled,
+ActionButton.-error:disabled,
+ActionButton:disabled:hover,
+ActionButton.-primary:disabled:hover,
+ActionButton.-warning:disabled:hover,
+ActionButton.-error:disabled:hover,
+ActionButton:ansi:disabled,
+ActionButton:ansi:disabled:hover {
+    border: round $border-blurred;
+    color: $text-muted;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton.-textual-compact:disabled {
+    border: none !important;
+}

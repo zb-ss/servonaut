@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.containers import Vertical
 from textual.geometry import Region
 from textual.widgets import (
@@ -364,3 +365,37 @@ async def test_key_hints_are_dimmed_in_the_terminal_colour_themes(theme: str) ->
                     if segment.text.strip() in (hint, words) and segment.style is not None:
                         styles[segment.text.strip()] = segment.style
             assert styles[hint].dim and not styles[words].dim, selector
+
+
+class _DisabledApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Holder", id="holder")
+        yield ActionButton("Primary", role="primary", disabled=True, id="d_primary")
+        yield ActionButton("Error", role="error", disabled=True, id="d_error")
+        yield ActionButton("Neutral", disabled=True, id="d_default")
+        yield ActionButton("Live", role="primary", id="e_primary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+async def test_disabled_actions_use_the_disabled_border_in_every_role(theme: str) -> None:
+    app = _DisabledApp()
+    app.theme = theme
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        edges = {
+            name: app.query_one(f"#{name}").styles.border.top[1]
+            for name in ("d_primary", "d_error", "d_default")
+        }
+        assert len({str(colour) for colour in edges.values()}) == 1
+        enabled = app.query_one("#e_primary").styles.border.top[1]
+        assert edges["d_primary"] != enabled
+        if theme in ("servonaut", "servonaut-light"):
+            assert edges["d_primary"] == Color.parse(app.theme_variables["border-blurred"])
