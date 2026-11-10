@@ -736,7 +736,7 @@ VaultAutoBindReviewModal {
 
 #auto_bind_review_scroll {
     height: 1fr;
-    border: solid $panel;
+    border: round $border-blurred;
     padding: 0 1;
     margin-bottom: 1;
 }

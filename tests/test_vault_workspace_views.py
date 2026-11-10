@@ -329,7 +329,7 @@ async def test_the_inspector_follows_the_selected_row() -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _ready(app)
         heading = screen.query_one("#vault_inspector_heading", Static)
-        assert heading.render().plain == "SELECTED VAULT"
+        assert heading.render().plain == "Selected vault"
         assert "Personal" in _facts(screen) and _PERSONAL in _facts(screen)
         screen.query_one("#vault_table", DataTable).move_cursor(row=1)
         await wait_until(lambda: "Platform team" in _facts(screen) and "team" in _facts(screen))
