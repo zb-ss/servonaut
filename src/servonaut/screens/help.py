@@ -421,6 +421,7 @@ class HelpScreen(WorkspaceScreen):
                 yield Static(
                     "Choose a topic or scroll the manual. Ctrl+P opens commands; Esc returns.",
                     id="help_navigation_hint",
+                    classes="screen-description",
                     markup=False,
                 )
                 yield _HelpViewer(build_help_text(), id="help_container")

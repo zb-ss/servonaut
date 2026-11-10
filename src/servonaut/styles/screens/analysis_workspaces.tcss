@@ -154,19 +154,6 @@ AIConversationsScreen #convs_container {
     overflow-y: auto;
 }
 
-AIConversationsScreen #convs_title {
-    height: 2;
-    border-bottom: solid $border-blurred;
-    color: $text-accent;
-    text-style: bold;
-}
-
-AIConversationsScreen #convs_subtitle {
-    height: auto;
-    margin-bottom: 1;
-    color: $text-muted;
-}
-
 AIConversationsScreen #convs_tabs {
     height: 1fr;
     min-height: 16;
@@ -246,15 +233,6 @@ AIConversationsScreen #local_actions {
     height: auto;
     padding-left: 1;
     margin: 0;
-}
-
-AIConversationsScreen.-content-narrow #convs_title {
-    height: 1;
-    border-bottom: none;
-}
-
-AIConversationsScreen.-content-narrow #convs_subtitle {
-    margin-bottom: 0;
 }
 
 /* The tabs take what the screen has: fixed minimum heights would push the

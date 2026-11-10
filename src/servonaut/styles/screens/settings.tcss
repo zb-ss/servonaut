@@ -189,19 +189,6 @@
     overflow-y: auto;
 }
 
-.panel-title {
-    height: auto;
-    text-style: bold;
-    color: $text-accent;
-    margin: 0;
-}
-
-.panel-description {
-    height: auto;
-    color: $text-muted;
-    margin-bottom: 1;
-}
-
 .panel-status {
     height: auto;
     color: $error;
@@ -451,16 +438,6 @@ SettingsScreen .settings-panel > .panel-context {
     height: auto;
     padding: 0 1 1 1;
     background: transparent;
-}
-
-SettingsScreen .panel-context .panel-title {
-    color: $text;
-    text-style: bold;
-}
-
-SettingsScreen .panel-context .panel-description {
-    color: $text-muted;
-    margin: 0;
 }
 
 SettingsScreen .settings-panel > .panel-body {

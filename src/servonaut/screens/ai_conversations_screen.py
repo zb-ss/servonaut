@@ -245,14 +245,12 @@ class AIConversationsScreen(WorkspaceScreen):
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Vertical(id="convs_container", classes="workspace-content"):
-                yield Static(
-                    "[bold $text-accent]Previous chats[/bold $text-accent]",
-                    id="convs_title",
-                )
+                yield Static("Previous chats", id="convs_title", classes="screen-title")
                 yield Static(
                     "Cloud chats are uploaded by Servonaut AI turns. "
                     "Local chats stay on this machine.",
                     id="convs_subtitle",
+                    classes="screen-description",
                 )
                 with TabbedContent(
                     initial=self._initial_tab(), id="convs_tabs",

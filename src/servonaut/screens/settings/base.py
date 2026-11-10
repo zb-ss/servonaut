@@ -89,9 +89,9 @@ class SettingsPanel(Vertical):
         pushing Save off-screen.
         """
         with Vertical(classes="panel-context"):
-            yield Static(escape(self.TITLE), classes="panel-title")
+            yield Static(escape(self.TITLE), classes="panel-title screen-title")
             if self.DESCRIPTION:
-                yield Static(self.DESCRIPTION, classes="panel-description", markup=False)
+                yield Static(self.DESCRIPTION, classes="panel-description screen-description", markup=False)
         with VerticalScroll(classes="panel-body"):
             yield from self.form_rows()
         yield Static("", id=f"status_{self.PANEL_ID}", classes="panel-status")
