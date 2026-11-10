@@ -67,7 +67,8 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     display: none;
 }
 
-/* A chip is a pill: a faint panel fill says "click me" while it stays one row. */
+/* A chip is one row by default: a faint panel fill says "click me" while it
+   costs no height. Roomy terminals draw outlined pills instead (below). */
 .fleet-chip {
     width: auto;
     min-width: 0;
@@ -95,6 +96,34 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     text-style: bold;
 }
 
+/* Roomy terminals (wide, tall, nothing beside the table): outlined pills. The
+   chosen one has an accent outline and accent text, the others a dim outline. */
+InstanceListScreen.-roomy #fleet_state_chips,
+InstanceListScreen.-roomy #fleet_provider_chips {
+    height: 3;
+}
+
+InstanceListScreen.-roomy .fleet-chip {
+    height: 3;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+}
+
+InstanceListScreen.-roomy .fleet-chip:hover,
+InstanceListScreen.-roomy .fleet-chip:focus {
+    border: round $accent;
+    background: transparent;
+    color: $text-accent;
+}
+
+InstanceListScreen.-roomy .fleet-chip.--chosen {
+    border: round $accent;
+    background: transparent;
+    color: $text-accent;
+    text-style: bold;
+}
+
 /* Terminal-colour themes: fills are not reliable there, so a chosen chip is
    drawn reversed and an unchosen one underlined. */
 .fleet-chip:ansi {
@@ -116,6 +145,19 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
 
 .fleet-chip.--chosen:ansi:focus {
     text-style: bold underline reverse;
+}
+
+/* In a pill the outline carries the state, so the ansi cues are lighter. */
+InstanceListScreen.-roomy .fleet-chip:ansi {
+    text-style: none;
+}
+
+InstanceListScreen.-roomy .fleet-chip.--chosen:ansi {
+    text-style: bold;
+}
+
+InstanceListScreen.-roomy .fleet-chip:ansi:focus {
+    text-style: bold underline;
 }
 
 #fleet_summary_row {

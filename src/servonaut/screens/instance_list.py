@@ -80,7 +80,7 @@ class FleetChip(Button):
     def __init__(self, group: str, value: str, label: str) -> None:
         key = "f" if group == "state" else "p"
         super().__init__(
-            label, id=f"chip_{group}_{value}", classes="fleet-chip", compact=True,
+            label, id=f"chip_{group}_{value}", classes="fleet-chip",
             tooltip=f"Filter the list; press {key} to cycle these choices",
         )
         self.group = group
@@ -153,6 +153,8 @@ class InstanceListScreen(WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 64
     CONTENT_NARROW_WIDTH = 105
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (130, "-wide")]
+    # Tall enough that outlined chips (three rows) do not starve the table.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (44, "-tall")]
 
     # The footer lists as many shortcuts as fit on one line, in this order
     # of usefulness; the rest stay bound, and the help screen lists them all.
@@ -199,6 +201,23 @@ class InstanceListScreen(WorkspaceScreen):
     def on_resize(self) -> None:
         """Re-fit the footer to the new width."""
         self.refresh_bindings()
+        self.call_after_refresh(self._sync_roomy)
+
+    def _set_layout_class(self, name: str, enabled: bool) -> None:
+        super()._set_layout_class(name, enabled)
+        self._sync_roomy()
+
+    def _sync_roomy(self) -> None:
+        """Mark a terminal with room for outlined chips: wide, tall, nothing beside the table."""
+        roomy = (
+            self.has_class("-wide") and self.has_class("-tall")
+            and not self.has_class("-content-narrow") and not self.has_class("-chat-open")
+        )
+        self._set_layout_class_only("-roomy", roomy)
+
+    def _set_layout_class_only(self, name: str, enabled: bool) -> None:
+        if self.has_class(name) != enabled:
+            self.set_class(enabled, name)
 
     def __init__(self, initial_search: str = "") -> None:
         """Initialize instance list screen.
