@@ -75,7 +75,7 @@ class KeyManagementScreen(WorkspaceScreen):
                             yield DataTable(id="instance_keys_table")
                             yield ActionButton(
                                 "Remove override", "Del", role="error",
-                                id="btn_remove_mapping", classes="key-remove",
+                                id="btn_remove_mapping"
                             )
                             yield Static("Select a mapping row, then remove its override.", classes="key-section-note")
                     with Vertical(id="key_local_column"):

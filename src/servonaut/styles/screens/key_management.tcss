@@ -143,6 +143,6 @@ KeyManagementScreen.-content-narrow .key-field {
     width: 100%;
     margin: 0;
 }
-KeyManagementScreen .key-remove {
+KeyManagementScreen #btn_remove_mapping {
     margin: 0 0 1 0;
 }

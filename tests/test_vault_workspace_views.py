@@ -336,7 +336,7 @@ async def test_the_inspector_follows_the_selected_row() -> None:
 
         screen.action_devices()
         await wait_until(lambda: screen._table_mode == "devices" and not screen._busy_work)
-        assert heading.render().plain == "SELECTED DEVICE"
+        assert heading.render().plain == "Selected device"
         assert "build workstation" in _facts(screen) and "pending" in _facts(screen)
         screen.query_one("#vault_table", DataTable).move_cursor(row=0)
         await wait_until(lambda: "work laptop" in _facts(screen) and "d-1" in _facts(screen))
