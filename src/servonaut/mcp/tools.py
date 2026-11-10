@@ -40,6 +40,7 @@ from servonaut.services.memory.notes import has_notes, strip_comments
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.team_fold import absorbed_share_ids
+from servonaut.services.ovh_billing_service import usage_figures
 from servonaut.services.memory.shared_view import (
     merge_shared,
     share_candidates,
@@ -1932,22 +1933,9 @@ class ServonautTools:
 
         lines = ["OVH Billing Summary:"]
 
-        current = usage.get('current_spend', {})
-        if isinstance(current, dict) and current:
-            lines.append("  Current Spend:")
-            for key, val in current.items():
-                if key not in ('provider',):
-                    lines.append(f"    {key}: {val}")
-        elif not current:
-            lines.append("  Current Spend: no data available")
-
-        forecast = usage.get('forecast', {})
-        if isinstance(forecast, dict) and forecast:
-            lines.append("  Forecast:")
-            for key, val in forecast.items():
-                lines.append(f"    {key}: {val}")
-        elif not forecast:
-            lines.append("  Forecast: no data available")
+        current, forecast = usage_figures(usage)
+        lines.append(f"  Current spend: {'no data available' if current == 'n/a' else current}")
+        lines.append(f"  Forecast: {'no data available' if forecast == 'n/a' else forecast}")
 
         result = '\n'.join(lines)
         self._audit.log('ovh_billing', args, result, True)

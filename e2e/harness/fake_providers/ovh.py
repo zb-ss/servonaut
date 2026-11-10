@@ -271,8 +271,9 @@ class OvhState:
             self.firewalls: dict[str, dict] = {}
             self.account_ssh_keys: dict[str, dict] = {}
             self.bills: dict[str, dict] = {}
-            self.usage_current: dict = {}
-            self.usage_forecast: dict = {}
+            # me.consumption.Transaction[]: one record per service
+            self.usage_current: list[dict] = []
+            self.usage_forecast: list[dict] = []
             self.tasks: list[dict] = []
             self._task_ids = itertools.count(88000001)
             self._record_ids = itertools.count(5000001)
@@ -469,15 +470,18 @@ class OvhState:
                 }
 
     def set_usage(self, current: float, forecast: float, currency: str = "EUR") -> None:
-        """Current and forecast consumption for the month."""
+        """Current and forecast consumption for the month, as one transaction each."""
         with self._lock:
             for target, value in ((self.usage_current, current), (self.usage_forecast, forecast)):
-                target.clear()
-                target.update({
-                    "beginDate": "2026-09-01", "endDate": "2026-09-30",
-                    "lastUpdate": CREATED_AT,
-                    "price": {"value": value, "currencyCode": currency},
-                })
+                target[:] = [{
+                    "id": 1, "serviceId": 1, "beginDate": "2026-09-01T00:00:00+00:00",
+                    "endDate": "2026-09-30T00:00:00+00:00", "lastUpdate": CREATED_AT,
+                    "elements": [],
+                    "price": {
+                        "value": value, "currencyCode": currency,
+                        "text": f"{value:.2f} {currency}", "valueInUcents": int(value * 100000000),
+                    },
+                }]
 
     # ------------------------------------------------------------------
     # Reads for assertions
@@ -1288,7 +1292,7 @@ def add_routes(app: web.Application, accounts: OvhAccounts) -> None:  # noqa: C9
     def usage(which: str) -> Any:
         async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
-                return ok(dict(getattr(state, which)))
+                return ok(list(getattr(state, which)))
 
         return handler
 

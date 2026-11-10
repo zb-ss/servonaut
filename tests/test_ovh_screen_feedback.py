@@ -169,10 +169,9 @@ class TestOVHBillingFeedback:
             return_value=_mock_app(ovh_service=ovh),
         ), patch.object(screen, "run_worker") as mock_worker, \
                 patch.object(screen, "_load_current_usage", MagicMock()), \
-                patch.object(screen, "_load_spend_history", MagicMock()), \
                 patch.object(screen, "_load_invoices", MagicMock()), \
                 patch.object(screen, "_load_services", MagicMock()):
             asyncio.run(screen._gate_then_load())
 
-        # current usage, spend history, invoices, services.
-        assert mock_worker.call_count == 4
+        # current usage, invoices (with the history), services.
+        assert mock_worker.call_count == 3
