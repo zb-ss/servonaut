@@ -55,9 +55,8 @@ async def test_key_cards_share_one_border_until_one_is_focused(size) -> None:
         await _ready(screen)
         screen.set_focus(screen.query_one("#available_keys_table"))
         await pilot.pause()
-        default = screen.query_one("#default_key_section").styles.border_top
-        overrides = screen.query_one("#instance_key_section").styles.border_top
-        assert default == overrides
+        default, overrides = list(screen.query("#key_connection_column .key-section"))
+        assert default.styles.border_top == overrides.styles.border_top
 
 
 @pytest.mark.asyncio

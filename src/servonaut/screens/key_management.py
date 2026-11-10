@@ -51,7 +51,7 @@ class KeyManagementScreen(WorkspaceScreen):
                 with Horizontal(id="keys_sections"):
                     with Vertical(id="key_connection_column"):
                         yield Static("Connection keys", classes="key-column-title")
-                        with Vertical(id="default_key_section", classes="key-section"):
+                        with Vertical(classes="key-section"):
                             yield Static("Default SSH key", classes="key-section-title")
                             yield Static("Used when a server has no key override.", classes="key-section-note")
                             yield Static("Not set", id="current_default_key")
