@@ -40,7 +40,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.utils.markup import with_bold_values
-from servonaut.utils.theme_text import themed_text
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
@@ -329,6 +329,7 @@ class ObjectStorageScreen(WorkspaceScreen):
         sync_compact_buttons(self)
 
     def on_mount(self) -> None:
+        follow_theme(self, "#s3_table", self._redraw_objects)
         sync_compact_buttons(self)
         picker = self.query_one("#s3_account", AccountPicker)
         self._account = picker.account
@@ -596,6 +597,11 @@ class ObjectStorageScreen(WorkspaceScreen):
             f"[dim]{len(self._folders)} folder(s), {len(self._objects)} object(s){suffix}[/dim]"
         )
 
+    def _redraw_objects(self) -> None:
+        """Draw the object rows again (their folder cells carry theme colours)."""
+        if self._view == _VIEW_OBJECTS:
+            self._render_objects_table()
+
     def _render_objects_table(self) -> None:
         """Populate the DataTable with folder and object rows."""
         table = self.query_one("#s3_table", DataTable)
@@ -609,7 +615,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                 self.scrub_key(folder.removeprefix(self._prefix))
             )
             table.add_row(
-                themed_text(self.app, "folder", "text-accent", bold=True),
+                themed_text(self.app, "folder", "bold $text-accent"),
                 display_name,
                 "",
                 "",

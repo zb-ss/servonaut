@@ -46,7 +46,7 @@ from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
-from servonaut.utils.theme_text import themed_text
+from servonaut.utils.theme_text import follow_theme, themed_text
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -76,18 +76,18 @@ STATUS_SHARED = "shared"
 # Table cells as (text, theme colour); drawn by ``_styled_cell`` because a
 # table cell cannot resolve a theme token itself.
 _STATUS_CELL: Dict[str, tuple[str, str]] = {
-    STATUS_FRESH: ("● Fresh", "text-success"),
-    STATUS_STALE: ("● Stale", "text-warning"),
+    STATUS_FRESH: ("● Fresh", "$text-success"),
+    STATUS_STALE: ("● Stale", "$text-warning"),
     STATUS_NONE: ("○ Not probed", "dim"),
-    STATUS_OPT_OUT: ("⛔ Opted-out", "text-error"),
+    STATUS_OPT_OUT: ("⛔ Opted-out", "$text-error"),
     # A server a team shares, read from the team's copy (read-only).
-    STATUS_SHARED: ("● Shared", "text-accent"),
+    STATUS_SHARED: ("● Shared", "$text-accent"),
 }
 _SOURCE_CELL: Dict[str, tuple[str, str]] = {
     "local": ("local", "dim"),
-    "remote": ("cloud", "text-accent"),
-    "merged": ("synced", "text-success"),
-    "team": ("team", "text-accent"),
+    "remote": ("cloud", "$text-accent"),
+    "merged": ("synced", "$text-success"),
+    "team": ("team", "$text-accent"),
 }
 
 
@@ -436,6 +436,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         )
 
     def on_mount(self) -> None:
+        follow_theme(self, "#fleet-memory-table", self._redraw_table)
         table = self.query_one("#fleet-memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Name", key="name")
@@ -727,7 +728,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             "",
         )
         text = row_reason_text(code)
-        return themed_text(self.app, text, "text-error") if text else "—"
+        return themed_text(self.app, text, "$text-error") if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -1164,7 +1165,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         if getattr(self.app, "demo_mode", False) and redaction is not None:
             teams = [redaction.redact_name(team) for team in teams]
         more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
-        return themed_text(self.app, f"{teams[0]}{more}", "text-accent")
+        return themed_text(self.app, f"{teams[0]}{more}", "$text-accent")
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))

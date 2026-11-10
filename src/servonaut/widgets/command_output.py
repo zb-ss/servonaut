@@ -34,7 +34,7 @@ class CommandOutput(RichLog):
         Args:
             command: Command string to display.
         """
-        self.write(themed_text(self.app, f"$ {command}", "text-accent", bold=True))
+        self.write(themed_text(self.app, f"$ {command}", "bold $text-accent"))
 
     def append_output(self, output: str) -> None:
         """Append command output to the log.
@@ -56,7 +56,7 @@ class CommandOutput(RichLog):
         """
         if not error:
             return
-        style = theme_style(self.app, "text-error", bold=True)
+        style = theme_style(self.app, "bold $text-error")
         if isinstance(error, Text):
             plain = error.plain
             if self.app.demo_mode and self.app.redaction_service:

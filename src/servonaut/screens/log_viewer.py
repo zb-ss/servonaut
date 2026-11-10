@@ -212,7 +212,7 @@ class LogViewerScreen(WorkspaceScreen):
             )
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
-            output.write(themed_text(self.app, f"Error probing logs: {e}", "text-error"))
+            output.write(themed_text(self.app, f"Error probing logs: {e}", "$text-error"))
             return
 
         self._available_logs = available
@@ -222,7 +222,7 @@ class LogViewerScreen(WorkspaceScreen):
             self._update_header()
             await self._start_stream(self._current_log)
         else:
-            output.write(themed_text(self.app, "No readable log files found on this server.", "text-warning"))
+            output.write(themed_text(self.app, "No readable log files found on this server.", "$text-warning"))
             output.write("[dim]Press L to pick a log or + to add a custom path.[/dim]")
             self.app.notify("No readable log files found", severity="warning")
 
@@ -302,7 +302,7 @@ class LogViewerScreen(WorkspaceScreen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "text-error"))
+            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
         ssh_cmd = self.app.ssh_service.build_ssh_command(
@@ -348,7 +348,7 @@ class LogViewerScreen(WorkspaceScreen):
         except Exception as e:
             logger.error("Failed to start stream process: %s", e)
             output = self.query_one("#log_output", RichLog)
-            output.write(themed_text(self.app, f"Error starting stream: {e}", "text-error"))
+            output.write(themed_text(self.app, f"Error starting stream: {e}", "$text-error"))
 
     def _reader_thread_fn(self) -> None:
         """Read lines from the subprocess stdout in a dedicated OS thread.
@@ -447,7 +447,7 @@ class LogViewerScreen(WorkspaceScreen):
             if self._content_buffer:
                 output.write("\n[dim]--- End of file ---[/dim]")
             else:
-                output.write(themed_text(self.app, "File is empty (0 lines)", "text-warning"))
+                output.write(themed_text(self.app, "File is empty (0 lines)", "$text-warning"))
 
     def _check_empty_output(self) -> None:
         """Show hint if no log output has arrived after the initial delay."""
@@ -455,7 +455,7 @@ class LogViewerScreen(WorkspaceScreen):
             return
         if self._reader_thread and self._reader_thread.is_alive():
             output = self.query_one("#log_output", RichLog)
-            output.write(themed_text(self.app, "No output received — file may be empty or inactive.", "text-warning"))
+            output.write(themed_text(self.app, "No output received — file may be empty or inactive.", "$text-warning"))
             output.write("[dim]New lines will appear here as they are written to the log.[/dim]")
 
     async def _stop_stream(self) -> None:

@@ -36,7 +36,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.utils.markup import inert_text, with_bold_values
-from servonaut.utils.theme_text import themed_text
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
     ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
@@ -231,6 +231,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         yield Footer()
 
     def on_mount(self) -> None:
+        follow_theme(self, "#hetzner_mgr_table", self._render_table)
         table = self.query_one("#hetzner_mgr_table", DataTable)
         table.add_columns(
             "#", "Name", "ID", "Type", "State", "Public IP",
@@ -323,13 +324,13 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
     def _colorize_state(self, state: str) -> Text:
         s = state.lower()
         if s in _RUNNING:
-            return themed_text(self.app, state, "text-success")
+            return themed_text(self.app, state, "$text-success")
         if s in _STOPPED:
-            return themed_text(self.app, state, "text-warning")
+            return themed_text(self.app, state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding"}:
-            return themed_text(self.app, state, "text-accent")
+            return themed_text(self.app, state, "$text-accent")
         if s == "error":
-            return themed_text(self.app, state, "text-error")
+            return themed_text(self.app, state, "$text-error")
         return Text(inert_text(state))
 
     # ------------------------------------------------------------------

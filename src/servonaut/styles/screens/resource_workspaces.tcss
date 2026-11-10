@@ -154,8 +154,7 @@ OVHStorageScreen .resource-workspace-content #storage_actions Button {
     margin: 0 1 0 0;
 }
 
-OVHStorageScreen.-content-narrow .resource-action-buttons,
-ObjectStorageScreen.-content-narrow .resource-action-buttons {
+OVHStorageScreen.-content-narrow .resource-action-buttons {
     layout: grid;
     grid-size: 3;
     grid-rows: 3;
@@ -206,7 +205,6 @@ OVHSnapshotsScreen #snapshots_actions Button {
     margin: 0;
 }
 
-ObjectStorageScreen.-content-narrow .resource-action-buttons,
 OVHDNSScreen #dns_actions,
 OVHDNSScreen.-content-narrow #dns_actions,
 OVHSnapshotsScreen #snapshots_actions,
@@ -380,7 +378,6 @@ OVHStorageScreen .provider-aux-workspace #storage_actions {
     content-align: left top;
 }
 
-ObjectStorageScreen .provider-aux-workspace .resource-action-buttons,
 OVHStorageScreen .provider-aux-workspace .resource-action-buttons {
     layout: grid;
     grid-size: 2;
@@ -389,11 +386,6 @@ OVHStorageScreen .provider-aux-workspace .resource-action-buttons {
     grid-gutter: 0 1;
     width: 1fr;
     height: auto;
-}
-
-/* Native auto-row measurement needs borders, line padding and a text cell. */
-ObjectStorageScreen .provider-aux-workspace .resource-action-buttons {
-    min-width: 11;
 }
 
 OVHStorageScreen .provider-aux-workspace #storage_actions Button {

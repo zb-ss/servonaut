@@ -52,7 +52,7 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.utils.markup import literal
-from servonaut.utils.table_text import rebuild_keeping_cursor, themed_cell
+from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -545,21 +545,21 @@ class FindingsScreen(WorkspaceScreen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = themed_cell(self.app, str(finding.get("detector") or ""))
-            title = themed_cell(self.app, redact_demo_text(
+            detector = themed_text(self.app, str(finding.get("detector") or ""))
+            title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = themed_cell(self.app, str(finding.get("detected_at") or ""))
+            detected = themed_text(self.app, str(finding.get("detected_at") or ""))
             row = [
-                themed_cell(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
-                themed_cell(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
+                themed_text(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
+                themed_text(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
             ]
             if self._instance is None:
                 instance_id = str(finding.get("instance_id") or "")
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(themed_cell(self.app, label))
+                row.append(themed_text(self.app, label))
             row.extend([detector, title, detected])
             table.add_row(*row)
         self._update_pill()

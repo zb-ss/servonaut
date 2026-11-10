@@ -38,7 +38,7 @@ from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
-from servonaut.utils.theme_text import themed_text
+from servonaut.utils.theme_text import follow_theme, themed_text
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -138,6 +138,7 @@ class BwVaultManagerScreen(WorkspaceScreen):
         sync_compact_buttons(self)
 
     def on_mount(self) -> None:
+        follow_theme(self, "#bw_vault_mgr_table", self._render_table)
         sync_compact_buttons(self)
         table = self.query_one("#bw_vault_mgr_table", DataTable)
         table.add_columns("Name", "Item ID", "Servers", "Verify")
@@ -387,11 +388,11 @@ class BwVaultManagerScreen(WorkspaceScreen):
             return themed_text(self.app, "—", "dim")
         statuses = [r.get("verify_status") for r in refs]
         if all(s == _VERIFIED for s in statuses):
-            return themed_text(self.app, "verified", "text-success")
+            return themed_text(self.app, "verified", "$text-success")
         failed = next((s for s in statuses if s in _FAILED_STATUSES), None)
         if failed is not None:
-            return themed_text(self.app, str(failed), "text-error")
-        return themed_text(self.app, "unverified", "text-warning")
+            return themed_text(self.app, str(failed), "$text-error")
+        return themed_text(self.app, "unverified", "$text-warning")
 
     # ------------------------------------------------------------------
     # Selection + actions

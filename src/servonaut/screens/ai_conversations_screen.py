@@ -33,7 +33,7 @@ from textual.widgets import (
 )
 
 from servonaut.screens._compact_actions import sync_compact_buttons
-from servonaut.utils.theme_text import themed_text
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -311,6 +311,8 @@ class AIConversationsScreen(WorkspaceScreen):
         sync_compact_buttons(self)
 
     def on_mount(self) -> None:
+        follow_theme(self, "#convs_table", self._render_table)
+        follow_theme(self, "#local_table", self._render_local_table)
         sync_compact_buttons(self)
         self.query_one("#convs_scroll").border_title = "Cloud conversations"
         self.query_one("#local_scroll").border_title = "Local sessions"
@@ -499,8 +501,8 @@ class AIConversationsScreen(WorkspaceScreen):
         return f"[dim]{group}[/dim] · {title}" if group else title
 
     def _format_status_cell(self, status: str) -> Text:
-        tokens = {"active": "text-success", "archived": "text-warning", "deleted": "text-error"}
-        return themed_text(self.app, status or "—", tokens.get(status, "text"))
+        tokens = {"active": "$text-success", "archived": "$text-warning", "deleted": "$text-error"}
+        return themed_text(self.app, status or "—", tokens.get(status, ""))
 
     @staticmethod
     def _format_age(ts: str) -> str:
@@ -1040,7 +1042,7 @@ class AIConversationsScreen(WorkspaceScreen):
         for s in items:
             paired = bool(s.get("remote_conversation_id"))
             where = (
-                themed_text(self.app, "uploaded", "text-accent") if paired
+                themed_text(self.app, "uploaded", "$text-accent") if paired
                 else themed_text(self.app, "local only", "dim")
             )
             provider = s.get("last_provider") or "—"
