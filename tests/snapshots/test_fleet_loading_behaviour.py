@@ -123,6 +123,7 @@ def test_the_timer_runs_only_while_a_provider_answers() -> None:
             gate.release()
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the load to end")
         assert screen._load_timer is None
+        assert screen._load_workers == {}  # finished workers are not kept
 
     _run(scenario)
 

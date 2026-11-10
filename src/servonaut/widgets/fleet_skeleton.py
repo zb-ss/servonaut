@@ -11,9 +11,9 @@ from textual.widget import Widget
 from servonaut.utils.markup import literal
 
 # What the user can do while the list fills; the last line of the widget.
-FOOTNOTE = "Rows appear as each provider answers. Esc cancels the slow provider, not the others."
+FOOTNOTE = "Rows appear as each provider answers. Esc stops the providers still loading."
 # For an area too narrow for one line of the footnote.
-SHORT_FOOTNOTE = "Esc cancels the slow providers only."
+SHORT_FOOTNOTE = "Esc stops the providers still loading."
 
 # Widths of the cells of one placeholder row (index, name, state, provider,
 # region); the pattern repeats with a different length each row so the

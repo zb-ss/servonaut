@@ -219,6 +219,7 @@ class AWSService(InstanceServiceInterface):
         except asyncio.CancelledError:
             # A thread cannot be interrupted; it stops at the next region.
             abandoned.set()
+            self.listing_region = ""
             raise
 
         logger.info(f"Fetched {len(instances)} instances from AWS")

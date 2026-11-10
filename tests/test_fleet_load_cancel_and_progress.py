@@ -82,6 +82,7 @@ async def test_a_cancelled_aws_listing_leaves_the_cache_alone_and_stops_listing(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert service.listing_region == ""  # nothing is being listed any more
         regions.hold.set()
         pool.shutdown(wait=True)
 

@@ -641,6 +641,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._settle_team_memory_load(event)
         self._handle_worker_state(event)
         self._record_load_outcome(event)
+        self._forget_finished_load_worker(event)
 
     def _handle_worker_state(self, event: Worker.StateChanged) -> None:
         """List what a finished inventory worker found (or report why it failed)."""
@@ -1135,6 +1136,12 @@ class InstanceListScreen(WorkspaceScreen):
     def _run_load(self, key: str, work, **kwargs) -> None:
         """Start *key*'s load in a worker and remember it as the one that owns the load."""
         self._load_workers[key] = self.run_worker(work, **kwargs)
+
+    def _forget_finished_load_worker(self, event: Worker.StateChanged) -> None:
+        """A load's worker ended: it no longer owns the provider's load."""
+        key = self._LOAD_NAMES.get(event.worker.name)
+        if key is not None and event.worker.is_finished and self._load_workers.get(key) is event.worker:
+            del self._load_workers[key]
 
     def _record_load_outcome(self, event: Worker.StateChanged) -> None:
         """A provider's worker ended: record its count, or why its rows are stale."""
