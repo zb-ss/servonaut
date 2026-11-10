@@ -273,8 +273,23 @@ class InstanceListScreen(WorkspaceScreen):
         # the outlined pill is the non-compact one.
         for chip in self.query(FleetChip):
             chip.compact = not roomy
+        self._sync_table_room()
         self.call_after_refresh(self._sync_fresh_layout)
         self.call_after_refresh(self._sync_memory_note)
+
+    def _sync_table_room(self) -> None:
+        """Tell the table whether the inspector sits beside it (its Details then cover Region and Type)."""
+        beside = not (
+            self.has_class("-narrow") or self.has_class("-content-narrow")
+            or self.has_class("-chat-open")
+        )
+        try:
+            table = self.query_one(InstanceTable)
+        except NoMatches:
+            return
+        if table.inspector_beside != beside:
+            table.inspector_beside = beside
+        table.replan()
 
     def _sync_fresh_layout(self) -> None:
         """Put the freshness on the chip row only when it fits there, whole.

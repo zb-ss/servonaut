@@ -134,3 +134,81 @@ def test_the_ssh_column_is_shown_when_there_is_room() -> None:
         assert "ssh" in keys
 
     _run(scenario)
+
+
+def _long_fleet() -> list[dict]:
+    rows = []
+    for number, base in enumerate(_harness.AWS_ROWS):
+        rows.append({**base, "name": f"{'n' * 30}-{number:02d}", "public_ip": f"123.123.123.{100 + number}"})
+    return rows
+
+
+async def _sweep(pilot: Any, rows: list[dict]) -> dict[int, list[str]]:
+    screen = pilot.app.screen
+    screen._instances = rows
+    screen._update_table()
+    table = screen.query_one(InstanceTable)
+    seen = {}
+    for width in range(118, 201, 2):
+        await pilot.resize_terminal(width, 44)
+        await pilot.pause()
+        await pilot.pause()
+        keys = [str(c.key.value) for c in table.columns.values()]
+        seen[width] = keys
+        assert table.virtual_size.width <= table.scrollable_content_region.width, (width, keys)
+        assert table._name_cap is None or table._name_cap >= 16, width
+        for key in ("#", "name", "state", "provider", "public_ip"):
+            assert key in keys or key == "#", (width, key)
+    return seen
+
+
+def test_the_fixture_fleet_never_scrolls_sideways_from_118_columns() -> None:
+    async def scenario(pilot: Any) -> None:
+        seen = await _sweep(pilot, [dict(r) for r in _harness.AWS_ROWS])
+        assert "region" in seen[160] and "type" in seen[160]
+
+    _run(scenario)
+
+
+def test_long_names_and_addresses_never_scroll_sideways_from_118_columns() -> None:
+    async def scenario(pilot: Any) -> None:
+        seen = await _sweep(pilot, _long_fleet())
+        assert "region" in seen[200]
+
+    _run(scenario)
+
+
+def test_long_names_never_scroll_sideways_with_the_navigation_hidden() -> None:
+    async def scenario(pilot: Any) -> None:
+        await _sweep(pilot, _long_fleet())
+
+    _run(scenario, hide_navigation=True)
+
+
+def test_columns_give_way_in_order_and_come_back_in_reverse() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        screen._instances = [dict(r) for r in _harness.AWS_ROWS]
+        screen._update_table()
+        table = screen.query_one(InstanceTable)
+        order = []
+        for width in range(200, 118, -2):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            await pilot.pause()
+            order.append((width, tuple(table._given_way), table._name_cap))
+        given = [g for _, g, _ in order]
+        # Once Type has given way, Region has too (the order never skips back).
+        for g in given:
+            assert "type" not in g or "region" in g
+        back = []
+        for width in range(120, 202, 2):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            await pilot.pause()
+            back.append(tuple(table._given_way))
+        for g in back:
+            assert "type" not in g or "region" in g
+        assert back[-1] == ()
+
+    _run(scenario)

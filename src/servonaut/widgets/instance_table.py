@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.color import Color, ColorParseError
 from textual.widgets import DataTable
@@ -53,8 +54,13 @@ COLUMNS: Sequence[_Column] = (
     _Column("ssh", "SSH", optional=True),
 )
 
-# Cells the SSH-verify column needs at most ("✗ auth failed").
-_OPTIONAL_WIDTH = 13
+# When the room is short, columns give way in this order before the table
+# scrolls. Region and Type are in the fleet inspector's Details, so they only
+# give way while the inspector sits beside the table. The Name column then
+# gives up width, never below the minimum (the full name is in the inspector
+# or the value line). #, Name, State, Provider and Public IP never leave.
+_GIVE_WAY_ORDER = ("ssh", "region", "type")
+_NAME_MINIMUM = 16
 
 # Shown in the table's bottom border while some columns are out of view.
 SCROLL_HINT = "← → more columns"
@@ -144,8 +150,10 @@ class InstanceTable(DataTable):
         # Row identity -> what the last refresh did to it (see ``set_marks``).
         self._marks: Dict[str, str] = {}
         self._shown_columns: List[_Column] = []
-        # An optional column steps aside when its room would make the table scroll.
-        self._optional_fits = True
+        # Which columns have given way, and the Name cap, for the room there is.
+        self._given_way: frozenset = frozenset()
+        self._name_cap: Optional[int] = None
+        self.inspector_beside = False
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
     def _setup_columns(self, columns: Sequence[_Column]) -> None:
@@ -157,24 +165,56 @@ class InstanceTable(DataTable):
     def on_resize(self) -> None:
         """Re-check the scroll hint: the view got wider or narrower."""
         self._sync_scroll_hint()
-        self._sync_optional_fit()
+        self.replan()
 
-    def _sync_optional_fit(self) -> None:
-        """Drop an optional column that would make the table scroll; bring it back when it fits."""
+    def replan(self) -> None:
+        """Fit the columns to the room there is now; redraw only when the plan changes."""
+        if self._plan_columns() != (self._given_way, self._name_cap):
+            self.call_after_refresh(self.redraw)
+
+    def _wanted_columns(self) -> List[_Column]:
+        """The columns this fleet shows when there is room for all of them."""
+        return [
+            column for column in COLUMNS
+            if not column.optional
+            or any(self._optional_cell(column.key, i) for i in self._all_instances)
+        ]
+
+    def _natural_widths(self, columns: Sequence[_Column]) -> Dict[str, int]:
+        """The width each column takes for its longest value, padding included."""
+        padding = 2 * self.cell_padding
+        widths = {column.key: cell_len(column.label) for column in columns}
+        for index, instance in enumerate(self._filtered_instances):
+            cells = self._row_cells(index, instance, name_cap=None)
+            for column in columns:
+                cell = cells[column.key]
+                text = Text.from_markup(cell) if isinstance(cell, str) else cell
+                widths[column.key] = max(widths[column.key], text.cell_len)
+        return {key: width + padding for key, width in widths.items()}
+
+    def _plan_columns(self) -> tuple[frozenset, Optional[int]]:
+        """Which columns give way, and the Name cap, so the table needs no sideways scroll."""
         available = self.scrollable_content_region.width
-        extra = next((c for c in self.columns.values() if str(c.key.value) == "ssh"), None)
-        if available <= 0:
-            return
-        if extra is not None:
-            width = self.virtual_size.width
-            if width > available and width - extra.get_render_width(self) <= available:
-                self._optional_fits = False
-                self.call_after_refresh(self.redraw)
-        elif not self._optional_fits:
-            estimate = _OPTIONAL_WIDTH + 2 * self.cell_padding
-            if self.virtual_size.width + estimate <= available:
-                self._optional_fits = True
-                self.call_after_refresh(self.redraw)
+        columns = self._wanted_columns()
+        if available <= 0 or not columns:
+            return self._given_way, self._name_cap
+        widths = self._natural_widths(columns)
+        total = sum(widths.values())
+        wanted = {column.key for column in columns}
+        given_way = set()
+        for key in _GIVE_WAY_ORDER:
+            if total <= available:
+                break
+            if key in wanted and (key == "ssh" or self.inspector_beside):
+                given_way.add(key)
+                total -= widths[key]
+        cap = None
+        if total > available and "name" in wanted:
+            content = widths["name"] - 2 * self.cell_padding
+            cap = max(_NAME_MINIMUM, content - (total - available))
+            if cap >= content:
+                cap = None
+        return frozenset(given_way), cap
 
     def _sync_scroll_hint(self) -> None:
         """Say so in the bottom border while columns are out of view."""
@@ -197,7 +237,6 @@ class InstanceTable(DataTable):
         widths_before = self._render_widths()
         super()._update_dimensions(*args, **kwargs)
         self._sync_scroll_hint()
-        self._sync_optional_fit()
         if self._render_widths() == widths_before:
             return
         clear_caches = getattr(self, "_clear_caches", None)
@@ -363,13 +402,8 @@ class InstanceTable(DataTable):
         """Refresh table display with current filtered instances."""
         # Judged on the whole fleet, not the filtered rows, so a search does
         # not make an optional column come and go.
-        columns = [
-            column
-            for column in COLUMNS
-            if not column.optional
-            or (self._optional_fits
-                and any(self._optional_cell(column.key, i) for i in self._all_instances))
-        ]
+        self._given_way, self._name_cap = self._plan_columns()
+        columns = [c for c in self._wanted_columns() if c.key not in self._given_way]
         if columns == self._shown_columns:
             self.clear()
         else:
@@ -379,12 +413,17 @@ class InstanceTable(DataTable):
             cells = self._row_cells(idx, instance)
             self.add_row(*(cells[column.key] for column in columns))
 
-    def _row_cells(self, idx: int, instance: dict) -> Dict[str, Any]:
+    def _row_cells(
+        self, idx: int, instance: dict, *, name_cap: Optional[int] = -1,
+    ) -> Dict[str, Any]:
         """Every column's cell for one server, by column key."""
         # The screens package imports this table, so the import waits.
         from servonaut.screens._fleet_filter import provider_label
 
         limits = {column.key: column.max_width for column in COLUMNS}
+        cap = self._name_cap if name_cap == -1 else name_cap
+        if cap is not None:
+            limits["name"] = cap
 
         def plain(key: str, value: Any) -> Text:
             return _fit(str(value or "") or _EMPTY, limits[key])
