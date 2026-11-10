@@ -101,18 +101,63 @@ InstanceListScreen.-chat-open #fleet_inspector {
     width: 100%;
 }
 
-#instance_detail {
+#fleet_values_heading {
     width: 100%;
-    height: 4;
-    min-height: 4;
-    background: $panel;
-    border: none;
-    color: $text;
-    padding: 0 1;
-    margin: 0;
+    height: 1;
+    margin-top: 1;
 }
 
-#instance_detail.--empty {
+#fleet_values_title {
+    width: 1fr;
+    height: 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+/* The inspector's blanket button size would stretch the link. */
+#fleet_inspector Button.fleet-copy-row {
+    width: auto;
+    height: 1;
+    min-height: 1;
+}
+
+#fleet_inspector #fleet_values {
+    width: 100%;
+    height: 1fr;
+    min-height: 3;
+    scrollbar-size-vertical: 1;
+}
+
+.value-row {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    color: $text;
+}
+
+.value-label {
+    width: 11;
+    height: auto;
+    color: $text-muted;
+}
+
+.value-text {
+    width: 1fr;
+    height: auto;
+}
+
+.value-row:hover {
+    background: $boost;
+}
+
+.value-row:focus {
+    background: $boost;
+    text-style: bold;
+}
+
+#fleet_values_hint {
+    width: 100%;
+    height: 1;
     color: $text-muted;
 }
 
@@ -120,7 +165,6 @@ InstanceListScreen.-chat-open #fleet_inspector {
     dock: bottom;
     width: 100%;
     height: auto;
-    border-top: solid $panel-lighten-2;
 }
 
 #fleet-bottom > StatusBar,
@@ -128,17 +172,42 @@ InstanceListScreen.-chat-open #fleet_inspector {
     dock: none;
 }
 
-#fleet-detail-toolbar {
+/* The one-line form replaces the inspector's list wherever the inspector is
+   hidden. */
+#fleet_value_bar {
+    display: none;
     width: 100%;
-    height: 1;
-    background: $panel-darken-1;
+    height: auto;
+    max-height: 2;
 }
 
-#fleet-detail-heading {
+InstanceListScreen.-narrow #fleet_value_bar,
+InstanceListScreen.-content-narrow #fleet_value_bar,
+InstanceListScreen.-chat-open #fleet_value_bar {
+    display: block;
+}
+
+#fleet_value_line {
     width: 1fr;
-    height: 1;
-    padding: 0 1;
-    color: $text-muted;
-    text-style: bold;
+    height: auto;
+    max-height: 2;
+    grid-size: 4;
+    grid-columns: 1fr;
+    grid-rows: 1;
+    grid-gutter: 0 1;
+    overflow-y: auto;
 }
 
+#fleet_value_line .value-row {
+    height: 1;
+}
+
+#fleet_value_line .value-label {
+    width: auto;
+    margin-right: 1;
+}
+
+#fleet_value_line .value-text {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

@@ -1,13 +1,17 @@
 """Platform detection and OS-specific utilities."""
 
 from __future__ import annotations
+import logging
 import platform
 import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 from typing import Final, Optional
+
+logger = logging.getLogger(__name__)
 
 # A clipboard tool returns in milliseconds. One that waits longer is waiting
 # for something it will not get (wl-copy waits for keyboard focus on GNOME),
@@ -185,6 +189,30 @@ def copy_to_clipboard(text: str) -> bool:
     except (subprocess.SubprocessError, OSError):
         return False
     return True
+
+
+class CopyOutcome(Enum):
+    """What a copy really did, so a screen never claims more than happened."""
+
+    COPIED = "copied"
+    SENT_TO_TERMINAL = "sent to terminal"
+    UNAVAILABLE = "unavailable"
+
+
+def copy_text(app, text: str) -> CopyOutcome:
+    """Copy ``text`` with the platform clipboard, else the terminal's (OSC 52).
+
+    The terminal route cannot confirm that anything arrived, so it is
+    reported as sent, not copied.
+    """
+    if copy_to_clipboard(text):
+        return CopyOutcome.COPIED
+    try:
+        app.copy_to_clipboard(text)
+    except Exception:  # noqa: BLE001 - a terminal without the escape must not crash a copy
+        logger.warning("terminal clipboard copy failed", exc_info=True)
+        return CopyOutcome.UNAVAILABLE
+    return CopyOutcome.SENT_TO_TERMINAL
 
 
 def _clipboard_command() -> Optional[list[str]]:
