@@ -135,7 +135,7 @@ def test_first_run_block_lists_every_provider() -> None:
     load.finish("hetzner", count=2)
     text = render_load(load).plain
     assert text.splitlines() == [
-        "Loading servers from 3 providers…",
+        "Loading servers from 3 providers…  esc stop",
         "◐ AWS · 2 accounts",
         "◐ OVH · 2 accounts",
         "✓ Hetzner · 2 servers",
@@ -152,7 +152,7 @@ def test_a_single_server_is_not_plural() -> None:
 def test_refresh_shows_one_line_with_the_cache_age() -> None:
     load = _load("aws", "ovh", "hetzner", has_rows=True)
     load.finish("aws", count=3)
-    assert render_load(load).plain == "◐ Refreshing · AWS ✓ · OVH … · Hetzner …  cached 6 min ago"
+    assert render_load(load).plain == "◐ Refreshing · AWS ✓ · OVH … · Hetzner …  cached 6 min ago  esc stop"
 
 
 def test_failure_reasons_are_literal_clipped_and_redacted() -> None:
