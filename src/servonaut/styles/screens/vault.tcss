@@ -258,7 +258,18 @@ VaultScreen.-identity-pending #vault_danger_group {
 VaultScreen.-identity-pending #vault_identity_panel {
     border: round $panel;
     background: transparent;
-    padding: 1 2;
+    padding: 0 2;
+}
+
+/* Inside a bordered card the border already keeps the title off the top
+   edge, so the shared title margin and the status offset are dropped. */
+VaultScreen.-identity-pending #vault_title,
+VaultScreen.-identity-error #vault_title,
+VaultScreen.-identity-pending #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-error #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-pending #vault_refresh,
+VaultScreen.-identity-error #vault_refresh {
+    margin-top: 0;
 }
 
 VaultScreen.-identity-pending #vault_identity_state {

@@ -3,7 +3,7 @@
 AWSCreateScreen #aws_create_container,
 HetznerCreateScreen #hetzner_create_container,
 OVHCloudCreateScreen #cloud_create_container {
-    padding: 1 2 2 2;
+    padding: 0 2 2 2;
 }
 
 .compute-workflow .compute-workflow-heading {

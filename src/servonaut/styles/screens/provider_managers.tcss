@@ -2,7 +2,7 @@
 AWSManagerScreen #aws_mgr_container,
 HetznerManagerScreen #hetzner_mgr_container,
 OVHManagerScreen #ovh_mgr_container {
-    padding: 1;
+    padding: 0 1 1 1;
 }
 
 .provider-manager-content .provider-manager-heading {

@@ -95,7 +95,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                 ScrollableContainer(
                     Horizontal(
                         Static(
-                            "[bold $text-accent]Hetzner SSH Keys[/bold $text-accent]",
+                            "Hetzner SSH keys",
                             id="hetzner_ssh_keys_header",
                             classes="screen-title",
                         ),

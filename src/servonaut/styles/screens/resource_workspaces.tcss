@@ -6,7 +6,7 @@ OVHSnapshotsScreen #snapshots_container,
 OVHStorageScreen #storage_container,
 OVHBillingScreen #billing_container,
 ObjectStorageScreen #s3_container {
-    padding: 1 2 2 2;
+    padding: 0 2 2 2;
 }
 
 .resource-workspace-content .resource-context {

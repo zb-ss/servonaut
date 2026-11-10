@@ -142,8 +142,7 @@
 #hetzner_mgr_hint,
 #hetzner_ssh_keys_hint,
 #ovh_mgr_hint,
-#aws_mgr_hint,
-#bw_vault_mgr_hint {
+#aws_mgr_hint {
     padding: 0 1;
     margin: 0 0 1 0;
     color: $text-muted;

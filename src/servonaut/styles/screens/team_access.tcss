@@ -1,6 +1,6 @@
 /* A selectable directory, two record workspaces and a durable return lane. */
 TeamManagementScreen #team_management_container {
-    padding: 1 2;
+    padding: 0 2 1 2;
     background: $surface;
     overflow-x: hidden;
     overflow-y: auto;
@@ -174,7 +174,7 @@ TeamManagementScreen.-content-narrow #agent_rules_section {
 }
 
 CaScreen #ca_content {
-    padding: 1 2;
+    padding: 0 2 1 2;
     background: $surface;
     overflow-y: auto;
 }
