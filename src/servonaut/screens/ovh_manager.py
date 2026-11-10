@@ -348,13 +348,13 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             for idx, inst in enumerate(self._instances, start=1):
                 table.add_row(
                     str(idx),
-                    display_name(inst),
-                    str(inst.get("type", "")),
-                    str(inst.get("provider_type", "—")),
+                    Text(inert_text(display_name(inst))),
+                    Text(inert_text(str(inst.get("type", "")))),
+                    Text(inert_text(str(inst.get("provider_type", "—")))),
                     self._colorize_state(str(inst.get("state", ""))),
-                    str(inst.get("public_ip", "") or "—"),
-                    str(inst.get("region", "")),
-                    str(inst.get("id", "")),
+                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
+                    Text(inert_text(str(inst.get("region", "")))),
+                    Text(inert_text(str(inst.get("id", "")))),
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()

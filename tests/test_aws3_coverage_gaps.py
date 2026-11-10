@@ -358,7 +358,7 @@ class TestAWSManagerRenderTable:
              patch.object(screen, "_sync_action_buttons"), \
              patch.object(AWSManagerScreen, "app", new=MagicMock(get_css_variables=lambda: _THEME)):
             screen._render_table()
-        assert "—" in rows_added[0]
+        assert "—" in [str(cell) for cell in rows_added[0]]
 
 
 class TestAWSManagerOnButtonPressed:

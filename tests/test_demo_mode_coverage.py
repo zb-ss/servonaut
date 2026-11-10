@@ -3248,7 +3248,7 @@ class TestHetznerCreateWizardDemoMode:
         )
         cells = " ".join(str(c) for c in rows[0])
         assert "ops@example.org" not in cells
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_raw_without_demo(self) -> None:
         mock_app = _make_mock_app(demo=False)
@@ -3657,7 +3657,7 @@ class TestSshKeyLabelsDemoMode:
         key = {"name": "client-laptop-key", "id": "k1", "fingerprint": "aa:bb",
                "public_key": "ssh-ed25519 AAAA"}
         mock_app, rows = self._run_load(OVHSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("client-laptop-key")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("client-laptop-key")
 
     def test_hetzner_key_label(self) -> None:
         from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
@@ -3667,7 +3667,7 @@ class TestSshKeyLabelsDemoMode:
 
         key = {"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb"}
         mock_app, rows = self._run_load(HetznerSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_wizard_confirm_label(self) -> None:
         from servonaut.screens.hetzner_create import HetznerCreateScreen

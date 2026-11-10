@@ -9,14 +9,15 @@ import subprocess
 import threading
 from typing import List, Optional
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.content import Content
 from textual.events import Key
 from textual.widgets import Button, Footer, Static, RichLog
 
+from servonaut.utils.markup import literal
 from servonaut.utils.theme_text import themed_text
 from servonaut.utils.ssh_utils import (
     SshLog,
@@ -146,7 +147,10 @@ class LogViewerScreen(WorkspaceScreen):
             with Container(id="log_viewer_container", classes="workspace-content"):
                 yield Static("[bold]Remote log stream[/bold]", id="log_title")
                 yield Static(
-                    f"[bold $text-accent]Log viewer:[/bold $text-accent] {escape(str(name))}  [dim]Probing available logs...[/dim]",
+                    Content.assemble(
+                        ("Log viewer:", "bold $text-accent"), " ", literal(str(name)),
+                        "  ", ("Probing available logs...", "dim"),
+                    ),
                     id="log_header",
                 )
                 yield RichLog(id="log_output", highlight=True, markup=True)
@@ -262,8 +266,10 @@ class LogViewerScreen(WorkspaceScreen):
             status_parts.append(f"[dim $text-success]\\[cached{age}][/dim $text-success]")
         status = "  " + " ".join(status_parts) if status_parts else ""
         self.query_one("#log_header", Static).update(
-            f"[bold $text-accent]Log viewer:[/bold $text-accent] {escape(str(name))}  "
-            f"[dim]Viewing:[/dim] {escape(log_label)}{status}"
+            Content.assemble(
+                ("Log viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
+                ("Viewing:", "dim"), " ", literal(log_label), Content.from_markup(status),
+            )
         )
 
     # ------------------------------------------------------------------

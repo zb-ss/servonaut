@@ -170,6 +170,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                         ActionButton("New bucket", role="primary", id="btn_s3_new_bucket"),
                         ActionButton("Up", "u", id="btn_s3_up"),
                         ActionButton("Open", "o", id="btn_s3_open"),
+                        keep_hints=True,
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",
@@ -179,6 +180,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                     ActionRow(
                         ActionButton("Upload", id="btn_s3_upload"),
                         ActionButton("Download", id="btn_s3_download"),
+                        keep_hints=True,
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",
@@ -191,6 +193,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                         ActionButton("Move", id="btn_s3_move"),
                         ActionButton("Share URL", id="btn_s3_share"),
                         ActionButton("Back", "esc", id="btn_s3_back"),
+                        keep_hints=True,
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",

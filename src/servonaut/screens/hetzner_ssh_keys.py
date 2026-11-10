@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
@@ -28,7 +29,7 @@ from textual.widgets import (
 )
 
 from servonaut.screens._compact_actions import sync_compact_buttons
-from servonaut.utils.markup import literal, with_bold_values
+from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -271,9 +272,9 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
         for key in self._keys:
             fp = key.get("fingerprint", "") or ""
             table.add_row(
-                _s(str(key.get("name", ""))),
-                str(key.get("id", "")),
-                fp[:32],
+                Text(inert_text(_s(str(key.get("name", ""))))),
+                Text(inert_text(str(key.get("id", "")))),
+                Text(inert_text(fp[:32])),
                 key=str(key.get("id", "")) or str(key.get("name", "")),
             )
         n = len(self._keys)

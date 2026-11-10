@@ -120,16 +120,16 @@ class BwVaultManagerScreen(WorkspaceScreen):
                     with Horizontal(id="bw_vault_mgr_actions"):
                         with Vertical(classes="credential_task_group"):
                             yield Static("Catalog", classes="credential_action_heading")
-                            with ActionRow():
+                            with ActionRow(keep_hints=True):
                                 yield ActionButton("Refresh", "F5", id="btn_bw_vault_refresh")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Selected key", classes="credential_action_heading")
-                            with ActionRow():
+                            with ActionRow(keep_hints=True):
                                 yield ActionButton("Open in Bitwarden", "o", short="Open", id="btn_bw_vault_open")
                                 yield ActionButton("Manage ref", "e", id="btn_bw_vault_edit")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Add keys", classes="credential_action_heading")
-                            with ActionRow():
+                            with ActionRow(keep_hints=True):
                                 yield ActionButton("Import keys", "a", id="btn_bw_vault_import")
         yield Footer()
 

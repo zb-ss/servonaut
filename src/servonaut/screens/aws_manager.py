@@ -65,7 +65,6 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
-from servonaut.utils.formatting import escape_cell
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -321,12 +320,12 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             for idx, inst in enumerate(self._instances, start=1):
                 table.add_row(
                     str(idx),
-                    escape_cell(display_name(inst)),
-                    escape_cell(str(inst.get("id", ""))),
-                    escape_cell(str(inst.get("type", ""))),
+                    Text(inert_text(display_name(inst))),
+                    Text(inert_text(str(inst.get("id", "")))),
+                    Text(inert_text(str(inst.get("type", "")))),
                     self._colorize_state(str(inst.get("state", ""))),
-                    escape_cell(str(inst.get("public_ip", "") or "—")),
-                    escape_cell(str(inst.get("region", ""))),
+                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
+                    Text(inert_text(str(inst.get("region", "")))),
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()

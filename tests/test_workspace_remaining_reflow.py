@@ -754,6 +754,24 @@ async def test_conversations_cloud_short_view_keeps_row_and_actions_visible(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("navigation_visible", [False, True])
+async def test_conversations_actions_stay_visible_when_the_status_is_long(
+    navigation_visible: bool,
+) -> None:
+    app = _RemainingHost(navigation_visible)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_case(CASES[3], app, pilot)
+        assert await pilot.click("#--content-tab-tab_cloud")
+        await wait_until(lambda: screen._active_tab == "tab_cloud")
+        await _ready(screen)
+        screen.query_one("#convs_status").update("a long status message " * 12)
+        await pilot.pause()
+        for button in screen.query_one("#convs_actions").query(Button):
+            await wait_until(lambda b=button: screen.can_view_entire(b))
+            assert app.get_widget_at(*button.region.center)[0] is button
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_dashboard_modified_quit_remains_available_during_navigation(
     navigation_visible: bool,
 ) -> None:
@@ -896,3 +914,17 @@ async def test_analysis_new_request_clears_previous_metadata_before_failed_resul
         for call in app.ai_analysis_service.analyze_text.await_args_list:
             assert call.args == (INPUT,) and call.kwargs == {"system_prompt": "Keep [literal] Ω"}
         assert app._exception is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [c for c in CASES if c.name in {"history"}], ids=lambda c: c.name)
+async def test_action_hints_are_bindings_and_the_key_matches_the_click(case: ReflowCase) -> None:
+    from tests._hint_conformance import assert_hints_match_bindings, record_actions
+
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        calls: list[str] = []
+        record_actions(screen, calls)
+        handovers = {"refresh": "refresh_local", "open_selected": "open_local", "delete": "delete_local"}
+        assert await assert_hints_match_bindings(pilot, screen, calls, handovers) >= 1

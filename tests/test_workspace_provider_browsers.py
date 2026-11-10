@@ -834,3 +834,16 @@ async def test_vault_keys_still_act_from_content(
                 call(folder_id="folder-1", ssh_only=True)] * 2
             opened.assert_not_called()
         assert app.screen is screen and app._exception is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [c for c in CASES if c.name in {"s3", "vault"}], ids=lambda c: c.name)
+async def test_action_hints_are_bindings_and_the_key_matches_the_click(case: ReflowCase) -> None:
+    from tests._hint_conformance import assert_hints_match_bindings, record_actions
+
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        calls: list[str] = []
+        record_actions(screen, calls)
+        assert await assert_hints_match_bindings(pilot, screen, calls) >= 1

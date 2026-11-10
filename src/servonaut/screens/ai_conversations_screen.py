@@ -277,7 +277,7 @@ class AIConversationsScreen(WorkspaceScreen):
                                 with Horizontal(id="convs_pager"):
                                     yield Static("", id="convs_status")
                                     yield ActionButton("Load more", id="btn_convs_more")
-                            with ActionRow(id="convs_actions"):
+                            with ActionRow(id="convs_actions", keep_hints=True):
                                 yield ActionButton("Open", "enter", role="primary", id="btn_convs_open")
                                 yield ActionButton("Archive", "a", id="btn_convs_archive")
                                 yield ActionButton("Delete", "d", role="error", id="btn_convs_delete")
@@ -301,7 +301,7 @@ class AIConversationsScreen(WorkspaceScreen):
                                 with Horizontal(id="local_pager"):
                                     yield Static("", id="local_status")
                                     yield ActionButton("Load more", id="btn_local_more")
-                            with ActionRow(id="local_actions"):
+                            with ActionRow(id="local_actions", keep_hints=True):
                                 yield ActionButton("Open", "enter", role="primary", id="btn_local_open")
                                 yield ActionButton("Delete", "d", role="error", id="btn_local_delete")
         yield Footer()

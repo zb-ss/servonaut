@@ -287,3 +287,11 @@ AIConversationsScreen.-content-narrow #local_actions {
     padding: 0;
     margin: 0;
 }
+
+/* A long status never pushes the actions below the visible area. */
+AIConversationsScreen.-content-narrow #convs_status,
+AIConversationsScreen.-content-narrow #local_status {
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

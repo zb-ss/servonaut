@@ -47,6 +47,10 @@ async def test_focused_narrow_ovh_keys_keep_account_project_and_actions(
         table.focus()
         table.move_cursor(row=key_count - 1)
         await pilot.pause()
+        actions = screen.query_one("#ovh_ssh_keys_actions")
+        # The action row re-fits for the narrow width before the geometry is read.
+        await wait_until(lambda: 4 <= table.region.height <= 6 and table.region.bottom <= actions.region.y
+                         and all(screen.region.contains_region(b.region) for b in actions.query(Button)))
 
         assert screen.focused is table
         assert "backup" in _painted(app, picker)

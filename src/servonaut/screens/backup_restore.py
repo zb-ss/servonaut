@@ -118,6 +118,7 @@ class BackupRestoreScreen(WorkspaceScreen):
                             ActionRow(
                                 ActionButton("Restore", "r", role="primary", id="btn_bkp_restore"),
                                 ActionButton("Refresh", "F5", id="btn_bkp_refresh"),
+                                keep_hints=True,
                                 id="backups_actions",
                             ),
                             classes="backup-action-panel",
