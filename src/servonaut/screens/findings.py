@@ -52,6 +52,7 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.utils.markup import literal
+from servonaut.utils.table_text import themed_cell
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -155,13 +156,13 @@ def _styled(styles: Dict[str, str], value: str) -> Content:
     return literal(value or "unknown", styles.get(value, ""))
 
 
-def _severity_markup(severity: str, *, cell: bool = False) -> Content:
-    """*severity* in its colour, as literal content (also fit for a table cell)."""
+def _severity_markup(severity: str) -> Content:
+    """*severity* in its colour, as literal content (not for a table cell)."""
     return _styled(_SEVERITY_STYLE, severity)
 
 
-def _status_markup(status: str, *, cell: bool = False) -> Content:
-    """*status* in its colour, as literal content (also fit for a table cell)."""
+def _status_markup(status: str) -> Content:
+    """*status* in its colour, as literal content (not for a table cell)."""
     return _styled(_STATUS_STYLE, status)
 
 
@@ -534,18 +535,21 @@ class FindingsScreen(WorkspaceScreen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = literal(str(finding.get("detector") or ""))
-            title = literal(redact_demo_text(
+            detector = themed_cell(self.app, str(finding.get("detector") or ""))
+            title = themed_cell(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = literal(str(finding.get("detected_at") or ""))
-            row = [_severity_markup(severity, cell=True), _status_markup(status, cell=True)]
+            detected = themed_cell(self.app, str(finding.get("detected_at") or ""))
+            row = [
+                themed_cell(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
+                themed_cell(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
+            ]
             if self._instance is None:
                 instance_id = str(finding.get("instance_id") or "")
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(literal(label))
+                row.append(themed_cell(self.app, label))
             row.extend([detector, title, detected])
             table.add_row(*row)
         self._update_pill()

@@ -11,7 +11,6 @@ from typing import List, Optional, Tuple
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.content import Content
-from textual.events import Click, MouseDown
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.screens._busy_work import BusyWork
@@ -43,6 +42,21 @@ class AmbiguousAddress(ValueError):
     """A shown stand-in address that stands for more than one real address."""
 
 
+class BannedTable(DataTable):
+    """The banned addresses; Enter uses the selected one.
+
+    The table consumes Enter for its own select binding, so the screen's
+    ``enter`` binding never fires while it has focus. A mouse click only moves
+    the cursor and must not overwrite an address being typed, so the key
+    binding runs the screen action instead of reacting to the selected event.
+    """
+
+    BINDINGS = [Binding("enter", "use_selected_ip", "Use IP", show=False)]
+
+    def action_use_selected_ip(self) -> None:
+        self.screen.action_use_selected_ip()
+
+
 class IPBanScreen(WorkspaceScreen):
     """IP Ban Manager: ban/unban IPs via WAF, Security Groups, or NACLs."""
 
@@ -56,8 +70,6 @@ class IPBanScreen(WorkspaceScreen):
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 76
     CONTENT_NARROW_WIDTH = 96
-
-    _pointer_selecting = False
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -142,7 +154,7 @@ class IPBanScreen(WorkspaceScreen):
                                 "Enter uses the selected IP; y copies it.",
                                 classes="ip-ban-help",
                             )
-                            yield DataTable(id="banned_table")
+                            yield BannedTable(id="banned_table")
                             with ActionRow(id="ip_ban_selection_actions"):
                                 yield ActionButton(
                                     "Use selected IP", "enter", short="Use IP", id="ip_ban_use_selected"
@@ -511,27 +523,6 @@ class IPBanScreen(WorkspaceScreen):
         else:
             self.app.copy_to_clipboard(ip)
             self.notify(f"Copied {ip} to clipboard")
-
-    def on_mouse_down(self, event: MouseDown) -> None:
-        self._pointer_selecting = True
-
-    def on_click(self, event: Click) -> None:
-        self._pointer_selecting = False
-
-    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        """Enter on a banned address uses it.
-
-        A focused table consumes Enter for its own select binding, so the
-        screen-level ``enter`` binding never fires there; the table reports
-        the choice as ``CellSelected``. A mouse click reports it too, but it
-        only moves the cursor: it must not overwrite an address being typed.
-        """
-        if event.data_table.id != "banned_table":
-            return
-        event.stop()
-        if self._pointer_selecting:
-            return
-        self.action_use_selected_ip()
 
     def action_use_selected_ip(self) -> None:
         """Copy the selected IP into the input field (bound to its real address)."""

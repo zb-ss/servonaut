@@ -19,6 +19,7 @@ from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.markup import literal as literal_text
+from servonaut.utils.table_text import themed_cell
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.content import Content
@@ -811,7 +812,7 @@ class MemoryScreen(WorkspaceScreen):
             is_stale = module_name in stale_names
 
             if is_stale:
-                age_display = Content.styled(age_display, "$text-warning")
+                age_display = themed_cell(self.app, age_display, "$text-warning")
 
             if not observed:
                 # Show a placeholder row for modules with no observed keys

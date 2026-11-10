@@ -21,6 +21,7 @@ from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.markup import literal
+from servonaut.utils.table_text import themed_cell
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -28,10 +29,10 @@ from servonaut.widgets.dialogs import DialogActions, DialogFrame, DialogNotifica
 
 logger = logging.getLogger(__name__)
 
-_SEVERITY_CELL: Dict[str, Content] = {
-    "high": Content.styled("high", "bold $text-error"),
-    "medium": Content.styled("medium", "$text-warning"),
-    "low": Content.styled("low", "dim"),
+_SEVERITY_STYLE: Dict[str, str] = {
+    "high": "bold $text-error",
+    "medium": "$text-warning",
+    "low": "dim",
 }
 
 
@@ -86,6 +87,8 @@ class DriftDiffScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         instance_id = str(getattr(self._event, "instance_id", "?"))
+        if self.app.demo_mode and self.app.redaction_service:
+            instance_id = self.app.redaction_service.redact_instance_id(instance_id)
         module = str(getattr(self._event, "module", "?"))
         old_hash = str(getattr(self._event, "old_hash", "") or "")[:12]
         new_hash = str(getattr(self._event, "new_hash", "") or "")[:12]
@@ -328,13 +331,13 @@ class MemoryDriftScreen(WorkspaceScreen):
                 raw_instance_id = self.app.redaction_service.redact_instance_id(
                     raw_instance_id
                 )
-            instance_id = literal(raw_instance_id)
-            module = literal(str(getattr(evt, "module", "?")))
+            instance_id = themed_cell(self.app, raw_instance_id)
+            module = themed_cell(self.app, str(getattr(evt, "module", "?")))
             severity = str(getattr(evt, "severity", "low"))
             status = "acknowledged" if getattr(evt, "acknowledged_at", None) else "open"
-            status = literal(status)
+            status = themed_cell(self.app, status)
             detected_at = str(getattr(evt, "detected_at", ""))[:19].replace("T", " ")
-            severity_cell = _SEVERITY_CELL.get(severity) or literal(severity)
+            severity_cell = themed_cell(self.app, severity, _SEVERITY_STYLE.get(severity, ""))
             table.add_row(
                 detected_at,
                 instance_id,
