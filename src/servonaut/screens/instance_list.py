@@ -11,7 +11,7 @@ from textual.content import Content
 from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
-from textual.widgets import Button, Footer, Input, Label, Static, TextArea
+from textual.widgets import Button, Footer, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -21,6 +21,7 @@ from servonaut.screens._fleet_filter import (
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
+from servonaut.widgets.fleet_values import FleetValueLine, FleetValues
 from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.safe_header import SafeHeader
@@ -70,15 +71,6 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
-class InstanceDetail(TextArea):
-    """Selectable server details whose painted rows follow native rewrapping."""
-
-    def on_resize(self) -> None:
-        # TextArea rewraps on Resize, but unchanged wrapped height can leave
-        # the outer paint cache showing rows from the previous width.
-        self.refresh()
-
-
 class FleetChip(Button):
     """A quick-filter chip: one state or provider choice, with its live count."""
 
@@ -91,25 +83,6 @@ class FleetChip(Button):
         self.group = group
         self.value = value
         self.base_label = label
-
-
-def instance_detail_text(instance: dict) -> str:
-    """Full labelled metadata for the fleet's native selectable document."""
-    groups = [
-        [("name", "Name"), ("state", "State"), ("provider", "Provider")],
-        [("public_ip", "Public IP"), ("private_ip", "Private IP")],
-        [("username", "Username"), ("login_user", "Team login"), ("port", "Port")],
-        [("region", "Region"), ("type", "Type"), ("group", "Group")],
-        [("id", "ID"), ("key_name", "Key")],
-    ]
-    if instance.get("account_qualified") and instance.get("account"):
-        groups[0].append(("account", "Account"))
-        groups.append([("account_id", "Account ID")])
-    lines = [
-        "   ".join(f"{label}: {instance[key]}" for key, label in fields if instance.get(key))
-        for fields in groups
-    ]
-    return "\n".join(line for line in lines if line)
 
 
 class InstanceListScreen(WorkspaceScreen):
@@ -162,6 +135,8 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Check that the selected server's SSH key works"),
         Binding("y", "copy_row", "Copy", show=True,
                 tooltip="Copy the selected server's details"),
+        Binding("Y", "copy_value", "Copy value", show=True,
+                tooltip="Pick one value of the selected server to copy"),
     ]
 
     # The screen opens on the fleet table, so the arrow keys and every
@@ -186,6 +161,7 @@ class InstanceListScreen(WorkspaceScreen):
         "refresh",
         "ai_analysis",
         "copy_row",
+        "copy_value",
         "verify_ssh",
         "manage_ssh_ref",
         "fleet_db_scan",
@@ -289,21 +265,16 @@ class InstanceListScreen(WorkspaceScreen):
                         yield self._inspector_button(
                             "All Actions (Enter)", "fleet_btn_actions",
                         )
+                        with Horizontal(id="fleet_values_heading"):
+                            yield Static("Details", id="fleet_values_title", markup=False)
+                            yield self._copy_row_button("fleet_copy_row")
+                        yield FleetValues(id="fleet_values", classes="fleet-values")
                 yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
         with Vertical(id="fleet-bottom"):
-            with Horizontal(id="fleet-detail-toolbar"):
-                yield Static(
-                    "Selected server · Full values · highlight text to copy",
-                    id="fleet-detail-heading", markup=False,
-                )
-                copy_row = Button("Copy row (y)", id="fleet_copy_row", disabled=True)
-                copy_row.can_focus = False
-                yield copy_row
-            yield InstanceDetail(
-                "No server selected", id="instance_detail",
-                read_only=True, soft_wrap=True,
-            )
+            with Horizontal(id="fleet_value_bar"):
+                yield self._copy_row_button("fleet_copy_row_line")
+                yield FleetValueLine(id="fleet_value_line", classes="fleet-values")
             yield StatusBar()
             yield Footer()
 
@@ -324,6 +295,15 @@ class InstanceListScreen(WorkspaceScreen):
             refresh = Button("Refresh (r)", id="fleet_refresh", compact=True)
             refresh.can_focus = False
             yield refresh
+
+    @staticmethod
+    def _copy_row_button(button_id: str) -> Button:
+        """The compact "Copy row" button beside the values (it keeps the Tab order)."""
+        button = Button(
+            "Copy row (y)", id=button_id, classes="fleet-copy-row", disabled=True, compact=True,
+        )
+        button.can_focus = False
+        return button
 
     @staticmethod
     def _inspector_button(
@@ -1188,19 +1168,11 @@ class InstanceListScreen(WorkspaceScreen):
         """Show selected instance metadata in the detail panel and inspector."""
         table = self.query_one(InstanceTable)
         instance = table.get_selected_instance()
-        detail = self.query_one("#instance_detail", TextArea)
-        detail.set_class(not instance, "--empty")
-        self.query_one("#fleet_copy_row", Button).disabled = not instance
+        for copy_row in self.query(".fleet-copy-row"):
+            copy_row.disabled = not instance
+        for values in self.query(".fleet-values"):
+            values.set_instance(instance)
         self._update_inspector_panel(instance)
-
-        if not instance:
-            if detail.text != "No server selected":
-                detail.load_text("No server selected")
-            return
-
-        text = instance_detail_text(instance)
-        if detail.text != text:
-            detail.load_text(text)
 
     def _update_inspector_panel(self, instance: Optional[dict]) -> None:
         """Update the right-hand Selected Server quick-action inspector."""
@@ -1734,7 +1706,7 @@ class InstanceListScreen(WorkspaceScreen):
         elif btn_id == "fleet_refresh":
             event.stop()
             self.action_refresh()
-        elif btn_id == "fleet_copy_row":
+        elif btn_id in ("fleet_copy_row", "fleet_copy_row_line"):
             event.stop()
             self.action_copy_row()
         elif btn_id == "fleet_btn_ssh":
@@ -1761,6 +1733,17 @@ class InstanceListScreen(WorkspaceScreen):
         elif btn_id == "fleet_btn_actions":
             event.stop()
             self.action_select_instance()
+
+    def action_copy_value(self) -> None:
+        """Move onto the selected server's values to copy one of them."""
+        if not self.query_one(InstanceTable).get_selected_instance():
+            self.app.notify("No instance selected", severity="warning")
+            return
+        values = self.query_one(
+            "#fleet_values" if self.query_one("#fleet_inspector").display
+            else "#fleet_value_line",
+        )
+        values.begin_walk()
 
     def action_copy_row(self) -> None:
         """Copy full selected instance row data to clipboard."""
