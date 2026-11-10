@@ -24,6 +24,8 @@ from servonaut.widgets.safe_header import SafeHeader
 
 pytestmark = pytest.mark.asyncio
 
+from servonaut.widgets.workspace.state import WorkspaceState
+
 ROW: Dict[str, Any] = {"id": "i-abc123", "name": "web-1", "provider": "aws"}
 SHARED_ROW: Dict[str, Any] = {
     "id": "share-1", "name": "web-2", "provider": "Team Team A", "is_shared": True,
@@ -58,6 +60,13 @@ def _host(
         shared_memory_reader = reader
         demo_mode = demo
         instances = [dict(row)]
+
+        def __init__(self) -> None:
+            super().__init__()
+            # The user pressed "Show navigation" in the narrow width class.
+            self.workspace_state = WorkspaceState(
+                navigation_visible=True, navigation_choice_class="narrow",
+            )
 
         def compose(self) -> ComposeResult:
             yield SafeHeader()

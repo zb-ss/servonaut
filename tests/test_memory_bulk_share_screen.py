@@ -24,7 +24,9 @@ from tests._bulk_share_fakes import (
     team_memory_service,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("navigation_open")]
+from servonaut.widgets.workspace.state import WorkspaceState
+
+pytestmark = pytest.mark.asyncio
 
 TARGETS = [
     ShareTarget("web-1", "web-1"),
@@ -51,6 +53,10 @@ class _Host(App):
             self.redaction_service.scrub_stream = lambda t: t
         self.notes: List[str] = []
         self.result: Optional[bool] = None
+        # The user pressed "Show navigation" in the narrow width class.
+        self.workspace_state = WorkspaceState(
+            navigation_visible=True, navigation_choice_class="narrow",
+        )
 
     def on_mount(self) -> None:
         self.push_screen(BulkShareScreen(self._targets), self._bulk_form_closed)
