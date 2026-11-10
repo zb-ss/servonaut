@@ -22,6 +22,7 @@ from textual.containers import Container, Grid, Horizontal, Vertical
 from textual.content import Content
 from textual.message import Message
 from textual.theme import Theme
+from textual.widget import Widget
 from textual.widgets import Button, Static
 
 from servonaut.config.paths import tildify
@@ -59,8 +60,10 @@ MAX_CARD_COLUMNS = 3
 SIDE_DETAILS_MIN_WIDTH = 110
 # Below this panel width the three action buttons drop their borders to fit one row.
 COMPACT_ACTIONS_MAX_WIDTH = 64
-DETAILS_WIDTH = 44
-SWATCH_CELLS = 3
+DETAILS_WIDTH = 36
+# At this panel width the title, hint and the three buttons share one row.
+HEADER_ROW_MIN_WIDTH = 120
+SWATCH_MIN_CELLS = 2
 _SWATCH_ROLES = ("background", "surface", "panel", "primary", "accent", "warning", "error", "success")
 _ANSI_SWATCHES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 
@@ -81,9 +84,24 @@ def _swatch_fills(theme: Theme) -> List[str]:
     return [colours[role].hex for role in _SWATCH_ROLES]
 
 
-def swatch_strip(theme: Theme) -> Content:
-    """The theme's main colours side by side."""
-    return Content.assemble(*[(" " * SWATCH_CELLS, f"on {fill}") for fill in _swatch_fills(theme)])
+def swatch_strip(theme: Theme, width: int) -> Content:
+    """The theme's main colours side by side, spread over *width* cells."""
+    fills = _swatch_fills(theme)
+    base, extra = divmod(max(width, SWATCH_MIN_CELLS * len(fills)), len(fills))
+    return Content.assemble(*[
+        (" " * (base + (1 if index < extra else 0)), f"on {fill}") for index, fill in enumerate(fills)
+    ])
+
+
+class SwatchStrip(Static):
+    """The swatches, redrawn to span whatever width the card has."""
+
+    def __init__(self, theme: Theme) -> None:
+        super().__init__(classes="theme-card-swatches")
+        self._theme = theme
+
+    def render(self) -> Content:
+        return swatch_strip(self._theme, self.content_size.width)
 
 
 def _suggest_name(active: str, taken: frozenset[str]) -> str:
@@ -128,17 +146,26 @@ class ThemeCard(Vertical):
             self.name = name
 
     def __init__(self, info: ThemeInfo, is_active: bool, warning: Optional[Reading]) -> None:
-        super().__init__(id=f"theme_card_{info.name}", classes="theme-card -active" if is_active else "theme-card")
+        classes = ["theme-card"]
+        if is_active:
+            classes.append("-active")
+        if warning is not None:
+            classes.append("-warning")
+        super().__init__(id=f"theme_card_{info.name}", classes=" ".join(classes))
         self.theme_name = info.name
         self._info = info
         self._warning = warning
 
     def compose(self) -> ComposeResult:
         yield Static(self._title(), classes="theme-card-title")
-        yield Static(swatch_strip(self._info.theme), classes="theme-card-swatches")
-        yield Static(self._detail(), classes="theme-card-detail")
-        if self._info.path is not None and _can_edit(self._info.path):
-            yield EditFileButton(self._info.path)
+        yield SwatchStrip(self._info.theme)
+        editable = self._info.path is not None and _can_edit(self._info.path)
+        with Horizontal(classes="theme-card-path"):
+            yield Static(self._detail(), classes="theme-card-detail")
+            if editable:
+                yield EditFileButton(self._info.path)
+        if self._warning is not None:
+            yield Static(Content.assemble((_warning_text(self._warning), "$text-warning")), classes="theme-card-warning")
 
     def set_active(self, is_active: bool) -> None:
         self.set_class(is_active, "-active")
@@ -156,10 +183,7 @@ class ThemeCard(Vertical):
     def _detail(self) -> Content:
         info = self._info
         if info.source == SOURCE_USER and info.path is not None:
-            location = Content(tildify(str(info.path)))
-            if self._warning is None:
-                return location
-            return Content.assemble(location, "\n", (_warning_text(self._warning), "$text-warning"))
+            return Content(tildify(str(info.path)))
         kind = "follows your terminal" if info.theme.ansi else ("dark" if info.theme.dark else "light")
         return Content(f"Built in · {kind}")
 
@@ -201,10 +225,10 @@ def _can_edit(path: Path) -> bool:
 
 
 class EditFileButton(Button):
-    """Opens the theme file for editing."""
+    """Opens the theme file for editing; one row, so it sits on the path line."""
 
     def __init__(self, path: Path) -> None:
-        super().__init__("Edit file", classes="theme-edit-file")
+        super().__init__("Edit file", classes="theme-edit-file", compact=True)
         self.path = path
 
 
@@ -240,7 +264,9 @@ class ThemeErrorCard(Vertical):
             classes="theme-card-detail",
         )
         if _can_edit(self._path):
-            yield EditFileButton(self._path)
+            with Horizontal(classes="theme-card-path"):
+                yield Static(Content(tildify(str(self._path))), classes="theme-card-detail")
+                yield EditFileButton(self._path)
         elif self._path.is_symlink():
             yield Static("This file is a link, so it cannot be opened from here.", classes="theme-card-detail")
 
@@ -251,6 +277,10 @@ class AppearancePanel(SettingsPanel):
     PANEL_ID = "appearance"
     TITLE = "Appearance"
     DESCRIPTION = "Applies at once and is saved to your config."
+    READABILITY_NOTE = (
+        "Themes set the core colours plus optional extras (borders, cursor, terminal palette for "
+        "command output). Check a theme file from the shell with: servonaut theme check <file>"
+    )
 
     BINDINGS = [
         Binding("n", "new_theme", "New from current", show=True),
@@ -267,23 +297,22 @@ class AppearancePanel(SettingsPanel):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        """The title, then the cards and the preview; there is nothing to save."""
-        with Vertical(classes="panel-context"):
-            yield Static(escape(self.TITLE), classes="panel-title")
-            yield Static(self.DESCRIPTION, classes="panel-description", markup=False)
+        """The title row, then the cards and the preview; there is nothing to save."""
         yield from self.form_rows()
         yield Static("", id=f"status_{self.PANEL_ID}", classes="panel-status")
 
     def form_rows(self) -> ComposeResult:
-        with Horizontal(id="appearance_actions"):
-            for button_id, (label, _short) in _ACTION_LABELS.items():
-                yield Button(
-                    label, id=button_id, tooltip=label,
-                    variant="primary" if button_id == "appearance_new" else "default",
-                )
-        yield Static("", id="appearance_folder", markup=False)
+        with Horizontal(id="appearance_header", classes="-wide"):
+            with Vertical(id="appearance_heading"):
+                yield Static(escape(self.TITLE), classes="panel-title")
+                yield Static(self._hint(), id="appearance_description", classes="panel-description", markup=False)
+            with Horizontal(id="appearance_actions"):
+                for button_id, (label, _short) in _ACTION_LABELS.items():
+                    yield Button(
+                        label, id=button_id, tooltip=label,
+                        variant="primary" if button_id == "appearance_new" else "default",
+                    )
         yield BusyIndicator(id="appearance_busy")
-        yield Static("", id="appearance_verdict", markup=False)
         with Container(id="appearance_layout", classes="-stacked"):
             yield Grid(id="appearance_cards", classes="-cols-1")
             with Vertical(id="appearance_details"):
@@ -293,11 +322,14 @@ class AppearancePanel(SettingsPanel):
                 with Vertical(classes="appearance-section"):
                     yield Static("", id="appearance_readability_title", classes="appearance-section-title", markup=False)
                     yield Static("", id="appearance_readability")
-                    yield Static(
-                        "Check a theme file from the shell with: servonaut theme check <file>",
-                        id="appearance_hint",
-                        markup=False,
-                    )
+                    yield Static(self.READABILITY_NOTE, id="appearance_hint", markup=False)
+
+    def _hint(self) -> str:
+        """What the panel does and where themes live, plus any problem with the folder itself."""
+        notes = [f"{self.DESCRIPTION} Your themes live in {tildify(str(themes_dir()))}."]
+        errors = getattr(self.app, "user_theme_errors", [])
+        notes += [e.message for e in errors if not e.file.endswith(THEME_FILE_SUFFIX)]
+        return "\n".join(notes)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -325,6 +357,8 @@ class AppearancePanel(SettingsPanel):
         layout.set_class(wide, "-side")
         layout.set_class(not wide, "-stacked")
         self._fit_actions(event.size.width < COMPACT_ACTIONS_MAX_WIDTH)
+        header = self.query_one("#appearance_header", Horizontal)
+        header.set_class(event.size.width >= HEADER_ROW_MIN_WIDTH, "-wide")
         cards_width = event.size.width - (DETAILS_WIDTH + 2 if wide else 0)
         columns = max(1, min(MAX_CARD_COLUMNS, cards_width // CARD_MIN_WIDTH))
         grid = self.query_one("#appearance_cards", Grid)
@@ -337,22 +371,26 @@ class AppearancePanel(SettingsPanel):
         return next((n for n in range(MAX_CARD_COLUMNS, 0, -1) if grid.has_class(f"-cols-{n}")), 1)
 
     def move_card_focus(self, current: "ThemeCard", direction: str) -> None:
-        """Focus the card *direction* of *current*; the first and last cards are the edges."""
-        cards = list(self.query(ThemeCard))
-        if current not in cards:
+        """Focus the card *direction* of *current*, following the grid's rows and columns.
+
+        Cards that cannot take focus (a file that failed to load) keep their place in the
+        grid, so a move steps over them.
+        """
+        slots = list(self.query_one("#appearance_cards", Grid).children)
+        focusable = [i for i, slot in enumerate(slots) if isinstance(slot, ThemeCard)]
+        if current not in slots or not focusable:
             return
-        index, columns = cards.index(current), self.card_columns
-        target = {
-            "left": index - 1,
-            "right": index + 1,
-            "up": index - columns,
-            "down": index + columns,
-            "first": 0,
-            "last": len(cards) - 1,
-        }[direction]
-        if 0 <= target < len(cards) and target != index:
-            cards[target].focus()
-            cards[target].scroll_visible()
+        index, columns = slots.index(current), self.card_columns
+        if direction in ("first", "last"):
+            target = focusable[0] if direction == "first" else focusable[-1]
+        else:
+            step = {"left": -1, "right": 1, "up": -columns, "down": columns}[direction]
+            target = index + step
+            while 0 <= target < len(slots) and not isinstance(slots[target], ThemeCard):
+                target += step
+        if 0 <= target < len(slots) and target != index:
+            slots[target].focus()
+            slots[target].scroll_visible()
 
     def _fit_actions(self, compact: bool) -> None:
         """Borderless buttons with short labels when the panel is too narrow for three."""
@@ -367,28 +405,32 @@ class AppearancePanel(SettingsPanel):
 
     async def _rebuild_cards(self) -> None:
         app = self.app
-        infos = describe_themes(app.available_themes, app.user_themes)
-        cards: List[object] = [
-            ThemeCard(
+        cards = self._ordered_cards(describe_themes(app.available_themes, app.user_themes))
+        grid = self.query_one("#appearance_cards", Grid)
+        await grid.remove_children()
+        await grid.mount_all(cards)
+        for description in self.query("#appearance_description"):  # none once the panel is closing
+            description.update(self._hint())
+        self._show_details(self._previewed or app.theme)
+
+    def _ordered_cards(self, infos: List[ThemeInfo]) -> List[Widget]:
+        """The active theme, yours, the files that did not load, then the built-in themes."""
+        app = self.app
+        cards = {
+            info.name: ThemeCard(
                 info,
                 is_active=info.name == app.theme,
                 warning=worst_reading(info.theme) if info.source == SOURCE_USER else None,
             )
             for info in infos
+        }
+        active = [cards[name] for name in cards if name == app.theme]
+        yours = [cards[i.name] for i in infos if i.source == SOURCE_USER and i.name != app.theme]
+        broken = [
+            ThemeErrorCard(errors, themes_dir() / errors[0].file) for errors in errors_by_file(app.user_theme_errors).values()
         ]
-        folder = themes_dir()
-        cards += [ThemeErrorCard(errors, folder / errors[0].file) for errors in errors_by_file(app.user_theme_errors).values()]
-        grid = self.query_one("#appearance_cards", Grid)
-        await grid.remove_children()
-        await grid.mount_all(cards)
-        self._show_folder_note()
-        self._show_details(self._previewed or app.theme)
-
-    def _show_folder_note(self) -> None:
-        """Where themes live, plus any problem with the folder itself."""
-        notes = [f"Your themes live in {tildify(str(themes_dir()))}"]
-        notes += [e.message for e in self.app.user_theme_errors if not e.file.endswith(THEME_FILE_SUFFIX)]
-        self.query_one("#appearance_folder", Static).update(Content("\n".join(notes)))
+        built_in = [cards[i.name] for i in infos if i.source != SOURCE_USER and i.name != app.theme]
+        return [*active, *yours, *broken, *built_in]
 
     def _follow_app_theme(self, theme: Theme) -> None:
         """Show a theme picked elsewhere (Ctrl+P) as the active one."""
@@ -422,7 +464,6 @@ class AppearancePanel(SettingsPanel):
         self.query_one("#appearance_readability_title", Static).update(literal(f"Readability · {label}"))
         preview = self.query_one("#appearance_preview", Static)
         readability = self.query_one("#appearance_readability", Static)
-        self.query_one("#appearance_verdict", Static).update(_verdict_line(label, theme))
         if theme.ansi:
             preview.styles.background = None
             preview.update("This theme uses your terminal's own colours, so it has no fixed preview.")
@@ -535,14 +576,25 @@ class AppearancePanel(SettingsPanel):
             )
 
 
-def _verdict_line(label: str, theme: Theme) -> Content:
-    """One line: whether the theme reads well, kept near the actions so it is always in view."""
-    if theme.ansi:
-        return literal(f"{label}: uses your terminal's colours; contrast depends on the terminal")
-    worst = worst_reading(theme)
-    if worst is None:
-        return Content.assemble(("✓", "$text-success"), f" {label}: every text colour reads well")
-    return Content.assemble(("⚠", "$text-warning"), f" {label}: {_shortfall(worst)}")
+def _outlined_button(label: str, colour: Color, fill: Color, bold: bool) -> List[tuple]:
+    """A rounded outline around *label*, as three (text, style) lines."""
+    style = f"{'bold ' if bold else ''}{colour.hex} on {fill.hex}"
+    width = len(label) + 2
+    return [
+        ("╭" + "─" * width + "╮", style),
+        (f"│ {label} │", style),
+        ("╰" + "─" * width + "╯", style),
+    ]
+
+
+def _join_with_gap(parts: tuple) -> List[object]:
+    """One line of each button, one cell apart."""
+    joined: List[object] = []
+    for index, part in enumerate(parts):
+        if index:
+            joined.append(" ")
+        joined.append(part)
+    return joined
 
 
 def _preview_content(theme: Theme) -> Content:
@@ -556,23 +608,23 @@ def _preview_content(theme: Theme) -> Content:
     def paint(value: str, foreground: Color, fill: Color, bold: bool = False) -> tuple:
         return (value, f"{'bold ' if bold else ''}{foreground.hex} on {fill.hex}")
 
+    def table_row(name: str, state: str, state_colour: Color, fill: Color) -> Content:
+        return Content.assemble(
+            paint(f" {name:<9} ", text, fill), paint(f"{state:<8} ", state_colour, fill), paint(f"{'AWS':<9}", text, fill),
+        )
+
+    def button_row(*buttons: tuple) -> List[Content]:
+        """Outlined buttons side by side: three lines, each button's outline in its role colour."""
+        boxes = [_outlined_button(label, colour, background, bold) for label, colour, bold in buttons]
+        return [Content.assemble(*_join_with_gap(line_parts)) for line_parts in zip(*boxes)]
+
     return Content("\n").join([
-        Content.assemble(
-            paint(" Connect ", on_primary, colours["primary"], True), " ",
-            paint(" Files ", text, panel), " ",
-            paint(" Ban IP… ", colours["warning"], surface), " ",
-            paint(" Stop… ", colours["error"], surface),
-        ),
+        *button_row(("SSH connect", colours["primary"], True), ("Browse files", muted, False)),
+        *button_row(("Ban IP…", colours["warning"], False), ("Terminate…", colours["error"], False)),
         Content(""),
-        Content.assemble(paint(" Name        State     Provider ", on_primary, colours["primary"], True)),
-        Content.assemble(
-            paint(" app-1       ", text, surface), paint("running", colours["success"], surface),
-            paint("   AWS      ", text, surface),
-        ),
-        Content.assemble(
-            paint(" db-1        ", text, panel), paint("stopped", colours["error"], panel),
-            paint("   AWS      ", text, panel),
-        ),
+        Content.assemble(paint(f" {'Name':<9} {'State':<8} {'Provider':<9}", on_primary, colours["primary"], True)),
+        table_row("app-1", "running", colours["success"], surface),
+        table_row("db-1", "stopped", colours["error"], panel),
         Content(""),
-        Content.assemble(paint(" Search servers…              ", muted, surface)),
+        Content.assemble(paint(f" {'Search servers…':<28}", muted, surface)),
     ])
