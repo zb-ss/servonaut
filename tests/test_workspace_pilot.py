@@ -19,6 +19,7 @@ from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.screens.server_actions import ServerActionsScreen
 from servonaut.widgets.chat_panel import ChatPanel
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
@@ -107,14 +108,13 @@ async def test_navigation_toggle_reclaims_width_without_changing_content(size: t
         old_width = table.region.width
         old_row = table.cursor_row
         sidebar_width = screen.query_one(Sidebar).region.width
-        details = screen.query_one("#instance_detail", TextArea)
-        original_text = details.text
+        values = [row.value for row in screen.query(ValueRow)]
         await _click(pilot, "#workspace_navigation")
         await pilot.pause()
         assert not screen.query_one(Sidebar).display
         assert table.region.width == old_width + sidebar_width
         assert table.cursor_row == old_row
-        assert details.text == original_text
+        assert [row.value for row in screen.query(ValueRow)] == values
         assert app.focused is table
         _assert_controls_clickable(app)
         await _click(pilot, "#workspace_navigation")
@@ -341,13 +341,13 @@ async def test_chat_overlay_keeps_controls_and_text_selection_usable(
     app = _Host(navigation_visible=visible)
     async with app.run_test(size=(100, 30)) as pilot:
         screen = app.screen
-        detail = screen.query_one("#instance_detail", TextArea)
-        detail.load_text("Name: web-1\nFull value: example-server-with-a-long-identifier")
-        detail.focus()
+        search = screen.query_one("#search_input", Input)
+        search.value = "Name: web-1"
+        search.focus()
         await pilot.press("f6")
-        assert detail.selected_text == "Name: web-1"
+        assert search.selected_text == "Name: web-1"
         await pilot.press("f7")
-        assert detail.selected_text == detail.text
+        assert search.selected_text == search.value
         await _click(pilot, "#workspace_chat")
         await pilot.pause()
         panel = screen.query_one(ChatPanel)
@@ -368,11 +368,6 @@ async def test_chat_overlay_keeps_controls_and_text_selection_usable(
         await pilot.pause()
         assert composer.text == "An unsent draft\nSecond line"
         assert app.focused is composer
-        detail.focus()
-        app.copy_to_clipboard = Mock()
-        await pilot.press("f7", "ctrl+c")
-        assert detail.selected_text == detail.text
-        app.copy_to_clipboard.assert_called_once_with(detail.text)
         await _click(pilot, "#workspace_chat")
         await pilot.pause()
         assert screen.query_one(ChatPanel)._collapsed
@@ -437,7 +432,7 @@ async def test_suspend_navigation_preserves_origin_and_modal_focus(
         if pilot_screen == "actions":
             await pilot.press("o")
         content_screen = app.screen
-        origin = (content_screen.query_one("#instance_detail", TextArea)
+        origin = (content_screen.query_one("#search_input", Input)
                   if pilot_screen == "fleet"
                   else content_screen.query_one("#btn_browse", Button))
         origin.focus()
@@ -510,7 +505,7 @@ async def test_palette_selection_toggles_navigation_after_returning_to_content()
     app = _Host()
     async with app.run_test(size=(100, 30)) as pilot:
         fleet = app.screen
-        origin = fleet.query_one("#instance_detail", TextArea)
+        origin = fleet.query_one("#search_input", Input)
         origin.focus()
         for expected_visible in (False, True):
             await pilot.press("ctrl+p", *"Toggle navigation")

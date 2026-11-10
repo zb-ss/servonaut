@@ -13,6 +13,7 @@ from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import AppConfig
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.settings.shell import SettingsScreen
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.services.chat_service import ChatMessage, ChatSession
 from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
@@ -97,13 +98,13 @@ async def test_ansi_settings_covers_prior_fleet_but_confirmation_stays_transpare
     tmp_path: Path, theme: str, size: tuple[int, int],
 ) -> None:
     app = _host(tmp_path, theme)
-    # All four native detail rows are beneath Settings' unused bottom band.
-    sentinel = "PRIOR-FLEET-DETAIL-ONLY"
+    # The selected server's values are beneath Settings' unused bottom band.
+    sentinel = "PRIOR-FLEET"
     async with app.run_test(size=size) as pilot:
         fleet = app.screen
-        fleet.query_one("#instance_detail", TextArea).load_text(
-            "\n".join([sentinel] * 4),
-        )
+        for row in fleet.query(ValueRow):
+            if row.field == "name":
+                row.set_value(sentinel)
         await pilot.pause()
         assert sentinel in _native_frame(app, tmp_path / "fleet.svg")
         await app.push_screen(SettingsScreen("general"))

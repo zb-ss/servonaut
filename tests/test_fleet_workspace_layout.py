@@ -23,6 +23,7 @@ from servonaut.screens.scan_results import ScanResultsScreen
 from servonaut.screens.server_actions import ServerActionsScreen
 from servonaut.services.chat_service import ChatMessage, ChatSession
 from servonaut.widgets.chat_panel import ChatPanel
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.status_bar import StatusBar
@@ -68,16 +69,18 @@ async def _open_chat(app: _LayoutHost, pilot: Pilot) -> ChatPanel:
     return panel
 
 
-def _assert_strip_painted(app: _LayoutHost, detail: TextArea) -> str:
-    assert detail.region.x == 0 and detail.region.width == app.size.width
-    assert detail.region.height == 4
-    for x in (1, app.size.width // 2, app.size.width - 2):
-        widget = app.get_widget_at(x, detail.region.y + 1)[0]
-        assert widget is detail or detail in widget.ancestors
+def _assert_values_painted(app: _LayoutHost) -> str:
+    """The one-line values under the table are laid out, hit-testable and painted."""
+    bar = app.screen.query_one("#fleet_value_bar")
+    assert bar.display and bar.region.x == 0 and bar.region.width == app.size.width
+    assert 1 <= bar.region.height <= 2
+    value = app.screen.query_one("#fleet_value_line_public_ip", ValueRow)
+    assert value.region.width > 0
+    assert app.get_widget_at(*value.region.center)[0] is value
     rows = app.screen._compositor.render_strips()
     return "".join(
-        rows[y].crop(detail.region.x, detail.region.right).text
-        for y in range(detail.region.y, detail.region.bottom)
+        rows[y].crop(bar.region.x, bar.region.right).text
+        for y in range(bar.region.y, bar.region.bottom)
     )
 
 
@@ -140,11 +143,11 @@ async def test_wide_chat_has_its_own_nonoverlapping_column(
         assert _control_regions(screen) == controls
         assert screen.query_one(Sidebar).display is navigation_visible
         if pilot_screen == "fleet":
-            detail = screen.query_one("#instance_detail", TextArea)
-            assert "Public IP" in _assert_strip_painted(app, detail)
+            bar = screen.query_one("#fleet_value_bar")
+            assert app.instances[0]["public_ip"] in _assert_values_painted(app)
             status, footer = screen.query_one(StatusBar), screen.query_one(Footer)
-            assert panel.region.bottom <= detail.region.y
-            assert detail.region.bottom <= status.region.y
+            assert panel.region.bottom <= bar.region.y
+            assert bar.region.bottom <= status.region.y
             assert status.region.bottom <= footer.region.y
         await pilot.press("f2")
         await pilot.pause()
@@ -178,62 +181,37 @@ async def test_narrow_chat_replaces_mounted_content_and_keeps_requested_navigati
             button = screen.query_one(f"#{name}", Button)
             assert app.get_widget_at(*button.region.center)[0] is button
         if pilot_screen == "fleet":
-            _assert_strip_painted(app, screen.query_one("#instance_detail", TextArea))
+            _assert_values_painted(app)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
-async def test_pointer_copy_reaches_complete_wrapped_unicode_value_with_chat_open(
+async def test_click_copies_the_complete_unicode_value_with_chat_open(
     size: tuple, clipboard: _Clipboard,
 ) -> None:
     app = _LayoutHost()
-    # Exceed both supported strip widths so the ID genuinely soft-wraps.
+    # Longer than any cell of the value line, so the painted value is cut.
     identifier = "id-" + "a" * 172 + "-Ω"
     app.instances = [_row("edge-café-東京-[literal]-" + "n" * 30)]
     app.instances[0]["id"] = identifier
     async with app.run_test(size=size) as pilot:
         panel = await _open_chat(app, pilot)
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        _assert_strip_painted(app, detail)
-        # Reveal the wrapped ID through native input before the actual drag.
-        offset = detail.content_region.offset - detail.region.offset
-        assert await pilot.click(detail, offset=(offset.x, offset.y))
-        await pilot.press("pagedown")
-        await wait_until(lambda: detail.wrapped_document._width == detail.wrap_width)
-        painted = _assert_strip_painted(app, detail)
-        assert identifier in "".join(painted.split())
+        _assert_values_painted(app)
         composer = panel.query_one("#chat-input", TextArea)
         composer.load_text("An unrelated old selection")
-        stale = Selection((0, 0), (0, 9))
-        composer.selection = stale
-        start = detail.text.index(identifier)
-        start_location = detail.document.get_location_from_index(start)
-        end_location = detail.document.get_location_from_index(start + len(identifier))
-        a = detail.wrapped_document.location_to_offset(start_location)
-        b = detail.wrapped_document.location_to_offset(end_location)
-        assert start_location[0] == end_location[0] and b.y > a.y
-        a, b = a - detail.scroll_offset, b - detail.scroll_offset
-        for point in (a, b):
-            assert 0 <= point.x < detail.content_size.width
-            assert 0 <= point.y < detail.content_size.height
-            hit = app.get_widget_at(
-                detail.content_region.x + point.x, detail.content_region.y + point.y,
-            )[0]
-            assert hit is detail or detail in hit.ancestors
-        assert composer.selection == stale
-        assert composer.selected_text == composer.text[:9]
-        assert composer.selected_text and composer.selected_text != identifier
-        assert app.focused is detail
+        composer.selection = Selection((0, 0), (0, 9))
+        row = app.screen.query_one("#fleet_value_line_id", ValueRow)
+        assert row.value == identifier
         clipboard.calls.clear()
-        await _drag(pilot, detail, (a.x, a.y), (b.x, b.y))
-        assert detail.selected_text == identifier
+        assert await pilot.click(row)
+        await pilot.pause()
         assert clipboard.calls == [identifier]
-        assert app.screen.query_one(ChatPanel) is panel and app.focused is detail
+        assert app.screen.query_one(ChatPanel) is panel
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("empty", ["fleet", "filter"])
-async def test_empty_selection_has_fixed_strip_height_and_no_stale_value(
+async def test_empty_selection_shows_no_stale_value(
     empty: str, clipboard: _Clipboard,
 ) -> None:
     app = _LayoutHost()
@@ -241,19 +219,18 @@ async def test_empty_selection_has_fixed_strip_height_and_no_stale_value(
         app.instances = []
     async with app.run_test(size=(100, 30)) as pilot:
         panel = await _open_chat(app, pilot)
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        region = detail.region
         if empty == "filter":
             app.screen.query_one("#search_input", Input).value = "no-such-server"
             await wait_until(lambda: app.screen.query_one(InstanceTable).row_count == 0)
         await pilot.pause()
-        assert detail.text == "No server selected"
-        assert "No server selected" in _assert_strip_painted(app, detail)
-        assert detail.region == region and panel.is_attached
+        screen = app.screen
+        assert not any(row.display for row in screen.query(ValueRow))
+        assert screen.query_one("#fleet_copy_row_line", Button).disabled
         clipboard.calls.clear()
-        assert await pilot.click(detail, offset=(2, 1))
+        await pilot.press("Y")
         await pilot.pause()
-        assert clipboard.calls == [] and detail.selected_text == ""
+        assert clipboard.calls == [] and not isinstance(app.focused, ValueRow)
+        assert panel.is_attached
 
 
 @pytest.mark.asyncio
@@ -394,13 +371,13 @@ async def test_resize_and_push_pop_keep_documents_cursor_filters_and_owned_worke
         search.value = "web"
         await wait_until(lambda: table.row_count == 1)
         table.focus()
-        detail = fleet.query_one("#instance_detail", TextArea)
+        values = fleet.query_one("#fleet_values")
         panel = await _open_chat(app, pilot)
         composer = panel.query_one("#chat-input", TextArea)
         composer.load_text("Keep this unsent draft")
         composer.selection = Selection((0, 5), (0, 9))
         composer_selection = composer.selection
-        composer_document, detail_document = composer.document, detail.document
+        composer_document, values_before = composer.document, [row.value for row in values.query(ValueRow)]
         row = table.cursor_row
         panel.run_worker(held_turn(), group="ai_chat")
         await wait_until(started.is_set)
@@ -421,7 +398,7 @@ async def test_resize_and_push_pop_keep_documents_cursor_filters_and_owned_worke
         assert fleet.query_one(ChatPanel) is panel and not cancelled.is_set()
         assert composer.document is composer_document and composer.text == "Keep this unsent draft"
         assert composer.selection == composer_selection
-        assert detail.document is detail_document
+        assert [row.value for row in values.query(ValueRow)] == values_before
         assert table.cursor_row == row and search.value == "web"
         app.action_end_chat()
         await wait_until(lambda: cancelled.is_set() and not panel.is_attached)

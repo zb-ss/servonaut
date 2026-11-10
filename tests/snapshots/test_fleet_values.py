@@ -45,6 +45,23 @@ def clipboard() -> Iterator[_Clipboard]:
         platform_utils.set_clipboard_writer(previous)
 
 
+def test_values_keep_full_literal_text_and_the_account_fields_only_when_qualified() -> None:
+    row = {
+        "name": "web-[b]東京[/b]-" + "x" * 140, "id": "server-full-id",
+        "provider": "custom", "state": "running", "type": "small",
+        "public_ip": "1.2.3.4", "private_ip": "10.0.0.1",
+        "username": "deploy", "port": 2200, "region": "local",
+        "group": "example", "key_name": "full-key-name", "login_user": "team-user",
+        "account": "personal", "account_id": "account-full-id",
+    }
+    values = fleet_values.instance_values(row)
+    assert "account" not in values and "account_id" not in values
+    assert values["name"] == row["name"] and values["port"] == "2200"
+    qualified = fleet_values.instance_values({**row, "account_qualified": True})
+    assert qualified["account"] == "personal" and qualified["account_id"] == "account-full-id"
+    assert fleet_values.instance_values(None) == {} and fleet_values.instance_values({"name": ""}) == {}
+
+
 def _run(scenario: Scenario, size: str = "160x50", *, demo: bool = False) -> None:
     async def main() -> None:
         app = _harness.SnapshotApp(demo=demo)
@@ -133,7 +150,8 @@ def test_y_then_arrows_and_enter_copy_the_chosen_value(clipboard: _Clipboard, si
 @sizes
 def test_the_values_are_not_in_the_tab_chain(size: str) -> None:
     async def scenario(pilot: Any) -> None:
-        assert not any(isinstance(w, ValueRow) for w in pilot.app.screen.focus_chain)
+        chain = pilot.app.screen.focus_chain
+        assert not any(isinstance(w, (ValueRow, FleetValues, FleetValueLine)) for w in chain)
 
     _run(scenario, size)
 

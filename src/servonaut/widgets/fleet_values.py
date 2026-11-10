@@ -12,6 +12,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from servonaut.utils.markup import literal
+from servonaut.widgets.instance_table import InstanceTable
 
 # How long a copied value shows its confirmation in place of itself (seconds).
 COPIED_SECONDS = 1.5
@@ -92,6 +93,13 @@ class ValueRow(Static):
         else:
             self.update(Content.assemble(literal(self.label, "dim"), "\n", literal(self.value)))
 
+    def on_mouse_down(self) -> None:
+        # Taking the focus, as any clicked field does, keeps another editor's
+        # old selection (the chat composer's) from being copied when this
+        # click is released; arrow keys then continue from this value.
+        self.parent.walking = True
+        self.focus()
+
     def on_click(self, event: Click) -> None:
         # A drag that selects part of the value already copies just that part.
         if self.screen.get_selected_text():
@@ -133,6 +141,7 @@ class _ValueWalker:
 
     compact = False
     walking = False
+    can_focus = False
 
     def compose(self) -> ComposeResult:
         for key, label in VALUE_FIELDS:
@@ -176,8 +185,6 @@ class _ValueWalker:
 
     def leave(self) -> None:
         """End the walk and hand the focus back to the fleet table."""
-        from servonaut.widgets.instance_table import InstanceTable
-
         self.walking = False
         self.screen.query_one(InstanceTable).focus()
 

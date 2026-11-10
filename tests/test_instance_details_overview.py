@@ -8,29 +8,11 @@ from textual.content import Content
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Static, TextArea, Tree
 
-from servonaut.screens.instance_list import instance_detail_text
 from servonaut.screens.server_actions import ServerActionsScreen
 from servonaut.widgets.chat_panel import ChatPanel
+from servonaut.widgets.fleet_values import ValueRow
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import _LayoutHost
-
-
-def test_fleet_document_retains_full_literal_values_in_labelled_lines() -> None:
-    row = {
-        "name": "web-[b]東京[/b]-" + "x" * 140, "id": "server-full-id",
-        "provider": "custom", "state": "running", "type": "small",
-        "public_ip": "192.0.2.10", "private_ip": "10.0.0.1",
-        "username": "deploy", "port": 2200, "region": "local",
-        "group": "example", "key_name": "full-key-name",
-        "account_qualified": True, "account": "personal", "account_id": "account-full-id",
-    }
-    document = instance_detail_text(row)
-    assert "  |  " not in document
-    assert len(document.splitlines()) >= 5
-    for key, value in row.items():
-        if key != "account_qualified":
-            assert str(value) in document
-    assert "Username: deploy   Port: 2200" in document
 
 
 @pytest.mark.parametrize("extra, identity_value, network_value", [
@@ -129,7 +111,7 @@ async def test_failed_files_open_keeps_overview_and_selected_document(monkeypatc
     monkeypatch.setattr("servonaut.screens.file_browser.build_remote_tree", fail_tree)
     app = _LayoutHost()
     async with app.run_test(size=(100, 30)) as pilot:
-        document = app.screen.query_one("#instance_detail", TextArea).document
+        values = [row.value for row in app.screen.query(ValueRow)]
         await app.push_screen(ServerActionsScreen(app.instances[0]))
         await pilot.pause()
         screen = app.screen
@@ -140,7 +122,7 @@ async def test_failed_files_open_keeps_overview_and_selected_document(monkeypatc
         assert not screen.query_one("#sa-inline").display
         await pilot.press("escape")
         await pilot.pause()
-        assert app.screen.query_one("#instance_detail", TextArea).document is document
+        assert [row.value for row in app.screen.query(ValueRow)] == values
 
 
 @pytest.mark.asyncio

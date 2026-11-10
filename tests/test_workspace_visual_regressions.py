@@ -10,6 +10,7 @@ from textual.geometry import Region
 from textual.widgets import Button, TextArea
 
 from servonaut.widgets.chat_panel import ChatPanel
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
@@ -17,60 +18,50 @@ from tests._async_bounds import wait_until
 from tests.test_workspace_pilot import _Host, _assert_controls_clickable, _click, _row
 
 
-def _visible_detail_text(detail: TextArea) -> str:
-    """Use the real painted strips, including the widget's outer style cache."""
-    return "".join(
-        strip.text for strip in detail.render_lines(Region(0, 0, *detail.size))
-    ).replace(" ", "")
+def _line_values(app: _Host) -> dict[str, ValueRow]:
+    """The one-line form's rows by field, with the painted value reachable."""
+    rows = {row.field: row for row in app.screen.query_one("#fleet_value_line").query(ValueRow)}
+    assert app.screen.query_one("#fleet_value_bar").display
+    return rows
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resize", ["navigation", "terminal"])
-async def test_details_render_full_values_after_reflow(resize: str) -> None:
+async def test_values_stay_complete_and_reachable_after_reflow(resize: str) -> None:
     app = _Host()
     app.instances = [_row("web-1"), _row("api-1"), _row("db-1")]
-    app.instances[2].update(public_ip="192.0.2.12", private_ip="10.0.0.12")
     async with app.run_test(size=(120 if resize == "terminal" else 100, 30)) as pilot:
         app.screen.query_one(InstanceTable).move_cursor(row=2)
         await pilot.pause()
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        document = detail.document
-        original = detail.text
-        assert "PublicIP:192.0.2.12" in _visible_detail_text(detail)
+        rows = _line_values(app)
+        selected = app.screen.query_one(InstanceTable).get_selected_instance()
+        expected = {field: selected[field] for field in ("public_ip", "private_ip", "region")}
+        assert selected["name"] == "db-1" and rows["name"].value == "db-1"
+        assert {field: rows[field].value for field in expected} == expected
         if resize == "navigation":
             await _click(pilot, "#workspace_navigation")
             await pilot.press("shift+f6")
         else:
             await pilot.resize_terminal(100, 30)
-        await wait_until(lambda: detail.wrapped_document._width == detail.wrap_width)
         await pilot.pause()
-        assert detail.document is document and detail.text == original
-        rendered = _visible_detail_text(detail)
-        assert "PublicIP:192.0.2.12" in rendered
-        assert "PrivateIP:10.0.0.12" in rendered
-        assert "Region:local" in rendered
+        assert _line_values(app) == rows
+        for field, value in expected.items():
+            row = rows[field]
+            assert row.value == value and row.region.width > 0
+            assert app.get_widget_at(*row.region.center)[0] is row
 
 
 @pytest.mark.asyncio
-async def test_reflow_preserves_detail_selection_scroll_and_chat_draft(
+async def test_reflow_keeps_the_values_and_the_chat_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ChatPanel, "on_mount", lambda self: None)
     app = _Host()
     async with app.run_test(size=(120, 30)) as pilot:
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        detail.load_text("\n".join(
-            f"Line {index}: neutral fixture value" for index in range(12)
-        ))
-        selection = Selection((6, 8), (6, 15))
-        detail.selection = selection
-        await pilot.pause()
-        detail.scroll_to(y=4, animate=False, force=True)
         app.screen.query_one(InstanceTable).focus()
         await pilot.pause()
-        original_scroll = detail.scroll_offset
-        assert original_scroll.y > 0
-        document = detail.document
+        rows = _line_values(app)
+        values = {field: row.value for field, row in rows.items()}
         await pilot.press("f2")
         await pilot.pause()
         composer = app.screen.query_one("#chat-input", TextArea)
@@ -78,19 +69,18 @@ async def test_reflow_preserves_detail_selection_scroll_and_chat_draft(
         composer.selection = Selection((0, 5), (0, 9))
         await pilot.pause()
         composer_selection = composer.selection
-        with patch.object(detail, "load_text", wraps=detail.load_text) as reload_text:
+        with patch.object(ValueRow, "set_value", autospec=True) as repaint:
             for operation in ("hide", "show", "narrow", "wide"):
                 if operation in {"hide", "show"}:
                     await _click(pilot, "#workspace_navigation")
                 else:
                     await pilot.resize_terminal(100 if operation == "narrow" else 120, 30)
                 await pilot.pause()
-                assert detail.document is document
-                assert detail.selection == selection
-                assert detail.scroll_offset == original_scroll
+                assert _line_values(app) == rows
+                assert {field: row.value for field, row in rows.items()} == values
                 assert composer.text == "Keep this unsent draft"
                 assert composer.selection == composer_selection
-            reload_text.assert_not_called()
+            repaint.assert_not_called()
 
 
 @pytest.mark.asyncio
