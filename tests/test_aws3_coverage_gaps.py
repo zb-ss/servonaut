@@ -288,29 +288,38 @@ def _mgr_app(*, aws_service=None, demo_mode=False, redaction_service=None):
     return app
 
 
+def _cell_styles(cell) -> set:
+    """The styles a table cell paints, as the strings the stylesheet knows."""
+    return {str(span.style) for span in cell.spans}
+
+
 class TestAWSManagerColorize:
 
-    def test_running_green(self) -> None:
-        assert "[green]" in AWSManagerScreen._colorize_state("running")
+    def test_running_success(self) -> None:
+        assert _cell_styles(AWSManagerScreen._colorize_state("running")) == {"$text-success"}
 
-    def test_stopped_yellow(self) -> None:
-        assert "[yellow]" in AWSManagerScreen._colorize_state("stopped")
+    def test_stopped_warning(self) -> None:
+        assert _cell_styles(AWSManagerScreen._colorize_state("stopped")) == {"$text-warning"}
 
-    def test_pending_blue(self) -> None:
-        assert "[blue]" in AWSManagerScreen._colorize_state("pending")
+    def test_pending_accent(self) -> None:
+        assert _cell_styles(AWSManagerScreen._colorize_state("pending")) == {"$text-accent"}
 
     def test_terminated_dim(self) -> None:
-        assert "[dim]" in AWSManagerScreen._colorize_state("terminated")
+        assert _cell_styles(AWSManagerScreen._colorize_state("terminated")) == {"dim"}
 
     def test_shutting_down_dim(self) -> None:
-        assert "[dim]" in AWSManagerScreen._colorize_state("shutting-down")
+        assert _cell_styles(AWSManagerScreen._colorize_state("shutting-down")) == {"dim"}
 
     def test_unknown_passthrough(self) -> None:
         result = AWSManagerScreen._colorize_state("weird-state")
-        assert "weird-state" in result
+        assert result.plain == "weird-state" and not result.spans
 
-    def test_rebooting_blue(self) -> None:
-        assert "[blue]" in AWSManagerScreen._colorize_state("rebooting")
+    def test_rebooting_accent(self) -> None:
+        assert _cell_styles(AWSManagerScreen._colorize_state("rebooting")) == {"$text-accent"}
+
+    def test_state_text_is_never_read_as_markup(self) -> None:
+        result = AWSManagerScreen._colorize_state("running[red]")
+        assert result.plain == "running[red]"
 
 
 class TestAWSManagerRenderTable:

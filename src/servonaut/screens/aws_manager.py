@@ -43,7 +43,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
     ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
@@ -332,17 +332,17 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         self._update_resource_context()
 
     @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(state: str) -> Content:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return literal(state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return literal(state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebooting"}:
-            return f"[blue]{state}[/blue]"
+            return literal(state, "$text-accent")
         if s in _TERMINAL:
-            return f"[dim]{state}[/dim]"
-        return state
+            return literal(state, "dim")
+        return literal(state)
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -615,7 +615,7 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                     "The instance ID will become invalid after ~1 hour",
                 ],
                 confirm_text="terminate",
-                action_label="Terminate Instance",
+                action_label="Terminate instance",
                 severity="danger",
             )
         )

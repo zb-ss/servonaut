@@ -37,6 +37,7 @@ def _make_mock_app(demo: bool = True) -> MagicMock:
     app = MagicMock()
     app.demo_mode = demo
     app.redaction_service = RedactionService() if demo else None
+    app.get_css_variables.return_value = {"text-error": "#d17e92", "text-accent": "#ffc473"}
     return app
 
 
@@ -86,7 +87,7 @@ class TestCommandOutputDemoMode:
                 assert "1.2.3.4" in written
 
     def test_append_error_scrubs_before_markup(self) -> None:
-        """Error text must be scrubbed BEFORE embedding in [bold red]...[/bold red]."""
+        """Error text must be scrubbed BEFORE styling it as an error."""
         from servonaut.widgets.command_output import CommandOutput
 
         mock_app = _make_mock_app(demo=True)
@@ -97,9 +98,9 @@ class TestCommandOutputDemoMode:
                 CommandOutput.append_error(widget, "error from 9.9.9.9")
                 mock_write.assert_called_once()
                 written = mock_write.call_args[0][0]
-                assert "9.9.9.9" not in written
-                # Must still be wrapped in bold red markup
-                assert "[bold red]" in written
+                assert "9.9.9.9" not in written.plain
+                # Must still be shown bold in the theme's error colour
+                assert written.style.lower() == "bold #d17e92"
 
     def test_append_error_scrubs_aws_key(self) -> None:
         from servonaut.widgets.command_output import CommandOutput
@@ -111,8 +112,8 @@ class TestCommandOutputDemoMode:
             with patch.object(type(widget), "app", new_callable=lambda: property(lambda self: mock_app)):
                 CommandOutput.append_error(widget, "AKIAIOSFODNN7EXAMPLE from 1.2.3.4")
                 written = mock_write.call_args[0][0]
-                assert "AKIAIOSFODNN7EXAMPLE" not in written
-                assert "1.2.3.4" not in written
+                assert "AKIAIOSFODNN7EXAMPLE" not in written.plain
+                assert "1.2.3.4" not in written.plain
 
 
 # ---------------------------------------------------------------------------

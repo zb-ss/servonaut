@@ -95,7 +95,7 @@ AITopUpModal #ai_topup_catalog {
 }
 
 AITopUpModal #ai_topup_catalog:focus {
-    border: heavy $accent;
+    border: round $accent;
 }
 
 AITopUpModal #ai_topup_catalog .ai_topup_pack {

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual.widgets import RichLog
+
+from servonaut.utils.theme_text import theme_style, themed_text
 
 
 class CommandOutput(RichLog):
@@ -31,7 +34,7 @@ class CommandOutput(RichLog):
         Args:
             command: Command string to display.
         """
-        self.write(f"[bold cyan]$ {command}[/bold cyan]")
+        self.write(themed_text(self.app, f"$ {command}", "text-accent", bold=True))
 
     def append_output(self, output: str) -> None:
         """Append command output to the log.
@@ -55,7 +58,7 @@ class CommandOutput(RichLog):
             # redact → escape → embed.
             if self.app.demo_mode and self.app.redaction_service:
                 error = self.app.redaction_service.scrub_stream(error)
-            self.write(f"[bold red]{error}[/bold red]")
+            self.write(Text.from_markup(error, style=theme_style(self.app, "text-error", bold=True)))
 
     def append_notice(self, notice: str) -> None:
         """Append an informational line, dimmed so it does not read as an error.

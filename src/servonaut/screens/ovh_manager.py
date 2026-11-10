@@ -38,7 +38,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
     ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
@@ -360,17 +360,17 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         self._update_resource_context()
 
     @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(state: str) -> Content:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return literal(state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return literal(state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding", "building"}:
-            return f"[blue]{state}[/blue]"
+            return literal(state, "$text-accent")
         if s == "error":
-            return f"[red]{state}[/red]"
-        return state
+            return literal(state, "$text-error")
+        return literal(state)
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -683,7 +683,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                     "Billing for this instance stops immediately",
                 ],
                 confirm_text="delete",
-                action_label="Delete Instance",
+                action_label="Delete instance",
                 severity="danger",
             )
         )

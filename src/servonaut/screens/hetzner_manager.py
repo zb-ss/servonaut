@@ -35,7 +35,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
     ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
@@ -320,17 +320,17 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         self._update_resource_context()
 
     @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(state: str) -> Content:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return literal(state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return literal(state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding"}:
-            return f"[blue]{state}[/blue]"
+            return literal(state, "$text-accent")
         if s == "error":
-            return f"[red]{state}[/red]"
-        return state
+            return literal(state, "$text-error")
+        return literal(state)
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -573,7 +573,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Hetzner Server",
+                title="Delete Hetzner server",
                 description=with_bold_values(
                     "Delete {} ({}) in {}?",
                     label, inst.get('type', ''), inst.get('region', ''),
@@ -584,7 +584,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
                     "Billing for this server stops immediately",
                 ],
                 confirm_text="delete",
-                action_label="Delete Server",
+                action_label="Delete server",
                 severity="danger",
             )
         )

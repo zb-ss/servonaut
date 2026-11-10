@@ -51,13 +51,13 @@ class CommandOverlay(ModalScreen):
                 tooltip="Stop the running command, or close the overlay"),
         Binding("ctrl+r", "show_command_picker", "Picker", show=True,
                 tooltip="Pick a saved or recent command"),
-        Binding("ctrl+s", "save_command", "Save Cmd", show=True,
+        Binding("ctrl+s", "save_command", "Save command", show=True,
                 tooltip="Save the current command to favourites"),
         Binding("up", "history_prev", "Previous", show=False,
                 tooltip="Previous command in the history"),
         Binding("down", "history_next", "Next", show=False,
                 tooltip="Next command in the history"),
-        Binding("y", "copy_output", "Copy All", show=True,
+        Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy all output to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
                 tooltip="Copy Mode: the output in a text area you can select from"),
@@ -183,7 +183,7 @@ class CommandOverlay(ModalScreen):
                 f"this server requires a jump host."
             )
             output.append_error(
-                f"[bold yellow]Warning:[/bold yellow] Connection profile "
+                f"[bold]Warning:[/bold] Connection profile "
                 f"'{self._missing_profile}' not found. Connecting directly "
                 f"(no bastion). Add the profile in Settings if this server "
                 f"requires a jump host."
@@ -236,7 +236,7 @@ class CommandOverlay(ModalScreen):
             Rich-formatted header string.
         """
         name = self._instance.get('name') or self._instance.get('id', 'unknown')
-        return f"[bold $text-accent]Command Execution:[/bold $text-accent] {name}"
+        return f"[bold $text-accent]Command execution:[/bold $text-accent] {name}"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle command input submission.
@@ -309,7 +309,7 @@ class CommandOverlay(ModalScreen):
         # Block interactive/TUI commands that need a real terminal
         if self._is_interactive_command(command):
             output_widget.append_error(
-                f"[bold yellow]{command.split()[0]}[/bold yellow] requires an "
+                f"[bold]{escape(command.split()[0])}[/bold] requires an "
                 f"interactive terminal and cannot run here."
             )
             output_widget.append_output(
