@@ -7,6 +7,7 @@ from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
+from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.sidebar import Sidebar
 
 
@@ -18,14 +19,14 @@ class WorkspaceControls(Horizontal):
         self._workspace_context = context
 
     def compose(self) -> ComposeResult:
-        navigation = Button("Hide navigation", id="workspace_navigation")
+        navigation = LinkButton("Hide navigation", id="workspace_navigation")
         navigation.can_focus = False
         yield navigation
         yield Static(self._workspace_context, id="workspace_context", markup=False)
-        chat = Button("Open chat", id="workspace_chat")
+        chat = LinkButton("Open chat", id="workspace_chat")
         chat.can_focus = False
         yield chat
-        end = Button("End chat", id="workspace_chat_end", tooltip="End chat and stop its reply · F3")
+        end = LinkButton("End chat", id="workspace_chat_end", tooltip="End chat and stop its reply · F3")
         end.can_focus = False
         end.disabled = True
         yield end

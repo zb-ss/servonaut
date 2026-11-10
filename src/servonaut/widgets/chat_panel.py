@@ -57,6 +57,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
 
 from servonaut.services.memory.provider import instance_provider
+from servonaut.widgets.link_button import LinkButton
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.markup import literal
 
@@ -546,8 +547,8 @@ class ChatPanel(Widget):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-restore-controls"):
-            yield Button("Restore chat", id="btn-chat-restore")
-            yield Button("End chat", id="btn-chat-end", tooltip="End chat and stop its reply · F3")
+            yield LinkButton("Restore chat", id="btn-chat-restore")
+            yield LinkButton("End chat", id="btn-chat-end", tooltip="End chat and stop its reply · F3")
         with Vertical(id="chat-inner"):
             # Header with logo and controls
             with Vertical(id="chat-header"):

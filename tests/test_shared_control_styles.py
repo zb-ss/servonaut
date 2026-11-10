@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
-from textual.widgets import Checkbox, Input, MaskedInput, RadioButton, RadioSet, Select, TextArea
+from textual.geometry import Region
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    MaskedInput,
+    RadioButton,
+    RadioSet,
+    Select,
+    TextArea,
+)
 
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.link_button import LinkButton
+from servonaut.widgets.workspace import WorkspaceControls
 
 FRAMED = ("#select_box", "#input_box", "#masked_box", "#area_box", "#check_box", "#radio_box")
 
@@ -59,3 +72,67 @@ async def test_select_keeps_its_height_and_rounds_the_open_list() -> None:
         assert _edges(overlay) == ["round"] * 4
         assert _edges(select.query_one("SelectCurrent")) == ["round"] * 4
         assert select.region.height == 3
+
+
+def _underlined_cells(widget) -> tuple[str, int]:
+    """The widget's rendered text and how many of its cells carry an underline."""
+    text, underlined = "", 0
+    for strip in widget.render_lines(Region(0, 0, widget.size.width, widget.size.height)):
+        for segment in strip:
+            text += segment.text
+            if segment.style is not None and segment.style.underline:
+                underlined += cell_len(segment.text)
+    return text, underlined
+
+
+def _words_underlined(widget, label: str) -> bool:
+    """True when exactly the label's cells are underlined and nothing else."""
+    text, underlined = _underlined_cells(widget)
+    return text.strip() == label and underlined == cell_len(label)
+
+
+class _LinkApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield Button("Plain", id="spacer_button")
+        yield LinkButton("Refresh (r)", id="link_idle")
+        yield LinkButton("Copy row (y)", id="link_disabled", disabled=True)
+        yield WorkspaceControls("Fleet")
+
+
+LINK_IDS = ("#link_idle", "#link_disabled", "#workspace_navigation", "#workspace_chat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", LINK_IDS)
+async def test_link_controls_underline_only_their_words(selector: str) -> None:
+    app = _LinkApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        link = app.query_one(selector, Button)
+        label = link.label.plain
+        text, underlined = _underlined_cells(link)
+        assert link.size.height == 1
+        assert text.strip() == label
+        assert underlined == cell_len(label)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", ("#link_idle", "#workspace_chat"))
+async def test_link_controls_keep_words_only_underline_when_hovered_or_focused(selector: str) -> None:
+    app = _LinkApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        link = app.query_one(selector, Button)
+        label = link.label.plain
+        await pilot.hover(selector)
+        await pilot.pause()
+        assert link.mouse_hover
+        assert _words_underlined(link, label)
+        link.can_focus = True
+        link.focus()
+        await pilot.hover("#spacer_button")
+        await pilot.pause()
+        assert link.has_focus
+        assert _words_underlined(link, label)
+        assert link.region.height == 1

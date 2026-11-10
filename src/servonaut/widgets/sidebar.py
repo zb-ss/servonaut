@@ -30,6 +30,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button
 
+from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.sidebar_section import SidebarSection
 
 
@@ -247,10 +248,10 @@ class Sidebar(Widget):
         with Vertical(id="sidebar-bottom"):
             from servonaut.widgets.relay_indicator import RelayIndicator
             yield RelayIndicator(id="relay_indicator")
-            update = Button(
+            update = LinkButton(
                 "Update Available",
                 id="nav_update",
-                classes="nav-button hidden",
+                classes="hidden",
             )
             update.can_focus = False
             yield update

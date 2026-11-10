@@ -127,18 +127,6 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     color: $text-muted;
 }
 
-#fleet_refresh {
-    width: auto;
-    min-width: 0;
-    height: 1;
-    margin: 0;
-    padding: 0 1;
-    border: none;
-    background: transparent;
-    color: $text-accent;
-    text-style: underline;
-}
-
 #keyword_matches_label {
     padding: 0 1;
     color: $accent;

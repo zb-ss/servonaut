@@ -42,23 +42,11 @@ WorkspaceControls {
     align: left middle;
 }
 
+/* The labels change with the pane state ("Hide"/"Show navigation", "Open"/
+   "Collapse"/"Restore chat"); a fixed width sized for the longest keeps the
+   controls from shifting. */
 WorkspaceControls Button {
-    width: auto;
-    min-width: 0;
-    height: 1;
-    border: none;
-    padding: 0;
     margin: 0;
-    background: $boost;
-    color: $text;
-    text-style: underline;
-}
-
-WorkspaceControls Button:hover,
-WorkspaceControls Button.--pane-open {
-    border: none;
-    background: $boost;
-    color: $text;
 }
 
 WorkspaceControls #workspace_navigation {

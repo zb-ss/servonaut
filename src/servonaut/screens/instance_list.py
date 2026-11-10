@@ -21,6 +21,7 @@ from servonaut.screens._fleet_filter import (
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
+from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.safe_header import SafeHeader
@@ -297,7 +298,7 @@ class InstanceListScreen(WorkspaceScreen):
                     "Selected server · Full values · highlight text to copy",
                     id="fleet-detail-heading", markup=False,
                 )
-                copy_row = Button("Copy row (y)", id="fleet_copy_row", disabled=True)
+                copy_row = LinkButton("Copy row (y)", id="fleet_copy_row", disabled=True)
                 copy_row.can_focus = False
                 yield copy_row
             yield InstanceDetail(
@@ -321,7 +322,7 @@ class InstanceListScreen(WorkspaceScreen):
         with Horizontal(id="fleet_summary_row"):
             yield Static("", id="fleet_summary", markup=False)
             yield Static("", id="fleet_updated", markup=False)
-            refresh = Button("Refresh (r)", id="fleet_refresh", compact=True)
+            refresh = LinkButton("Refresh (r)", id="fleet_refresh")
             refresh.can_focus = False
             yield refresh
 
