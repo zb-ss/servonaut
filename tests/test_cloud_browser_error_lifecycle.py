@@ -25,6 +25,8 @@ from tests.test_workspace_security_reflow import (
     _fake_boundaries as _fake_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 Browser = CloudWatchBrowserScreen | CloudTrailBrowserScreen
 PAYLOAD = (

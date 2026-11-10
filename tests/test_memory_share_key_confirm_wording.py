@@ -21,7 +21,7 @@ from tests.test_memory_share_key_confirm import (
 from tests.test_memory_share_screen import SLUG, _live_panel, _member, _open, _settle, _text
 from servonaut.utils.file_lock import FileLock
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("navigation_open")]
 
 
 async def _review_and_confirm(app, pilot, screen):

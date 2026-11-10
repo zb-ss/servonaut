@@ -1,9 +1,10 @@
 /* ===================================================================
    SCREEN HEADER
    One header look for every screen: a bold title, a muted description under
-   it, no side inset beyond the container's own, no bar or accent colour. A status, if the screen has
-   one, sits right-aligned on the title row. The title keeps one empty row
-   above it so it never touches the top of the content area.
+   it, no side inset beyond the container's own, no bar or accent colour. A
+   status, if the screen has one, sits right-aligned on the title row. The
+   title keeps one empty row above it so it never touches the top of the
+   content area.
    =================================================================== */
 
 .screen-title {

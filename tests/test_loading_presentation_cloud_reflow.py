@@ -24,6 +24,8 @@ from tests._workspace_reflow_conformance import content
 from tests import test_workspace_cloud_reflow as parent
 from tests.test_workspace_cloud_reflow import _isolated_providers as _isolated_providers
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 

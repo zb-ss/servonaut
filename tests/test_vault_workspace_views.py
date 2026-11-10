@@ -12,6 +12,8 @@ from servonaut.widgets.action_button import ActionButton
 from tests._async_bounds import wait_until
 from tests.test_vault_screen import _StyledVaultHost, _VaultHost, _VaultStatusService
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 _PERSONAL = "11111111-1111-4111-8111-111111111111"
 _TEAM = "22222222-2222-4222-8222-222222222222"
 # An OpenSSH SHA256 fingerprint is "SHA256:" and 43 characters; ids are UUIDs.

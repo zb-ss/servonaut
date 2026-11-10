@@ -14,6 +14,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import _LayoutHost
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def test_fleet_document_retains_full_literal_values_in_labelled_lines() -> None:
     row = {

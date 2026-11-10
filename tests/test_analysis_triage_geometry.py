@@ -22,6 +22,8 @@ from tests.test_workspace_logs import _LogHost, _viewer_instance
 from tests.test_workspace_reflow import _painted
 from tests.test_workspace_remaining_reflow import _RemainingHost
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.fixture(autouse=True)
 def _inert_geometry_boundaries(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:

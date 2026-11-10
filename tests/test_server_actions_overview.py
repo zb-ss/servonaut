@@ -17,6 +17,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import _LayoutHost, _open_chat
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SIZES = [(160, 50), (100, 30)]
 TOOLBAR_IDS = ["btn_back", "btn_browse", "btn_scp", "btn_command", "btn_ssh"]
 CARD_OF = {

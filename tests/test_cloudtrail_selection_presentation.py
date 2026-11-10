@@ -17,6 +17,8 @@ from tests.test_workspace_security_reflow import (
     _fake_boundaries as _fake_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 async def _choose(pilot: Pilot, select: Select, *, first: bool) -> None:
     select.scroll_visible(animate=False, immediate=True)

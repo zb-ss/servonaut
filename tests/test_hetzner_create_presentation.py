@@ -11,6 +11,8 @@ from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import assert_button_label_painted
 from tests.test_workspace_cloud_managers import _CloudApp, _ready, _tab_to
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)], ids=["narrow", "wide"])

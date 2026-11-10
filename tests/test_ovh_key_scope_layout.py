@@ -12,6 +12,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
 from tests.test_workspace_ovh_resources import _ResourceApp
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _painted(app, widget) -> str:
     strips = app.screen._compositor.render_strips()

@@ -24,6 +24,8 @@ from servonaut.services.vault.errors import VaultUserError
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 PERSONAL_VAULT = "11111111-1111-4111-8111-111111111111"
 HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 

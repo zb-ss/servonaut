@@ -15,6 +15,8 @@ from tests.test_cloud_browser_error_lifecycle import (
 )
 from tests.test_workspace_security_reflow import _fake_boundaries as _fake_boundaries
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # Capture before the shared fixture substitutes an error-result fake. The
 # regression must exercise the actual no-key return, not a mocked None.

@@ -24,6 +24,8 @@ from tests.test_server_tool_identity_contrast import (
 from tests.test_settings_presentation import _tab_to
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _native_frame(app: _Host, target: Path) -> str:
     """Capture exactly the native screen stack, including transparent underlays."""

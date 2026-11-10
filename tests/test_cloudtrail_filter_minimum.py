@@ -14,6 +14,8 @@ from tests.test_workspace_security_reflow import (
     _SecurityHost, _fake_boundaries as _fake_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("narrow,multi", [

@@ -13,6 +13,8 @@ from tests._workspace_reflow_conformance import assert_button_label_painted
 from tests.test_workspace_ovh_resources import _ResourceApp
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_type", ["vps", "cloud"])

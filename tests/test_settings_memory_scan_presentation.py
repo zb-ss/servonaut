@@ -20,6 +20,8 @@ from servonaut.services.memory import passphrase_store
 from tests._async_bounds import wait_until
 from tests.test_settings_presentation import _Host, _ready
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SIZES = [(160, 50), (100, 30)]
 MEMORY_SCALARS = [

@@ -34,6 +34,8 @@ from tests.test_selection_copy import _Clipboard
 from tests.test_selection_copy import clipboard as clipboard
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ("servonaut", "servonaut-light", "ansi-dark", "ansi-light")
 SIZES = ((100, 30), (160, 50))

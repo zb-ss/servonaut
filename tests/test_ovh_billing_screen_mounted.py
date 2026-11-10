@@ -10,6 +10,8 @@ from servonaut.screens.ovh_billing import OVHBillingScreen
 from tests._async_bounds import wait_until
 from tests.test_workspace_ovh_resources import _ResourceApp
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _price(value: float) -> dict:
     return {"serviceId": 1, "elements": [], "price": {"value": value, "currencyCode": "EUR"}}

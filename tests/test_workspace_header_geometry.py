@@ -12,6 +12,8 @@ from tests.test_workspace_account_leaf import (
     _AccountHost, _inert_boundaries as _inert_boundaries, _opener, _ready,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SIZES = [(160, 50), (100, 30)]
 
 

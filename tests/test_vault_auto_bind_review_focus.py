@@ -16,6 +16,8 @@ from tests.test_basic_dialogs import BasicDialogHost
 from tests.test_vault_dialog_presentation import _review_rows
 from tests.test_workspace_vault_reflow import inert_services  # noqa: F401
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
