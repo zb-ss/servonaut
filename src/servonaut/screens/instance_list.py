@@ -280,9 +280,10 @@ class InstanceListScreen(WorkspaceScreen):
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Vertical(id="instance_list_container", classes="workspace-content"):
+                yield Static("Search", id="fleet_search_label", markup=False)
                 yield FleetSearchInput(
                     self._shortcut_characters(),
-                    placeholder="Search instances and keywords...",
+                    placeholder="Search servers, IPs and keywords…",
                     id="search_input",
                 )
                 # Memory discoverability banner — only visible when no

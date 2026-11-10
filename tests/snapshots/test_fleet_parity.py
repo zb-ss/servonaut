@@ -270,3 +270,62 @@ def test_the_inspector_list_always_has_the_values_the_table_dropped() -> None:
         assert {"private_ip", "id", "key_name"} <= fields
 
     _run(scenario)
+
+
+# --- wording ---------------------------------------------------------------
+
+
+def test_the_provider_column_reads_aws_ovh_hetzner_and_a_customs_own_label() -> None:
+    async def scenario(pilot: Any) -> None:
+        table = _screen(pilot).query_one(InstanceTable)
+        shown = {
+            str(table.get_row_at(i)[1]): str(table.get_row_at(i)[3])
+            for i in range(table.row_count)
+        }
+        assert shown["app-1"] == "AWS"
+        assert shown["mail-1"] == "OVH"
+        assert shown["cache-1"] == "Hetzner"
+        # A custom server keeps the label its owner gave it.
+        assert shown["web-1"] == "colo"
+
+    _run(scenario)
+
+
+def test_a_custom_server_without_a_label_reads_custom() -> None:
+    from servonaut.screens._fleet_filter import provider_label
+
+    assert provider_label({"is_custom": True, "provider": ""}) == "Custom"
+    assert provider_label({"is_custom": True, "provider": "acme-colo"}) == "acme-colo"
+    assert provider_label({"is_custom": True, "provider": "hetzner"}) == "hetzner"
+
+
+def test_demo_mode_provider_column_and_summary_use_only_stand_ins() -> None:
+    from servonaut.screens._demo_resolve import connection_instance
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        table = screen.query_one(InstanceTable)
+        real = {
+            str(connection_instance(pilot.app, row).get("provider"))
+            for row in table._filtered_instances
+        }
+        shown = {str(table.get_row_at(i)[3]) for i in range(table.row_count)}
+        assert "colo" in real and "colo" not in shown
+        assert screen.query_one("#fleet_summary", Static).visual.plain.startswith("Showing 7 of 7")
+
+    _run(scenario, demo=True)
+
+
+@sizes
+def test_the_search_box_reads_the_boards_words(size: str) -> None:
+    from textual.widgets import Input
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        assert screen.query_one("#search_input", Input).placeholder == "Search servers, IPs and keywords…"
+        label = screen.query_one("#fleet_search_label", Static)
+        assert label.display is (size == "160x50")
+        if label.display:
+            assert label.region.bottom == screen.query_one("#search_input").region.y
+
+    _run(scenario, size)

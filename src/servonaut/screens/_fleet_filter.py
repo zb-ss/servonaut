@@ -48,6 +48,18 @@ def row_provider(row: dict) -> str:
     return row_source(row)
 
 
+def provider_label(row: dict) -> str:
+    """What the Provider column shows: AWS, OVH or Hetzner by name, otherwise the row's own label.
+
+    A custom or team server keeps the label its owner gave it ("Custom" or
+    "Team" when it has none).
+    """
+    group = row_provider(row)
+    if group in ("aws", "ovh", "hetzner"):
+        return PROVIDER_LABELS[group]
+    return str(row.get("provider") or "").strip() or PROVIDER_LABELS.get(group, group)
+
+
 @dataclass(frozen=True)
 class FleetFilter:
     """Which servers the fleet list shows: one state and one provider, or all."""

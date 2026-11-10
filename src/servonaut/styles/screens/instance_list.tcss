@@ -4,6 +4,18 @@
 
 
 
+/* The label above the search box needs a spare row: tall terminals only. */
+#fleet_search_label {
+    display: none;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+InstanceListScreen.-tall #fleet_search_label {
+    display: block;
+}
+
 #search_input {
     width: 1fr;
     margin: 0;

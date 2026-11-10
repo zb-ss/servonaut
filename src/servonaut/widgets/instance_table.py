@@ -356,6 +356,9 @@ class InstanceTable(DataTable):
 
     def _row_cells(self, idx: int, instance: dict) -> Dict[str, Any]:
         """Every column's cell for one server, by column key."""
+        # The screens package imports this table, so the import waits.
+        from servonaut.screens._fleet_filter import provider_label
+
         limits = {column.key: column.max_width for column in COLUMNS}
 
         def plain(key: str, value: Any) -> Text:
@@ -371,7 +374,7 @@ class InstanceTable(DataTable):
             ), instance),
             # A state without a colour is provider text: never read as markup.
             "state": self._state_cell(instance, coloured, plain("state", state), state),
-            "provider": plain("provider", instance.get("provider", "AWS")),
+            "provider": plain("provider", provider_label(instance)),
             "public_ip": plain("public_ip", instance.get("public_ip")),
             "type": plain("type", instance.get("type")),
             "region": plain("region", instance.get("region")),
