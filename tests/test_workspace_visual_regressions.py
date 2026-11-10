@@ -17,6 +17,8 @@ from servonaut.widgets.sidebar_section import SidebarSection
 from tests._async_bounds import wait_until
 from tests.test_workspace_pilot import _Host, _assert_controls_clickable, _click, _row
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _line_values(app: _Host) -> dict[str, ValueRow]:
     """The one-line form's rows by field, with the painted value reachable."""

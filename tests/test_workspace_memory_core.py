@@ -30,6 +30,8 @@ from tests.test_memory_sync_ui import _AuthStub, _SetupSyncStub
 from tests.test_workspace_pilot import _Host, _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 KINDS = ("memory-populated", "memory-empty", "export", "sync-configured", "sync-setup")
 

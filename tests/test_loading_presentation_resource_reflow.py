@@ -27,6 +27,8 @@ from tests.test_workspace_resource_reflow import (
     _isolated_resources as _isolated_resources,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 

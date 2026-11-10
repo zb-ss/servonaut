@@ -297,8 +297,9 @@ class ObjectStorageScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static(
-                            f"[bold $text-accent]{label}[/bold $text-accent]",
+                            f"{label}",
                             id="s3_title",
+                            classes="screen-title",
                         ),
                         Static(
                             "Open a bucket or folder to browse objects, then select an "

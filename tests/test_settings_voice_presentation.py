@@ -24,6 +24,8 @@ from servonaut.services import voice_engines
 from servonaut.services.voice_setup_service import InstalledModel, VoiceReadiness
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SIZES = [(160, 50), (100, 30)]
 DOWNLOADS = [

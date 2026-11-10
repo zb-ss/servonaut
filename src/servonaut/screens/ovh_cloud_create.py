@@ -101,8 +101,9 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "[bold $text-accent]Create Cloud Instance[/bold $text-accent]",
+                        "Create Cloud Instance",
                         id="cloud_create_title",
+                        classes="screen-title",
                     ),
                     Static(
                         "OVHcloud Public Cloud: select a region to load its flavors "

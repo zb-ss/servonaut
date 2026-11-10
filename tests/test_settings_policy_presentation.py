@@ -22,6 +22,8 @@ from tests._async_bounds import wait_until
 from tests.test_navigation_dialog_contrast import _painted_text_styles
 from tests.test_settings_presentation import _Host, _ready, _tab_to
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 PANELS = ("vault", "relay", "ai_chat")
 PROMPT = "first café\nsecond Ω"
 GUARDS = (

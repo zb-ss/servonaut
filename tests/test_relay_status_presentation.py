@@ -19,6 +19,8 @@ from servonaut.widgets.relay_indicator import RelayStatusScreen
 from tests._async_bounds import wait_until
 from tests.test_workspace_account_leaf import _AccountHost
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _painted(app, widget) -> str:
     strips = app.screen._compositor.render_strips()

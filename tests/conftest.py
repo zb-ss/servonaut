@@ -181,6 +181,39 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     _home_isolation.arm(_HOME_ISOLATION, allowed)
 
 
+class _ChoiceInEveryWidthClass(str):
+    """An explicit navigation choice that counts as made in whichever width class applies."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+@pytest.fixture
+def navigation_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every workspace session with the navigation as the test's state says.
+
+    Below 110 columns the navigation hides by itself. Layout tests that set the
+    navigation (open or hidden) and expect it to stay that way at any width use
+    this (``pytestmark = pytest.mark.usefixtures("navigation_open")``): it makes
+    the explicit choice a user makes, held in every width class, instead of
+    patching the rule.
+    """
+    from servonaut.widgets.workspace.state import WorkspaceState
+
+    original = WorkspaceState.__init__
+
+    def init(self, *args, **kwargs) -> None:
+        original(self, *args, **kwargs)
+        self.navigation_choice_class = _ChoiceInEveryWidthClass("any")
+
+    monkeypatch.setattr(WorkspaceState, "__init__", init)
+
+
 @pytest.fixture(autouse=True)
 def _refuse_real_home_writes():
     """Fail the test that tried to write under the real home directory."""

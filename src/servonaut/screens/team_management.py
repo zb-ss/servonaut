@@ -133,8 +133,8 @@ class TeamManagementScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             yield ScrollableContainer(
                 Container(
-                    Static("[bold]Team Management[/bold]", id="team_mgmt_header"),
-                    Static("Choose a team to review its members, shared servers and configuration.", id="team_workspace_summary"),
+                    Static("[bold]Team Management[/bold]", id="team_mgmt_header", classes="screen-title"),
+                    Static("Choose a team to review its members, shared servers and configuration.", id="team_workspace_summary", classes="screen-description"),
 
                     # No-auth notice (shown when not authenticated)
                     Static(

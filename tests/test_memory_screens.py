@@ -23,6 +23,8 @@ from servonaut.styles import CSS_FILES
 
 from tests._native_actions import click_action
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

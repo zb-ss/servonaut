@@ -209,8 +209,8 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with Container(id="cloudtrail_container", classes="workspace-content"):
                 yield Horizontal(
-                    Label("[bold]CloudTrail events[/bold]", id="cloudtrail_title"),
-                    Static("No events loaded", id="cloudtrail_context"),
+                    Label("[bold]CloudTrail events[/bold]", id="cloudtrail_title", classes="screen-title"),
+                    Static("No events loaded", id="cloudtrail_context", classes="screen-status"),
                     id="cloudtrail_heading",
                 )
                 yield Container(

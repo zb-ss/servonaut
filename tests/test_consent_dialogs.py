@@ -23,6 +23,8 @@ from servonaut.widgets.upsell_modal import BackendMaintenanceModal, BetaWaitlist
 from tests._async_bounds import wait_until
 from tests.test_basic_dialogs import BasicDialogHost, assert_exposed
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def make_dialog(kind: str) -> tuple[ModalScreen, str, str]:
     """Return the modal, initial focus target and its safe dismissal target."""

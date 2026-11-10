@@ -14,6 +14,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import _LayoutHost, _open_chat
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.fixture(autouse=True)
 def _no_provider(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,6 +20,8 @@ from servonaut.screens.instance_list import FleetSearchInput, InstanceListScreen
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 # The single-letter fleet shortcuts (``/`` itself moves to the search box).
 _SHORTCUT_KEYS = {"r", "o", "s", "b", "c", "t", "l", "a", "m", "D", "k", "v", "y"}
 

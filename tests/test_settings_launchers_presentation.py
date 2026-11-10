@@ -21,6 +21,8 @@ from servonaut.screens.snapshot_manager import SnapshotManagerScreen
 from tests._async_bounds import wait_until
 from tests.test_settings_presentation import _Host, _ready
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 ROUTES = [
     ("custom_servers", "open_custom_servers", CustomServersScreen),

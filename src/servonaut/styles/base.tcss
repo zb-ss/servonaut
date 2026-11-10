@@ -146,7 +146,7 @@ Button {
     height: 3;
     background: transparent;
     color: $text;
-    border: round $primary 65%;
+    border: round $border-blurred;
     text-align: center;
     content-align: center middle;
 }
@@ -351,7 +351,7 @@ OptionList:focus {
    the list, no frame. */
 CommandPalette CommandList {
     border-top: blank;
-    border-bottom: hkey black;
+    border-bottom: hkey $border-blurred;
     border-left: none;
     border-right: none;
 }
@@ -406,19 +406,22 @@ DataTable {
 
 DataTable > .datatable--header {
     background: $primary;
+    color: $background;
+    text-style: bold;
+}
+
+/* The cursor row is a muted primary fill with the normal text colour, not a
+   reversed white bar. Terminal-colour themes keep the reversed form below,
+   as they have no reliable muted fill. */
+DataTable > .datatable--cursor {
+    background: $primary-muted;
     color: $text;
     text-style: bold;
 }
 
-DataTable > .datatable--cursor {
-    background: $surface;
-    color: auto 100%;
-    text-style: bold reverse;
-}
-
 DataTable:focus > .datatable--cursor {
-    background: $surface;
-    color: auto 100%;
+    background: $primary 45%;
+    color: $text;
 }
 
 DataTable:ansi > .datatable--header {

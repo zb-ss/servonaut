@@ -12,6 +12,8 @@ from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
 from tests.test_sidebar_presentation import _SidebarHost
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 # These destination sets pin the publicly reachable controls for each provider.
 COMPUTE_ROUTES = {
     "ovh": {

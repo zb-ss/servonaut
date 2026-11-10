@@ -70,8 +70,9 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                 yield BusyIndicator(id="read_loading", classes="read-loading")
                 with Vertical(classes="provider-lifecycle-heading"):
                     yield Static(
-                        f"[bold $text-accent]Snapshots: {escape(str(instance_name))}[/bold $text-accent]",
+                        f"Snapshots: {escape(str(instance_name))}",
                         id="snapshots_title",
+                        classes="screen-title",
                     )
                     yield Static(
                         "OVH recovery points: select a snapshot to restore or delete it.",

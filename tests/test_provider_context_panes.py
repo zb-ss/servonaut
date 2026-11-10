@@ -15,6 +15,8 @@ from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
 from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
 from servonaut.styles.themes import SERVONAUT_THEMES
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 CLICK_NAME = "[@click=app.quit]key-1[/]"
 LINK_NAME = "[link=x -1"
 

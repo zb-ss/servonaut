@@ -8,22 +8,7 @@
 }
 
 #cloudwatch_heading {
-    height: 2;
-    border-bottom: solid $border-blurred;
-    margin-bottom: 1;
-}
-
-#cloudwatch_title {
-    width: auto;
-    color: $text-accent;
-}
-
-#cloudwatch_context {
-    width: 1fr;
-    text-align: right;
-    color: $text-muted;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
+    height: auto;
 }
 
 #cloudwatch_filter_bar {

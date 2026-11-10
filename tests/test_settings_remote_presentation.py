@@ -26,6 +26,8 @@ from servonaut.services.bw_ssh_config_service import BITWARDEN_PM_PROVIDER
 from servonaut.services.memory.interfaces import MemorySettings
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SIZES = [(160, 50), (100, 30)]
 PANELS = ["bw_ssh", "memory_sync"]

@@ -27,6 +27,8 @@ from servonaut.utils import platform_utils
 from servonaut.widgets.dialogs import DialogContent, DialogFrame, DialogNotificationSpace
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SIZES = [(100, 30), (160, 50)]
 DOCUMENT = "\n".join(f"row {index}: café Ω [literal] " + "text " * 30 for index in range(100))

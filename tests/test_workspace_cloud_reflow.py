@@ -40,6 +40,8 @@ from tests.test_workspace_cloud_managers import _CloudApp
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 MUTATIONS = {
     "aws_service": (

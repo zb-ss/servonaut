@@ -206,7 +206,7 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             yield ScrollableContainer(
                 Vertical(
                     Horizontal(
-                        Static("AWS EC2 instances", id="aws_mgr_header"),
+                        Static("AWS EC2 instances", id="aws_mgr_header", classes="screen-title"),
                         Static(
                             "Inventory", id="aws_mgr_overview",
                             classes="provider-manager-overview", markup=False,

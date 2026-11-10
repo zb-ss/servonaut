@@ -41,6 +41,8 @@ from tests.test_selection_copy import clipboard as clipboard
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 MESSAGE = "GET /report café [literal] Ω from 1.1.1.1"
 TRAIL = {

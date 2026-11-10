@@ -31,6 +31,8 @@ from tests.test_workspace_memory_fleet_reflow import (
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # Baseline native IDs must come from the original source producer, not inference.
 ORIGINAL_MODAL_FOCUS: dict[str, str] | None = {

@@ -14,6 +14,8 @@ from tests.test_workspace_vault_reflow import (
     _VaultHost, inert_services as _native_vault_services,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # Every action button: the view switch, the header and the inspector.
 _ALL_ACTIONS = "#vault_actions Button, #vault_views Button, #vault_identity_heading Button"

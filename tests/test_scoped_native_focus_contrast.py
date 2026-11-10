@@ -26,6 +26,8 @@ from tests.test_server_tool_identity_contrast import _no_external_operations  # 
 from tests.test_settings_presentation import _tab_to
 from tests.test_workspace_server_screens import _ServerWorkspaceApp
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ('ansi-dark', 'ansi-light', 'servonaut', 'servonaut-light')
 

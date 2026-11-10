@@ -25,6 +25,8 @@ from tests.test_workspace_access_reflow import (
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # Modal default-focus and absent Escape behavior must come from original native evidence.
 ORIGINAL_MODAL_FOCUS: dict[str, str | None] | None = {

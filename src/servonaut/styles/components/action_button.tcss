@@ -163,3 +163,12 @@ ActionButton#btn_back.-textual-compact:hover,
 ActionButton#btn_back.-textual-compact:focus {
     background: $panel-lighten-2;
 }
+
+/* No room: the actions wrap onto further lines instead of being cut off. The
+   row sets its own column count and column widths when it wraps. */
+ActionRow.-wrap {
+    layout: grid;
+    grid-size: 2;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+}

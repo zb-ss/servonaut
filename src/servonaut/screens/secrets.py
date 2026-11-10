@@ -129,7 +129,7 @@ class SecretsScreen(WorkspaceScreen):
             yield Container(
                 Vertical(
                     Horizontal(
-                        Static("Secrets management", id="secrets_title"),
+                        Static("Secrets management", id="secrets_title", classes="screen-title"),
                         Static("", id="secrets_status_pill"),
                         id="secrets_heading_row",
                     ),
@@ -137,6 +137,7 @@ class SecretsScreen(WorkspaceScreen):
                         "Check your active provider, manage its cache, or browse secret names. "
                         "Secret values stay hidden.",
                         id="secrets_subtitle",
+                        classes="screen-description",
                     ),
                     classes="secrets_overview",
                 ),

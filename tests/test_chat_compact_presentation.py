@@ -18,6 +18,8 @@ from tests.test_fleet_workspace_layout import _LayoutHost, _open_chat
 from tests.test_selection_copy import _Clipboard, _drag
 from tests.test_selection_copy import clipboard as clipboard
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ("servonaut", "servonaut-light", "ansi-dark", "ansi-light")
 

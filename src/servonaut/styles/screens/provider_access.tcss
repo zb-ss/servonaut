@@ -82,7 +82,7 @@ OVHSetupScreen.-content-narrow .setting_row .label {
 /* Cloud registries remain distinct from local SSH key management. */
 HetznerSSHKeysScreen #hetzner_ssh_keys_container,
 OVHSSHKeysScreen #ovh_ssh_keys_container {
-    padding: 1 2;
+    padding: 0 2 1 2;
     background: $surface;
 }
 

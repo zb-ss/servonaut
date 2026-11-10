@@ -31,6 +31,8 @@ from tests._workspace_reflow_conformance import open_chat, tab_to
 from tests.test_navigation_dialog_contrast import _assert_readable
 from tests.test_workspace_server_screens import _ServerWorkspaceApp, _server
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"]
 

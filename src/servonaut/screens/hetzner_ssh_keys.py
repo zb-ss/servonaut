@@ -98,8 +98,9 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                 ScrollableContainer(
                     Horizontal(
                         Static(
-                            "[bold $text-accent]Hetzner SSH keys[/bold $text-accent]",
+                            "Hetzner SSH keys",
                             id="hetzner_ssh_keys_header",
+                            classes="screen-title",
                         ),
                         AccountPicker.for_provider(
                             registry_for(self.app, "hetzner"), "hetzner",

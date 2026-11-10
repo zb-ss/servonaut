@@ -13,6 +13,8 @@ from tests.test_workspace_vault_reflow import (
     HOST_KEY, _VaultHost, inert_services as _inert_services, stable_open,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])

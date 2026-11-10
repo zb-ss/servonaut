@@ -2,7 +2,7 @@
 AWSManagerScreen #aws_mgr_container,
 HetznerManagerScreen #hetzner_mgr_container,
 OVHManagerScreen #ovh_mgr_container {
-    padding: 1;
+    padding: 0 1 1 1;
 }
 
 .provider-manager-content .provider-manager-heading {
@@ -13,18 +13,6 @@ OVHManagerScreen #ovh_mgr_container {
 .provider-manager-content .provider-manager-heading-row {
     height: auto;
     align: left top;
-}
-
-AWSManagerScreen #aws_mgr_header,
-HetznerManagerScreen #hetzner_mgr_header,
-OVHManagerScreen #ovh_mgr_header {
-    width: 1fr;
-    height: auto;
-    text-align: left;
-    text-style: bold;
-    color: $text;
-    padding: 0;
-    margin: 0;
 }
 
 .provider-manager-content .provider-manager-overview {

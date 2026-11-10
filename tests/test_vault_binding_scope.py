@@ -22,6 +22,8 @@ from servonaut.services.vault import crypto
 from servonaut.styles import CSS_FILES
 from tests.test_vault_bind_picker import KEY_ITEM, PERSONAL_VAULT, TEAM_VAULT, _Service, _host_key, _settle
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _own() -> dict:
     return {"id": "i-1", "name": "web-1", "public_ip": "9.9.9.9", "username": "deploy"}

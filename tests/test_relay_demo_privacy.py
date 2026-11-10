@@ -24,6 +24,8 @@ from tests.test_workspace_account_leaf import (
     _inert_boundaries as _inert_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 REAL_NAME = "private-node"
 PAYLOAD = (

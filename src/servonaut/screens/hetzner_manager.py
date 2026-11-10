@@ -207,7 +207,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
             yield ScrollableContainer(
                 Vertical(
                     Horizontal(
-                        Static("Hetzner Cloud servers", id="hetzner_mgr_header"),
+                        Static("Hetzner Cloud servers", id="hetzner_mgr_header", classes="screen-title"),
                         Static(
                             "Inventory", id="hetzner_mgr_overview",
                             classes="provider-manager-overview", markup=False,

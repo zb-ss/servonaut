@@ -92,8 +92,9 @@ class OVHIPManagementScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static(
-                            "[bold $text-accent]OVH IP Management[/bold $text-accent]",
+                            "OVH IP Management",
                             id="ip_mgmt_title",
+                            classes="screen-title",
                         ),
                         Static(
                             "Select an IP to move its routing or manage its reverse DNS.",

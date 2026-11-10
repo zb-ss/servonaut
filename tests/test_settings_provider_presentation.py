@@ -28,6 +28,8 @@ from tests.test_settings_presentation import _tab_to
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 ROWS = {
     "aws": (

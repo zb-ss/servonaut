@@ -45,6 +45,9 @@ class WorkspaceNotificationSpace(Widget):
 class WorkspaceScreen(Screen):
     """Apply session preferences without changing screen-stack ownership."""
 
+    # Below this many columns the navigation collapses by itself.
+    NAVIGATION_AUTO_HIDE_WIDTH = 110
+
     CHAT_REFLOW = False
     CHAT_MIN_CONTENT_WIDTH: int | None = None
     CONTENT_NARROW_WIDTH: int | None = None
@@ -78,21 +81,40 @@ class WorkspaceScreen(Screen):
         """Opted-in screens place chat beside mounted content in their row."""
         return self.query_one("#main-layout") if self.CHAT_REFLOW else self
 
+    def navigation_width_class(self) -> str:
+        """"narrow" below the auto-hide width, otherwise "wide"."""
+        return "narrow" if self.app.size.width < self.NAVIGATION_AUTO_HIDE_WIDTH else "wide"
+
+    def navigation_should_show(self) -> bool:
+        """An explicit choice made in this width class, else the automatic rule."""
+        width_class = self.navigation_width_class()
+        state = getattr(self.app, "workspace_state", None)
+        if state is not None and state.navigation_choice_class == width_class:
+            return state.navigation_visible
+        return width_class == "wide"
+
+    def expire_stale_navigation_choice(self) -> None:
+        """Forget an explicit choice once the terminal is in the other width class."""
+        state = getattr(self.app, "workspace_state", None)
+        if state is None or state.navigation_choice_class is None:
+            return
+        if state.navigation_choice_class != self.navigation_width_class():
+            state.navigation_choice_class = None
+            state.navigation_visible = True
+
     def workspace_sidebar(self) -> Sidebar:
         """Set visibility before the first layout, including on a new screen."""
         sidebar = Sidebar()
-        state = getattr(self.app, "workspace_state", None)
-        if state is not None:
-            sidebar.display = state.navigation_visible
+        sidebar.display = self.navigation_should_show()
         return sidebar
 
     def apply_workspace_state(self) -> None:
         sidebar = next(iter(self.query(Sidebar)), None)
         if sidebar is None:
             return
-        state = getattr(self.app, "workspace_state", None)
-        if state is not None and not sidebar.navigation_mode:
-            sidebar.display = state.navigation_visible
+        self.expire_stale_navigation_choice()
+        if not sidebar.navigation_mode:
+            sidebar.display = self.navigation_should_show()
         self.sync_workspace_controls()
 
     def sync_workspace_controls(self) -> None:
@@ -105,6 +127,7 @@ class WorkspaceScreen(Screen):
             controls.sync_state()
 
     def on_resize(self) -> None:
+        self.call_after_refresh(self.apply_workspace_state)
         if self.CHAT_REFLOW:
             self.call_after_refresh(self.sync_workspace_controls)
 

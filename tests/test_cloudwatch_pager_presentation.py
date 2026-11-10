@@ -16,6 +16,8 @@ from tests.test_workspace_security_reflow import (
     _opener,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_count", [12, 112])

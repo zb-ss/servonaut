@@ -38,6 +38,8 @@ from tests._workspace_reflow_conformance import (
 )
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 BUCKETS = ({"name": "assets", "creation_date": "2026-01-01"},
            {"name": "backups", "creation_date": "2026-01-02"})
