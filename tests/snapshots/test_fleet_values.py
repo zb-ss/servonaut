@@ -12,6 +12,9 @@ from typing import Any, Awaitable, Callable, Iterator, List
 
 import pytest
 
+from textual import events
+from textual.widgets import Input, TextArea
+
 from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.utils import platform_utils
 from servonaut.widgets import fleet_values
@@ -97,13 +100,13 @@ def test_a_click_copies_the_value_and_confirms_in_place(
         row = _row(pilot, "public_ip")
         assert row.value == instance["public_ip"]
         toasts = len(pilot.app._notifications)
-        await pilot.click(row, offset=(1, 1))
+        await pilot.click(row.value_widget)
         await pilot.pause()
         assert clipboard.calls == [instance["public_ip"]]
-        assert row.copied and "✓ copied" in row.visual.plain
+        assert row.copied and row.shown_text == "✓ copied"
         assert len(pilot.app._notifications) == toasts
         await _harness.wait_until(pilot, lambda: not row.copied, "the confirmation to clear")
-        assert "✓ copied" not in row.visual.plain and instance["public_ip"] in row.visual.plain
+        assert row.shown_text == instance["public_ip"]
 
     _run(scenario)
 
@@ -112,9 +115,10 @@ def test_dragging_inside_a_value_copies_only_the_highlighted_part(clipboard: _Cl
     async def scenario(pilot: Any) -> None:
         instance = await _mail(pilot)
         row = _row(pilot, "name")
-        assert await pilot.mouse_down(row, offset=(1, 1))
-        await pilot.hover(row, offset=(4, 1))
-        assert await pilot.mouse_up(row, offset=(4, 1))
+        text = row.value_widget
+        assert await pilot.mouse_down(text, offset=(1, 0))
+        await pilot.hover(text, offset=(4, 0))
+        assert await pilot.mouse_up(text, offset=(4, 0))
         await pilot.pause()
         assert clipboard.calls and clipboard.calls[-1] != instance["name"]
         assert clipboard.calls[-1] in instance["name"]
@@ -206,7 +210,7 @@ def test_demo_mode_shows_and_copies_only_stand_ins(clipboard: _Clipboard, size: 
         await pilot.pause()
         painted = " ".join(r.value for r in rows)
         assert not any(v in painted for v in real_values)
-        assert len(clipboard.calls) >= len(rows) - 1
+        assert clipboard.calls == [r.value for r in rows]
         assert not any(v in call for call in clipboard.calls for v in real_values)
 
     _run(scenario, size, demo=True)
@@ -246,3 +250,187 @@ def test_fleet_values_in_the_inspector_or_on_one_line(screen_snapshot, size: str
         _harness.freeze_cursors(pilot.app)
 
     screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], before)
+
+
+# --- focus ---------------------------------------------------------------
+
+
+def _focused_value_is_shown(pilot: Any) -> bool:
+    focused = pilot.app.focused
+    return isinstance(focused, ValueRow) and focused.region.width > 0
+
+
+def test_closing_the_chat_ends_a_click_started_walk(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        await pilot.press("Y")
+        screen = pilot.app.screen
+        await pilot.press("f2")
+        await _harness.wait_until(pilot, lambda: bool(screen.query("#chat-input")), "the chat")
+        # The inspector is hidden by the chat; the walk must not stay in it.
+        await pilot.pause()
+        assert not _focused_value_is_shown(pilot)
+        assert not isinstance(pilot.app.focused, ValueRow)
+
+    _run(scenario)
+
+
+def test_closing_the_chat_ends_a_walk_in_the_one_line_form(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        screen = pilot.app.screen
+        await pilot.press("f2")
+        await _harness.wait_until(pilot, lambda: bool(screen.query("#chat-input")), "the chat")
+        screen.action_copy_value()
+        await pilot.pause()
+        assert _focused_value_is_shown(pilot)
+        await pilot.press("f2")
+        await pilot.pause()
+        assert isinstance(pilot.app.focused, InstanceTable)
+        before = screen.query_one(InstanceTable).cursor_row
+        await pilot.press("up")
+        await pilot.pause()
+        assert screen.query_one(InstanceTable).cursor_row == before - 1
+
+    _run(scenario)
+
+
+def test_shrinking_the_window_ends_a_walk_in_the_hidden_list(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        await pilot.press("Y")
+        assert isinstance(pilot.app.focused, ValueRow)
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        assert isinstance(pilot.app.focused, InstanceTable)
+        clipboard.calls.clear()
+        await pilot.press("down")
+        await pilot.pause()
+        assert clipboard.calls == []
+
+    _run(scenario)
+
+
+@sizes
+def test_a_click_gives_the_focus_back_to_the_table(clipboard: _Clipboard, size: str) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        table = pilot.app.screen.query_one(InstanceTable)
+        row = _row(pilot, "name", line=size == "100x30")
+        before = table.cursor_row
+        await pilot.click(row.value_widget)
+        await pilot.pause()
+        assert pilot.app.focused is table
+        await pilot.press("up")
+        await pilot.pause()
+        assert table.cursor_row == before - 1
+
+    _run(scenario, size)
+
+
+def test_a_click_gives_the_focus_back_to_the_chat_composer(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        screen = pilot.app.screen
+        await pilot.press("f2")
+        await _harness.wait_until(pilot, lambda: bool(screen.query("#chat-input")), "the chat")
+        composer = screen.query_one("#chat-input", TextArea)
+        await _harness.wait_until(pilot, lambda: pilot.app.focused is composer, "the composer")
+        row = _row(pilot, "name", line=True)
+        await pilot.click(row.value_widget)
+        await pilot.pause()
+        assert pilot.app.focused is composer
+        await pilot.press("x")
+        assert composer.text.endswith("x")
+
+    _run(scenario)
+
+
+def test_y_during_a_walk_keeps_the_chosen_value(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        await pilot.press("Y", "down", "down")
+        chosen = pilot.app.focused
+        await pilot.press("Y")
+        assert pilot.app.focused is chosen
+
+    _run(scenario)
+
+
+# --- what a copy really did ----------------------------------------------
+
+
+def test_a_value_sent_only_to_the_terminal_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform_utils, "copy_to_clipboard", lambda text: False)
+    monkeypatch.setattr(platform_utils, "_clipboard_writer", None)
+
+    async def scenario(pilot: Any) -> None:
+        instance = await _mail(pilot)
+        sent: List[str] = []
+        toasts: List[str] = []
+        monkeypatch.setattr(pilot.app, "copy_to_clipboard", sent.append)
+        monkeypatch.setattr(pilot.app, "notify", lambda message, **kw: toasts.append(message))
+        row = _row(pilot, "public_ip")
+        await pilot.click(row.value_widget)
+        await pilot.pause()
+        assert sent == [instance["public_ip"]] and row.shown_text == "sent to terminal"
+        await pilot.press("y")
+        await pilot.pause()
+        assert toasts == [f"Sent to the terminal clipboard: {instance['name']}"]
+
+    _run(scenario)
+
+
+def test_a_copy_that_cannot_happen_says_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform_utils, "copy_to_clipboard", lambda text: False)
+
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        toasts: List[str] = []
+
+        def refuse(text: str) -> None:
+            raise OSError("no terminal")
+
+        monkeypatch.setattr(pilot.app, "copy_to_clipboard", refuse)
+        monkeypatch.setattr(pilot.app, "notify", lambda message, **kw: toasts.append(message))
+        row = _row(pilot, "public_ip")
+        await pilot.click(row.value_widget)
+        await pilot.press("y")
+        await pilot.pause()
+        assert toasts == ["Clipboard not available", "Clipboard not available"]
+        assert not row.copied
+
+    _run(scenario)
+
+
+# --- mouse details ---------------------------------------------------------
+
+
+def test_only_the_left_button_copies(clipboard: _Clipboard) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        row = _row(pilot, "public_ip")
+        await pilot.click(row.value_widget, button=3)
+        await pilot.pause()
+        assert clipboard.calls == [] and not row.copied
+
+    _run(scenario)
+
+
+def test_a_click_arriving_over_a_selection_does_not_copy_the_whole_value(
+    clipboard: _Clipboard,
+) -> None:
+    async def scenario(pilot: Any) -> None:
+        await _mail(pilot)
+        row = _row(pilot, "name")
+        text = row.value_widget
+        assert await pilot.mouse_down(text, offset=(1, 0))
+        await pilot.hover(text, offset=(4, 0))
+        assert await pilot.mouse_up(text, offset=(4, 0))
+        await pilot.pause()
+        assert pilot.app.screen.get_selected_text()
+        clipboard.calls.clear()
+        row.on_click(events.Click(row, 1, 0, 0, 0, 1, False, False, False))
+        assert clipboard.calls == [] and not row.copied
+
+    _run(scenario)

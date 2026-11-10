@@ -133,11 +133,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Set the Bitwarden SSH key reference of the selected server"),
         Binding("v", "verify_ssh", "Verify", show=True,
                 tooltip="Check that the selected server's SSH key works"),
-        Binding("y", "copy_row", "Copy", show=True,
+        Binding("y", "copy_row", "Copy row", show=True,
                 tooltip="Copy the selected server's details"),
-        # Not in the footer (it is full at common widths); the help screen
-        # lists it.
-        Binding("Y", "copy_value", "Copy value", show=False,
+        Binding("Y", "copy_value", "Copy value", show=True,
                 tooltip="Pick one value of the selected server to copy"),
     ]
 
@@ -166,6 +164,7 @@ class InstanceListScreen(WorkspaceScreen):
         "verify_ssh",
         "manage_ssh_ref",
         "fleet_db_scan",
+        "copy_value",
     )
 
     # Debounce delay for search input (seconds)
@@ -270,6 +269,9 @@ class InstanceListScreen(WorkspaceScreen):
                             yield Static("Details", id="fleet_values_title", markup=False)
                             yield self._copy_row_button("fleet_copy_row")
                         yield FleetValues(id="fleet_values", classes="fleet-values")
+                        yield Static(
+                            "Click a value to copy it", id="fleet_values_hint", markup=False,
+                        )
                 yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
         with Vertical(id="fleet-bottom"):
@@ -302,6 +304,7 @@ class InstanceListScreen(WorkspaceScreen):
         """The compact "Copy row" button beside the values (it keeps the Tab order)."""
         button = Button(
             "Copy row (y)", id=button_id, classes="fleet-copy-row", disabled=True, compact=True,
+            tooltip="Copy the selected server's details",
         )
         button.can_focus = False
         return button
@@ -1748,7 +1751,7 @@ class InstanceListScreen(WorkspaceScreen):
 
     def action_copy_row(self) -> None:
         """Copy full selected instance row data to clipboard."""
-        from servonaut.utils.platform_utils import copy_to_clipboard
+        from servonaut.utils.platform_utils import CopyOutcome, copy_text
 
         table = self.query_one(InstanceTable)
         instance = table.get_selected_instance()
@@ -1770,9 +1773,12 @@ class InstanceListScreen(WorkspaceScreen):
         ]
         text = "  ".join(f"{v}" for _, v in fields if v)
 
-        if copy_to_clipboard(text):
-            name = instance.get('name') or instance.get('id', '')
+        name = instance.get('name') or instance.get('id', '')
+        outcome = copy_text(self.app, text)
+        if outcome is CopyOutcome.COPIED:
             self.app.notify(f"Copied: {name}", markup=False)
+        elif outcome is CopyOutcome.SENT_TO_TERMINAL:
+            self.app.notify(f"Sent to the terminal clipboard: {name}", markup=False)
         else:
             self.app.notify("Clipboard not available", severity="warning")
 

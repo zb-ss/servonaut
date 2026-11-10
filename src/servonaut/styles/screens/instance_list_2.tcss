@@ -119,6 +119,17 @@ Button.fleet-copy-row {
     color: $text;
 }
 
+.value-label {
+    width: 11;
+    height: auto;
+    color: $text-muted;
+}
+
+.value-text {
+    width: 1fr;
+    height: auto;
+}
+
 .value-row:hover {
     background: $boost;
 }
@@ -126,6 +137,12 @@ Button.fleet-copy-row {
 .value-row:focus {
     background: $boost;
     text-style: bold;
+}
+
+#fleet_values_hint {
+    width: 100%;
+    height: 1;
+    color: $text-muted;
 }
 
 #fleet-bottom {
@@ -172,6 +189,14 @@ InstanceListScreen.-chat-open #fleet_value_bar {
 
 #fleet_value_line .value-row {
     height: 1;
+}
+
+#fleet_value_line .value-label {
+    width: auto;
+    margin-right: 1;
+}
+
+#fleet_value_line .value-text {
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }

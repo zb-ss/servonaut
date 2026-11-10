@@ -76,7 +76,8 @@ def _assert_values_painted(app: _LayoutHost) -> str:
     assert 1 <= bar.region.height <= 2
     value = app.screen.query_one("#fleet_value_line_public_ip", ValueRow)
     assert value.region.width > 0
-    assert app.get_widget_at(*value.region.center)[0] is value
+    hit = app.get_widget_at(*value.region.center)[0]
+    assert hit is value or value in hit.ancestors
     rows = app.screen._compositor.render_strips()
     return "".join(
         rows[y].crop(bar.region.x, bar.region.right).text

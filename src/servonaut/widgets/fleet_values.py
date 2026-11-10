@@ -6,35 +6,37 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, VerticalScroll
-from textual.content import Content
-from textual.events import Click
+from textual.containers import Grid, Horizontal, VerticalScroll
+from textual.events import Click, MouseDown, MouseUp
+from textual.widget import Widget
 from textual.widgets import Static
 
 from servonaut.utils.markup import literal
+from servonaut.utils.platform_utils import CopyOutcome, copy_text
 from servonaut.widgets.instance_table import InstanceTable
 
 # How long a copied value shows its confirmation in place of itself (seconds).
 COPIED_SECONDS = 1.5
 
-# Every value a row can carry, the ones people copy most first. A server without a value for
-# a field simply has no row for it.
-VALUE_FIELDS: tuple[tuple[str, str], ...] = (
-    ("name", "Name"),
-    ("public_ip", "Public IP"),
-    ("private_ip", "Private IP"),
-    ("region", "Region"),
-    ("type", "Type"),
-    ("id", "ID"),
-    ("key_name", "Key"),
-    ("state", "State"),
-    ("provider", "Provider"),
-    ("login_user", "Team login"),
-    ("username", "Username"),
-    ("port", "Port"),
-    ("group", "Group"),
-    ("account", "Account"),
-    ("account_id", "Account ID"),
+# Every value a row can carry, the ones people copy most first, with the label
+# the list shows and the shorter one the one-line form shows. A server without
+# a value for a field simply has no row for it.
+VALUE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("name", "Name", "Name"),
+    ("public_ip", "Public IP", "IP"),
+    ("private_ip", "Private IP", "Priv"),
+    ("region", "Region", "Region"),
+    ("type", "Type", "Type"),
+    ("id", "ID", "ID"),
+    ("key_name", "Key", "Key"),
+    ("state", "State", "State"),
+    ("provider", "Provider", "Prov"),
+    ("login_user", "Team login", "Login"),
+    ("username", "Username", "User"),
+    ("port", "Port", "Port"),
+    ("group", "Group", "Group"),
+    ("account", "Account", "Acct"),
+    ("account_id", "Account ID", "Acct ID"),
 )
 _ACCOUNT_FIELDS = frozenset({"account", "account_id"})
 
@@ -45,7 +47,7 @@ def instance_values(instance: Optional[dict]) -> dict[str, str]:
         return {}
     qualified = bool(instance.get("account_qualified") and instance.get("account"))
     values: dict[str, str] = {}
-    for key, _label in VALUE_FIELDS:
+    for key, _label, _short in VALUE_FIELDS:
         if key in _ACCOUNT_FIELDS and not qualified:
             continue
         value = instance.get(key)
@@ -54,27 +56,49 @@ def instance_values(instance: Optional[dict]) -> dict[str, str]:
     return values
 
 
-class ValueRow(Static):
+_CONFIRMATIONS = {
+    CopyOutcome.COPIED: "✓ copied",
+    CopyOutcome.SENT_TO_TERMINAL: "sent to terminal",
+}
+
+
+class ValueRow(Horizontal):
     """One labelled value; a click, or enter while it has the focus, copies it."""
 
     BINDINGS = [Binding("enter", "copy", "Copy value", show=False)]
 
     def __init__(self, field: str, label: str, compact: bool) -> None:
         super().__init__(
-            "", id=f"fleet_value_{'line' if compact else 'list'}_{field}",
-            classes="value-row", markup=False,
+            id=f"fleet_value_{'line' if compact else 'list'}_{field}",
+            classes="value-row -compact" if compact else "value-row",
         )
         self.field = field
         self.label = label
         self.value = ""
         self.copied = False
-        self._compact = compact
+        self._label_widget = Static(label, markup=False, classes="value-label")
+        self._value_widget = Static("", markup=False, classes="value-text")
         self._copied_timer = None
-        self.tooltip = f"Click to copy the {label.lower()}"
+        self._returns_to: Optional[Widget] = None
+        self.tooltip = "Click to copy this value, or press Y and pick it with the keys"
+
+    def compose(self) -> ComposeResult:
+        yield self._label_widget
+        yield self._value_widget
+
+    @property
+    def value_widget(self) -> Static:
+        return self._value_widget
+
+    @property
+    def shown_text(self) -> str:
+        """What the value cell currently paints (the value, or its confirmation)."""
+        return self._value_widget.visual.plain
 
     def allow_focus(self) -> bool:
-        # Only "Y" walks the values: they stay out of the Tab chain.
-        return getattr(self.parent, "walking", False)
+        # Only "Y" (or a click) walks the values: they stay out of the Tab chain.
+        parent = self.parent
+        return isinstance(parent, _ValueWalker) and parent.walking
 
     def set_value(self, value: str) -> None:
         self.value = value
@@ -82,45 +106,63 @@ class ValueRow(Static):
         self._paint()
 
     def _paint(self) -> None:
-        if self.copied:
-            confirmation = literal("✓ copied", "$text-success")
-            if self._compact:
-                self.update(confirmation)
-            else:
-                self.update(Content.assemble(literal(self.label, "dim"), "  ", confirmation, "\n", literal(self.value)))
-        elif self._compact:
-            self.update(literal(self.value))
-        else:
-            self.update(Content.assemble(literal(self.label, "dim"), "\n", literal(self.value)))
+        self._value_widget.update(literal(self.value))
 
-    def on_mouse_down(self) -> None:
-        # Taking the focus, as any clicked field does, keeps another editor's
-        # old selection (the chat composer's) from being copied when this
-        # click is released; arrow keys then continue from this value.
+    def on_hide(self) -> None:
+        # A value that leaves the screen (chat toggled, window narrowed) must
+        # not keep the keyboard: it is handed back to the table.
+        if self.has_focus and isinstance(self.parent, _ValueWalker):
+            self.parent.leave()
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1 or not isinstance(self.parent, _ValueWalker):
+            return
+        # Taking the focus for the gesture keeps another editor's old
+        # selection (the chat composer's) from being copied when the click is
+        # released; the focus then goes back to where it was.
+        focused = self.screen.focused
+        self._returns_to = None if isinstance(focused, ValueRow) else focused
         self.parent.walking = True
         self.focus()
 
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if event.button != 1:
+            return
+        # Queued behind the app's selection hook, which reads the focus.
+        self.app.call_later(self._give_focus_back)
+
+    def _give_focus_back(self) -> None:
+        target, self._returns_to = self._returns_to, None
+        parent = self.parent
+        if target is None or not isinstance(parent, _ValueWalker) or not self.has_focus:
+            return
+        parent.walking = False
+        if target.is_attached and target.focusable:
+            target.focus()
+        else:
+            parent.leave()
+
     def on_click(self, event: Click) -> None:
         # A drag that selects part of the value already copies just that part.
-        if self.screen.get_selected_text():
+        if event.button != 1 or self.screen.get_selected_text():
             return
         event.stop()
         self.action_copy()
 
     def action_copy(self) -> None:
-        from servonaut.utils.platform_utils import copy_to_clipboard
-
         if not self.value:
             return
-        if not copy_to_clipboard(self.value):
-            self.app.copy_to_clipboard(self.value)
-        self._show_copied()
+        outcome = copy_text(self.app, self.value)
+        if outcome is CopyOutcome.UNAVAILABLE:
+            self.app.notify("Clipboard not available", severity="warning")
+            return
+        self._show_copied(_CONFIRMATIONS[outcome])
 
-    def _show_copied(self) -> None:
+    def _show_copied(self, confirmation: str) -> None:
         self._clear_copied()
         self.copied = True
         self.add_class("-copied")
-        self._paint()
+        self._value_widget.update(literal(confirmation, "$text-success"))
         self._copied_timer = self.set_timer(COPIED_SECONDS, self._end_copied)
 
     def _end_copied(self) -> None:
@@ -144,8 +186,8 @@ class _ValueWalker:
     can_focus = False
 
     def compose(self) -> ComposeResult:
-        for key, label in VALUE_FIELDS:
-            row = ValueRow(key, label, compact=self.compact)
+        for key, label, short in VALUE_FIELDS:
+            row = ValueRow(key, short if self.compact else label, compact=self.compact)
             row.display = False
             yield row
 
@@ -168,7 +210,8 @@ class _ValueWalker:
         if not rows:
             return False
         self.walking = True
-        rows[0].focus()
+        if self.screen.focused not in rows:
+            rows[0].focus()
         return True
 
     def action_step(self, offset: int) -> None:

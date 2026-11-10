@@ -290,8 +290,7 @@ _HIGHLIGHTED = 8
 
 async def _drag_value(pilot: Pilot, row: ValueRow) -> str:
     """Highlight the start of a value with the mouse; returns the highlighted text."""
-    line = 1 if row.content_region.height > 1 else 0
-    await _drag(pilot, row, (0, line), (_HIGHLIGHTED - 1, line))
+    await _drag(pilot, row.value_widget, (0, 0), (_HIGHLIGHTED - 1, 0))
     return row.value[:_HIGHLIGHTED]
 
 
@@ -372,7 +371,10 @@ async def test_collapsing_chat_retires_only_its_native_screen_copy_target(
         target.scroll_visible(animate=False, immediate=True)
         await pilot.pause()
         # Native Static selection includes the glyph at the release coordinate.
-        await _drag(pilot, target, (0, 0), (len(expected) - 1, 0))
+        await _drag(
+            pilot, target.value_widget if isinstance(target, ValueRow) else target,
+            (0, 0), (len(expected) - 1, 0),
+        )
         assert screen.get_selected_text() == expected
         assert clipboard.calls[-1] == expected
         assert editor.document is document and editor.text == draft
@@ -383,12 +385,8 @@ async def test_collapsing_chat_retires_only_its_native_screen_copy_target(
         clipboard.calls.clear()
         app.copy_to_clipboard("keep the clipboard")
         await pilot.press("f2")
-        # Dragging in the value took the focus from the composer, as a click on
-        # any field does; the collapse leaves it where it is.
-        await wait_until(lambda: panel._collapsed and not panel.display)
-        if selection_source == "chat":
-            assert app.focused is table
-        assert panel.is_attached
+        await wait_until(lambda: panel._collapsed and app.focused is table)
+        assert panel.is_attached and not panel.display
         with patch.object(app, "copy_to_clipboard", wraps=app.copy_to_clipboard) as copy:
             await pilot.press("ctrl+c")
             await pilot.pause()

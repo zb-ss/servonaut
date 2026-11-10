@@ -48,7 +48,8 @@ async def test_values_stay_complete_and_reachable_after_reflow(resize: str) -> N
         for field, value in expected.items():
             row = rows[field]
             assert row.value == value and row.region.width > 0
-            assert app.get_widget_at(*row.region.center)[0] is row
+            hit = app.get_widget_at(*row.region.center)[0]
+            assert hit is row or row in hit.ancestors
 
 
 @pytest.mark.asyncio
