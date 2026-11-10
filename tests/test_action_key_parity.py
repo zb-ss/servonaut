@@ -7,6 +7,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Input, Static
 
 from servonaut.widgets.memory_prompt import MemoryPrompt
+from tests.test_selection_copy import clipboard as clipboard
 from tests.test_memory_summary_ui import _INSTANCE, _MemorySummaryApp
 from tests.test_workspace_security_reflow import (
     _SecurityHost,
@@ -88,3 +89,24 @@ async def test_memory_prompt_buttons_and_keys_run_the_same_actions(
             await pilot.press(how[-1])
         await pilot.pause()
         assert prompt_calls == [expected]
+
+
+@pytest.mark.asyncio
+async def test_ip_ban_row_click_keeps_typed_text_and_y_still_copies(clipboard) -> None:
+    app = _SecurityHost(True)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _opener("ban")(app, pilot)
+        field = screen.query_one("#ip_input", Input)
+        table = screen.query_one("#banned_table", DataTable)
+        field.value = "203"
+        field.focus()
+        await pilot.pause()
+        # A click on a row only moves the cursor; the typed address survives.
+        assert await pilot.click("#banned_table", offset=(2, 2))
+        await pilot.pause()
+        assert field.value == "203"
+        assert app.focused is table
+        await pilot.press("y")
+        await pilot.pause()
+        assert field.value == "203"
+        assert clipboard.calls == ["8.8.8.8/32"]
