@@ -2548,7 +2548,7 @@ class ServonautApp(App):
             label = self.redaction_service.redact_name(label)
         self.notify(
             f"A team member's memory key changed, so {label} is not shared with "
-            "them yet. Confirm it in Fleet Memory: select the server, then S.",
+            "them yet. Confirm it in Fleet memory: select the server, then S.",
             severity="warning",
             markup=False,
         )

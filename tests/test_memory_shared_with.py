@@ -190,7 +190,7 @@ async def test_the_memory_screen_says_whom_an_own_server_is_shared_with(tmp_path
         await _wait_for(pilot, lambda: not _share_line(app).has_class("hidden"))
         text = str(_share_line(app).render())
         assert text.startswith("Shared with Team A (viewer and above); Team B (admin and above).")
-        assert "Fleet Memory and press S" in text
+        assert "Fleet memory and press S" in text
 
 
 async def test_the_memory_screen_says_nothing_when_it_is_not_shared(tmp_path):

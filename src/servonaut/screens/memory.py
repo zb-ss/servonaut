@@ -1112,7 +1112,7 @@ class MemoryScreen(WorkspaceScreen):
             label.add_class("hidden")
             return
         label.update(Text.assemble(
-            (text, ""), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
+            (text, ""), ("\nTo change it, select the server in Fleet memory and press S.", "dim"),
         ))
         label.remove_class("hidden")
 
