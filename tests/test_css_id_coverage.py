@@ -52,6 +52,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "aws_mgr_identity",
         "hetzner_mgr_identity",
         "ovh_mgr_identity",
+        # link_button.tcss: Button.link-button (LinkButton)
+        "fleet_copy_row",
+        "fleet_refresh",
         # memory.tcss: MemoryDriftScreen #drift-actions Button
         "btn-drift-diff",
         # memory_screen.tcss: MemoryScreen .memory-row-buttons Button
