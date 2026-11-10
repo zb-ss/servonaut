@@ -372,7 +372,8 @@ async def test_reload_picks_up_new_files_and_fixed_ones(manager: ConfigManager, 
         (folder / "river.toml").write_text(OCEAN, encoding="utf-8")
         await pilot.click("#appearance_reload")
         await _until(lambda: not panel.query(ThemeErrorCard) and any(c.theme_name == "ocean" for c in panel.query(ThemeCard)))
-        assert any(card.theme_name == "river" for card in panel.query(ThemeCard))
+        await _until(lambda: any(card.theme_name == "river" for card in panel.query(ThemeCard)))
+        await app.workers.wait_for_complete()  # the reload ends before the screen is torn down
 
 
 @pytest.mark.asyncio
@@ -700,9 +701,8 @@ def _rows_fully_visible(panel: AppearancePanel) -> int:
 
 
 def _title_cells(card: Widget) -> tuple:
-    """What the card's title is drawn with: the computed style, which a focus cue must change."""
-    title = card.query_one(".theme-card-title")
-    return (title.styles.background, title.styles.text_style)
+    """The card's title text style: the focus cue, which must not depend on the state border."""
+    return card.query_one(".theme-card-title").styles.text_style
 
 
 @pytest.mark.asyncio
@@ -719,6 +719,7 @@ async def test_every_kind_of_card_shows_when_it_has_focus(manager: ConfigManager
             card.focus()
             await pilot.pause()
             assert _title_cells(card) != blurred, f"a focused {kind} card looks the same"
+            assert _title_cells(card).underline, f"a focused {kind} card's title is not underlined"
 
 
 @pytest.mark.asyncio
@@ -789,3 +790,18 @@ async def test_arrow_keys_step_over_the_broken_files_card(manager: ConfigManager
         assert app.focused.theme_name == "servonaut-light", "right from the last card of a row steps over it"
         await pilot.press("left")
         assert app.focused.theme_name == "ocean"
+
+
+@pytest.mark.asyncio
+async def test_every_card_with_a_file_shows_its_full_path_when_it_fits(manager: ConfigManager, folder: Path) -> None:
+    # Slots: servonaut, ocean / pale, sunset (broken): the broken file sits in the right-hand column.
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "sunset.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        error_card = next(iter(panel.query(ThemeErrorCard)))
+        await _until(lambda: "~/.servonaut/themes/sunset.toml" in _card_text(error_card))
+        assert "~/.servonaut/themes/ocean.toml" in _card_text(_card(panel, "ocean"))

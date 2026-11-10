@@ -64,8 +64,7 @@ DETAILS_WIDTH = 36
 # At this panel width the title, hint and the three buttons share one row.
 HEADER_ROW_MIN_WIDTH = 120
 SWATCH_MIN_CELLS = 2
-# Border and padding of a card, and the room the "Edit file" link and its gap need beside a path.
-CARD_CHROME_CELLS = 4
+# The room the "Edit file" link and its gap need beside a path.
 EDIT_LINK_CELLS = 11
 
 
@@ -323,7 +322,6 @@ class AppearancePanel(SettingsPanel):
     def __init__(self) -> None:
         super().__init__()
         self._previewed: str = ""
-        self._path_room = 0
 
     # ------------------------------------------------------------------
     # Composition
@@ -397,13 +395,16 @@ class AppearancePanel(SettingsPanel):
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
             grid.set_class(count == columns, f"-cols-{count}")
-        self._path_room = (cards_width - 2 - (columns - 1)) // columns - CARD_CHROME_CELLS
         self._fit_card_paths()
 
     def _fit_card_paths(self) -> None:
+        """Once the cards are laid out, give each the width it really has for its path row."""
+        self.call_after_refresh(self._measure_card_paths)
+
+    def _measure_card_paths(self) -> None:
         for card in self.query(".theme-card"):
-            if isinstance(card, (ThemeCard, ThemeErrorCard)):
-                card.fit_path(self._path_room)
+            if isinstance(card, (ThemeCard, ThemeErrorCard)) and card.content_size.width > 0:
+                card.fit_path(card.content_size.width)
 
     @property
     def card_columns(self) -> int:
