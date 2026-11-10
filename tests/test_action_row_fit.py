@@ -213,9 +213,9 @@ def _lines(app: App) -> list[int]:
 
 @pytest.mark.asyncio
 async def test_five_buttons_that_fit_four_across_wrap_three_and_two() -> None:
-    # 58 cells hold four 14-cell columns but not five, so an unbalanced wrap
+    # 66 cells hold four 14-cell columns but not five, so an unbalanced wrap
     # would put four on the first line and one alone on the second.
-    app = _UniformApp(58)
+    app = _UniformApp(66)
     async with app.run_test(size=(100, 30)) as pilot:
         row = app.query_one(ActionRow)
         await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
@@ -226,7 +226,7 @@ async def test_five_buttons_that_fit_four_across_wrap_three_and_two() -> None:
 
 @pytest.mark.asyncio
 async def test_prefer_one_line_drops_hints_instead_of_wrapping() -> None:
-    app = _UniformApp(58, prefer_one_line=True)
+    app = _UniformApp(66, prefer_one_line=True)
     async with app.run_test(size=(100, 30)) as pilot:
         row = app.query_one(ActionRow)
         await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
@@ -239,7 +239,7 @@ async def test_prefer_one_line_drops_hints_instead_of_wrapping() -> None:
 
 @pytest.mark.asyncio
 async def test_keep_hints_wins_over_prefer_one_line() -> None:
-    app = _UniformApp(58, prefer_one_line=True, keep_hints=True)
+    app = _UniformApp(66, prefer_one_line=True, keep_hints=True)
     async with app.run_test(size=(100, 30)) as pilot:
         row = app.query_one(ActionRow)
         await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
