@@ -60,7 +60,6 @@ def test_invoice_pagination_preserves_raw_data_but_shows_safe_ids(is_demo: bool)
 @pytest.mark.parametrize("is_demo", [False, True])
 @pytest.mark.parametrize("method, service_method", [
     ("_load_current_usage", "get_current_usage"),
-    ("_load_spend_history", "get_monthly_spend_history"),
     ("_load_invoices", "get_invoices"),
     ("_load_services", "get_service_list"),
 ])
@@ -81,7 +80,7 @@ def test_provider_errors_do_not_disclose_unknown_billing_details(
     message = (notify.call_args or widget.update.call_args).args[0]
     plain = message.plain if isinstance(message, Content) else Content.from_markup(message).plain
     # The summary cards never repeat provider text; notifications do outside demo.
-    hides = is_demo or method in ("_load_current_usage", "_load_spend_history")
+    hides = is_demo or method in ("_load_current_usage", "_load_invoices")
     assert ("private-bill-123" not in plain) is hides
     assert ("123.45" not in plain) is hides
 
@@ -151,37 +150,88 @@ def test_failed_forecast_does_not_hide_current_figure() -> None:
     assert "unavailable" in text
 
 
-def test_history_card_always_ends_when_the_call_fails() -> None:
-    service = SimpleNamespace(
-        get_current_usage=AsyncMock(return_value={"current_spend": {}, "forecast": {}}),
-        get_monthly_spend_history=AsyncMock(side_effect=RuntimeError("[bold]x[/] secret")),
-    )
-    screen, app, widgets = _card_screen(service)
-    _run(screen, app, widgets, "_load_spend_history")
-    shown = widgets["#spend_history"].update.call_args.args[0]
-    assert "Loading" not in shown.plain
-    assert "secret" not in shown.plain
-    assert "Could not load" in shown.plain
+def _invoice_widgets():
+    return {"#current_usage": MagicMock(), "#spend_history": MagicMock(),
+            "#invoices_page_info": MagicMock(), "#invoices_table": MagicMock()}
 
 
-def test_history_card_ends_on_timeout(monkeypatch) -> None:
+def test_history_and_invoices_end_when_the_bill_call_fails() -> None:
+    service = SimpleNamespace(get_invoices=AsyncMock(side_effect=RuntimeError("[bold]x[/] secret")))
+    screen, app, _ = _card_screen(service)
+    widgets = _invoice_widgets()
+    _run(screen, app, widgets, "_load_invoices")
+    for selector in ("#spend_history", "#invoices_page_info"):
+        shown = widgets[selector].update.call_args.args[0]
+        assert "Loading" not in shown.plain
+        assert "secret" not in shown.plain
+        assert "Could not load" in shown.plain
+
+
+def test_invoice_loading_state_is_shown_then_replaced() -> None:
+    service = SimpleNamespace(get_invoices=AsyncMock(return_value=[]))
+    screen, app, _ = _card_screen(service)
+    widgets = _invoice_widgets()
+    with patch.object(screen, "_render_invoice_page"):
+        _run(screen, app, widgets, "_load_invoices")
+    assert widgets["#invoices_page_info"].update.call_args_list[0].args[0] == "[dim]Loading...[/dim]"
+
+
+def test_invoices_end_on_timeout(monkeypatch) -> None:
     import servonaut.screens.ovh_billing as module
 
-    async def never(**_):
+    async def never():
         await asyncio.sleep(60)
 
     monkeypatch.setattr(module, "_CARD_TIMEOUT_SECONDS", 0.05)
-    service = SimpleNamespace(get_monthly_spend_history=never)
-    screen, app, widgets = _card_screen(service)
-    _run(screen, app, widgets, "_load_spend_history")
+    screen, app, _ = _card_screen(SimpleNamespace(get_invoices=never))
+    widgets = _invoice_widgets()
+    _run(screen, app, widgets, "_load_invoices")
     assert "Could not load" in widgets["#spend_history"].update.call_args.args[0].plain
+    assert "Could not load" in widgets["#invoices_page_info"].update.call_args.args[0].plain
 
 
-def test_empty_history_shows_an_empty_state() -> None:
-    service = SimpleNamespace(get_monthly_spend_history=AsyncMock(return_value=[]))
-    screen, app, widgets = _card_screen(service)
-    _run(screen, app, widgets, "_load_spend_history")
+def test_one_invoice_fetch_feeds_table_and_history() -> None:
+    invoices = [{"billId": "B1", "date": "2026-03-02", "priceWithTax": {"value": 4.0, "currencyCode": "EUR"}}]
+    service = SimpleNamespace(get_invoices=AsyncMock(return_value=invoices))
+    screen, app, _ = _card_screen(service)
+    widgets = _invoice_widgets()
+    with patch.object(screen, "_render_invoice_page") as render:
+        _run(screen, app, widgets, "_load_invoices")
+    render.assert_called_once_with()
+    assert "2026-03" in widgets["#spend_history"].update.call_args.args[0]
+    service.get_invoices.assert_awaited_once()
+
+
+def test_empty_invoices_show_an_empty_history_line() -> None:
+    service = SimpleNamespace(get_invoices=AsyncMock(return_value=[]))
+    screen, app, _ = _card_screen(service)
+    widgets = _invoice_widgets()
+    with patch.object(screen, "_render_invoice_page"):
+        _run(screen, app, widgets, "_load_invoices")
     assert "No history" in widgets["#spend_history"].update.call_args.args[0]
+
+
+def test_loaders_do_not_need_python_311_timeout_api(monkeypatch) -> None:
+    """Python 3.10 has no asyncio.timeout; the loaders must not use it."""
+    monkeypatch.delattr(asyncio, "timeout", raising=False)
+    usage = {"current_spend": [{"price": {"value": 1, "currencyCode": "EUR"}}], "forecast": []}
+    service = SimpleNamespace(
+        get_current_usage=AsyncMock(return_value=usage),
+        get_invoices=AsyncMock(return_value=[]),
+    )
+    screen, app, widgets = _card_screen(service)
+    _run(screen, app, widgets, "_load_current_usage")
+    assert "1.00 EUR" in widgets["#current_usage"].update.call_args.args[0]
+    widgets = _invoice_widgets()
+    with patch.object(screen, "_render_invoice_page"):
+        _run(screen, app, widgets, "_load_invoices")
+    assert "Could not load" not in str(widgets["#spend_history"].update.call_args.args[0])
+
+
+def test_empty_usage_list_reads_as_zero_not_na() -> None:
+    text = _format_current_usage({"current_spend": [], "forecast": []})
+    assert "0.00" in text
+    assert "n/a" not in text
 
 
 def test_service_states_use_theme_tokens_not_named_colours() -> None:

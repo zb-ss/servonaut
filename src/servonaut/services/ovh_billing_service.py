@@ -12,18 +12,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Bill details are fetched one request per invoice; a small pool keeps a long
-# history from taking minutes without flooding the API.
+# Bill details are fetched one request per invoice. One shared limit keeps a
+# stalled API from filling the thread pool, however often the screen reopens.
 _BILL_FETCH_CONCURRENCY = 5
 
 
 def usage_total(payload: object) -> Optional[Tuple[float, str]]:
     """Reduce a consumption payload to ``(amount, currency)``.
 
-    The consumption endpoints return either one record or a list of records,
-    and a record carries its amount under ``price`` or ``total``. Lists are
-    summed. Returns ``None`` when no amount can be read.
+    The consumption endpoints return a list of transactions, one per service,
+    each carrying its amount under ``price``. The amounts are summed; an empty
+    list is a valid answer meaning no consumption, so it totals zero with no
+    currency. A single record (``price`` or ``total``) is accepted too.
+    Returns ``None`` when no amount can be read.
     """
+    if payload == []:
+        return (0.0, "")
     records = payload if isinstance(payload, list) else [payload]
     amount = 0.0
     currency = ""
@@ -43,6 +47,66 @@ def usage_total(payload: object) -> Optional[Tuple[float, str]]:
     return (round(amount, 2), currency) if found else None
 
 
+def usage_figures(usage: dict) -> Tuple[str, str]:
+    """Readable ``(current, forecast)`` figures from ``get_current_usage``.
+
+    A failed call reads ``unavailable``, an unreadable payload ``n/a``. A zero
+    total without a currency borrows the other figure's currency.
+    """
+    def total_of(key: str) -> Optional[Tuple[float, str]]:
+        if usage.get(f"{key}_failed"):
+            return None
+        return usage_total(usage.get(key if key == "forecast" else "current_spend"))
+
+    current, forecast = total_of("current"), total_of("forecast")
+    currencies = [t[1] for t in (current, forecast) if t and t[1]]
+    shared = currencies[0] if currencies else ""
+
+    def show(key: str, total: Optional[Tuple[float, str]]) -> str:
+        if usage.get(f"{key}_failed"):
+            return "unavailable"
+        if total is None:
+            return "n/a"
+        return f"{total[0]:.2f} {total[1] or shared}".strip()
+
+    return show("current", current), show("forecast", forecast)
+
+
+def spend_history_from_invoices(invoices: List[dict], months: int = 6) -> List[dict]:
+    """Aggregate invoices into per-month spend totals, oldest first.
+
+    Args:
+        invoices: Bill records with ``date`` and ``priceWithTax``.
+        months: Number of recent months to return.
+
+    Returns:
+        ``{month, total, currency}`` dicts where ``month`` is ``YYYY-MM``.
+    """
+    monthly: dict[str, dict] = {}
+    for inv in invoices:
+        date_str: Optional[str] = inv.get("date") or inv.get("billDate") or ""
+        amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
+        if isinstance(amount_raw, dict):
+            value: float = float(amount_raw.get("value", 0) or 0)
+            currency: str = amount_raw.get("currencyCode", "")
+        else:
+            value = float(amount_raw or 0)
+            currency = ""
+
+        try:
+            month_key = datetime.fromisoformat(date_str[:10]).strftime("%Y-%m")
+        except (ValueError, TypeError, IndexError):
+            continue
+
+        if month_key not in monthly:
+            monthly[month_key] = {"month": month_key, "total": 0.0, "currency": currency}
+        monthly[month_key]["total"] = round(monthly[month_key]["total"] + value, 2)
+        if not monthly[month_key]["currency"] and currency:
+            monthly[month_key]["currency"] = currency
+
+    return sorted(monthly.values(), key=lambda x: x["month"])[-months:]
+
+
 class OVHBillingService:
     """Service for querying OVHcloud billing, invoices, and usage data."""
 
@@ -53,6 +117,8 @@ class OVHBillingService:
             ovh_service: An initialized OVHService instance whose client will be reused.
         """
         self._ovh_service = ovh_service
+        self._bill_gate: Optional[asyncio.Semaphore] = None
+        self._invoice_fetches: dict[int, asyncio.Task] = {}
 
     async def get_current_usage(self) -> dict:
         """Fetch current billing usage and forecast.
@@ -121,18 +187,40 @@ class OVHBillingService:
     async def get_invoices(self, limit: int = 0) -> List[dict]:
         """Fetch OVH invoices sorted by date descending (most recent first).
 
+        Concurrent callers asking for the same ``limit`` share one fetch, and
+        the fetch keeps running if a caller is cancelled, so reopening a screen
+        during a slow API joins the work in flight instead of adding to it.
+
         Args:
             limit: Maximum number of invoices to return. 0 means all.
 
         Returns:
             List of invoice dicts, newest first.
+
+        Raises:
+            Exception: When the bill list cannot be fetched, or every bill
+                request fails.
         """
+        task = self._invoice_fetches.get(limit)
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._fetch_invoices(limit))
+            task.add_done_callback(lambda t, key=limit: self._finish_fetch(key, t))
+            self._invoice_fetches[limit] = task
+        return list(await asyncio.shield(task))
+
+    def _finish_fetch(self, limit: int, task: asyncio.Task) -> None:
+        if self._invoice_fetches.get(limit) is task:
+            del self._invoice_fetches[limit]
+        if not task.cancelled():
+            task.exception()  # mark retrieved; callers see it through the shield
+
+    async def _fetch_invoices(self, limit: int) -> List[dict]:
         client = self._ovh_service.client
         try:
             bill_ids = await asyncio.to_thread(client.get, "/me/bill")
         except Exception as e:
             logger.error("Error fetching OVH bill list: %s", e)
-            return []
+            raise
 
         if not bill_ids:
             return []
@@ -142,7 +230,9 @@ class OVHBillingService:
         if limit > 0:
             bill_ids = bill_ids[:limit]
 
-        gate = asyncio.Semaphore(_BILL_FETCH_CONCURRENCY)
+        if self._bill_gate is None:
+            self._bill_gate = asyncio.Semaphore(_BILL_FETCH_CONCURRENCY)
+        gate = self._bill_gate
 
         async def fetch(bill_id: str) -> Optional[dict]:
             async with gate:
@@ -154,12 +244,10 @@ class OVHBillingService:
 
         fetched = await asyncio.gather(*(fetch(b) for b in bill_ids))
         invoices = [bill for bill in fetched if isinstance(bill, dict)]
+        if not invoices:
+            raise RuntimeError("No OVH bill could be fetched")
 
-        # Sort by date descending for consistent ordering
-        def _sort_key(inv: dict) -> str:
-            return inv.get("date") or inv.get("billDate") or ""
-
-        invoices.sort(key=_sort_key, reverse=True)
+        invoices.sort(key=lambda inv: inv.get("date") or inv.get("billDate") or "", reverse=True)
         return invoices
 
     async def get_service_list(self) -> List[dict]:
@@ -318,31 +406,7 @@ class OVHBillingService:
 
         # Fetch a larger batch so we have enough history to cover *months* months.
         invoices = await self.get_invoices(limit=months * 5)
-
-        monthly: dict[str, dict] = {}
-        for inv in invoices:
-            date_str: Optional[str] = inv.get("date") or inv.get("billDate") or ""
-            amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
-            if isinstance(amount_raw, dict):
-                value: float = float(amount_raw.get("value", 0) or 0)
-                currency: str = amount_raw.get("currencyCode", "")
-            else:
-                value = float(amount_raw or 0)
-                currency = ""
-
-            try:
-                month_key = datetime.fromisoformat(date_str[:10]).strftime("%Y-%m")
-            except (ValueError, TypeError, IndexError):
-                continue
-
-            if month_key not in monthly:
-                monthly[month_key] = {"month": month_key, "total": 0.0, "currency": currency}
-            monthly[month_key]["total"] = round(monthly[month_key]["total"] + value, 2)
-            if not monthly[month_key]["currency"] and currency:
-                monthly[month_key]["currency"] = currency
-
-        sorted_months = sorted(monthly.values(), key=lambda x: x["month"])
-        return sorted_months[-months:]
+        return spend_history_from_invoices(invoices, months)
 
     async def get_cloud_cost_forecast(self, project_id: str) -> dict:
         """Fetch the projected end-of-month cost for a Public Cloud project.

@@ -16,7 +16,6 @@ from textual.content import Content
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
-from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
@@ -25,7 +24,7 @@ from servonaut.screens._provider_accounts import (
     registry_for,
     show_account_labels,
 )
-from servonaut.services.ovh_billing_service import usage_total
+from servonaut.services.ovh_billing_service import spend_history_from_invoices, usage_figures
 from servonaut.utils.markup import literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -42,20 +41,12 @@ def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
     if not usage:
         return "  [dim]No data available.[/dim]"
 
-    def _figure(blob: object, failed: bool) -> str:
-        if failed:
-            return "unavailable"
-        if not blob:
-            return "n/a"
-        if redact:
-            return "Hidden in demo mode"
-        total = usage_total(blob)
-        if total is None:
-            return "n/a"
-        return f"{total[0]:.2f} {total[1]}".strip()
-
-    current = _figure(usage.get("current_spend"), bool(usage.get("current_failed")))
-    forecast = _figure(usage.get("forecast"), bool(usage.get("forecast_failed")))
+    current, forecast = usage_figures(usage)
+    if redact:
+        current, forecast = (
+            fig if fig in ("unavailable", "n/a") else "Hidden in demo mode"
+            for fig in (current, forecast)
+        )
     return (
         f"  Current spend : [$text-accent]{current}[/$text-accent]\n"
         f"  Forecast      : [$text-warning]{forecast}[/$text-warning]"
@@ -242,8 +233,7 @@ class OVHBillingScreen(WorkspaceScreen):
                 self._show_credential_error(cred_error)
                 return
         for loader in (
-            self._load_current_usage, self._load_spend_history,
-            self._load_invoices, self._load_services,
+            self._load_current_usage, self._load_invoices, self._load_services,
         ):
             self.run_worker(loader(), group=_LOAD_GROUP, exclusive=False)
 
@@ -256,7 +246,7 @@ class OVHBillingScreen(WorkspaceScreen):
         if self.app.demo_mode:
             message = "Unable to verify OVH credentials. See logs for details."
         self.query_one("#current_usage", Static).update(
-            f"[$text-error]⚠ {escape(message)}[/$text-error]"
+            literal(f"⚠ {message}", "$text-error")
         )
         self.query_one("#spend_history", Static).update("[dim]—[/dim]")
 
@@ -264,7 +254,7 @@ class OVHBillingScreen(WorkspaceScreen):
         """Keep arbitrary provider diagnostics out of public demo displays."""
         if self.app.demo_mode:
             return "Unable to load billing data. See logs for details."
-        return escape(str(error))
+        return str(error)
 
     # ------------------------------------------------------------------
     # Table setup
@@ -327,6 +317,12 @@ class OVHBillingScreen(WorkspaceScreen):
         message = f"Could not load {what}. Reopen this screen to retry; details are in the log."
         widget.update(literal(f"  {message}", "$text-error"))
 
+    def _log_load_failure(self, what: str, exc: Exception) -> None:
+        if isinstance(exc, asyncio.TimeoutError):
+            logger.warning("Loading OVH %s timed out after %s s", what, _CARD_TIMEOUT_SECONDS)
+        else:
+            logger.exception("Failed to load OVH %s: %s", what, exc)
+
     async def _load_current_usage(self) -> None:
         svc = self._billing_service()
         widget = self.query_one("#current_usage", Static)
@@ -334,38 +330,39 @@ class OVHBillingScreen(WorkspaceScreen):
             widget.update("[$text-error]OVH billing service not available.[/$text-error]")
             return
         try:
-            async with asyncio.timeout(_CARD_TIMEOUT_SECONDS):
-                usage = await svc.get_current_usage()
+            usage = await asyncio.wait_for(
+                svc.get_current_usage(), timeout=_CARD_TIMEOUT_SECONDS,
+            )
             widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
-            logger.exception("Failed to load OVH current usage: %s", exc)
+            self._log_load_failure("current usage", exc)
             self._show_card_error(widget, "the current month")
 
-    async def _load_spend_history(self) -> None:
-        svc = self._billing_service()
-        widget = self.query_one("#spend_history", Static)
-        if svc is None:
-            widget.update("[$text-error]OVH billing service not available.[/$text-error]")
-            return
-        try:
-            async with asyncio.timeout(_CARD_TIMEOUT_SECONDS):
-                history = await svc.get_monthly_spend_history(months=6)
-            widget.update(_format_spend_history(history, redact=self.app.demo_mode))
-        except Exception as exc:
-            logger.exception("Failed to load OVH spend history: %s", exc)
-            self._show_card_error(widget, "the monthly history")
-
     async def _load_invoices(self) -> None:
+        """Fetch each bill once and fill both the invoice list and the history."""
         svc = self._billing_service()
+        history = self.query_one("#spend_history", Static)
+        page_info = self.query_one("#invoices_page_info", Static)
         if svc is None:
+            history.update("[$text-error]OVH billing service not available.[/$text-error]")
+            page_info.update("")
             return
+        page_info.update("[dim]Loading...[/dim]")
         try:
-            self._all_invoices = await svc.get_invoices()
-            self._invoice_page = 0
-            self._render_invoice_page()
+            self._all_invoices = await asyncio.wait_for(
+                svc.get_invoices(), timeout=_CARD_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
-            logger.error("Failed to load OVH invoices: %s", exc)
-            self.notify(f"Error loading invoices: {self._display_error(exc)}", severity="error", markup=False)
+            self._log_load_failure("invoices", exc)
+            self._show_card_error(history, "the monthly history")
+            self._show_card_error(page_info, "the invoices")
+            return
+        self._invoice_page = 0
+        self._render_invoice_page()
+        history.update(_format_spend_history(
+            spend_history_from_invoices(self._all_invoices, months=6),
+            redact=self.app.demo_mode,
+        ))
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""
@@ -429,7 +426,10 @@ class OVHBillingScreen(WorkspaceScreen):
                     "pending": Content.styled("pending", "$text-accent"),
                 }.get(status) or literal(status)
                 expiry = str(service.get("expiration", ""))[:10]
-                auto_renew = Content.styled("yes", "$text-success") if service.get("auto_renew") else Content.styled("no", "$text-muted")
+                auto_renew = (
+                    Content.styled("yes", "$text-success") if service.get("auto_renew")
+                    else Content.styled("no", "$text-muted")
+                )
                 tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
