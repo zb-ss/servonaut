@@ -246,3 +246,30 @@ async def test_keep_hints_wins_over_prefer_one_line() -> None:
         await pilot.pause()
         assert row.has_class("-wrap")
         assert all(b.label.plain.rstrip().endswith(str(i)) for i, b in enumerate(app.query(ActionButton)))
+
+
+class _CompactWrapApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#host { width: 40; height: auto; }"
+
+    def compose(self) -> ComposeResult:
+        labels = [("Scan all (2)", "s"), ("Stale", "f"), ("Auto: off", "a"), ("Refresh", "r"), ("Share", "S")]
+        yield Vertical(
+            ActionRow(*(ActionButton(t, k, compact=True, id=f"c{i}") for i, (t, k) in enumerate(labels))),
+            id="host",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_row_of_compact_buttons_never_folds_a_label() -> None:
+    app = _CompactWrapApp()
+    async with app.run_test(size=(80, 20)) as pilot:
+        row = app.query_one(ActionRow)
+        buttons = list(app.query(ActionButton))
+        await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in buttons))
+        await pilot.pause()
+        assert row.has_class("-wrap")
+        for button in buttons:
+            # Button pads its label by one cell on each side.
+            assert button.content_size.width >= button.label.cell_length + 2 * button.styles.line_pad, button.id
+            assert button.region.height == 1

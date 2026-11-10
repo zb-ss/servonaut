@@ -261,12 +261,17 @@ class ActionRow(Horizontal):
         self.styles.grid_size_columns = columns
         # Each column is as wide as its own widest button, so the lines align
         # on one grid without every column taking the widest label's width.
-        # A single column takes the width there is, so a label too long for
-        # the row is squeezed rather than pushed past the edge.
-        track = "auto" if columns and columns > 1 else "1fr"
-        self.styles.grid_columns = (
-            tuple(Scalar.parse(track) for _ in range(columns)) if columns else None
-        )
+        # Textual's own "auto" column leaves out the button's margin and comes
+        # out a cell short, which folds a label inside its button, so the
+        # widths are given in cells (margin included). A single column takes
+        # the width there is, so a label too long for the row is squeezed
+        # rather than pushed past the edge.
+        if columns and columns > 1:
+            widths = self._column_widths(buttons, columns, hint=hint)
+            tracks = tuple(Scalar.parse(str(width)) for width in widths)
+        else:
+            tracks = (Scalar.parse("1fr"),) if columns else None
+        self.styles.grid_columns = tracks
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.
         self.call_after_refresh(self._remeasure)
