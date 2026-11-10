@@ -148,3 +148,33 @@ async def test_wrapped_columns_follow_their_own_content() -> None:
         buttons = {b.label.plain.split("  ")[0]: b for b in app.query("#box7 ActionButton")}
         assert len({b.region.y for b in buttons.values()}) <= 2
         assert buttons["Refresh status"].region.width < buttons["Switch on SSH certificates"].region.width
+
+
+class _BorderedApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#host { width: 52; height: auto; }"
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            ActionRow(
+                ActionButton("Browse files", "1", short="Browse", id="r0"),
+                ActionButton("SCP transfer", "4", short="SCP", id="r1"),
+                ActionButton("Run command", "2", short="Command", id="r2"),
+                ActionButton("SSH connect", "3", short="SSH", id="r3"),
+            ),
+            id="host",
+        )
+
+
+@pytest.mark.asyncio
+async def test_bordered_buttons_drop_hints_before_wrapping_into_a_second_line() -> None:
+    app = _BorderedApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        buttons = list(app.query(ActionButton))
+        row = app.query_one(ActionRow)
+        # Hinted short words need 59 cells; the bare short words fit in 52.
+        assert not row.has_class("-wrap")
+        assert len({b.region.y for b in buttons}) == 1
+        assert [b.label.plain for b in buttons] == ["Browse", "SCP", "Command", "SSH"]
