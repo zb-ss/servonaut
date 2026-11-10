@@ -31,10 +31,11 @@ def _make_table() -> InstanceTable:
 # ---------------------------------------------------------------------------
 
 class TestColumns:
-    def test_ssh_column_sits_between_key_and_mem(self):
-        """The SSH verify column is listed after Key and before Mem."""
+    def test_ssh_column_comes_after_the_default_seven(self):
+        """The optional SSH verify column follows Region; the private values moved away."""
         keys = [column.key for column in COLUMNS]
-        assert keys.index("key") < keys.index("ssh") < keys.index("memory")
+        assert keys[-1] == "ssh" and keys[-2] == "region"
+        assert not {"private_ip", "id", "key", "memory"} & set(keys)
 
     def test_ssh_column_is_optional(self):
         """The SSH column is left out while no server has a verify result."""
@@ -66,7 +67,7 @@ class TestSshVerifyCell:
             "ssh_verified_at": "2026-05-24T10:00:00+00:00",
         })
         assert "[green]" in result
-        assert "verified" in result
+        assert "✓" in result and "ago" in result
 
     def test_not_found_status_shows_red(self):
         result = self._cell({"ssh_verify_status": "not_found"})

@@ -4,6 +4,18 @@
 
 
 
+/* The label above the search box needs a spare row: tall terminals only. */
+#fleet_search_label {
+    display: none;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+InstanceListScreen.-tall #fleet_search_label {
+    display: block;
+}
+
 #search_input {
     width: 1fr;
     margin: 0;
@@ -39,7 +51,23 @@ StatusBar {
 
 /* Quick filters: state chips, then provider chips. */
 #fleet_filters {
+    layout: grid;
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-rows: auto;
+    grid-gutter: 0;
     width: 100%;
+    height: auto;
+}
+
+/* The age and the Refresh link fit on the chip row: a second column. */
+#fleet_filters.-fresh-inline {
+    grid-size: 2;
+    grid-columns: auto 1fr;
+}
+
+#fleet_chip_row {
+    width: auto;
     height: auto;
 }
 
@@ -55,9 +83,9 @@ StatusBar {
     color: $border-blurred;
 }
 
-InstanceListScreen.-narrow #fleet_filters,
-InstanceListScreen.-content-narrow #fleet_filters,
-InstanceListScreen.-chat-open #fleet_filters {
+InstanceListScreen.-narrow #fleet_chip_row,
+InstanceListScreen.-content-narrow #fleet_chip_row,
+InstanceListScreen.-chat-open #fleet_chip_row {
     layout: vertical;
 }
 
@@ -67,7 +95,8 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     display: none;
 }
 
-/* A chip is a pill: a faint panel fill says "click me" while it stays one row. */
+/* A chip is one row by default: a faint panel fill says "click me" while it
+   costs no height. Roomy terminals draw outlined pills instead (below). */
 .fleet-chip {
     width: auto;
     min-width: 0;
@@ -80,18 +109,59 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
 }
 
 .fleet-chip:hover {
+    border: none;
     background: $panel-lighten-2;
     color: $text-accent;
 }
 
 .fleet-chip:focus {
+    border: none;
     background: $panel-lighten-2;
     text-style: bold underline;
 }
 
 .fleet-chip.--chosen {
+    border: none;
     background: $accent;
     color: $background;
+    text-style: bold;
+}
+
+/* Roomy terminals (wide, tall, nothing beside the table): outlined pills. The
+   chosen one has an accent outline and accent text, the others a dim outline. */
+InstanceListScreen.-roomy .fleet-chip-divider {
+    height: 3;
+    content-align: center middle;
+}
+
+InstanceListScreen.-roomy #fleet_state_chips,
+InstanceListScreen.-roomy #fleet_provider_chips {
+    height: 3;
+}
+
+InstanceListScreen.-roomy .fleet-chip {
+    height: 3;
+    padding: 0;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+}
+
+/* Hover and focus are a brighter neutral outline: only the chosen pill is accent. */
+InstanceListScreen.-roomy .fleet-chip:hover,
+InstanceListScreen.-roomy .fleet-chip:focus {
+    border: round $border;
+    background: transparent;
+    color: $text;
+    text-style: bold;
+}
+
+InstanceListScreen.-roomy .fleet-chip.--chosen,
+InstanceListScreen.-roomy .fleet-chip.--chosen:hover,
+InstanceListScreen.-roomy .fleet-chip.--chosen:focus {
+    border: round $accent;
+    background: transparent;
+    color: $text-accent;
     text-style: bold;
 }
 
@@ -118,23 +188,51 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     text-style: bold underline reverse;
 }
 
-#fleet_summary_row {
-    width: 100%;
-    height: 1;
+/* In a pill the outline carries the state, so the ansi cues are lighter. */
+InstanceListScreen.-roomy .fleet-chip:ansi {
+    text-style: none;
 }
 
-#fleet_summary {
-    width: 1fr;
-    color: $text-muted;
-    /* One row at any width: a long summary is cut, not wrapped. */
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
+InstanceListScreen.-roomy .fleet-chip.--chosen:ansi {
+    text-style: bold;
+}
+
+InstanceListScreen.-roomy .fleet-chip:ansi:focus {
+    text-style: bold underline;
+}
+
+/* Freshness and Refresh: right-aligned on a row of their own, or on the chip
+   row when the screen measured enough room (see _sync_fresh_layout). */
+#fleet_fresh {
+    width: 100%;
+    height: 1;
+    align-horizontal: right;
+}
+
+#fleet_filters.-fresh-inline #fleet_fresh {
+    width: 100%;
+}
+
+InstanceListScreen.-roomy #fleet_filters.-fresh-inline #fleet_fresh {
+    height: 3;
+    align-vertical: middle;
 }
 
 #fleet_updated {
     width: auto;
+    padding: 0;
+    color: $text-muted;
+    text-wrap: nowrap;
+}
+
+/* One row under the table at any width: a long summary is cut, not wrapped. */
+#fleet_summary {
+    width: 100%;
+    height: 1;
     padding: 0 1;
     color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #keyword_matches_label {

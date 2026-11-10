@@ -1,29 +1,32 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import dataclasses
 import time
 from datetime import timedelta
 from typing import Dict, Optional, List
 
+from rich.cells import cell_len
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.content import Content
 from textual.css.query import NoMatches
-from textual.containers import Container, Vertical, VerticalScroll, Horizontal
+from textual.containers import Container, Grid, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._fleet_filter import (
+    provider_label,
     ALL, PROVIDERS, PROVIDER_LABELS, STATES, STATE_LABELS, STATE_OTHER,
     FleetFacets, FleetFilter, facets, next_choice, row_provider, row_state, summary,
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
-from servonaut.widgets.action_button import action_label
+from servonaut.widgets.action_button import ActionButton, ActionRole, action_label
 from servonaut.widgets.fleet_skeleton import FleetSkeleton
-from servonaut.widgets.fleet_values import FleetValueLine, FleetValues
+from servonaut.widgets.fleet_values import FleetValueLine, FleetValues, ValueRow, instance_values
 from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
@@ -102,11 +105,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Fetch the fleet again from every provider"),
         Binding("/", "focus_search", "Search", show=True,
                 tooltip="Search instances and keyword scan results"),
-        # Not in the footer (it is full at common widths): the chips carry the
-        # keys in their tooltips and the help screen lists them.
-        Binding("f", "filter_state", "State", show=False,
+        Binding("f", "filter_state", "State", show=True,
                 tooltip="Cycle the state filter: all, running, stopped, other"),
-        Binding("p", "filter_provider", "Provider", show=False,
+        Binding("p", "filter_provider", "Provider", show=True,
                 tooltip="Cycle the provider filter: all, then each provider in the list"),
         Binding("enter", "select_instance", "Actions", show=True,
                 tooltip="Open the selected server's actions"),
@@ -130,9 +131,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Analyse the selected server's logs with AI"),
         Binding("m", "open_memory", "Memory", show=True,
                 tooltip="Open the selected server's memory (cached facts)"),
-        Binding("D", "fleet_db_scan", "DB Vault", show=True,
+        Binding("D", "fleet_db_scan", "DB vault", show=True,
                 tooltip="Scan the fleet for database credentials"),
-        Binding("k", "manage_ssh_ref", "SSH Ref", show=True,
+        Binding("k", "manage_ssh_ref", "SSH ref", show=True,
                 tooltip="Set the Bitwarden SSH key reference of the selected server"),
         Binding("v", "verify_ssh", "Verify", show=True,
                 tooltip="Check that the selected server's SSH key works"),
@@ -153,19 +154,23 @@ class InstanceListScreen(WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 64
     CONTENT_NARROW_WIDTH = 105
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (130, "-wide")]
+    # Tall enough that outlined chips (three rows) do not starve the table.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (44, "-tall")]
 
     # The footer lists as many shortcuts as fit on one line, in this order
     # of usefulness; the rest stay bound, and the help screen lists them all.
     FOOTER_PRIORITY = (
-        "select_instance",
+        "refresh",
         "focus_search",
+        "filter_state",
+        "filter_provider",
         "ssh_connect",
+        "select_instance",
         "run_command",
         "browse_files",
         "view_logs",
         "open_memory",
         "scp_transfer",
-        "refresh",
         "ai_analysis",
         "copy_row",
         "verify_ssh",
@@ -194,11 +199,88 @@ class InstanceListScreen(WorkspaceScreen):
     @property
     def active_bindings(self):
         """Active bindings, with the footer kept to the shortcuts that fit."""
-        return fit_footer(super().active_bindings, self, self.FOOTER_PRIORITY)
+        return fit_footer(
+            self._without_inspector_keys(super().active_bindings), self, self.FOOTER_PRIORITY,
+        )
+
+    # Actions the inspector's buttons already show with their keys.
+    _INSPECTOR_ACTIONS = frozenset({
+        "browse_files", "scp_transfer", "run_command", "view_logs", "open_memory", "ai_analysis",
+    })
+
+    def _without_inspector_keys(self, bindings: dict) -> dict:
+        """*bindings* without the footer entries the visible inspector repeats."""
+        try:
+            if not self.query_one("#fleet_inspector").display:
+                return bindings
+        except NoMatches:
+            return bindings
+        return {
+            key: (
+                active._replace(binding=dataclasses.replace(active.binding, show=False))
+                if active.node is self and active.binding.action in self._INSPECTOR_ACTIONS
+                else active
+            )
+            for key, active in bindings.items()
+        }
 
     def on_resize(self) -> None:
         """Re-fit the footer to the new width."""
         self.refresh_bindings()
+        self.call_after_refresh(self._sync_roomy)
+
+    def on_mouse_up(self) -> None:
+        """A drag that began in a value may end anywhere: the value hands the focus back."""
+        self.app.call_later(self._values_give_focus_back)
+
+    def _values_give_focus_back(self) -> None:
+        for row in self.query(ValueRow):
+            row.give_focus_back()
+
+    def _set_layout_class(self, name: str, enabled: bool) -> None:
+        super()._set_layout_class(name, enabled)
+        self._sync_roomy()
+
+    def _sync_roomy(self) -> None:
+        """Mark a terminal with room for outlined chips: wide, tall, nothing beside the table."""
+        roomy = (
+            self.has_class("-wide") and self.has_class("-tall")
+            and not self.has_class("-content-narrow") and not self.has_class("-chat-open")
+        )
+        if self.has_class("-roomy") != roomy:
+            self.set_class(roomy, "-roomy")
+        # A compact chip keeps its border off in every theme, hovered or not;
+        # the outlined pill is the non-compact one.
+        for chip in self.query(FleetChip):
+            chip.compact = not roomy
+        self.call_after_refresh(self._sync_fresh_layout)
+        self.call_after_refresh(self._sync_memory_note)
+
+    def _sync_fresh_layout(self) -> None:
+        """Put the freshness on the chip row only when it fits there, whole.
+
+        Measured, not guessed from the width class: the chips take what they
+        take, and the age and the Refresh link need their own cells. When they
+        do not fit, they sit right-aligned on a row of their own.
+        """
+        try:
+            filters = self.query_one("#fleet_filters")
+            chips = self.query_one("#fleet_chip_row").outer_size.width
+            refresh = self.query_one("#fleet_refresh").outer_size.width
+        except NoMatches:
+            return
+        stacked = (
+            self.has_class("-narrow") or self.has_class("-content-narrow")
+            or self.has_class("-chat-open")
+        )
+        age = cell_len(self._inline_age(self._updated_text()))
+        inline = not stacked and 0 < chips and chips + age + refresh <= filters.size.width
+        if filters.has_class("-fresh-inline") != inline:
+            filters.set_class(inline, "-fresh-inline")
+        if inline != self._fresh_inline:
+            self._fresh_inline = inline
+            self._updated_shown = None
+        self._sync_updated()
 
     def __init__(self, initial_search: str = "") -> None:
         """Initialize instance list screen.
@@ -228,6 +310,7 @@ class InstanceListScreen(WorkspaceScreen):
         self._refresh_failed = False
         self._cache_written_at: Optional[float] = None
         self._updated_shown: Optional[str] = None
+        self._fresh_inline = False
         self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
@@ -237,9 +320,10 @@ class InstanceListScreen(WorkspaceScreen):
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Vertical(id="instance_list_container", classes="workspace-content"):
+                yield Static("Search", id="fleet_search_label", markup=False)
                 yield FleetSearchInput(
                     self._shortcut_characters(),
-                    placeholder="Search instances and keywords...",
+                    placeholder="Search servers, IPs and keywords…",
                     id="search_input",
                 )
                 # Memory discoverability banner — only visible when no
@@ -265,25 +349,24 @@ class InstanceListScreen(WorkspaceScreen):
                     with Vertical(id="fleet_table_column"):
                         yield InstanceTable()
                         yield FleetSkeleton(id="fleet_skeleton")
+                        yield Static("", id="fleet_summary", markup=False)
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
                         yield Static(
-                            "[bold]Selected Server[/bold]\n[dim]No server selected[/dim]",
+                            "[bold]Selected server[/bold]\n[dim]No server selected[/dim]",
                             id="fleet_inspector_header",
                             classes="fleet-inspector-header",
                         )
                         yield self._inspector_button(
-                            "SSH Connect (s)", "fleet_btn_ssh", variant="primary",
+                            "SSH connect", "s", "fleet_btn_ssh", role="primary",
                         )
                         with Container(id="fleet_inspector_grid", classes="fleet-inspector-grid"):
-                            yield self._inspector_button("Browse (b)", "fleet_btn_browse")
-                            yield self._inspector_button("Transfer (t)", "fleet_btn_scp")
-                            yield self._inspector_button("Command (c)", "fleet_btn_command")
-                            yield self._inspector_button("Logs (l)", "fleet_btn_logs")
-                            yield self._inspector_button("Memory (m)", "fleet_btn_memory")
-                            yield self._inspector_button("AI (a)", "fleet_btn_ai")
-                        yield self._inspector_button(
-                            "All Actions (Enter)", "fleet_btn_actions",
-                        )
+                            yield self._inspector_button("Browse", "b", "fleet_btn_browse")
+                            yield self._inspector_button("Transfer", "t", "fleet_btn_scp")
+                            yield self._inspector_button("Command", "c", "fleet_btn_command")
+                            yield self._inspector_button("Logs", "l", "fleet_btn_logs")
+                            yield self._inspector_button("Memory", "m", "fleet_btn_memory")
+                            yield self._inspector_button("AI", "a", "fleet_btn_ai")
+                        yield self._inspector_button("All actions", "enter", "fleet_btn_actions")
                         with Horizontal(id="fleet_values_heading"):
                             yield Static("Details", id="fleet_values_title", markup=False)
                             yield self._copy_row_button("fleet_copy_row")
@@ -302,27 +385,30 @@ class InstanceListScreen(WorkspaceScreen):
 
     def _compose_filters(self) -> ComposeResult:
         """The chip rows and the summary line under the search box."""
-        with Horizontal(id="fleet_filters"):
-            with Horizontal(id="fleet_state_chips"):
-                yield FleetChip("state", ALL, "All")
-                for state in STATES:
-                    yield FleetChip("state", state, STATE_LABELS[state])
-            with Horizontal(id="fleet_provider_chips"):
-                yield Static("│", classes="fleet-chip-divider", markup=False)
-                for provider in PROVIDERS:
-                    yield FleetChip("provider", provider, PROVIDER_LABELS[provider])
-        with Horizontal(id="fleet_summary_row"):
-            yield Static("", id="fleet_summary", markup=False)
-            yield Static("", id="fleet_updated", markup=False)
-            refresh = LinkButton("Refresh (r)", id="fleet_refresh")
-            refresh.can_focus = False
-            yield refresh
+        with Grid(id="fleet_filters"):
+            with Horizontal(id="fleet_chip_row"):
+                with Horizontal(id="fleet_state_chips"):
+                    yield FleetChip("state", ALL, "All")
+                    for state in STATES:
+                        yield FleetChip("state", state, STATE_LABELS[state])
+                with Horizontal(id="fleet_provider_chips"):
+                    yield Static("│", classes="fleet-chip-divider", markup=False)
+                    for provider in PROVIDERS:
+                        yield FleetChip("provider", provider, PROVIDER_LABELS[provider])
+            with Horizontal(id="fleet_fresh"):
+                yield Static("", id="fleet_updated", markup=False)
+                refresh = LinkButton(
+                    "Refresh", key="r", id="fleet_refresh",
+                    tooltip="Fetch the fleet again from every provider",
+                )
+                refresh.can_focus = False
+                yield refresh
 
     @staticmethod
     def _copy_row_button(button_id: str) -> Button:
         """The "Copy row" link beside the values (it keeps the Tab order)."""
         button = LinkButton(
-            action_label("Copy row", "y"), id=button_id, classes="fleet-copy-row",
+            "Copy row", key="y", id=button_id, classes="fleet-copy-row",
             disabled=True, tooltip="Copy the selected server's details",
         )
         button.can_focus = False
@@ -330,12 +416,12 @@ class InstanceListScreen(WorkspaceScreen):
 
     @staticmethod
     def _inspector_button(
-        label: str, button_id: str, variant: str = "default",
-    ) -> Button:
-        """Create a mouse-accessible quick-action button that preserves keyboard Tab order."""
-        btn = Button(label, id=button_id, variant=variant)
-        btn.can_focus = False
-        return btn
+        text: str, key: str, button_id: str, role: ActionRole = "default",
+    ) -> ActionButton:
+        """A quick-action button with its key as a quiet hint; it keeps the Tab order."""
+        button = ActionButton(text, key, role=role, id=button_id)
+        button.can_focus = False
+        return button
 
     @classmethod
     def _shortcut_characters(cls) -> frozenset[str]:
@@ -855,18 +941,16 @@ class InstanceListScreen(WorkspaceScreen):
             self._update_status_bar()
 
     def refresh_memory_status(self) -> None:
-        """Refresh the instance table's memory column after a fleet auto-scan.
+        """Redraw the memory line of the inspector after a fleet auto-scan.
 
         Called duck-typed by ``app._refresh_fleet_panels_after_scan`` when a
         background auto-scan cycle completes while this screen is mounted, so
-        the "Mem" status column reflects freshly-probed servers in real time.
-        Exception-safe: a no-op if the table isn't mounted yet.
+        the status reflects freshly-probed servers in real time.
         """
         try:
-            table = self.query_one(InstanceTable)
-        except Exception:
+            self._update_detail_panel()
+        except NoMatches:
             return
-        table.refresh_memory_status()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fleet, status bar and detail pane after a demo toggle."""
@@ -911,16 +995,7 @@ class InstanceListScreen(WorkspaceScreen):
         banner.display = not has_any
 
     def _update_status_bar(self) -> None:
-        """Update status bar with current counts and cache age."""
-        status_bar = self.query_one(StatusBar)
-        table = self.query_one(InstanceTable)
-
-        # Update counts: the servers listed (a shared server that is also
-        # one of the user's own is listed once).
-        total = len(table._all_instances)
-        filtered = len(table._filtered_instances)
-        status_bar.update_instance_count(total, filtered)
-
+        """Refresh the cache age and the filter-driven parts of the screen."""
         # The cache age is shown once, next to the summary (see _updated_text);
         # reading it here also keeps the file off the once-a-second path.
         self._note_cache_age(self.app.cache_service.get_age())
@@ -997,15 +1072,32 @@ class InstanceListScreen(WorkspaceScreen):
         )
 
     def _sync_updated(self) -> None:
-        """Say how fresh the list is, redrawing only when the words change."""
-        text = self._updated_text()
+        """Say how fresh the list is, redrawing only when the words change.
+
+        On the chip row only the age fits; on its own row the full words show.
+        """
+        full = self._updated_text()
+        text = self._inline_age(full) if self._fresh_inline else full
         if text == self._updated_shown:
             return
         try:
-            self.query_one("#fleet_updated", Static).update(text)
+            label = self.query_one("#fleet_updated", Static)
+            label.update(f"{text} ·" if text else "")
+            label.tooltip = full or None
         except NoMatches:
             return
         self._updated_shown = text
+        self.call_after_refresh(self._sync_fresh_layout)
+
+    @staticmethod
+    def _inline_age(full: str) -> str:
+        """*full* cut down to the age alone: "5 min ago", or "Refresh failed"."""
+        if full.startswith("Refresh failed"):
+            return "Refresh failed"
+        for prefix in ("Updated ", "Cached ", "cached "):
+            if full.startswith(prefix):
+                return full[len(prefix):]
+        return full
 
     def _cache_ago(self) -> str:
         if self._cache_written_at is None or not self._instances:
@@ -1262,9 +1354,10 @@ class InstanceListScreen(WorkspaceScreen):
         for values in self.query(".fleet-values"):
             values.set_instance(instance)
         self._update_inspector_panel(instance)
+        self._sync_memory_note()
 
     def _update_inspector_panel(self, instance: Optional[dict]) -> None:
-        """Update the right-hand Selected Server quick-action inspector."""
+        """Update the right-hand Selected server quick-action inspector."""
         try:
             header = self.query_one("#fleet_inspector_header", Static)
         except NoMatches:
@@ -1272,10 +1365,10 @@ class InstanceListScreen(WorkspaceScreen):
         for btn in self.query("#fleet_inspector Button"):
             btn.disabled = not instance
         if not instance:
-            header.update("[bold]Selected Server[/bold]\n[dim]No server selected[/dim]")
+            header.update("[bold]Selected server[/bold]\n[dim]No server selected[/dim]")
             return
         name = display_name(instance) or str(instance.get("id") or "Unnamed")
-        provider = str(instance.get("provider") or ("Custom" if instance.get("is_custom") else "AWS"))
+        provider = provider_label(instance)
         address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
         # Server-sourced text is content, never markup: a name written like a
         # markup link must neither crash the screen nor run an action.
@@ -1285,7 +1378,39 @@ class InstanceListScreen(WorkspaceScreen):
             self._inspector_state_badge(instance),
             "\n",
             literal(f"{provider} · {address}", "dim"),
+            "\n",
+            self._memory_line(instance),
         ))
+
+    def _sync_memory_note(self) -> None:
+        """Say the selected server's memory status in the status bar while the inspector is hidden."""
+        try:
+            hidden = not self.query_one("#fleet_inspector").display
+            instance = self.query_one(InstanceTable).get_selected_instance()
+            bar = self.query_one(StatusBar)
+        except NoMatches:
+            return
+        bar.set_note(self._memory_line(instance).plain if hidden and instance else "")
+
+    def _memory_line(self, instance: dict) -> Content:
+        """Whether the server's memory (cached facts) is fresh, stale, off or missing."""
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return literal("Memory unavailable", "dim")
+        from servonaut.screens.fleet_memory import (
+            STATUS_FRESH, STATUS_OPT_OUT, STATUS_STALE, compute_memory_status,
+        )
+        try:
+            status = compute_memory_status(instance, memory_service)
+        except Exception:  # noqa: BLE001 - a broken memory store must not hide the server
+            return literal("Memory unavailable", "dim")
+        words = {
+            STATUS_FRESH: ("● Memory fresh", "$text-success"),
+            STATUS_STALE: ("● Memory stale", "$text-warning"),
+            STATUS_OPT_OUT: ("⛔ Memory off", "$text-error"),
+        }
+        text, style = words.get(status, ("○ No memory yet", "dim"))
+        return literal(text, style)
 
     @staticmethod
     def _inspector_state_badge(instance: dict) -> Content:
@@ -1845,18 +1970,8 @@ class InstanceListScreen(WorkspaceScreen):
             self.app.notify("No instance selected", severity="warning")
             return
 
-        fields = [
-            ("Name", display_name(instance)),
-            ("ID", instance.get('id', '')),
-            ("Type", instance.get('type', '')),
-            ("State", instance.get('state', '')),
-            ("Public IP", instance.get('public_ip', '')),
-            ("Private IP", instance.get('private_ip', '')),
-            ("Region", instance.get('region', '')),
-            ("Provider", instance.get('provider', '')),
-            ("Key", instance.get('key_name', '')),
-        ]
-        text = "  ".join(f"{v}" for _, v in fields if v)
+        # The same values, in the same order, as the inspector lists them.
+        text = "  ".join(instance_values(instance).values())
 
         name = instance.get('name') or instance.get('id', '')
         outcome = copy_text(self.app, text)

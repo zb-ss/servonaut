@@ -11,6 +11,7 @@ from textual.events import Click, MouseDown, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
 
+from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
 from servonaut.utils.platform_utils import CopyOutcome, copy_text
 from servonaut.widgets.instance_table import InstanceTable
@@ -50,7 +51,7 @@ def instance_values(instance: Optional[dict]) -> dict[str, str]:
     for key, _label, _short in VALUE_FIELDS:
         if key in _ACCOUNT_FIELDS and not qualified:
             continue
-        value = instance.get(key)
+        value = display_name(instance) if key == "name" else instance.get(key)
         if value not in (None, ""):
             values[key] = str(value)
     return values
@@ -129,9 +130,10 @@ class ValueRow(Horizontal):
         if event.button != 1:
             return
         # Queued behind the app's selection hook, which reads the focus.
-        self.app.call_later(self._give_focus_back)
+        self.app.call_later(self.give_focus_back)
 
-    def _give_focus_back(self) -> None:
+    def give_focus_back(self) -> None:
+        """After a click or a drag, return the focus to where it was before the gesture."""
         target, self._returns_to = self._returns_to, None
         parent = self.parent
         if target is None or not isinstance(parent, _ValueWalker) or not self.has_focus:

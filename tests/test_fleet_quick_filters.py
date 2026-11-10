@@ -86,13 +86,15 @@ def test_next_choice_leaves_a_choice_that_is_no_longer_present() -> None:
 
 
 def test_summary_says_only_fixed_words() -> None:
+    hint = " · f cycle state filter · p cycle provider"
     assert summary(9, 12, FleetFilter(state="running", provider="aws")) == (
-        "Showing 9 of 12 · Running · AWS"
+        "Showing 9 of 12 · filters: Running, AWS" + hint
     )
-    assert summary(12, 12, FleetFilter()) == "12 servers"
-    assert summary(1, 1, FleetFilter()) == "1 server"
-    assert summary(0, 0, FleetFilter()) == "0 servers"
-    assert summary(2, 12, FleetFilter(), "secret-name") == "Showing 2 of 12 · search"
+    assert summary(12, 12, FleetFilter()) == "Showing 12 of 12 · filters: none" + hint
+    assert summary(0, 0, FleetFilter()) == "Showing 0 of 0 · filters: none" + hint
+    assert summary(2, 12, FleetFilter(), "secret-name") == (
+        "Showing 2 of 12 · filters: search" + hint
+    )
 
 
 # ---- load reporting ------------------------------------------------------
@@ -252,9 +254,9 @@ async def test_marks_decorate_the_name_and_state_cells() -> None:
     async with _Host().run_test() as pilot:
         table = pilot.app.query_one(InstanceTable)
         table.set_marks({row_identity(ROWS[1]): "was running"}, redraw=False)
-        cells = table._row_cells(0, ROWS[1], None)
+        cells = table._row_cells(0, ROWS[1])
         assert cells["state"].plain.endswith("was running") and _is_bold(cells["name"])
-        plain_cells = table._row_cells(0, ROWS[2], None)
+        plain_cells = table._row_cells(0, ROWS[2])
         assert "was" not in str(plain_cells["state"]) and not _is_bold(plain_cells["name"])
 
 
@@ -322,7 +324,7 @@ async def test_marked_rows_get_a_row_tint_taken_from_the_theme() -> None:
         table = pilot.app.query_one(InstanceTable)
         table.set_marks({row_identity(ROWS[0]): "new", row_identity(ROWS[1]): "was running"}, redraw=False)
         def tints(row):
-            cells = table._row_cells(0, row, None)
+            cells = table._row_cells(0, row)
             return {str(span.style) for key in ("name", "state") for span in cells[key].spans if "on " in str(span.style)}
         new, changed, plain = tints(ROWS[0]), tints(ROWS[1]), tints(ROWS[2])
         assert new and changed and new != changed and not plain

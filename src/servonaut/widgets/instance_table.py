@@ -38,7 +38,8 @@ class _Column:
 # Every column is as wide as its longest value, up to its maximum, so short
 # values leave room for the rest. Most important first: when the terminal is
 # too narrow, the table scrolls sideways and the last columns are the ones
-# out of view.
+# out of view. The private address, the id, the key and the memory status are
+# in the fleet inspector, not here.
 COLUMNS: Sequence[_Column] = (
     _Column("index", "#"),
     _Column("name", "Name", max_width=32),
@@ -47,16 +48,9 @@ COLUMNS: Sequence[_Column] = (
     _Column("public_ip", "Public IP", max_width=24),
     _Column("type", "Type", max_width=20),
     _Column("region", "Region", max_width=16),
-    _Column("private_ip", "Private IP", max_width=24),
-    # 25 fits an OVH VPS service name; AWS ids are 19.
-    _Column("id", "ID", max_width=25),
-    _Column("key", "Key", max_width=20),
     # SSH verify status — at-a-glance BW probe result badge. Shown once any
     # server has a result, so a fleet that never verifies keeps the room.
     _Column("ssh", "SSH", optional=True),
-    # Memory discoverability — at-a-glance status so users learn the
-    # feature exists without needing to drill into a server.
-    _Column("memory", "Mem"),
 )
 
 # Shown in the table's bottom border while some columns are out of view.
@@ -128,19 +122,6 @@ def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]
     if shared_with:
         fields.extend(["shared", *shared_with])
     return [str(value).lower() for value in fields if value]
-
-
-def _key_label(key: str) -> str:
-    """A key as the table lists it: the file name of a key file path.
-
-    Custom servers name a key file (``~/.ssh/web1_ed25519``); cloud servers
-    name a key pair. The directory rarely tells servers apart, so the table
-    keeps to the file name and the detail panel shows the full path.
-    """
-    if "/" in key or "\\" in key:
-        name = key.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-        return name or key
-    return key
 
 
 class InstanceTable(DataTable):
@@ -284,7 +265,7 @@ class InstanceTable(DataTable):
             return
         self._marks = dict(marks)
         if redraw:
-            self.refresh_memory_status()
+            self.redraw()
 
     def _cursor_anchor(self) -> tuple[Optional[str], int]:
         """The selected server's id and row, to put the cursor back after a redraw."""
@@ -307,14 +288,12 @@ class InstanceTable(DataTable):
             )
         self.move_cursor(row=target, animate=False)
 
-    def refresh_memory_status(self) -> None:
-        """Re-render rows so the memory status column recomputes, keeping cursor.
+    def redraw(self) -> None:
+        """Re-render the rows from ``_filtered_instances``, keeping the cursor.
 
-        Called (via the screen) after a background fleet auto-scan cycle so the
-        "Mem" column reflects freshly-probed servers immediately.  Re-renders
-        from the current ``_filtered_instances`` (so the active filter is
-        preserved) and restores the cursor row so a background refresh never
-        yanks the user's selection to the top.  A no-op when the table is empty.
+        The active filter is preserved and the cursor row restored, so a
+        background change never yanks the selection to the top. A no-op when
+        the table is empty.
         """
         if not self._filtered_instances:
             return
@@ -358,7 +337,6 @@ class InstanceTable(DataTable):
 
     def _refresh_table(self) -> None:
         """Refresh table display with current filtered instances."""
-        memory_service = getattr(self.app, "memory_service", None)
         # Judged on the whole fleet, not the filtered rows, so a search does
         # not make an optional column come and go.
         columns = [
@@ -373,11 +351,14 @@ class InstanceTable(DataTable):
             self.clear(columns=True)
             self._setup_columns(columns)
         for idx, instance in enumerate(self._filtered_instances):
-            cells = self._row_cells(idx, instance, memory_service)
+            cells = self._row_cells(idx, instance)
             self.add_row(*(cells[column.key] for column in columns))
 
-    def _row_cells(self, idx: int, instance: dict, memory_service: Any) -> Dict[str, Any]:
+    def _row_cells(self, idx: int, instance: dict) -> Dict[str, Any]:
         """Every column's cell for one server, by column key."""
+        # The screens package imports this table, so the import waits.
+        from servonaut.screens._fleet_filter import provider_label
+
         limits = {column.key: column.max_width for column in COLUMNS}
 
         def plain(key: str, value: Any) -> Text:
@@ -393,15 +374,11 @@ class InstanceTable(DataTable):
             ), instance),
             # A state without a colour is provider text: never read as markup.
             "state": self._state_cell(instance, coloured, plain("state", state), state),
-            "provider": plain("provider", instance.get("provider", "AWS")),
+            "provider": plain("provider", provider_label(instance)),
             "public_ip": plain("public_ip", instance.get("public_ip")),
             "type": plain("type", instance.get("type")),
             "region": plain("region", instance.get("region")),
-            "private_ip": plain("private_ip", instance.get("private_ip")),
-            "id": plain("id", instance.get("id")),
-            "key": plain("key", _key_label(instance.get("key_name") or "")),
             "ssh": self._ssh_verify_cell(instance),
-            "memory": self._memory_icon(instance, memory_service),
         }
 
     def _state_cell(self, instance: dict, coloured: str, plain_cell: Text, state: str) -> Any:
@@ -452,33 +429,8 @@ class InstanceTable(DataTable):
         return format_ssh_verify_state(
             instance.get("ssh_verify_status"),
             instance.get("ssh_verified_at"),
+            compact=True,
         )
-
-    def _memory_icon(self, instance: dict, memory_service) -> str:
-        """Return a compact Rich-markup icon for the memory column.
-
-        Delegates to :func:`compute_memory_status` from the fleet screen so
-        the instance list and fleet view stay in lockstep on status vocabulary.
-        """
-        if memory_service is None:
-            return "[dim]—[/dim]"
-        try:
-            from servonaut.screens.fleet_memory import (
-                compute_memory_status,
-                STATUS_FRESH,
-                STATUS_STALE,
-                STATUS_OPT_OUT,
-            )
-            status = compute_memory_status(instance, memory_service)
-        except Exception:
-            return "[dim]—[/dim]"
-        if status == STATUS_FRESH:
-            return "[green]●[/green]"
-        if status == STATUS_STALE:
-            return "[yellow]●[/yellow]"
-        if status == STATUS_OPT_OUT:
-            return "[red]⛔[/red]"
-        return "[dim]○[/dim]"
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.

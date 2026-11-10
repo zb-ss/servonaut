@@ -48,6 +48,18 @@ def row_provider(row: dict) -> str:
     return row_source(row)
 
 
+def provider_label(row: dict) -> str:
+    """What the Provider column shows: AWS, OVH or Hetzner by name, otherwise the row's own label.
+
+    A custom or team server keeps the label its owner gave it ("Custom" or
+    "Team" when it has none).
+    """
+    group = row_provider(row)
+    if group in ("aws", "ovh", "hetzner"):
+        return PROVIDER_LABELS[group]
+    return str(row.get("provider") or "").strip() or PROVIDER_LABELS.get(group, group)
+
+
 @dataclass(frozen=True)
 class FleetFilter:
     """Which servers the fleet list shows: one state and one provider, or all."""
@@ -130,14 +142,17 @@ def next_choice(
 
 
 def summary(shown: int, total: int, active: FleetFilter, query: Optional[str] = None) -> str:
-    """"12 servers", or "Showing 9 of 12 · Running · AWS" while something narrows the list.
+    """"Showing 9 of 12 · filters: Running · AWS · f cycle state filter · p cycle provider".
 
     Fixed words and counts, never server text. *query* only says that a search
     is narrowing the list; its text is already visible in the search box.
     """
-    if not active.is_active and not query:
-        return f"{total} server" + ("" if total == 1 else "s")
-    parts = [f"Showing {shown} of {total}", *active.describe()]
+    filters = active.describe()
     if query:
-        parts.append("search")
-    return " · ".join(parts)
+        filters = [*filters, "search"]
+    return " · ".join([
+        f"Showing {shown} of {total}",
+        "filters: " + (", ".join(filters) if filters else "none"),
+        "f cycle state filter",
+        "p cycle provider",
+    ])
