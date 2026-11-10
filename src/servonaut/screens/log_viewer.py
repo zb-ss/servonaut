@@ -9,14 +9,16 @@ import subprocess
 import threading
 from typing import List, Optional
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.content import Content
 from textual.events import Key
 from textual.widgets import Button, Footer, Static, RichLog
 
+from servonaut.utils.markup import literal
+from servonaut.utils.theme_text import themed_text
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
@@ -93,13 +95,13 @@ class LogViewerScreen(WorkspaceScreen):
         Binding("p", "toggle_pause", "Pause/Resume", show=True,
                 tooltip="Pause or resume streaming"),
         Binding("c", "clear_output", "Clear", show=True, tooltip="Clear the output"),
-        Binding("m", "manage_paths", "Manage Paths", show=True,
+        Binding("m", "manage_paths", "Manage paths", show=True,
                 tooltip="Manage custom log paths"),
-        Binding("l", "pick_log", "Pick Log", show=True,
+        Binding("l", "pick_log", "Pick log", show=True,
                 tooltip="Switch to a different log file"),
         Binding("a", "send_to_ai", "Send to AI", show=True,
                 tooltip="Send the log buffer to AI analysis"),
-        Binding("y", "copy_output", "Copy All", show=True,
+        Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy the whole log buffer to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
                 tooltip="Copy Mode: the log in a text area you can select from"),
@@ -145,7 +147,10 @@ class LogViewerScreen(WorkspaceScreen):
             with Container(id="log_viewer_container", classes="workspace-content"):
                 yield Static("[bold]Remote log stream[/bold]", id="log_title")
                 yield Static(
-                    f"[bold $text-accent]Log Viewer:[/bold $text-accent] {escape(str(name))}  [dim]Probing available logs...[/dim]",
+                    Content.assemble(
+                        ("Log viewer:", "bold $text-accent"), " ", literal(str(name)),
+                        "  ", ("Probing available logs...", "dim"),
+                    ),
                     id="log_header",
                 )
                 yield RichLog(id="log_output", highlight=True, markup=True)
@@ -207,7 +212,7 @@ class LogViewerScreen(WorkspaceScreen):
             )
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
-            output.write(f"[red]Error probing logs: {e}[/red]")
+            output.write(themed_text(self.app, f"Error probing logs: {e}", "$text-error"))
             return
 
         self._available_logs = available
@@ -217,10 +222,8 @@ class LogViewerScreen(WorkspaceScreen):
             self._update_header()
             await self._start_stream(self._current_log)
         else:
-            output.write(
-                "[yellow]No readable log files found on this server.[/yellow]\n"
-                "[dim]Press L to pick a log or + to add a custom path.[/dim]"
-            )
+            output.write(themed_text(self.app, "No readable log files found on this server.", "$text-warning"))
+            output.write("[dim]Press L to pick a log or + to add a custom path.[/dim]")
             self.app.notify("No readable log files found", severity="warning")
 
         # Kick off background directory scan
@@ -263,8 +266,10 @@ class LogViewerScreen(WorkspaceScreen):
             status_parts.append(f"[dim $text-success]\\[cached{age}][/dim $text-success]")
         status = "  " + " ".join(status_parts) if status_parts else ""
         self.query_one("#log_header", Static).update(
-            f"[bold $text-accent]Log Viewer:[/bold $text-accent] {escape(str(name))}  "
-            f"[dim]Viewing:[/dim] {escape(log_label)}{status}"
+            Content.assemble(
+                ("Log viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
+                ("Viewing:", "dim"), " ", literal(log_label), Content.from_markup(status),
+            )
         )
 
     # ------------------------------------------------------------------
@@ -297,7 +302,7 @@ class LogViewerScreen(WorkspaceScreen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
         ssh_cmd = self.app.ssh_service.build_ssh_command(
@@ -343,7 +348,7 @@ class LogViewerScreen(WorkspaceScreen):
         except Exception as e:
             logger.error("Failed to start stream process: %s", e)
             output = self.query_one("#log_output", RichLog)
-            output.write(f"[red]Error starting stream: {e}[/red]")
+            output.write(themed_text(self.app, f"Error starting stream: {e}", "$text-error"))
 
     def _reader_thread_fn(self) -> None:
         """Read lines from the subprocess stdout in a dedicated OS thread.
@@ -442,7 +447,7 @@ class LogViewerScreen(WorkspaceScreen):
             if self._content_buffer:
                 output.write("\n[dim]--- End of file ---[/dim]")
             else:
-                output.write("[yellow]File is empty (0 lines)[/yellow]")
+                output.write(themed_text(self.app, "File is empty (0 lines)", "$text-warning"))
 
     def _check_empty_output(self) -> None:
         """Show hint if no log output has arrived after the initial delay."""
@@ -450,10 +455,8 @@ class LogViewerScreen(WorkspaceScreen):
             return
         if self._reader_thread and self._reader_thread.is_alive():
             output = self.query_one("#log_output", RichLog)
-            output.write(
-                "[yellow]No output received — file may be empty or inactive.[/yellow]\n"
-                "[dim]New lines will appear here as they are written to the log.[/dim]"
-            )
+            output.write(themed_text(self.app, "No output received — file may be empty or inactive.", "$text-warning"))
+            output.write("[dim]New lines will appear here as they are written to the log.[/dim]")
 
     async def _stop_stream(self) -> None:
         """Terminate the reader thread and subprocess."""

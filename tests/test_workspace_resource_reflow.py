@@ -698,3 +698,19 @@ async def test_resource_representative_palettes_keep_all_toolbar_targets(
         assert content(screen).display
         await assert_essential_targets(case, app, pilot, screen)
         await _assert_all_toolbar_buttons(app, pilot, screen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [c for c in CASES if c.name in {"keys", "config-snapshots", "backups"}],
+                         ids=lambda c: c.name)
+async def test_action_hints_are_bindings_and_the_key_matches_the_click(case: ReflowCase) -> None:
+    from tests._hint_conformance import assert_hints_match_bindings, record_actions
+
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        calls: list[str] = []
+        record_actions(screen, calls)
+        table = screen.query_one(PRIMARY_TABLES[type(screen)], DataTable)
+        table.focus()
+        assert await assert_hints_match_bindings(pilot, screen, calls) >= 1

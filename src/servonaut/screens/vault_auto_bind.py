@@ -39,6 +39,7 @@ from servonaut.services.vault.auto_bind import (
 from servonaut.services.vault.display import strip_terminal_controls, terminal_safe
 from servonaut.services.vault.ec2_host_keys import key_family_from_public_key
 from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -273,15 +274,15 @@ class VaultAutoBindScreen(WorkspaceScreen):
                     with Horizontal(id="auto_bind_actions"):
                         with Vertical(id="auto_bind_binding_actions"):
                             yield Static("Binding", classes="credential_action_heading")
-                            with Horizontal(classes="credential_binding_buttons"):
-                                yield Button("Bind selected", variant="primary", id="auto_bind_apply")
-                                yield Button("Fetch host keys", id="auto_bind_fetch_keys")
+                            with ActionRow(classes="credential_binding_buttons"):
+                                yield ActionButton("Bind selected", role="primary", id="auto_bind_apply")
+                                yield ActionButton("Fetch host keys", "f", short="Fetch", id="auto_bind_fetch_keys")
                         with Vertical(id="auto_bind_selection_actions"):
                             yield Static("Selection", classes="credential_action_heading")
-                            with Horizontal(classes="credential_selection_buttons"):
-                                yield Button("Select all", id="auto_bind_all")
-                                yield Button("Select none", id="auto_bind_none")
-                                yield Button("Back", id="auto_bind_back")
+                            with ActionRow(classes="credential_selection_buttons"):
+                                yield ActionButton("Select all", id="auto_bind_all")
+                                yield ActionButton("Select none", id="auto_bind_none")
+                                yield ActionButton("Back", "esc", id="auto_bind_back")
         yield Footer()
 
 
@@ -307,7 +308,11 @@ class VaultAutoBindScreen(WorkspaceScreen):
 
     def _sync_compact_layout(self) -> None:
         """Keep the short-terminal presentation alongside content-width reflow."""
-        self.set_class(self.size.height <= 32, "-short")
+        short = self.size.height <= 32
+        self.set_class(short, "-short")
+        # A short terminal has no room for bordered buttons: one row each.
+        for button in self.query(ActionButton):
+            button.compact = short
 
     # ------------------------------------------------------------------
     # Display helpers
@@ -476,15 +481,13 @@ class VaultAutoBindScreen(WorkspaceScreen):
         detail.update(self.scrub_for_display(text))
 
     def _sync_apply(self) -> None:
-        apply = self.query_one("#auto_bind_apply", Button)
+        apply = self.query_one("#auto_bind_apply", ActionButton)
         if self._busy.holds("#auto_bind_apply"):
             return  # running work gives the button back its state when it ends
         count = len(self._selected)
         label = f"Bind selected ({count})" if count else "Bind selected"
-        if apply.label.plain != label:
-            apply.label = label
-            # The auto-sized action column must follow changes to the count.
-            apply.refresh(layout=True)
+        if apply.words != label:
+            apply.set_text(label)
         apply.disabled = count == 0
 
     # ------------------------------------------------------------------

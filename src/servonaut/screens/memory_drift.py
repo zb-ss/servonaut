@@ -21,7 +21,7 @@ from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.markup import literal
-from servonaut.utils.table_text import rebuild_keeping_cursor, themed_cell
+from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -340,13 +340,13 @@ class MemoryDriftScreen(WorkspaceScreen):
                 raw_instance_id = self.app.redaction_service.redact_instance_id(
                     raw_instance_id
                 )
-            instance_id = themed_cell(self.app, raw_instance_id)
-            module = themed_cell(self.app, str(getattr(evt, "module", "?")))
+            instance_id = themed_text(self.app, raw_instance_id)
+            module = themed_text(self.app, str(getattr(evt, "module", "?")))
             severity = str(getattr(evt, "severity", "low"))
             status = "acknowledged" if getattr(evt, "acknowledged_at", None) else "open"
-            status = themed_cell(self.app, status)
+            status = themed_text(self.app, status)
             detected_at = str(getattr(evt, "detected_at", ""))[:19].replace("T", " ")
-            severity_cell = themed_cell(self.app, severity, _SEVERITY_STYLE.get(severity, ""))
+            severity_cell = themed_text(self.app, severity, _SEVERITY_STYLE.get(severity, ""))
             table.add_row(
                 detected_at,
                 instance_id,

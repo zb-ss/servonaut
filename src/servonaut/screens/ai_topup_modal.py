@@ -76,7 +76,7 @@ class AITopUpModal(ModalScreen[Optional[str]]):
     }
 
     AITopUpModal #ai_topup_catalog:focus {
-        border: heavy $accent;
+        border: round $accent;
     }
 
     AITopUpModal .ai_topup_pack {

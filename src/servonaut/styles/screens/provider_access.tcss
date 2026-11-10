@@ -161,28 +161,9 @@ OVHSSHKeysScreen.-content-narrow .provider_catalog_heading {
 HetznerSSHKeysScreen #hetzner_ssh_keys_actions,
 OVHSSHKeysScreen #ovh_ssh_keys_actions {
     dock: bottom;
-    layout: grid;
-    grid-size: 4;
-    grid-columns: 1fr 1fr 1fr 1fr;
-    grid-rows: auto;
-    grid-gutter: 0 1;
     padding: 1 0 0 0;
     height: auto;
     background: $surface;
-}
-
-HetznerSSHKeysScreen #hetzner_ssh_keys_actions Button,
-OVHSSHKeysScreen #ovh_ssh_keys_actions Button {
-    width: 1fr;
-    min-width: 0;
-    margin: 0;
-}
-
-HetznerSSHKeysScreen.-content-narrow #hetzner_ssh_keys_actions,
-OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions {
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: auto;
 }
 
 HetznerSSHKeysScreen #hetzner_ssh_add_form_actions,

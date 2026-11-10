@@ -8,9 +8,11 @@ import threading
 from typing import List, Optional
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
@@ -27,6 +29,7 @@ from servonaut.utils.ssh_utils import (
     is_known_hosts_notice,
     track_background_process,
 )
+from servonaut.utils.markup import inert_text, literal
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
@@ -51,13 +54,13 @@ class CommandOverlay(ModalScreen):
                 tooltip="Stop the running command, or close the overlay"),
         Binding("ctrl+r", "show_command_picker", "Picker", show=True,
                 tooltip="Pick a saved or recent command"),
-        Binding("ctrl+s", "save_command", "Save Cmd", show=True,
+        Binding("ctrl+s", "save_command", "Save command", show=True,
                 tooltip="Save the current command to favourites"),
         Binding("up", "history_prev", "Previous", show=False,
                 tooltip="Previous command in the history"),
         Binding("down", "history_next", "Next", show=False,
                 tooltip="Next command in the history"),
-        Binding("y", "copy_output", "Copy All", show=True,
+        Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy all output to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
                 tooltip="Copy Mode: the output in a text area you can select from"),
@@ -174,7 +177,7 @@ class CommandOverlay(ModalScreen):
         # Show welcome message
         output = self.query_one("#command_output", CommandOutput)
         welcome = f"Connected to {self._instance.get('name') or self._instance.get('id')}"
-        output.append_output(f"[dim]{welcome}[/dim]")
+        output.append_notice(Text(inert_text(welcome)))
         self._output_lines.append(welcome)
         if self._missing_profile:
             warning = (
@@ -182,12 +185,7 @@ class CommandOverlay(ModalScreen):
                 f"Connecting directly (no bastion). Add the profile in Settings if "
                 f"this server requires a jump host."
             )
-            output.append_error(
-                f"[bold yellow]Warning:[/bold yellow] Connection profile "
-                f"'{self._missing_profile}' not found. Connecting directly "
-                f"(no bastion). Add the profile in Settings if this server "
-                f"requires a jump host."
-            )
+            output.append_error(Text(inert_text(warning)))
             self._output_lines.append(warning)
         hint = "Type commands below. Ctrl+C stops a running command, Escape closes."
         output.append_output(f"[dim]{hint}[/dim]\n")
@@ -229,14 +227,14 @@ class CommandOverlay(ModalScreen):
                 return None
         return None
 
-    def _build_header_text(self) -> str:
+    def _build_header_text(self) -> Content:
         """Build header text with server name and prompt.
 
         Returns:
             Rich-formatted header string.
         """
         name = self._instance.get('name') or self._instance.get('id', 'unknown')
-        return f"[bold $text-accent]Command Execution:[/bold $text-accent] {name}"
+        return Content.assemble(("Command execution:", "bold $text-accent"), " ", literal(str(name)))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle command input submission.
@@ -308,10 +306,10 @@ class CommandOverlay(ModalScreen):
 
         # Block interactive/TUI commands that need a real terminal
         if self._is_interactive_command(command):
-            output_widget.append_error(
-                f"[bold yellow]{command.split()[0]}[/bold yellow] requires an "
-                f"interactive terminal and cannot run here."
-            )
+            output_widget.append_error(Text.assemble(
+                (inert_text(command.split()[0]), "bold"),
+                " requires an interactive terminal and cannot run here.",
+            ))
             output_widget.append_output(
                 "[dim]Press Escape to close, then press s to open an SSH terminal.[/dim]\n"
             )
