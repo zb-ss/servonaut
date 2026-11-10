@@ -201,6 +201,15 @@ Button.-error:focus {
     text-style: bold underline;
 }
 
+/* A compact button (a chip, a toolbar action) has no frame at all. The hover
+   and focus rules above out-rank any class selector that sets `border: none`
+   (a pseudo-class counts as a class), so without this the frame appears the
+   moment the pointer or focus arrives and the button grows by two rows. */
+Button.-textual-compact {
+    height: 1;
+    border: none !important;
+}
+
 #btn_back {
     background: transparent;
     color: $text-muted;

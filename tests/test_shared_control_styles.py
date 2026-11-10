@@ -17,7 +17,9 @@ from textual.widgets import (
     TextArea,
 )
 
+from servonaut.screens.instance_list import FleetChip
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.action_button import ActionButton
 from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.workspace import WorkspaceControls
 
@@ -136,3 +138,53 @@ async def test_link_controls_keep_words_only_underline_when_hovered_or_focused(s
         assert link.has_focus
         assert _words_underlined(link, label)
         assert link.region.height == 1
+
+
+BORDER_GLYPHS = set("╭╮╰╯─│━┃┏┓┗┛▔▁▏▕▀▄█")
+
+
+class _HoverApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield Button("Away", id="away_button")
+        yield FleetChip("state", "running", "Running")
+        yield FleetChip("provider", "aws", "AWS")
+        yield Button("Compact", id="compact_button", compact=True)
+        yield ActionButton("Action", id="compact_action", compact=True)
+        yield LinkButton("Refresh (r)", id="link_button")
+
+
+BORDERLESS = ("#chip_state_running", "#chip_provider_aws", "#compact_button", "#compact_action", "#link_button")
+
+
+def _top_row_text(widget) -> str:
+    strip = widget.render_lines(Region(0, 0, widget.size.width, 1))[0]
+    return "".join(segment.text for segment in strip)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", BORDERLESS)
+async def test_borderless_buttons_gain_no_border_on_hover_or_focus(selector: str) -> None:
+    app = _HoverApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        widget = app.query_one(selector, Button)
+        app.query_one("#away_button").focus()
+        await pilot.hover("#away_button")
+        await pilot.pause()
+        idle = widget.region
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+        await pilot.hover(selector)
+        await pilot.pause()
+        assert widget.mouse_hover
+        assert widget.region == idle
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+        widget.focus()
+        await pilot.hover("#away_button")
+        await pilot.pause()
+        assert widget.has_focus
+        assert widget.region == idle
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
