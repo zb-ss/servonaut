@@ -162,7 +162,7 @@ class MemorySummaryScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         """Compose a focused, scrollable Markdown reading surface."""
         yield SafeHeader()
-        yield WorkspaceControls("Memory Summary")
+        yield WorkspaceControls("Memory summary")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield Container(

@@ -120,7 +120,7 @@ _HELP_TEMPLATE = """
 Use the **sidebar** on the left to switch between views. The sidebar is
 available on every screen. Hover over buttons for descriptions.
 
-## Instance List
+## Instance list
 
 Keys are case-sensitive: `D` is Shift+d.
 
@@ -135,7 +135,7 @@ copy it, or press `Y`, pick one with the arrow keys (`Left` / `Right` on the
 line) and press `Enter`; `Esc` goes back to the table. `y` copies the whole
 row. Highlighting part of a value with the mouse copies just that part.
 
-## Server Actions
+## Server actions
 
 <<server-action-keys>>
 
@@ -151,7 +151,7 @@ row. Highlighting part of a value with the mouse copies just that part.
 | **AI Analysis** | Send logs to AI for analysis (requires `httpx`) |
 | **Ban IP** | Ban the instance's IP via configured method |
 
-## Server Memory (AI-queryable fact cache)
+## Server memory (AI-queryable fact cache)
 
 Memory builds a structured, redactable snapshot of each server — OS,
 runtimes, services, web stack, recent log paths, annotations — and stores
@@ -173,7 +173,7 @@ Memory is **opt-out per server** via `memory.per_server_overrides` in
 config.json. Sensitive probe output is scrubbed by the redaction library
 when `memory.redaction_enabled` is true (the default).
 
-## Custom Servers
+## Custom servers
 
 Add non-AWS servers from any provider (DigitalOcean, Hetzner, on-prem, etc.).
 Custom servers appear alongside EC2 instances with a **Provider** column.
@@ -181,7 +181,7 @@ All features work transparently: SSH, SCP, file browsing, commands, log viewing,
 
 Each custom server has: name, host, port, username, SSH key, provider label, group, and tags.
 
-## Log Viewer (tail -f)
+## Log viewer (tail -f)
 
 Stream remote server logs in real-time via SSH.
 
@@ -190,7 +190,7 @@ Stream remote server logs in real-time via SSH.
 The viewer auto-detects readable log files on the server (syslog, auth.log,
 nginx, apache, mysql, postgresql). Configure custom paths per instance in settings.
 
-## CloudTrail Event Browser
+## CloudTrail event browser
 
 Browse AWS CloudTrail events with filters:
 
@@ -202,7 +202,7 @@ Browse AWS CloudTrail events with filters:
 
 Select an event row to view the full raw JSON detail.
 
-## IP Ban Manager
+## IP ban manager
 
 Ban IPs using three AWS methods:
 
@@ -215,7 +215,7 @@ Ban IPs using three AWS methods:
 Configure ban methods in `config.json` under `ip_ban_configs`.
 All ban/unban operations are logged to `~/.servonaut/ip_ban_audit.json`.
 
-## AI Log Analysis
+## AI log analysis
 
 Send log text to an AI provider for analysis. Requires `httpx` (`pip install 'servonaut[ai]'`).
 
@@ -228,7 +228,7 @@ Send log text to an AI provider for analysis. Requires `httpx` (`pip install 'se
 Configure in Settings or in `config.json` under `ai_provider`.
 Large logs are automatically chunked. Token count and estimated cost are displayed.
 
-### API Key Formats
+### API key formats
 
 The per-provider key fields (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`,
 `ollama_api_key`) support three formats so you don't have to store secrets in `config.json`:
@@ -242,7 +242,7 @@ The per-provider key fields (`openai_api_key`, `anthropic_api_key`, `gemini_api_
 You can also create `~/.secrets/servonaut.env` with `KEY=value` pairs — these are
 auto-loaded into the environment on startup (existing env vars take precedence).
 
-## MCP Server (for AI Agents)
+## MCP server (for AI agents)
 
 Expose Servonaut tools to AI agents like Claude Code.
 
@@ -266,7 +266,7 @@ servonaut --mcp-repair            # Repoint agents left on a removed install
 Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are **always blocked**.
 All operations logged to `~/.servonaut/mcp_audit.jsonl`.
 
-## Instance Caching
+## Instance caching
 
 Instances are cached to `~/.servonaut/cache.json` for fast startup.
 
@@ -279,7 +279,7 @@ Instances are cached to `~/.servonaut/cache.json` for fast startup.
 
 Default TTL is **1 hour** (`cache_ttl_seconds: 3600` in config).
 
-## Multiple Accounts
+## Multiple accounts
 
 A provider can have several accounts: AWS named profiles, Hetzner Cloud
 projects (one API token each) and OVH accounts. The provider's own settings
@@ -304,7 +304,7 @@ than one account, its servers are listed as `label/name` (for example
 accept `label/name` too; a name shared by several servers is refused with the
 choices. Custom servers are `custom/name`.
 
-## Connection Profiles (Bastion Support)
+## Connection profiles (bastion support)
 
 For instances behind a bastion host, add to `~/.servonaut/config.json`:
 
@@ -333,14 +333,14 @@ For instances behind a bastion host, add to `~/.servonaut/config.json`:
 
 `account` matches a provider account label, so one account's servers can use their own bastion.
 
-## SSH Key Management
+## SSH key management
 
 Keys are auto-discovered in `~/.ssh/` by AWS key pair name
 (e.g., `mykey`, `mykey.pem`, `id_rsa_mykey`).
 
 You can also set keys per-instance or set a default key in Settings.
 
-## Configuration Reference
+## Configuration reference
 
 Config file: `~/.servonaut/config.json`
 
@@ -361,11 +361,11 @@ Config file: `~/.servonaut/config.json`
 | `ai_provider` | OpenAI defaults | AI provider settings (provider, api_key, model, etc.) |
 | `mcp.guard_level` | `standard` | MCP server guard level |
 
-## Command Overlay Shortcuts
+## Command overlay shortcuts
 
 <<command-overlay-keys>>
 
-## Logging & Debugging
+## Logging & debugging
 
 Logs: `~/.servonaut/logs/servonaut.log` (auto-rotated: 2 MB per file, 5
 backups → `servonaut.log.1` … `servonaut.log.5`, max ~10 MB on disk).
@@ -373,7 +373,7 @@ Debug mode: `servonaut --debug`
 
 SSH failures keep the terminal window **open** so you can read the error message.
 
-## Copying Text
+## Copying text
 
 | Method | Where it works |
 |--------|---------------|
@@ -384,7 +384,7 @@ SSH failures keep the terminal window **open** so you can read the error message
 Mouse text selection auto-copies to clipboard on Static widgets and TextArea fields.
 For scrollable views (log output, tables), use `v` to enter Copy Mode.
 
-## Global Shortcuts
+## Global shortcuts
 
 <<global-keys>>
 """

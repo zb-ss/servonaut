@@ -139,7 +139,7 @@ class SCPTransferScreen(WorkspaceScreen):
     def _banner_text(self) -> str:
         name = self._instance.get("name") or self._instance.get("id")
         return (
-            "[bold]SCP File Transfer[/bold]\n"
+            "[bold]SCP file transfer[/bold]\n"
             f"Instance: {escape(self._display_identity(name))}"
         )
 

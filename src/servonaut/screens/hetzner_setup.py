@@ -243,7 +243,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 "[dim][b]Hetzner-side SSH Key[/b] is the [i]name[/i] (or numeric ID) "
                 "of an SSH key already registered on your Hetzner Cloud project — "
                 "used at server-creation time so newly-created servers accept your "
-                "key. [b]Local SSH Key[/b] is the on-disk private-key path used by "
+                "key. [b]Local SSH key[/b] is the on-disk private-key path used by "
                 "[b]ssh -i[/b] when connecting to those servers.[/dim]",
                 classes="note",
             ),
@@ -252,7 +252,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 Select(
                     options=[],
                     id="hetzner_select_remote_ssh_key",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
@@ -286,7 +286,7 @@ class HetznerSetupScreen(WorkspaceScreen):
             Static(
                 "[dim]Used when [b]servonaut hetzner create <name>[/b] (or the "
                 "TUI's [b]+ New[/b] action) is called without explicit flags. "
-                "Until you click [b]Test Connection[/b] each dropdown shows only "
+                "Until you click [b]Test connection[/b] each dropdown shows only "
                 "your currently-saved value; a successful connection refreshes "
                 "the list from the Hetzner API.[/dim]",
                 classes="note",
@@ -296,7 +296,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 Select(
                     options=[],
                     id="hetzner_select_image",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
@@ -306,7 +306,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 Select(
                     options=[],
                     id="hetzner_select_server_type",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
@@ -316,7 +316,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 Select(
                     options=[],
                     id="hetzner_select_location",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
@@ -444,8 +444,8 @@ class HetznerSetupScreen(WorkspaceScreen):
         self.query_one("#hetzner_input_s3_endpoint_url", Input).value = s3.endpoint_url
 
         # Seed each dropdown with just the user's current saved value so
-        # they can save without first clicking Test Connection (e.g.
-        # tweaking only the username). Test Connection later swaps in
+        # they can save without first clicking Test connection (e.g.
+        # tweaking only the username). Test connection later swaps in
         # the full API list and preserves whichever value is selected.
         self._seed_select(
             "#hetzner_select_remote_ssh_key", h.default_hetzner_ssh_key or "",
@@ -495,7 +495,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         """Pre-populate a Select with one option (the saved config value).
 
         Empty strings collapse to BLANK so the placeholder prompt
-        ("Test Connection to load options") is shown — better signal
+        ("Test connection to load options") is shown — better signal
         than a row that just says "''".
         """
         sel = self.query_one(selector, Select)

@@ -63,7 +63,7 @@ class CommandOverlay(ModalScreen):
         Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy all output to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
-                tooltip="Copy Mode: the output in a text area you can select from"),
+                tooltip="Copy mode: the output in a text area you can select from"),
     ]
 
     def __init__(self, instance: dict) -> None:

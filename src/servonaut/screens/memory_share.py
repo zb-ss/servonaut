@@ -223,7 +223,7 @@ class ShareInstanceScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         name = str(self._instance.get("name") or self._instance.get("id", "?"))
         yield SafeHeader()
-        yield WorkspaceControls("Share Memory")
+        yield WorkspaceControls("Share memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield Container(

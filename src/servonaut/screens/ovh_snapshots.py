@@ -83,7 +83,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         yield Static("Snapshots", classes="resource-section-title")
                         yield DataTable(id="snapshots_table")
                         yield Static(
-                            "No snapshots found. Use Create Snapshot to add a recovery point.",
+                            "No snapshots found. Use Create snapshot to add a recovery point.",
                             id="snapshot_empty_state",
                         )
                     with Vertical(classes="provider-lifecycle-operations"):
@@ -138,7 +138,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
     def on_mount(self) -> None:
         """Set up table columns and load snapshots."""
         table = self.query_one("#snapshots_table", DataTable)
-        table.add_columns("Name / ID", "Date", "Description / Status")
+        table.add_columns("Name / ID", "Date", "Description / status")
         table.cursor_type = "row"
 
         if self._provider_type == "vps":

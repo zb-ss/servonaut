@@ -307,7 +307,7 @@ class AWSCreateScreen(WorkspaceScreen):
         types_tbl.cursor_type = "row"
 
         keys_tbl = self.query_one("#aws_keys_table", DataTable)
-        keys_tbl.add_columns("Key Name", "ID", "Fingerprint")
+        keys_tbl.add_columns("Key name", "ID", "Fingerprint")
         keys_tbl.cursor_type = "row"
 
         subnets_tbl = self.query_one("#aws_subnets_table", DataTable)

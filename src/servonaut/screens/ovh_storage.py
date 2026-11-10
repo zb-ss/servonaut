@@ -214,7 +214,7 @@ class OVHStorageScreen(WorkspaceScreen):
     def _setup_table(self) -> None:
         table = self.query_one("#volumes_table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Name", "Size (GB)", "Region", "Status", "Attached To")
+        table.add_columns("Name", "Size (GB)", "Region", "Status", "Attached to")
 
     def _hide_all_forms(self) -> None:
         self.query_one("#create_vol_form").display = False

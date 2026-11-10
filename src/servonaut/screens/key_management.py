@@ -47,7 +47,7 @@ class KeyManagementScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         """Separate connection policy from keys available on this computer."""
         yield SafeHeader()
-        yield WorkspaceControls("SSH Keys")
+        yield WorkspaceControls("SSH keys")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with ScrollableContainer(id="keys_container", classes="workspace-content"):

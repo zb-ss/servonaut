@@ -119,7 +119,7 @@ class ScanPanel(SettingsPanel):
             self._rules_container = rules_container
             yield rules_container
             yield Static(
-                "Type a name and press “+ Add Rule” to append a new rule above.",
+                "Type a name and press “+ Add rule” to append a new rule above.",
                 classes="scan-rule-sublabel",
             )
             yield Horizontal(

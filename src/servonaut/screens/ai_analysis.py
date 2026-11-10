@@ -68,7 +68,7 @@ class AIAnalysisScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("AI Log Analysis")
+        yield WorkspaceControls("AI log analysis")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="ai_container", classes="workspace-content"):
@@ -612,7 +612,7 @@ class AIAnalysisScreen(WorkspaceScreen):
         text = self._get_input_text()
         if not text.strip():
             self.app.notify(
-                "No text to analyze. Paste text or press 'Fetch Logs'.",
+                "No text to analyze. Paste text or press 'Fetch logs'.",
                 severity="warning",
             )
             return

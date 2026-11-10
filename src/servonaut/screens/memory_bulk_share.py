@@ -152,7 +152,7 @@ class BulkShareScreen(WorkspaceScreen):
         count = len(self._targets)
         servers = f"{count} server" if count == 1 else f"{count} servers"
         yield SafeHeader()
-        yield WorkspaceControls("Share Memory")
+        yield WorkspaceControls("Share memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="bulk_outer", classes="workspace-content"):

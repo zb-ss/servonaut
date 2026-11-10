@@ -39,7 +39,7 @@ class CopyModeScreen(ModalScreen[None]):
     }
     """
 
-    def __init__(self, text: str, title: str = "Copy Mode") -> None:
+    def __init__(self, text: str, title: str = "Copy mode") -> None:
         super().__init__()
         self._text = text
         self._title = title

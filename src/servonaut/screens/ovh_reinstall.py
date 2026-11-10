@@ -118,7 +118,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
     def on_mount(self) -> None:
         """Set up the DataTable and start loading images."""
         table = self.query_one("#images_table", DataTable)
-        table.add_columns("Name", "OS Type")
+        table.add_columns("Name", "OS type")
         table.cursor_type = "row"
         self.run_worker(self._load_images(), exclusive=True)
 

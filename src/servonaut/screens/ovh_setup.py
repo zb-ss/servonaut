@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 class OVHSetupScreen(WorkspaceScreen):
     """Guided setup wizard for OVHcloud API credentials.
 
-    Supports both classic 3-key auth (Application Key + Secret + Consumer Key)
+    Supports both classic 3-key auth (Application key + Secret + Consumer key)
     and OAuth2 service account auth (Client ID + Client Secret) for extra
     accounts. Opened with no arguments it sets up the primary account;
     ``add_extra`` adds another account and ``extra`` edits extra account
@@ -228,7 +228,7 @@ class OVHSetupScreen(WorkspaceScreen):
             Static("[bold]Step 2: API credentials[/bold]", classes="section_header"),
             Static(
                 "[dim]Visit https://www.ovh.com/auth/api/createApp to create an application "
-                "and obtain your Application Key and Secret.\n"
+                "and obtain your Application key and Secret.\n"
                 "For other regions: ovh-ca → ca.api.ovh.com/createApp/ | "
                 "ovh-us → api.us.ovhcloud.com/createApp/[/dim]",
                 classes="note",
@@ -270,7 +270,7 @@ class OVHSetupScreen(WorkspaceScreen):
             Horizontal(
                 Static("Application key:", classes="label"),
                 Input(
-                    placeholder="Your OVH Application Key",
+                    placeholder="Your OVH application key",
                     id="ovh_input_app_key",
                 ),
                 classes="setting_row ovh-classic-auth",
@@ -278,26 +278,26 @@ class OVHSetupScreen(WorkspaceScreen):
             Horizontal(
                 Static("Application secret:", classes="label"),
                 SecretInput(
-                    placeholder="Your OVH Application Secret or $ENV_VAR",
+                    placeholder="Your OVH application secret or $ENV_VAR",
                     id="ovh_input_app_secret",
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
 
-            # Step 3: Consumer Key
+            # Step 3: Consumer key
             Static(
                 "[bold]Step 3: Consumer key[/bold]",
                 classes="section_header ovh-classic-auth",
             ),
             Static(
-                "[dim]If you already have a Consumer Key, enter it below. "
-                "Otherwise, click 'Request Consumer Key' to generate one.[/dim]",
+                "[dim]If you already have a Consumer key, enter it below. "
+                "Otherwise, click 'Request Consumer key' to generate one.[/dim]",
                 classes="note ovh-classic-auth",
             ),
             Horizontal(
                 Static("Consumer key:", classes="label"),
                 SecretInput(
-                    placeholder="Your OVH Consumer Key or $ENV_VAR",
+                    placeholder="Your OVH consumer key or $ENV_VAR",
                     id="ovh_input_consumer_key",
                 ),
                 classes="setting_row ovh-classic-auth",
@@ -309,7 +309,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="ovh-classic-auth",
             ),
             Static(
-                "[dim]After adding new features, click 'Request Consumer Key' again "
+                "[dim]After adding new features, click 'Request Consumer key' again "
                 "to grant permissions for all OVH operations.[/dim]",
                 classes="note ovh-classic-auth",
             ),
@@ -345,7 +345,7 @@ class OVHSetupScreen(WorkspaceScreen):
             ),
 
             # Step 5: Cloud Project IDs
-            Static("[bold]Step 5: Public cloud projects (optional)[/bold]", classes="section_header"),
+            Static("[bold]Step 5: Public Cloud projects (optional)[/bold]", classes="section_header"),
             Static(
                 "[dim]Enter comma-separated OVH Public Cloud project IDs to include. "
                 "Leave blank to skip cloud instances.[/dim]",
@@ -673,12 +673,12 @@ class OVHSetupScreen(WorkspaceScreen):
         values = self._collect_form_values()
         if not values['application_key'] or not values['application_secret']:
             self.app.notify(
-                "Application Key and Secret are required to request a Consumer Key.",
+                "Application key and Secret are required to request a Consumer key.",
                 severity="error",
             )
             return
 
-        self.app.notify("Requesting Consumer Key from OVH...", severity="information")
+        self.app.notify("Requesting Consumer key from OVH...", severity="information")
         self.run_worker(
             self._do_request_consumer_key(values),
             name="ovh_request_ck",
@@ -759,26 +759,26 @@ class OVHSetupScreen(WorkspaceScreen):
             if ck:
                 self.query_one("#ovh_input_consumer_key", Input).value = ck
                 self.query_one("#ovh_validation_url", Static).update(
-                    f"[bold $text-success]Consumer Key received![/bold $text-success]\n"
+                    f"[bold $text-success]Consumer key received![/bold $text-success]\n"
                     f"[dim]Validation URL (open in browser to activate):[/dim]\n"
                     f"[$text-accent]{url}[/$text-accent]\n"
-                    f"[dim]After granting access, click 'Test Connection'.[/dim]"
+                    f"[dim]After granting access, click 'Test connection'.[/dim]"
                 )
                 self.app.notify(
-                    "Consumer Key received! Open the validation URL to activate it.",
+                    "Consumer key received! Open the validation URL to activate it.",
                     severity="information",
                     timeout=10,
                 )
             else:
                 self.query_one("#ovh_validation_url", Static).update(
-                    "[$text-error]Failed to obtain Consumer Key[/$text-error]"
+                    "[$text-error]Failed to obtain Consumer key[/$text-error]"
                 )
         except Exception as e:
             logger.error("Consumer key request failed: %s", e)
             self.query_one("#ovh_validation_url", Static).update(
-                "[$text-error]Failed to request Consumer Key. Check credentials and try again.[/$text-error]"
+                "[$text-error]Failed to request Consumer key. Check credentials and try again.[/$text-error]"
             )
-            self.app.notify("Consumer Key request failed. Check credentials.", severity="error")
+            self.app.notify("Consumer key request failed. Check credentials.", severity="error")
 
     def _test_connection(self, save: bool = False) -> None:
         """Test OVH connection with current form values.
@@ -806,14 +806,14 @@ class OVHSetupScreen(WorkspaceScreen):
             # An extra account never borrows the primary's keys, so all
             # three must be its own.
             self.app.notify(
-                "Enter the Application Key, Application Secret and Consumer Key "
+                "Enter the Application key, Application secret and Consumer key "
                 "(or request one) to save this account.",
                 severity="warning",
             )
             return
         elif not values['application_key']:
             self.app.notify(
-                "Enter at least Application Key and Consumer Key to test.",
+                "Enter at least Application key and Consumer key to test.",
                 severity="warning",
             )
             return

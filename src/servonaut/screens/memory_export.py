@@ -55,7 +55,7 @@ class MemoryExportScreen(WorkspaceScreen):
                 Container(
                     Container(
                         Static(
-                            "[bold $text-accent]Compliance Memory Export[/bold $text-accent]",
+                            "[bold $text-accent]Compliance memory export[/bold $text-accent]",
                             id="export-title",
                         ),
                         Static(

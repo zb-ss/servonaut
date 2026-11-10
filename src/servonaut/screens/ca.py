@@ -215,7 +215,7 @@ class CaScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls('SSH Certificate Authority')
+        yield WorkspaceControls('SSH certificate authority')
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Horizontal(id="ca_layout", classes="workspace-content"):

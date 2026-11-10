@@ -109,7 +109,7 @@ class TeamManagementScreen(WorkspaceScreen):
         self._shared_servers: list[dict] = []
         # Cache team-shared config versions, latest first per backend ordering.
         self._team_configs: list[dict] = []
-        # Holds the parsed remote payload between "Pull Latest" and Apply confirm.
+        # Holds the parsed remote payload between "Pull latest" and Apply confirm.
         self._pending_pull_payload: Optional[dict] = None
         # Team-list rows by slug: a team's agent rules are fetched by its id.
         self._teams_by_slug: dict[str, dict] = {}
@@ -157,7 +157,7 @@ class TeamManagementScreen(WorkspaceScreen):
                         Container(
                             Static("[bold]Create team[/bold]", classes="section_header"),
                             Static("Team name", classes="team_field_label"),
-                            Input(placeholder="Team Name", id="input_team_name"),
+                            Input(placeholder="Team name", id="input_team_name"),
                             Horizontal(
                                 Button("Save team", variant="primary", id="btn_save_team"),
                                 Button("Cancel", variant="default", id="btn_cancel_create_team"),
@@ -627,7 +627,7 @@ class TeamManagementScreen(WorkspaceScreen):
             else email
         )
         self.query_one("#change_role_header", Static).update(
-            Text(f"Change Role: {terminal_safe(display_email)}", style="bold")
+            Text(f"Change role: {terminal_safe(display_email)}", style="bold")
         )
         role_select = self.query_one("#select_change_role", Select)
         role_select.set_options(self._role_options_for_caller())
@@ -1107,12 +1107,12 @@ class TeamManagementScreen(WorkspaceScreen):
 
         The backend returns ``email_sent: bool`` — when ``False`` the row was
         persisted with a valid token but mailer delivery failed. Steer the
-        user toward "Copy Accept URL" rather than silently claiming success.
+        user toward "Copy accept URL" rather than silently claiming success.
         """
         if isinstance(response, dict) and response.get("email_sent") is False:
             self.notify(
                 f"{action} recorded for {email} — email delivery failed. "
-                "Use 'Copy Accept URL' to share the link manually.",
+                "Use 'Copy accept URL' to share the link manually.",
                 severity="warning",
                 timeout=10,
             )
@@ -1177,7 +1177,7 @@ class TeamManagementScreen(WorkspaceScreen):
         # if they bypass the UI.
         self.query_one("#btn_create_team").display = owned_count == 0
         self.query_one("#team_workspace_summary", Static).update(
-            f"{len(teams)} team{'s' if len(teams) != 1 else ''} available. Select a team and choose View Team."
+            f"{len(teams)} team{'s' if len(teams) != 1 else ''} available. Select a team and choose View team."
             if teams else "No teams yet. Create a team or ask a team owner to invite you."
         )
 
@@ -1855,7 +1855,7 @@ class TeamManagementScreen(WorkspaceScreen):
     def _submit_pull_config(self) -> None:
         """Apply the previously-fetched remote payload over the local config."""
         if self._pending_pull_payload is None:
-            self.notify("Click 'Pull Latest' first to fetch the team config.", severity="warning")
+            self.notify("Click 'Pull latest' first to fetch the team config.", severity="warning")
             return
         config_manager = getattr(self.app, "config_manager", None)
         config = config_manager.get() if config_manager is not None else None
@@ -1940,7 +1940,7 @@ class TeamManagementScreen(WorkspaceScreen):
         if not chosen:
             return
         if slug != self._loaded_team_slug or slug != self._current_team_slug:
-            self.notify("Team data changed or is refreshing. Reload the team and reopen Share All.", severity="warning")
+            self.notify("Team data changed or is refreshing. Reload the team and reopen Share all.", severity="warning")
             return
         self._start_server_operation(
             partial(self._do_share_all, slug, chosen, skipped_existing, skipped_no_ip,
@@ -1988,7 +1988,7 @@ class TeamManagementScreen(WorkspaceScreen):
             parts.append(f"skipped {skipped_no_ip} without IP")
         if failed:
             parts.append(f"failed {len(failed)}")
-        summary = "Share All: " + ", ".join(parts) + "."
+        summary = "Share all: " + ", ".join(parts) + "."
         severity = "warning" if failed else "information"
         self.notify(summary, severity=severity, timeout=12 if failed else 6, markup=False)
         if failed:

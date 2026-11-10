@@ -124,7 +124,7 @@ class BetaWaitlistModal(ModalScreen[None]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]You're on the Waitlist[/bold $text-accent]",
+                "[bold $text-accent]You're on the waitlist[/bold $text-accent]",
                 id="waitlist-title",
             ),
             body=DialogBody(
@@ -163,7 +163,7 @@ class BackendMaintenanceModal(ModalScreen[None]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-error]Memory Sync Unavailable[/bold $text-error]",
+                "[bold $text-error]Memory Sync unavailable[/bold $text-error]",
                 id="maintenance-title",
             ),
             body=DialogBody(

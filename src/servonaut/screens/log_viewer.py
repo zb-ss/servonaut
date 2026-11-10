@@ -104,7 +104,7 @@ class LogViewerScreen(WorkspaceScreen):
         Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy the whole log buffer to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
-                tooltip="Copy Mode: the log in a text area you can select from"),
+                tooltip="Copy mode: the log in a text area you can select from"),
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
@@ -162,7 +162,7 @@ class LogViewerScreen(WorkspaceScreen):
                     yield Button("Send to AI", id="log_analyze")
                     yield Button("Clear", id="log_clear")
                 yield Static(
-                    "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
+                    "[dim]P: Pause | C: Clear | L: Pick log | M: Manage paths | +: Add path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
                     id="log_hints",
                 )
         yield Footer()

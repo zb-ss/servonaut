@@ -190,9 +190,9 @@ class LogPickerModal(ModalScreen[str]):
 
         total_matches = len(filtered_available) + len(filtered_custom) + len(filtered_discovered)
 
-        # --- Available Logs section ---
+        # --- Available logs section ---
         if filtered_available:
-            all_options.append(Option("── Available Logs ──", disabled=True))
+            all_options.append(Option("── Available logs ──", disabled=True))
             idx += 1
             for path in filtered_available:
                 option_id = f"avail:{path}"
@@ -208,12 +208,12 @@ class LogPickerModal(ModalScreen[str]):
                     self._first_selectable = idx
                 idx += 1
 
-        # --- Custom Paths section (saved but not confirmed readable) ---
+        # --- Custom paths section (saved but not confirmed readable) ---
         if filtered_custom:
             if filtered_available:
                 all_options.append(Option("", disabled=True))
                 idx += 1
-            all_options.append(Option("── Custom Paths ──", disabled=True))
+            all_options.append(Option("── Custom paths ──", disabled=True))
             idx += 1
             for path in filtered_custom:
                 option_id = f"custom:{path}"
@@ -239,12 +239,12 @@ class LogPickerModal(ModalScreen[str]):
             all_options.append(Option("", disabled=True))
             idx += 1
 
-        # --- Discovered Logs section (capped) ---
+        # --- Discovered logs section (capped) ---
         truncated_discovered = filtered_discovered[:_MAX_VISIBLE]
         hidden_count = len(filtered_discovered) - len(truncated_discovered)
 
         if truncated_discovered:
-            all_options.append(Option("── Discovered Logs ──", disabled=True))
+            all_options.append(Option("── Discovered logs ──", disabled=True))
             idx += 1
             for path in truncated_discovered:
                 option_id = f"disc:{path}"

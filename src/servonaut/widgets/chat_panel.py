@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # Minimal AI Logo (Matches Website)
 SERVONAUT_LOGO = (
     "[bold $text-accent]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
-    "   [bold $text-success]●[/] MCP Server Online"
+    "   [bold $text-success]●[/] MCP server online"
 )
 
 # Inline bot marker for assistant messages

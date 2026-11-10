@@ -182,7 +182,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
 
     def on_mount(self) -> None:
         table = self.query_one("#ip_table", DataTable)
-        table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
+        table.add_columns("IP", "Type", "Routed to", "Reverse DNS")
         table.cursor_type = "row"
         picker = self.query_one("#ip_mgmt_account", AccountPicker)
         self._account = picker.account
