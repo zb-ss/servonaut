@@ -60,12 +60,22 @@ from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
 
 #: Per-action one-line help shown in the detail pane on focus.
+# How many findings the count looks at, and the statuses that no longer count as open.
+_FINDINGS_COUNT_LIMIT = 100
+_CLOSED_FINDING_STATUSES = ("resolved", "suppressed")
+
+# The cards stack into one column when the content column is narrower than this.
+_STACK_CARDS_BELOW = 96
+
+# Seconds a failed one-off sample stays on the live card before it clears.
+_SAMPLE_ERROR_SECONDS = 6.0
+
 _ACTION_HELP: dict[str, str] = {
     "btn_browse": "Browse the remote filesystem in a tree view (over SSH).",
     "btn_command": "Run a one-off command on this server in an overlay panel.",
     "btn_ssh": "Open a full SSH session in a new terminal window.",
     "btn_memory": "Build / view the AI-queryable fact cache, notes and agent findings for this server.",
-    "btn_findings": "View proactive monitoring findings for this server and trigger a scan.",
+    "btn_findings": "Open this server's findings inbox: proactive monitoring findings and their triage.",
     "btn_logs": "Stream live log files via SSH (tail -f).",
     "btn_scan": "View keyword scan results collected from this server.",
     "btn_db_creds": "Scan this server for DB credentials and store them in your secret vault.",
@@ -81,11 +91,17 @@ _ACTION_HELP: dict[str, str] = {
     "btn_ovh_firewall": "Manage VPS firewall rules.",
     "btn_back": "Return to the instance list.",
     "btn_live": "Start or stop live CPU, memory and disk polling over SSH.",
+    "btn_live_refresh": "Take one CPU, memory, disk and uptime sample over SSH, without starting the poll.",
     "btn_copy_id": "Copy this server's instance ID to the clipboard.",
     "btn_copy_summary": "Copy the identity and connection details shown here.",
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _tip(button_id: str) -> str:
+    """The tooltip that says what an action button does."""
+    return _ACTION_HELP[button_id]
 
 #: Display names of the credential sources a binding can name.
 _CREDENTIAL_SOURCE_LABELS: dict[str, str] = {
@@ -130,7 +146,8 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
 
 def _card_actions(*buttons: ActionButton) -> ActionRow:
     """The row of actions that belong to one card."""
-    return ActionRow(*buttons, classes="sa-card-actions")
+    # keep_hints: every card row shows the same hint state, so none drops its keys.
+    return ActionRow(*buttons, classes="sa-card-actions", keep_hints=True)
 
 
 def _card(card_id: str, body: Static, *buttons: ActionButton) -> Vertical:
@@ -836,8 +853,9 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Binding("m", "open_memory", "Memory", show=True),
         Binding("d", "scan_db_creds", "Scan DB", show=True),
         Binding("f", "open_findings", "Monitoring", show=True),
-        Binding("l", "toggle_live", "Live", show=True),
-        Binding("L", "toggle_live", "Live", show=False),
+        Binding("l", "toggle_live", "Monitoring", show=False),
+        Binding("L", "toggle_live", "Monitoring", show=False),
+        Binding("R", "refresh_live", "Refresh stats", show=False),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
         Binding("u", "use_vault_key", "Vault Key", show=False),
@@ -870,9 +888,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._instance = instance
         self._reverse_dns = ""
         self._live_on = False
-        # Id of the action button the focus-help line currently describes, so a
-        # click on that (otherwise passive) line can re-dispatch to the button.
-        self._focused_action_id: Optional[str] = None
+        self._sampling = False
+        self._findings_count = 0
+        # Whether the cards show their short form (two facts, no blank row).
+        self._short_cards = False
         # Which read-only view is mounted inline in the detail pane, if any:
         # None | "browse" | "logs".
         self._inline_view: Optional[str] = None
@@ -914,7 +933,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                     id="sa-provider",
                     classes="sa-section",
                 ),
-                before=self.query_one("#action_help"),
             )
         # A team's shared server shows no instance ID, so there is nothing to copy.
         if self._instance.get('is_shared') is True or not self._instance.get('id'):
@@ -922,6 +940,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._sync_compact_buttons()
         self._sync_vault_button_role()
         self.call_after_refresh(self._sync_compact_buttons)
+        if getattr(self.app, "findings_service", None) is not None:
+            self.run_worker(self._load_findings_count(), group="findings_count", exclusive=True)
         # Populate the cached-memory snapshot pane.
         self._render_memory_panel()
 
@@ -979,12 +999,12 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 )
                 # Toolbar: the primary actions, always one row
                 yield ActionRow(
-                    ActionButton("← Fleet", "esc", short="← Fleet", id="btn_back"),
+                    ActionButton("← Fleet", "esc", short="← Fleet", id="btn_back", tooltip=_tip("btn_back")),
                     Static("", classes="sa-toolbar-spacer"),
-                    ActionButton("Browse files", "1", short="Browse", id="btn_browse"),
-                    ActionButton("SCP transfer", "4", short="SCP", id="btn_scp"),
-                    ActionButton("Run command", "2", short="Command", id="btn_command"),
-                    ActionButton("SSH connect", "3", id="btn_ssh", role="primary"),
+                    ActionButton("Browse files", "1", short="Browse", id="btn_browse", tooltip=_tip("btn_browse")),
+                    ActionButton("SCP transfer", "4", short="SCP", id="btn_scp", tooltip=_tip("btn_scp")),
+                    ActionButton("Run command", "2", short="Command", id="btn_command", tooltip=_tip("btn_command")),
+                    ActionButton("SSH connect", "3", id="btn_ssh", role="primary", tooltip=_tip("btn_ssh")),
                     id="action_buttons",
                 )
                 # Main detail workspace
@@ -1002,7 +1022,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                                 Static(connection, id="server_info"),
                                 ActionButton("Use vault key", "u", short="Vault key", id="btn_use_vault_key"),
                                 ActionButton("SSH ref", "r", id="btn_manage_ssh_ref"),
-                                ActionButton("Verify SSH", "v", id="btn_verify_ssh"),
+                                ActionButton("Verify SSH", "v", short="Verify", id="btn_verify_ssh"),
                             ),
                             id="sa-facts",
                         ),
@@ -1010,29 +1030,29 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             _card(
                                 "card_live",
                                 Static(self._live_stats_idle_text(), id="live_stats"),
-                                ActionButton("Live poll: off", "l", id="btn_live"),
+                                ActionButton("Start monitoring", "l", id="btn_live", tooltip=_tip("btn_live")),
+                                ActionButton("Refresh", id="btn_live_refresh", tooltip=_tip("btn_live_refresh")),
                             ),
                             _card(
                                 "card_memory",
                                 Static("[bold]Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
-                                ActionButton("Server memory", "m", short="Memory", id="btn_memory"),
-                                ActionButton("Monitoring", "f", id="btn_findings"),
-                                ActionButton("Scan DB", "d", id="btn_db_creds"),
+                                ActionButton("Open memory", "m", short="Memory", id="btn_memory", tooltip=_tip("btn_memory")),
+                                ActionButton("Findings", "f", id="btn_findings", tooltip=_tip("btn_findings")),
+                                ActionButton("Scan DB", "d", id="btn_db_creds", tooltip=_tip("btn_db_creds")),
                             ),
                             id="sa-monitoring",
                         ),
                         Vertical(
                             Static("[bold]Diagnostics & security[/bold]", classes="sa-card-title"),
                             _card_actions(
-                                ActionButton("Stream logs", "6", short="Logs", id="btn_logs"),
-                                ActionButton("AI log analysis", "7", short="AI analysis", id="btn_ai_analysis"),
-                                ActionButton("Keyword scan results", "5", short="Scan results", id="btn_scan"),
-                                ActionButton("Ban IP", "8", id="btn_ban_ip", role="error"),
+                                ActionButton("Stream logs", "6", short="Logs", id="btn_logs", tooltip=_tip("btn_logs")),
+                                ActionButton("AI log analysis", "7", short="AI analysis", id="btn_ai_analysis", tooltip=_tip("btn_ai_analysis")),
+                                ActionButton("Keyword scan", "5", id="btn_scan", tooltip=_tip("btn_scan")),
+                                ActionButton("Ban IP…", "8", id="btn_ban_ip", role="error", tooltip=_tip("btn_ban_ip")),
                             ),
                             id="sa-diagnostics",
                             classes="sa-section",
                         ),
-                        Static("", id="action_help"),
                         id="sa-overview",
                     ),
                     # Mount target for inline read-only views (Browse / Logs).
@@ -1048,8 +1068,11 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         """The complete overview, also useful to non-layout consumers."""
         return Content("\n\n").join(self._server_info_sections())
 
-    def _server_info_sections(self) -> tuple[Content, Content, Content]:
+    def _server_info_sections(self, short: bool = False) -> tuple[Content, Content, Content]:
         """Build the header and the two card texts from displayed records.
+
+        With *short*, each card keeps its two most useful facts and no blank
+        row after its title, so every card fits a short terminal.
 
         Resolve connection rules against the real record, but render only the
         displayed row and redacted connection details. Every value comes from
@@ -1134,12 +1157,20 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 path = Content.assemble(Content.styled("via", "dim"), " ", literal(bastion))
                 path_is_bastion = True
                 target = field("private_ip", "N/A")
-        network.extend([
-            Content(""), path, line("Target", target),
-            self._credential_source_line(),
-        ])
+        if short:
+            network = [
+                Content.assemble(line("Target", target), Content.styled(" · ", "dim"), path),
+                self._credential_source_line(),
+            ]
+        else:
+            network.extend([
+                Content(""), path, line("Target", target),
+                self._credential_source_line(),
+            ])
+        if short:
+            identity = identity[:2]
         shared_with = self._shared_with_line()
-        if shared_with.plain:
+        if shared_with.plain and not short:
             identity.append(shared_with)
 
         route = Content.assemble(
@@ -1152,10 +1183,11 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         )]
         if self._instance.get("account_qualified"):
             heading.append(line("Account", field("account", "-")))
+        gap = "\n" if short else "\n\n"
         return (
             Content("\n").join(heading),
-            Content.assemble(Content.styled("Identity", "bold"), "\n\n", Content("\n").join(identity)),
-            Content.assemble(Content.styled("Network · SSH", "bold"), "\n\n", Content("\n").join(network)),
+            Content.assemble(Content.styled("Identity", "bold"), gap, Content("\n").join(identity)),
+            Content.assemble(Content.styled("Network · SSH", "bold"), gap, Content("\n").join(network)),
         )
 
     def _shared_with_line(self) -> Content:
@@ -1297,8 +1329,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Rebuilt from its source rather than edited in place, so a demo-mode
         toggle and a late reverse-DNS answer both land in one consistent text.
         """
-        heading, identity, connection = self._server_info_sections()
-        self._server_info_text = Content("\n\n").join((heading, identity, connection))
+        self._server_info_text = Content("\n\n").join(self._server_info_sections())
+        heading, identity, connection = self._server_info_sections(self._short_cards)
         self.query_one("#server_context", Static).update(heading)
         self.query_one("#server_identity", Static).update(identity)
         self.query_one("#server_info", Static).update(connection)
@@ -1307,39 +1339,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
     # ------------------------------------------------------------------
-
-    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        """Update the focus-driven help line when an action button gains focus.
-
-        The line is also a clickable proxy for the focused button (see
-        :meth:`on_click`), so it reads as actionable rather than a dead label.
-        """
-        widget_id = getattr(event.widget, "id", None)
-        if not widget_id:
-            return
-        help_text = _ACTION_HELP.get(widget_id)
-        if help_text is None:
-            return
-        self._focused_action_id = widget_id
-        try:
-            self.query_one("#action_help", Static).update(
-                f"[dim]▸[/dim] [u]{escape(help_text)}[/u]  [dim]· click to run[/dim]"
-            )
-        except Exception:  # noqa: BLE001 — pane may not be mounted yet
-            pass
-
-    def on_click(self, event: events.Click) -> None:
-        """Treat a click on the focus-help line as activating the focused action."""
-        widget = getattr(event, "widget", None)
-        if widget is None or getattr(widget, "id", None) != "action_help":
-            return
-        btn_id = self._focused_action_id
-        if not btn_id:
-            return
-        try:
-            self.query_one(f"#{btn_id}", Button).press()
-        except Exception:  # noqa: BLE001
-            pass
 
     def _provider_for_memory(self) -> str:
         """Best-effort provider slug for memory lookups.
@@ -1384,6 +1383,9 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # Memory screen and log viewer.
         if self.app.demo_mode and getattr(self.app, "redaction_service", None):
             text = scrub(text, self.app.redaction_service.scrub_stream)
+        if self._short_cards:
+            lines = [line for line in text.split("\n") if line.plain.strip()]
+            text = Content("\n").join(lines[:3])
         panel.update(text)
 
     # ------------------------------------------------------------------
@@ -1486,11 +1488,33 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             button = self.query_one("#btn_live", ActionButton)
         except NoMatches:
             return
-        button.set_text("Live poll: on" if self._live_on else "Live poll: off")
+        button.set_text("Stop monitoring" if self._live_on else "Start monitoring")
 
     def sync_workspace_controls(self) -> None:
         super().sync_workspace_controls()
         self._sync_compact_buttons()
+        self._sync_card_layout()
+
+    def _sync_card_layout(self) -> None:
+        """Stack the cards only when the content is narrow; shorten them on a short terminal.
+
+        Compact buttons follow the terminal width; the card columns follow the
+        room the content column has, so 100 columns with the navigation hidden
+        keeps two columns.
+        """
+        try:
+            width = self.query_one("#sa-body").size.width
+        except NoMatches:
+            return
+        if width <= 0:
+            return
+        self.set_class(width < _STACK_CARDS_BELOW, "-stack-cards")
+        short = self.has_class("-short")
+        if short != self._short_cards:
+            self._short_cards = short
+            self._render_server_info()
+            self._render_memory_panel()
+            self._restore_live_idle()
 
     def _sync_compact_buttons(self) -> None:
         """One-row borderless buttons whenever the layout is narrow."""
@@ -1530,6 +1554,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
     def _live_stats_idle_text(self) -> str:
         """Text shown in the live-stats pane while polling is off."""
+        if self._short_cards:
+            return "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n[dim]CPU, memory, disk, uptime[/dim]"
         return (
             "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n\n"
             "[dim]CPU, memory, load, disk and uptime appear here.\n"
@@ -1563,6 +1589,48 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             group="live_stats",
             exclusive=True,
         )
+
+    def action_refresh_live(self) -> None:
+        """Take one live sample without starting the poll."""
+        if self._live_on or self._sampling:
+            return
+        if getattr(self.app, "live_stats_service", None) is None:
+            self.app.notify("SSH monitoring is unavailable.", severity="warning", markup=False)
+            return
+        if not self._validate_instance_connection():
+            return
+        self._sampling = True
+        self._sync_refresh_button()
+        self._set_live_text(
+            "[bold]Live via SSH[/bold]\n\n[$text-accent]Sampling…[/$text-accent]"
+        )
+        self.run_worker(self._sample_once(), group="live_sample", exclusive=True)
+
+    async def _sample_once(self) -> None:
+        """One collect() over SSH; errors show briefly, then the idle text returns."""
+        service = self.app.live_stats_service
+        try:
+            with self._busy.running("Sampling over SSH…"):
+                stats = await service.collect(self._instance)
+        except LiveStatsError as exc:
+            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]")
+            self.set_timer(_SAMPLE_ERROR_SECONDS, self._restore_live_idle)
+        else:
+            self._set_live_text(format_live_stats(stats))
+        finally:
+            self._sampling = False
+            if self.is_attached:
+                self._sync_refresh_button()
+
+    def _restore_live_idle(self) -> None:
+        if not self._live_on and not self._sampling:
+            self._set_live_text(self._live_stats_idle_text())
+
+    def _sync_refresh_button(self) -> None:
+        try:
+            self.query_one("#btn_live_refresh", ActionButton).disabled = self._sampling
+        except NoMatches:
+            pass
 
     def _stop_live_stats(self) -> None:
         """Stop the poller and reset the pane to its idle text."""
@@ -1661,6 +1729,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             self.action_verify_ssh()
         elif button_id == "btn_live":
             self.action_toggle_live()
+        elif button_id == "btn_live_refresh":
+            self.action_refresh_live()
         elif button_id == "btn_copy_id":
             self.action_copy_instance_id()
         elif button_id == "btn_copy_summary":
@@ -2272,6 +2342,36 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             return
         from servonaut.screens.db_credential_scan import DbCredentialScanScreen
         self.app.push_screen(DbCredentialScanScreen(self._instance))
+
+    async def _load_findings_count(self) -> None:
+        """Show how many findings are still open on this server on the Findings button."""
+        service = getattr(self.app, "findings_service", None)
+        instance_id = connection_instance(self.app, self._instance).get("id")
+        if service is None or not instance_id:
+            return
+        try:
+            data = await service.list_findings(instance=str(instance_id), limit=_FINDINGS_COUNT_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - the button keeps its plain label
+            logger.debug("Findings count unavailable: %s", type(exc).__name__)
+            return
+        rows = data.get("findings") if isinstance(data, Mapping) else None
+        if not isinstance(rows, list):
+            return
+        open_count = sum(
+            1 for row in rows
+            if isinstance(row, Mapping) and row.get("status") not in _CLOSED_FINDING_STATUSES
+        )
+        self._findings_count = open_count
+        self._sync_findings_button()
+
+    def _sync_findings_button(self) -> None:
+        try:
+            button = self.query_one("#btn_findings", ActionButton)
+        except NoMatches:
+            return
+        count = self._findings_count
+        label = f"Findings ({count})" if count else "Findings"
+        button.set_text(label, short=label)
 
     def action_open_findings(self) -> None:
         """Open the findings inbox scoped to this instance."""

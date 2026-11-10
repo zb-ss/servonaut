@@ -125,41 +125,23 @@ ServerActionsScreen.-short #action_buttons {
     padding: 0;
 }
 
-ServerActionsScreen.-narrow #sa-facts,
-ServerActionsScreen.-narrow #sa-monitoring,
-ServerActionsScreen.-content-narrow #sa-facts,
-ServerActionsScreen.-content-narrow #sa-monitoring {
+/* Below about 96 content columns the cards stack (the class is set by the
+   screen from the width the content really has; compact buttons are separate). */
+ServerActionsScreen.-stack-cards #sa-facts,
+ServerActionsScreen.-stack-cards #sa-monitoring {
     layout: vertical;
 }
 
-ServerActionsScreen.-narrow #sa-facts .sa-section,
-ServerActionsScreen.-narrow #sa-monitoring .sa-section,
-ServerActionsScreen.-content-narrow #sa-facts .sa-section,
-ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
+ServerActionsScreen.-stack-cards #sa-facts .sa-section,
+ServerActionsScreen.-stack-cards #sa-monitoring .sa-section {
+    width: 100%;
     height: auto;
     margin-bottom: 1;
-}
-
-ServerActionsScreen.-narrow #sa-facts .sa-section,
-ServerActionsScreen.-narrow #sa-monitoring .sa-section,
-ServerActionsScreen.-content-narrow #sa-facts .sa-section,
-ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
-    width: 100%;
 }
 
 ServerActionsScreen.-narrow .sa-card-actions,
 ServerActionsScreen.-content-narrow .sa-card-actions {
     padding: 0;
-}
-
-#action_help {
-    padding: 0 1;
-    height: auto;
-    color: $text-muted;
-}
-
-#action_help:hover {
-    color: $text;
 }
 
 /* Slow work indicator: pinned to bottom of detail pane */
