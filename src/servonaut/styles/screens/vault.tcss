@@ -545,16 +545,6 @@ VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
     height: auto;
 }
 
-#ca_content #ca_enable,
-#ca_content #ca_refresh,
-#ca_content #ca_audit,
-#ca_content #ca_enroll,
-#ca_content #ca_krl,
-#ca_content #ca_break_glass_scan {
-    width: 1fr;
-    margin-top: 1;
-}
-
 /* Auto-bind: the review of which vault key each server gets. */
 #auto_bind_layout {
     height: 1fr;

@@ -52,6 +52,13 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "aws_mgr_identity",
         "hetzner_mgr_identity",
         "ovh_mgr_identity",
+        # action_button.tcss: ActionButton in an ActionRow at natural width
+        "ca_audit",
+        "ca_break_glass_scan",
+        "ca_enable",
+        "ca_enroll",
+        "ca_krl",
+        "ca_refresh",
         # link_button.tcss: Button.link-button (LinkButton)
         "fleet_copy_row",
         "fleet_refresh",
