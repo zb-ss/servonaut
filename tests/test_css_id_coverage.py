@@ -52,9 +52,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "aws_mgr_identity",
         "hetzner_mgr_identity",
         "ovh_mgr_identity",
-        # memory.tcss: MemoryDriftScreen #drift-actions Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn-drift-diff",
-        # memory_screen.tcss: MemoryScreen .memory-row-buttons Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn_enhance_ai",
         "btn_view_summary",
         # main_menu.tcss: MainMenuScreen #dashboard-content .action-card
