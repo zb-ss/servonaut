@@ -295,7 +295,7 @@ Input.-invalid {
    half-block border, whose corners stand out next to the rounded ones. The
    fill stays transparent so nothing square shows outside the curve. */
 SelectCurrent {
-    border: round $border-blurred;
+    border: round $primary-background;
     background: transparent;
 }
 
@@ -306,7 +306,7 @@ Select:focus > SelectCurrent {
 }
 
 Select > SelectOverlay {
-    border: round $border-blurred;
+    border: round $primary-background;
     background: $surface;
 }
 
@@ -320,7 +320,7 @@ Select.-textual-compact > SelectCurrent {
 }
 
 SelectCurrent:ansi {
-    border: round $border-blurred;
+    border: round $primary-background;
     background: transparent;
 }
 
@@ -328,14 +328,15 @@ Select:ansi:focus > SelectCurrent {
     border: round $border;
 }
 
-/* The other framed controls follow the same rounded frame: Textual draws
-   them with half-block borders, which would sit oddly beside the Input. */
+/* The other framed controls follow the same rounded frame, in the Input's
+   idle colour: Textual draws them with half-block borders, which would sit
+   oddly beside the Input. */
 TextArea,
 Checkbox,
 RadioSet,
 Switch,
 OptionList {
-    border: round $border-blurred;
+    border: round $primary-background;
 }
 
 TextArea:focus,
@@ -344,6 +345,23 @@ RadioSet:focus,
 Switch:focus,
 OptionList:focus {
     border: round $accent;
+}
+
+/* The command palette's result list keeps Textual's own look: a rule under
+   the list, no frame. */
+CommandPalette CommandList {
+    border-top: blank;
+    border-bottom: hkey black;
+    border-left: none;
+    border-right: none;
+}
+
+CommandPalette CommandList:focus {
+    border: blank;
+}
+
+CommandPalette CommandList.--populating {
+    border-bottom: none;
 }
 
 Checkbox,

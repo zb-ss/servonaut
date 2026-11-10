@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
+from textual.containers import Vertical
 from textual.geometry import Region
 from textual.widgets import (
     Button,
@@ -19,6 +20,7 @@ from textual.widgets import (
 
 from servonaut.screens.instance_list import FleetChip
 from servonaut.styles import CSS_FILES
+from servonaut.styles.themes import SERVONAUT_THEMES
 from servonaut.widgets.action_button import ActionButton
 from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.workspace import WorkspaceControls
@@ -218,3 +220,63 @@ async def test_back_action_words_are_not_muted() -> None:
         back = app.query_one("#btn_back", ActionButton)
         other = app.query_one("#other_action", ActionButton)
         assert _word_colour(back, "Back") == _word_colour(other, "Refresh")
+
+
+class _PanelApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="bar"):
+            yield Input(id="bar_input")
+            yield Select([("One", 1)], id="bar_select")
+            yield Checkbox("Check", id="bar_check")
+            yield TextArea(id="bar_area")
+
+
+def _luminance(colour) -> float:
+    def linear(value: int) -> float:
+        channel = value / 255
+        return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(colour.r) + 0.7152 * linear(colour.g) + 0.0722 * linear(colour.b)
+
+
+def _frame_contrast(frame, backdrop) -> float:
+    lighter, darker = sorted((_luminance(frame), _luminance(backdrop)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+async def test_idle_frames_stay_visible_on_a_panel_backdrop(theme: str) -> None:
+    app = _PanelApp()
+    app.theme = theme
+    async with app.run_test(size=(80, 40)) as pilot:
+        app.query_one("#bar").styles.background = app.theme_variables["panel"]
+        app.set_focus(None)
+        await pilot.pause()
+        backdrop = app.query_one("#bar").styles.background
+        input_frame = app.query_one("#bar_input").styles.border.top[1]
+        for selector in ("#bar_select > SelectCurrent", "#bar_check", "#bar_area"):
+            frame = app.query_one(selector).styles.border.top[1]
+            assert frame != backdrop, selector
+            assert frame == input_frame, selector
+            if frame.ansi is None and backdrop.ansi is None:
+                assert _frame_contrast(frame, backdrop) >= 1.3, selector
+
+
+@pytest.mark.asyncio
+async def test_command_palette_list_stays_unframed() -> None:
+    app = _ControlsApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        await pilot.pause()
+        palette_list = app.screen.query_one("CommandList")
+        assert palette_list.styles.border.left[0] in ("", "none")
+        assert palette_list.styles.border.right[0] in ("", "none")
