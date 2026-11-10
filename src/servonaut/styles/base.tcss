@@ -146,7 +146,7 @@ Button {
     height: 3;
     background: transparent;
     color: $text;
-    border: round $primary 65%;
+    border: round $border-blurred;
     text-align: center;
     content-align: center middle;
 }
