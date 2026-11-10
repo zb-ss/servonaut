@@ -23,6 +23,14 @@ from servonaut.services.ssh_host_keys import (
 )
 
 
+
+def path_roles(is_upload: bool) -> tuple[str, str]:
+    """The role each path plays: (this computer's, the remote server's)."""
+    if is_upload:
+        return "Source · This computer", "Destination · Remote server"
+    return "Destination · This computer", "Source · Remote server"
+
+
 class SCPTransferScreen(WorkspaceScreen):
     """Screen for SCP file transfers (upload/download).
 
@@ -72,7 +80,7 @@ class SCPTransferScreen(WorkspaceScreen):
                             Vertical(
                                 Horizontal(
                                     Static("Local path", id="local_path_label"),
-                                    Static("Source · this computer", id="local_path_role", classes="transfer-path-role"),
+                                    Static(path_roles(True)[0], id="local_path_role", classes="transfer-path-role"),
                                     classes="transfer-path-heading",
                                 ),
                                 Input(placeholder="/path/to/local/file", id="local_path_input"),
@@ -81,7 +89,7 @@ class SCPTransferScreen(WorkspaceScreen):
                             Vertical(
                                 Horizontal(
                                     Static("Remote path", id="remote_path_label"),
-                                    Static("Destination · remote server", id="remote_path_role", classes="transfer-path-role"),
+                                    Static(path_roles(True)[1], id="remote_path_role", classes="transfer-path-role"),
                                     classes="transfer-path-heading",
                                 ),
                                 Input(placeholder="/path/to/remote/file", id="remote_path_input"),
@@ -156,17 +164,14 @@ class SCPTransferScreen(WorkspaceScreen):
             selected = event.pressed
             if selected.id == "radio_upload":
                 self._transfer_direction = "upload"
-                self.app.notify("Direction: Upload (Local → Remote)", severity="information")
+                self.app.notify(f"Direction: {selected.label}", severity="information")
             elif selected.id == "radio_download":
                 self._transfer_direction = "download"
-                self.app.notify("Direction: Download (Remote → Local)", severity="information")
+                self.app.notify(f"Direction: {selected.label}", severity="information")
             is_upload = self._transfer_direction == "upload"
-            self.query_one("#local_path_role", Static).update(
-                "Source · This computer" if is_upload else "Destination · This computer"
-            )
-            self.query_one("#remote_path_role", Static).update(
-                "Destination · Remote server" if is_upload else "Source · Remote server"
-            )
+            local_role, remote_role = path_roles(is_upload)
+            self.query_one("#local_path_role", Static).update(local_role)
+            self.query_one("#remote_path_role", Static).update(remote_role)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
