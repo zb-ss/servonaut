@@ -191,15 +191,15 @@ class ActionRow(Horizontal):
             return
         for short in (False, True):
             if sum(b.natural_width(short=short, hint=True) for b in buttons) <= width:
-                self._apply(buttons, short=short, hint=True, wrap=False, width=width)
+                self._apply(buttons, short=short, hint=True, wrap=False)
                 return
         columns = self._column_count(buttons, hint=True, width=width)
         if -(-len(buttons) // columns) <= _MAX_HINTED_LINES or len(buttons) == 1:
-            self._apply(buttons, short=True, hint=True, wrap=True, width=width)
+            self._apply(buttons, short=True, hint=True, wrap=True)
         elif not self._keep_hints and sum(b.natural_width(short=True, hint=False) for b in buttons) <= width:
-            self._apply(buttons, short=True, hint=False, wrap=False, width=width)
+            self._apply(buttons, short=True, hint=False, wrap=False)
         else:
-            self._apply(buttons, short=True, hint=self._keep_hints, wrap=True, width=width)
+            self._apply(buttons, short=True, hint=self._keep_hints, wrap=True)
 
     @staticmethod
     def _column_count(buttons: list[ActionButton], *, hint: bool, width: int) -> int:
@@ -213,12 +213,15 @@ class ActionRow(Horizontal):
         return self._column_count(buttons, hint=hint, width=self.available_width())
 
     def _apply(
-        self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool, width: int | None = None,
+        self, buttons: list[ActionButton], *, short: bool, hint: bool, wrap: bool,
     ) -> None:
-        width = self.available_width() if width is None else width
+        width = self.available_width()
         for button in buttons:
             button.set_fit(short=short, hint=hint)
         self.set_class(wrap, "-wrap")
+        # An id rule that fixes the layout (a toolbar kept horizontal) would
+        # out-rank the class rule, leaving a "wrapped" row on one line.
+        self.styles.layout = "grid" if wrap else None
         # Columns follow the labels as they are now shown, so none is squeezed.
         self.styles.grid_size_columns = (
             self._column_count(buttons, hint=hint, width=width) if wrap else None
