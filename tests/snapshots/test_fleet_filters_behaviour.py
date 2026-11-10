@@ -370,7 +370,7 @@ def test_first_run_lists_rows_as_providers_answer() -> None:
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the load to end")
         await pilot.pause()
         assert not status.display
-        assert screen._updated_text() == "Updated just now ·"
+        assert screen._updated_text() == "Updated just now"
 
     _run(scenario)
 
@@ -572,7 +572,7 @@ def test_one_provider_answering_is_an_update_even_if_another_failed() -> None:
         gates["ovh"].release(error="offline")
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
-        assert screen._updated_text() == "Updated just now ·"
+        assert screen._updated_text() == "Updated just now"
 
     _run(scenario)
 

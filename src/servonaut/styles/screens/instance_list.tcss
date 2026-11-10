@@ -93,16 +93,19 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
 }
 
 .fleet-chip:hover {
+    border: none;
     background: $panel-lighten-2;
     color: $text-accent;
 }
 
 .fleet-chip:focus {
+    border: none;
     background: $panel-lighten-2;
     text-style: bold underline;
 }
 
 .fleet-chip.--chosen {
+    border: none;
     background: $accent;
     color: $background;
     text-style: bold;
