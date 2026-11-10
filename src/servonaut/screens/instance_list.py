@@ -22,7 +22,7 @@ from servonaut.screens._fleet_filter import (
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
-from servonaut.widgets.action_button import action_label
+from servonaut.widgets.action_button import ActionButton, ActionRole, action_label
 from servonaut.widgets.fleet_skeleton import FleetSkeleton
 from servonaut.widgets.fleet_values import FleetValueLine, FleetValues
 from servonaut.widgets.link_button import LinkButton
@@ -316,18 +316,16 @@ class InstanceListScreen(WorkspaceScreen):
                             classes="fleet-inspector-header",
                         )
                         yield self._inspector_button(
-                            "SSH Connect (s)", "fleet_btn_ssh", variant="primary",
+                            "SSH connect", "s", "fleet_btn_ssh", role="primary",
                         )
                         with Container(id="fleet_inspector_grid", classes="fleet-inspector-grid"):
-                            yield self._inspector_button("Browse (b)", "fleet_btn_browse")
-                            yield self._inspector_button("Transfer (t)", "fleet_btn_scp")
-                            yield self._inspector_button("Command (c)", "fleet_btn_command")
-                            yield self._inspector_button("Logs (l)", "fleet_btn_logs")
-                            yield self._inspector_button("Memory (m)", "fleet_btn_memory")
-                            yield self._inspector_button("AI (a)", "fleet_btn_ai")
-                        yield self._inspector_button(
-                            "All Actions (Enter)", "fleet_btn_actions",
-                        )
+                            yield self._inspector_button("Browse", "b", "fleet_btn_browse")
+                            yield self._inspector_button("Transfer", "t", "fleet_btn_scp")
+                            yield self._inspector_button("Command", "c", "fleet_btn_command")
+                            yield self._inspector_button("Logs", "l", "fleet_btn_logs")
+                            yield self._inspector_button("Memory", "m", "fleet_btn_memory")
+                            yield self._inspector_button("AI", "a", "fleet_btn_ai")
+                        yield self._inspector_button("All actions", "enter", "fleet_btn_actions")
                         with Horizontal(id="fleet_values_heading"):
                             yield Static("Details", id="fleet_values_title", markup=False)
                             yield self._copy_row_button("fleet_copy_row")
@@ -373,12 +371,12 @@ class InstanceListScreen(WorkspaceScreen):
 
     @staticmethod
     def _inspector_button(
-        label: str, button_id: str, variant: str = "default",
-    ) -> Button:
-        """Create a mouse-accessible quick-action button that preserves keyboard Tab order."""
-        btn = Button(label, id=button_id, variant=variant)
-        btn.can_focus = False
-        return btn
+        text: str, key: str, button_id: str, role: ActionRole = "default",
+    ) -> ActionButton:
+        """A quick-action button with its key as a quiet hint; it keeps the Tab order."""
+        button = ActionButton(text, key, role=role, id=button_id)
+        button.can_focus = False
+        return button
 
     @classmethod
     def _shortcut_characters(cls) -> frozenset[str]:

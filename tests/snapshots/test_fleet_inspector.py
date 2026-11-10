@@ -166,7 +166,7 @@ def test_each_button_runs_the_action_of_its_shortcut(
         screen = pilot.app.screen
         button = screen.query_one(f"#{button_id}", Button)
         assert not button.disabled
-        key = re.search(r"\((.+)\)", str(button.label)).group(1).lower()
+        key = button._key.lower()
         bound = {b.key: b.action for b in InstanceListScreen.BINDINGS}
         assert bound[key] == action.removeprefix("action_")
         button.press()

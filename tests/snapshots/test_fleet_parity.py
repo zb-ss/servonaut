@@ -199,3 +199,36 @@ def test_footer_descriptions_are_sentence_case() -> None:
     for binding in InstanceListScreen.BINDINGS:
         words = binding.description.split()
         assert not any(word.istitle() and not word.isupper() for word in words[1:]), binding.description
+
+
+# --- inspector buttons -----------------------------------------------------
+
+_EXPECTED_BUTTONS = {
+    "fleet_btn_ssh": ("SSH connect", "s"),
+    "fleet_btn_browse": ("Browse", "b"),
+    "fleet_btn_scp": ("Transfer", "t"),
+    "fleet_btn_command": ("Command", "c"),
+    "fleet_btn_logs": ("Logs", "l"),
+    "fleet_btn_memory": ("Memory", "m"),
+    "fleet_btn_ai": ("AI", "a"),
+    "fleet_btn_actions": ("All actions", "enter"),
+}
+
+
+def test_inspector_buttons_are_action_buttons_with_quiet_key_hints() -> None:
+    from servonaut.widgets.action_button import ActionButton
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        inspector = screen.query_one("#fleet_inspector")
+        for button_id, (words, key) in _EXPECTED_BUTTONS.items():
+            button = screen.query_one(f"#{button_id}", ActionButton)
+            assert (button.words, button._key) == (words, key)
+            assert not button.can_focus
+            assert inspector.region.contains_region(button.region), button_id
+            assert "(" not in button.label.plain
+        assert screen.query_one("#fleet_btn_ssh", ActionButton).variant == "primary"
+        others = [b for b_id, b in ((i, screen.query_one(f"#{i}", ActionButton)) for i in _EXPECTED_BUTTONS) if b_id != "fleet_btn_ssh"]
+        assert all(b.variant == "default" for b in others)
+
+    _run(scenario)
