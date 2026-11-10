@@ -8,11 +8,34 @@ from rich.cells import cell_len
 from textual.widget import Widget
 
 
-from servonaut.widgets.action_button import ActionButton
+from servonaut.widgets.action_button import ActionButton, ActionRow
+from tests._async_bounds import wait_until
 from tests._native_actions import click_action
 from tests.test_workspace_secrets import (
     _SecretsHost, _inert_boundaries as _inert_boundaries, _opener,
 )
+
+
+async def _actions_settled(pilot, screen) -> None:
+    """Wait until every action row is fitted: wrapped exactly when it must be, buttons inside."""
+    def settled() -> bool:
+        rows = list(screen.query(ActionRow))
+        if not rows:
+            return False
+        for row in rows:
+            buttons = list(row.query(ActionButton))
+            width = row.size.width
+            if width <= 0 or not buttons:
+                return False
+            needed = sum(b.natural_width(short=True, hint=True) for b in buttons)
+            if row.has_class("-wrap") != (needed > width):
+                return False
+            if any(b.region.right > row.region.right for b in buttons):
+                return False
+        return True
+
+    await wait_until(settled)
+    await pilot.wait_for_scheduled_animations()
 
 
 def _assert_painted_text(app: _SecretsHost, widget: Widget, text: str) -> None:
@@ -40,8 +63,7 @@ async def test_provider_action_controls_dispatch_existing_actions(
     app = _SecretsHost(navigation_visible=True)
     async with app.run_test(size=size) as pilot:
         screen = await _opener("secrets")(app, pilot)
-        await pilot.pause()
-        await pilot.pause()
+        await _actions_settled(pilot, screen)
         buttons = list(screen.query(ActionButton))
         assert buttons
         for button in buttons:
@@ -92,9 +114,12 @@ async def test_refreshing_keeps_every_action_inside_the_screen() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await _opener("secrets")(app, pilot)
         for _ in range(4):
-            screen._render_state()
-            await pilot.pause()
-            await pilot.pause()
+            await _actions_settled(pilot, screen)
+            old = list(screen.query(ActionRow))
+            screen.set_focus(None)
+            await pilot.press("r")
+            await wait_until(lambda: not any(row.parent is not None for row in old))
+            await _actions_settled(pilot, screen)
             for button in screen.query(ActionButton):
                 assert button.region.right <= app.screen.region.right, button.id
                 assert button.tooltip

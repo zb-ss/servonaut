@@ -67,7 +67,7 @@ class SecretsScreen(WorkspaceScreen):
     # Body and card padding, border and scrollbar (14) plus the 22-column
     # key/value label and a readable value beside the chat column.
     CHAT_MIN_CONTENT_WIDTH = 60
-    # Keep each selectable action description readable beside its native key.
+    # Below this width the key/value rows stack and the action row wraps.
     CONTENT_NARROW_WIDTH = 96
 
     # Compact words for a row that is too narrow for the full ones, by label.
