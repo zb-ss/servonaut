@@ -163,3 +163,39 @@ def test_demo_mode_summary_and_values_use_the_redacted_rows() -> None:
         assert screen.query_one("#fleet_summary", Static).visual.plain.startswith("Showing 7 of 7")
 
     _run(scenario, demo=True)
+
+
+# --- footer ----------------------------------------------------------------
+
+
+def _footer_keys(screen: Any) -> set:
+    return {key for key, active in screen.active_bindings.items() if active.binding.show}
+
+
+def test_the_footer_shows_the_filter_keys_and_leaves_out_the_inspector_keys() -> None:
+    async def scenario(pilot: Any) -> None:
+        keys = _footer_keys(_screen(pilot))
+        assert {"f", "p", "r", "slash", "s"} <= keys
+        assert not {"b", "c", "t", "l", "a", "m"} & keys
+
+    _run(scenario)
+
+
+def test_the_footer_does_not_hide_those_keys_when_the_inspector_is_hidden() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        assert not screen.query_one("#fleet_inspector").display
+        from textual.screen import Screen
+
+        raw = Screen.active_bindings.fget(screen)
+        assert screen._without_inspector_keys(raw) == raw
+
+    _run(scenario, "100x30")
+
+
+def test_footer_descriptions_are_sentence_case() -> None:
+    from servonaut.screens.instance_list import InstanceListScreen
+
+    for binding in InstanceListScreen.BINDINGS:
+        words = binding.description.split()
+        assert not any(word.istitle() and not word.isupper() for word in words[1:]), binding.description

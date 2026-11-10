@@ -1,6 +1,7 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import dataclasses
 import time
 from datetime import timedelta
 from typing import Dict, Optional, List
@@ -102,11 +103,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Fetch the fleet again from every provider"),
         Binding("/", "focus_search", "Search", show=True,
                 tooltip="Search instances and keyword scan results"),
-        # Not in the footer (it is full at common widths): the chips carry the
-        # keys in their tooltips and the help screen lists them.
-        Binding("f", "filter_state", "State", show=False,
+        Binding("f", "filter_state", "State", show=True,
                 tooltip="Cycle the state filter: all, running, stopped, other"),
-        Binding("p", "filter_provider", "Provider", show=False,
+        Binding("p", "filter_provider", "Provider", show=True,
                 tooltip="Cycle the provider filter: all, then each provider in the list"),
         Binding("enter", "select_instance", "Actions", show=True,
                 tooltip="Open the selected server's actions"),
@@ -130,9 +129,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Analyse the selected server's logs with AI"),
         Binding("m", "open_memory", "Memory", show=True,
                 tooltip="Open the selected server's memory (cached facts)"),
-        Binding("D", "fleet_db_scan", "DB Vault", show=True,
+        Binding("D", "fleet_db_scan", "DB vault", show=True,
                 tooltip="Scan the fleet for database credentials"),
-        Binding("k", "manage_ssh_ref", "SSH Ref", show=True,
+        Binding("k", "manage_ssh_ref", "SSH ref", show=True,
                 tooltip="Set the Bitwarden SSH key reference of the selected server"),
         Binding("v", "verify_ssh", "Verify", show=True,
                 tooltip="Check that the selected server's SSH key works"),
@@ -159,15 +158,17 @@ class InstanceListScreen(WorkspaceScreen):
     # The footer lists as many shortcuts as fit on one line, in this order
     # of usefulness; the rest stay bound, and the help screen lists them all.
     FOOTER_PRIORITY = (
-        "select_instance",
+        "refresh",
         "focus_search",
+        "filter_state",
+        "filter_provider",
         "ssh_connect",
+        "select_instance",
         "run_command",
         "browse_files",
         "view_logs",
         "open_memory",
         "scp_transfer",
-        "refresh",
         "ai_analysis",
         "copy_row",
         "verify_ssh",
@@ -196,7 +197,30 @@ class InstanceListScreen(WorkspaceScreen):
     @property
     def active_bindings(self):
         """Active bindings, with the footer kept to the shortcuts that fit."""
-        return fit_footer(super().active_bindings, self, self.FOOTER_PRIORITY)
+        return fit_footer(
+            self._without_inspector_keys(super().active_bindings), self, self.FOOTER_PRIORITY,
+        )
+
+    # Actions the inspector's buttons already show with their keys.
+    _INSPECTOR_ACTIONS = frozenset({
+        "browse_files", "scp_transfer", "run_command", "view_logs", "open_memory", "ai_analysis",
+    })
+
+    def _without_inspector_keys(self, bindings: dict) -> dict:
+        """*bindings* without the footer entries the visible inspector repeats."""
+        try:
+            if not self.query_one("#fleet_inspector").display:
+                return bindings
+        except NoMatches:
+            return bindings
+        return {
+            key: (
+                active._replace(binding=dataclasses.replace(active.binding, show=False))
+                if active.node is self and active.binding.action in self._INSPECTOR_ACTIONS
+                else active
+            )
+            for key, active in bindings.items()
+        }
 
     def on_resize(self) -> None:
         """Re-fit the footer to the new width."""
