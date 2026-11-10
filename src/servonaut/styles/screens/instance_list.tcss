@@ -108,6 +108,16 @@ InstanceListScreen.-chat-open .fleet-chip-divider {
     text-style: bold reverse;
 }
 
+/* These out-rank the plain :focus rule above, so focus needs its own cue
+   here: the same bold underline the sidebar gives a focused active entry. */
+.fleet-chip:ansi:focus {
+    text-style: bold underline;
+}
+
+.fleet-chip.--chosen:ansi:focus {
+    text-style: bold underline reverse;
+}
+
 #fleet_summary_row {
     width: 100%;
     height: 1;
