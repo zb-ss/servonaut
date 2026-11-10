@@ -433,7 +433,7 @@ DataTable:ansi > .datatable--cursor,
 DataTable:ansi:focus > .datatable--cursor {
     background: $block-cursor-background;
     color: $block-cursor-foreground;
-    text-style: not bold reverse;
+    text-style: not bold;
 }
 
 DataTable > .datatable--odd-row {

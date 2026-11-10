@@ -114,14 +114,19 @@ async def test_cursor_row_is_a_muted_fill_with_readable_normal_text(theme: str, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
-async def test_terminal_themes_keep_the_reversed_cursor_row(theme: str) -> None:
+async def test_terminal_themes_draw_the_cursor_row_with_the_native_cursor_pair(theme: str) -> None:
     app = _TableApp()
     app.theme = theme
     async with app.run_test(size=(60, 20)) as pilot:
         table = app.query_one(DataTable)
         table.focus()
         await pilot.pause()
-        assert table.get_component_rich_style("datatable--cursor").reverse
+        cursor = table.get_component_rich_style("datatable--cursor")
+        normal = table.get_component_rich_style("datatable--even-row")
+        # The block-cursor colours already are the inverted pair: reversing
+        # them again would put the row back to normal colours.
+        assert not cursor.reverse
+        assert (cursor.color, cursor.bgcolor) != (normal.color, normal.bgcolor)
 
 
 @pytest.mark.asyncio
