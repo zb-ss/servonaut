@@ -35,19 +35,30 @@ STYLE_FILES = [
     "styles/screens/cloudtrail.tcss",
 ]
 
+_COLOUR = (
+    r"(?:dark|light)?(?:red|green|yellow|cyan|blue|magenta|white|black|orange|purple|pink|gray|grey)"
+)
 # A label such as "r. Refresh" / "enter. Open" (a key and a dot before the words).
-_PREFIX_LABEL = re.compile(r"""Button\(\s*f?["'](?:[A-Za-z]{1,5}|\d)\.\s""")
+_PREFIX_LABEL = re.compile(
+    r"""Button\(\s*(?:label\s*=\s*)?f?["'](?:[A-Za-z]{1,5}|\d)\.\s"""
+)
 # A label such as "Save (s)" or a pseudo-button such as "[All]".
-_BRACKET_LABEL = re.compile(r"""Button\(\s*f?["'][^"']*\([A-Za-z]{1,5}\)["']""")
+_BRACKET_LABEL = re.compile(
+    r"""Button\(\s*(?:label\s*=\s*)?f?["'][^"']*\([A-Za-z]{1,5}\)["']"""
+)
 _PSEUDO_BUTTON = re.compile(r"""\\+\[[A-Za-z]+\\*\]""")
+# A style that is only a colour name and modifiers ("red", "bold red", "red bold"),
+# or markup tags that contain one ("[yellow]", "[dim yellow]", "[/red]").
 _NAMED_COLOUR = re.compile(
-    r"""\[(?:bold )?/?(?:green|red|yellow|cyan|blue|magenta|white|black)\]"""
-    r"""|style=["'](?:bold )?(?:green|red|yellow|cyan|blue|magenta)\b"""
-    r"""|["'](?:bold )?(?:green|red|yellow|cyan|blue|magenta)["']"""
+    r"""["'](?:(?:bold|dim|italic|underline|reverse|not)\s+)*""" + _COLOUR
+    + r"""(?:\s+(?:bold|dim|italic|underline|reverse))*["']"""
+    + r"""|\[/?(?:[a-z]+\s+)*""" + _COLOUR + r"""(?:\s+[a-z]+)*\]"""
 )
-_HEX_OR_NAMED_CSS = re.compile(
-    r"#[0-9a-fA-F]{3,8}\b|:\s*(?:green|red|yellow|cyan|blue|magenta|white|black)\s*;"
+# A stylesheet value that names a colour instead of a theme variable.
+_CSS_NAMED_COLOUR = re.compile(
+    r"(?:border\S*|background\S*|color|outline\S*|tint)\s*:[^;{}$]*?\b" + _COLOUR + r"\b"
 )
+_CSS_HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 
 
 def _text(relative: str) -> str:
@@ -69,7 +80,9 @@ def test_no_named_colours_in_screen_code(relative: str) -> None:
 
 @pytest.mark.parametrize("relative", STYLE_FILES)
 def test_no_hex_or_named_colours_in_styles(relative: str) -> None:
-    assert not _HEX_OR_NAMED_CSS.search(_text(relative))
+    text = _text(relative)
+    assert not _CSS_HEX.search(text)
+    assert not _CSS_NAMED_COLOUR.search(text)
 
 
 # ---------------------------------------------------------------------------
@@ -102,3 +115,41 @@ async def test_memory_prompt_buttons_and_keys_share_actions(monkeypatch) -> None
         await pilot.click("#memory_prompt_accept")
         await pilot.pause()
         assert calls == ["build"]
+
+
+# ---------------------------------------------------------------------------
+# The guards themselves: each regression they exist for is caught
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("line", [
+    'Text("x", style="red bold")',
+    'Static("[dim yellow]x[/dim yellow]")',
+    'return "bold green"',
+    'Button(label="r. Refresh", id="b")',
+    'Button("1. Refresh", id="b")',
+])
+def test_label_and_colour_guards_catch_the_regressions(line: str) -> None:
+    assert (
+        _PREFIX_LABEL.search(line) or _NAMED_COLOUR.search(line)
+    ), line
+
+
+@pytest.mark.parametrize("line", [
+    "border: round red;",
+    "background: darkred;",
+    "color: cyan;",
+])
+def test_style_guard_catches_named_colours(line: str) -> None:
+    assert _CSS_NAMED_COLOUR.search(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "border: round $border-blurred;",
+    "background: $primary-darken-1;",
+    "color: $text-error;",
+    'Static("[$text-success]ok[/$text-success] required")',
+])
+def test_guards_leave_theme_tokens_alone(line: str) -> None:
+    assert not _CSS_NAMED_COLOUR.search(line)
+    assert not _NAMED_COLOUR.search(line)
