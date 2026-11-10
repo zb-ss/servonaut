@@ -27,14 +27,18 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.content import Content
 from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.screens.bw_unlock_modal import BwUnlockModal
 from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.markup import literal
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -61,7 +65,7 @@ class BwVaultManagerScreen(WorkspaceScreen):
         Binding("escape", "back", "Back", show=True),
         Binding("f5", "refresh", "Refresh", show=True),
         Binding("r", "refresh", "Refresh", show=False),
-        Binding("o", "open_in_bw", "Open in BW", show=True),
+        Binding("o", "open_in_bw", "Open in Bitwarden", show=True),
         Binding("e", "edit_ref", "Manage ref", show=True),
         Binding("a", "import_keys", "Import keys", show=True),
     ]
@@ -116,17 +120,25 @@ class BwVaultManagerScreen(WorkspaceScreen):
                     with Horizontal(id="bw_vault_mgr_actions"):
                         with Vertical(classes="credential_task_group"):
                             yield Static("Catalog", classes="credential_action_heading")
-                            yield Button("Refresh (F5)", id="btn_bw_vault_refresh")
+                            with ActionRow():
+                                yield ActionButton("Refresh", "F5", id="btn_bw_vault_refresh")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Selected key", classes="credential_action_heading")
-                            yield Button("Open in BW (o)", id="btn_bw_vault_open")
-                            yield Button("Manage ref (e)", id="btn_bw_vault_edit")
+                            with ActionRow():
+                                yield ActionButton("Open in Bitwarden", "o", short="Open", id="btn_bw_vault_open")
+                                yield ActionButton("Manage ref", "e", id="btn_bw_vault_edit")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Add keys", classes="credential_action_heading")
-                            yield Button("Import keys (a)", id="btn_bw_vault_import")
+                            with ActionRow():
+                                yield ActionButton("Import keys", "a", id="btn_bw_vault_import")
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#bw_vault_mgr_table", DataTable)
         table.add_columns("Name", "Item ID", "Servers", "Verify")
         self._refresh()
@@ -371,16 +383,16 @@ class BwVaultManagerScreen(WorkspaceScreen):
         return f"{len(refs)}: {shown}"
 
     @staticmethod
-    def _verify_cell(refs: List[dict]) -> str:
+    def _verify_cell(refs: List[dict]) -> Content:
         if not refs:
-            return "[dim]—[/dim]"
+            return literal("—", "dim")
         statuses = [r.get("verify_status") for r in refs]
         if all(s == _VERIFIED for s in statuses):
-            return "[green]verified[/green]"
+            return literal("verified", "$text-success")
         failed = next((s for s in statuses if s in _FAILED_STATUSES), None)
         if failed is not None:
-            return f"[red]{escape(str(failed))}[/red]"
-        return "[yellow]unverified[/yellow]"
+            return literal(str(failed), "$text-error")
+        return literal("unverified", "$text-warning")
 
     # ------------------------------------------------------------------
     # Selection + actions

@@ -13,6 +13,8 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.screens._compact_actions import sync_compact_buttons
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -164,10 +166,10 @@ class SnapshotManagerScreen(WorkspaceScreen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "restore", "Restore", show=True),
-        Binding("l", "pull_latest", "Pull Latest", show=True),
+        Binding("l", "pull_latest", "Pull latest", show=True),
         Binding("n", "rename", "Rename", show=True),
         Binding("d", "delete", "Delete", show=True),
-        Binding("p", "push_new", "Push New", show=True),
+        Binding("p", "push_new", "Push new", show=True),
         Binding("f5", "refresh", "Refresh", show=True),
     ]
 
@@ -183,7 +185,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             yield VerticalScroll(
                 Container(
-                    Static("[bold $text-accent]Config Snapshots[/bold $text-accent]", id="snapshots_header"),
+                    Static("[bold $text-accent]Config snapshots[/bold $text-accent]", id="snapshots_header"),
                     id="snapshots_context",
                 ),
                 Horizontal(
@@ -198,10 +200,10 @@ class SnapshotManagerScreen(WorkspaceScreen):
                         Horizontal(
                             Container(
                                 Static("Cloud snapshots", classes="backup-panel-heading"),
-                                Horizontal(
-                                    Button("Pull Latest (l)", variant="primary", id="btn_pull_latest"),
-                                    Button("Push New (p)", variant="primary", id="btn_push_new"),
-                                    Button("Refresh (F5)", id="btn_refresh"),
+                                ActionRow(
+                                    ActionButton("Pull latest", "l", short="Pull", role="primary", id="btn_pull_latest"),
+                                    ActionButton("Push new", "p", short="Push", id="btn_push_new"),
+                                    ActionButton("Refresh", "F5", id="btn_refresh"),
                                     classes="backup-action-buttons",
                                 ),
                                 id="snapshots_cloud_actions",
@@ -209,10 +211,10 @@ class SnapshotManagerScreen(WorkspaceScreen):
                             ),
                             Container(
                                 Static("Selected snapshot", classes="backup-panel-heading"),
-                                Horizontal(
-                                    Button("Restore (r)", id="btn_restore"),
-                                    Button("Rename (n)", id="btn_rename"),
-                                    Button("Delete (d)", variant="error", id="btn_delete"),
+                                ActionRow(
+                                    ActionButton("Restore", "r", id="btn_restore"),
+                                    ActionButton("Rename", "n", id="btn_rename"),
+                                    ActionButton("Delete", "d", role="error", id="btn_delete"),
                                     classes="backup-action-buttons",
                                 ),
                                 classes="backup-action-panel",
@@ -234,7 +236,12 @@ class SnapshotManagerScreen(WorkspaceScreen):
             )
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#snapshots_table", DataTable)
         table.add_columns("#", "Label", "Version", "Created", "Hash")
         self._refresh()
@@ -338,7 +345,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         label = snap.get("label") or snap.get("version") or "this snapshot"
         self.app.push_screen(
             ConfirmModal(
-                title="Restore Snapshot",
+                title="Restore snapshot",
                 message=(
                     f"Replace your local config with snapshot [bold]{escape(str(label))}[/bold]?\n"
                     "Local-only fields (instance keys, paths) will be preserved."
@@ -382,7 +389,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
             return
         current = str(snap.get("label") or "")
         self.app.push_screen(
-            LabelInputModal(title="Rename Snapshot", initial=current),
+            LabelInputModal(title="Rename snapshot", initial=current),
             callback=lambda new_label: self._rename_after_input(snap, new_label),
         )
 
@@ -418,7 +425,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         label = snap.get("label") or snap.get("version") or "this snapshot"
         self.app.push_screen(
             ConfirmModal(
-                title="Delete Snapshot",
+                title="Delete snapshot",
                 message=(
                     f"Permanently delete [bold]{escape(str(label))}[/bold]?\n"
                     "This cannot be undone."
@@ -456,7 +463,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         default_label = socket.gethostname() or "servonaut"
         self.app.push_screen(
             LabelInputModal(
-                title="Push New Snapshot",
+                title="Push new snapshot",
                 initial=default_label,
                 placeholder="e.g. MacBook Pro",
             ),
@@ -529,7 +536,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
 
         If the passphrase is cached on the service, uses it without prompting.
 
-        The "Set Sync Passphrase" (type-it-twice) mode is ONLY correct when the
+        The "Set sync passphrase" (type-it-twice) mode is ONLY correct when the
         user is choosing the passphrase for the very first time — i.e. an
         initial push to an account that has zero snapshots. In every other case
         the passphrase is account-global and must EXACTLY match the key the
@@ -553,7 +560,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         # A local probe means a passphrase was already established on this
         # device, so never offer "Set" even if the caller allows it.
         is_set = allow_set and not sync.has_probe()
-        title = "Set Sync Passphrase" if is_set else "Enter Sync Passphrase"
+        title = "Set sync passphrase" if is_set else "Enter sync passphrase"
         self.app.push_screen(
             PassphraseModal(confirm=is_set, title=title),
             callback=lambda pp: then(pp) if pp else None,

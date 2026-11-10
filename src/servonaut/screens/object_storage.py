@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from rich.markup import escape as markup_escape
 from rich.text import Text
 from textual.app import ComposeResult
-from servonaut.utils.markup import with_bold_values
+from servonaut.screens._compact_actions import sync_compact_buttons
+from servonaut.utils.markup import literal, with_bold_values
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
@@ -59,6 +60,7 @@ from servonaut.screens._provider_accounts import (
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.services.interfaces import BucketListing
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -162,32 +164,32 @@ class ObjectStorageScreen(WorkspaceScreen):
             actions = Vertical(
                 Horizontal(
                     Static("Browse", classes="resource-action-label"),
-                    Horizontal(
-                        Button("Refresh (r)",      id="btn_s3_refresh",    variant="default"),
-                        Button("New Bucket",       id="btn_s3_new_bucket", variant="primary"),
-                        Button("Up (u)",           id="btn_s3_up",         variant="default"),
-                        Button("Open (o)",         id="btn_s3_open",       variant="default"),
+                    ActionRow(
+                        ActionButton("Refresh", "r", id="btn_s3_refresh"),
+                        ActionButton("New bucket", role="primary", id="btn_s3_new_bucket"),
+                        ActionButton("Up", "u", id="btn_s3_up"),
+                        ActionButton("Open", "o", id="btn_s3_open"),
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",
                 ),
                 Horizontal(
                     Static("Transfer", classes="resource-action-label"),
-                    Horizontal(
-                        Button("Upload",           id="btn_s3_upload",     variant="default"),
-                        Button("Download",         id="btn_s3_download",   variant="default"),
+                    ActionRow(
+                        ActionButton("Upload", id="btn_s3_upload"),
+                        ActionButton("Download", id="btn_s3_download"),
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",
                 ),
                 Horizontal(
                     Static("Selected", classes="resource-action-label"),
-                    Horizontal(
-                        Button("Delete (d)",       id="btn_s3_delete",     variant="error"),
-                        Button("Copy",             id="btn_s3_copy",       variant="default"),
-                        Button("Move",             id="btn_s3_move",       variant="default"),
-                        Button("Share URL",        id="btn_s3_share",      variant="default"),
-                        Button("Back",             id="btn_s3_back",       variant="default"),
+                    ActionRow(
+                        ActionButton("Delete", "d", role="error", id="btn_s3_delete"),
+                        ActionButton("Copy", id="btn_s3_copy"),
+                        ActionButton("Move", id="btn_s3_move"),
+                        ActionButton("Share URL", id="btn_s3_share"),
+                        ActionButton("Back", "esc", id="btn_s3_back"),
                         classes="resource-action-buttons",
                     ),
                     classes="resource-action-group",
@@ -203,7 +205,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                 ),
                 actions,
                 Container(
-                    Static("[bold]Create Bucket[/bold]", classes="section_header"),
+                    Static("[bold]Create bucket[/bold]", classes="section_header"),
                     Label("Bucket name:"),
                     Input(placeholder="my-bucket", id="s3_input_bucket_name"),
                     # Region row is AWS-only: Hetzner/OVH derive the region
@@ -226,7 +228,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                     id="s3_new_bucket_form",
                 ),
                 Container(
-                    Static("[bold]Upload File[/bold]", classes="section_header"),
+                    Static("[bold]Upload file[/bold]", classes="section_header"),
                     Label("Local file path:"),
                     Input(placeholder="/home/user/file.txt", id="s3_input_upload_path"),
                     Label("Object key (destination):"),
@@ -239,7 +241,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                     id="s3_upload_form",
                 ),
                 Container(
-                    Static("[bold]Download File[/bold]", classes="section_header"),
+                    Static("[bold]Download file[/bold]", classes="section_header"),
                     Label("Local destination path:"),
                     Input(placeholder="~/Downloads/file.txt", id="s3_input_download_path"),
                     Horizontal(
@@ -250,7 +252,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                     id="s3_download_form",
                 ),
                 Container(
-                    Static("[bold]Copy Object[/bold]", classes="section_header"),
+                    Static("[bold]Copy object[/bold]", classes="section_header"),
                     Label("Destination bucket:"),
                     Input(placeholder="target-bucket", id="s3_input_copy_dst_bucket"),
                     Label("Destination key:"),
@@ -263,7 +265,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                     id="s3_copy_form",
                 ),
                 Container(
-                    Static("[bold]Move Object[/bold]", classes="section_header"),
+                    Static("[bold]Move object[/bold]", classes="section_header"),
                     Label("Destination bucket:"),
                     Input(placeholder="target-bucket", id="s3_input_move_dst_bucket"),
                     Label("Destination key:"),
@@ -318,7 +320,12 @@ class ObjectStorageScreen(WorkspaceScreen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         picker = self.query_one("#s3_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
@@ -329,7 +336,7 @@ class ObjectStorageScreen(WorkspaceScreen):
     def _setup_table(self) -> None:
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last Modified")
+        table.add_columns("Type", "Name / Key", "Size", "Last modified")
 
     def _hide_all_forms(self) -> None:
         for form_id in (
@@ -528,9 +535,9 @@ class ObjectStorageScreen(WorkspaceScreen):
         table.clear(columns=True)
         with_region = any(b.get("region") for b in buckets)
         if with_region:
-            table.add_columns("Type", "Bucket Name", "Region", "Created", "")
+            table.add_columns("Type", "Bucket name", "Region", "Created", "")
         else:
-            table.add_columns("Type", "Bucket Name", "Created", "")
+            table.add_columns("Type", "Bucket name", "Created", "")
         self._bucket_rows = {}
         for b in buckets:
             name = b.get("name", "")
@@ -589,7 +596,7 @@ class ObjectStorageScreen(WorkspaceScreen):
         """Populate the DataTable with folder and object rows."""
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last Modified")
+        table.add_columns("Type", "Name / Key", "Size", "Last modified")
 
         for folder in self._folders:
             # Strip the current prefix so only the segment is shown.
@@ -598,7 +605,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                 self.scrub_key(folder.removeprefix(self._prefix))
             )
             table.add_row(
-                "[bold blue]folder[/bold blue]",
+                literal("folder", "bold $text-accent"),
                 display_name,
                 "",
                 "",
@@ -1028,14 +1035,14 @@ class ObjectStorageScreen(WorkspaceScreen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Bucket",
+                    title="Delete bucket",
                     description=with_bold_values("Permanently delete bucket {}.", display_name),
                     consequences=[
                         "The bucket must be empty before it can be deleted",
                         "This operation is irreversible",
                     ],
                     confirm_text=display_name,
-                    action_label="Delete Bucket",
+                    action_label="Delete bucket",
                     severity="danger",
                 )
             )
@@ -1081,14 +1088,14 @@ class ObjectStorageScreen(WorkspaceScreen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Object",
+                    title="Delete object",
                     description=with_bold_values("Permanently delete {}.", display_key),
                     consequences=[
                         "The object will be permanently removed from the bucket",
                         "This operation is irreversible",
                     ],
                     confirm_text=display_key,
-                    action_label="Delete Object",
+                    action_label="Delete object",
                     severity="danger",
                 )
             )

@@ -106,42 +106,8 @@ BackupRestoreScreen .backup-action-panel {
 
 SnapshotManagerScreen .backup-action-buttons,
 BackupRestoreScreen #backups_actions {
-    layout: vertical;
-    height: auto;
-}
-
-SnapshotManagerScreen #snapshots_actions Button,
-BackupRestoreScreen #backups_actions Button {
     width: 100%;
     height: auto;
-    min-height: 1;
-    min-width: 0;
-    margin: 0;
-    padding: 0 1;
-    border: none;
-    background: $surface;
-    color: $text;
-    content-align: left middle;
-}
-
-SnapshotManagerScreen #snapshots_actions Button.-error {
-    color: $text-error;
-}
-
-SnapshotManagerScreen #snapshots_actions Button:hover,
-SnapshotManagerScreen #snapshots_actions Button:focus,
-BackupRestoreScreen #backups_actions Button:hover,
-BackupRestoreScreen #backups_actions Button:focus {
-    background: $primary;
-    color: auto 100%;
-}
-
-SnapshotManagerScreen #snapshots_actions Button:ansi:hover,
-SnapshotManagerScreen #snapshots_actions Button:ansi:focus,
-BackupRestoreScreen #backups_actions Button:ansi:hover,
-BackupRestoreScreen #backups_actions Button:ansi:focus {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
 }
 
 SnapshotManagerScreen.-content-narrow #snapshots_workspace,
@@ -161,17 +127,4 @@ SnapshotManagerScreen.-content-narrow #snapshots_records,
 BackupRestoreScreen.-content-narrow #backups_records {
     width: 100%;
     height: 12;
-}
-
-SnapshotManagerScreen.-content-narrow .backup-action-buttons,
-BackupRestoreScreen.-content-narrow #backups_actions {
-    layout: grid;
-    grid-size: 3;
-    grid-columns: 1fr 1fr 1fr;
-    grid-gutter: 0 1;
-}
-
-BackupRestoreScreen.-content-narrow #backups_actions {
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
 }

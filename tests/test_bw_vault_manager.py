@@ -25,20 +25,20 @@ def _ref(item_id="ssh-1", instance_id="i-1", name="web-1", status="verified"):
 class TestCells:
     def test_verify_cell_all_verified_green(self):
         cell = BwVaultManagerScreen._verify_cell([_ref(status="verified")])
-        assert "green" in cell and "verified" in cell
+        assert cell.plain == "verified" and str(cell.spans[0].style) == "$text-success"
 
     def test_verify_cell_failed_red(self):
         cell = BwVaultManagerScreen._verify_cell(
             [_ref(status="verified"), _ref(status="auth_failed")]
         )
-        assert "red" in cell and "auth_failed" in cell
+        assert cell.plain == "auth_failed" and str(cell.spans[0].style) == "$text-error"
 
     def test_verify_cell_none_is_dash(self):
-        assert "—" in BwVaultManagerScreen._verify_cell([])
+        assert BwVaultManagerScreen._verify_cell([]).plain == "—"
 
     def test_verify_cell_unknown_is_unverified(self):
         cell = BwVaultManagerScreen._verify_cell([_ref(status=None)])
-        assert "unverified" in cell
+        assert cell.plain == "unverified" and str(cell.spans[0].style) == "$text-warning"
 
     def test_servers_cell_counts_and_truncates(self):
         refs = [_ref(instance_id=f"i-{n}", name=f"web-{n}") for n in range(5)]

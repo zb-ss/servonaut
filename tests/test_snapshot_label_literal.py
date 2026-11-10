@@ -149,6 +149,9 @@ async def test_snapshot_native_label_save_keeps_success_toast_literal(
         screen = await _open(app, pilot)
         table = screen.query_one("#snapshots_table", DataTable)
         await wait_until(lambda: table.row_count == 1)
+        # The action rows re-fit their buttons over a few frames; click once the table stays put.
+        for _ in range(3):
+            await pilot.pause()
         assert await pilot.click(table, offset=(
             table.content_region.x - table.region.x + 1,
             table.content_region.y - table.region.y + table.header_height,

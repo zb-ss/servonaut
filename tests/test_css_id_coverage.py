@@ -348,6 +348,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_banner_scan",      # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
         "btn_empty_scan",       # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
+        "auto_bind_all",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_apply",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_back",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_fetch_keys",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_none",       # Reason: ActionButton; styled by components/action_button.tcss
         "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_summary",     # Reason: server-actions ActionButton; styled by components/action_button.tcss

@@ -82,7 +82,9 @@ async def test_overlong_ovh_scope_retains_keyboard_scroll_and_full_value(monkeyp
         scope = screen.query_one("#ovh_ssh_keys_scope", VerticalScroll)
         scope.focus()
         await pilot.pause()
-        assert scope.region.height <= 6 and scope.max_scroll_y > 0
+        # The action row re-fits its buttons for the narrow width over a few frames.
+        await wait_until(lambda: scope.region.height <= 6)
+        assert scope.max_scroll_y > 0
         assert app.focused is scope
         await pilot.press("end")
         await pilot.wait_for_scheduled_animations()

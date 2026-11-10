@@ -27,6 +27,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.utils.markup import literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
@@ -38,6 +39,7 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -95,7 +97,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                 ScrollableContainer(
                     Horizontal(
                         Static(
-                            "[bold $text-accent]Hetzner SSH Keys[/bold $text-accent]",
+                            "[bold $text-accent]Hetzner SSH keys[/bold $text-accent]",
                             id="hetzner_ssh_keys_header",
                         ),
                         AccountPicker.for_provider(
@@ -127,7 +129,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                     ),
                     Container(
                         Static(
-                            "[bold]Add SSH Key[/bold]",
+                            "[bold]Add SSH key[/bold]",
                             classes="section_header",
                         ),
                         Label("Key name:"),
@@ -161,23 +163,11 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                         id="hetzner_ssh_add_form_actions",
                         classes="hidden",
                     ),
-                    Horizontal(
-                        Button(
-                            "Refresh (r)", id="btn_hetzner_ssh_refresh",
-                        ),
-                        Button(
-                            "+ Add Key (n)", variant="primary",
-                            id="btn_hetzner_ssh_add",
-                        ),
-                        Button(
-                            "Delete (d)", variant="error",
-                            id="btn_hetzner_ssh_delete",
-                            disabled=True,
-                        ),
-                        Button(
-                            "Back",
-                            id="btn_hetzner_ssh_back",
-                        ),
+                    ActionRow(
+                        ActionButton("Refresh", "r", id="btn_hetzner_ssh_refresh"),
+                        ActionButton("Add key", "n", role="primary", id="btn_hetzner_ssh_add"),
+                        ActionButton("Delete", "d", role="error", id="btn_hetzner_ssh_delete", disabled=True),
+                        ActionButton("Back", "esc", id="btn_hetzner_ssh_back"),
                         id="hetzner_ssh_keys_actions",
                     ),
                     classes="provider-key-footer",
@@ -191,7 +181,12 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "ID", "Fingerprint")
@@ -473,7 +468,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                     "New servers can no longer reference this key by name",
                 ],
                 confirm_text="delete",
-                action_label="Delete Key",
+                action_label="Delete key",
                 severity="warning",
             )
         )

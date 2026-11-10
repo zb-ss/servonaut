@@ -147,8 +147,7 @@ ObjectStorageScreen .resource-workspace-content #s3_actions {
     align: left top;
 }
 
-OVHStorageScreen .resource-workspace-content #storage_actions Button,
-ObjectStorageScreen .resource-workspace-content #s3_actions Button {
+OVHStorageScreen .resource-workspace-content #storage_actions Button {
     width: auto;
     min-width: 0;
     padding: 0 1;
@@ -167,14 +166,9 @@ OVHStorageScreen.-content-narrow .resource-action-buttons {
     grid-size: 2;
 }
 
-OVHStorageScreen.-content-narrow .resource-workspace-content #storage_actions Button,
-ObjectStorageScreen.-content-narrow .resource-workspace-content #s3_actions Button {
+OVHStorageScreen.-content-narrow .resource-workspace-content #storage_actions Button {
     width: 1fr;
     margin: 0;
-}
-
-ObjectStorageScreen.-content-narrow .resource-workspace-content #s3_actions Button {
-    padding: 0;
 }
 
 OVHDNSScreen #dns_actions,
@@ -220,7 +214,6 @@ OVHSnapshotsScreen.-content-narrow #snapshots_actions {
     grid-rows: auto;
 }
 
-ObjectStorageScreen #s3_actions Button,
 OVHDNSScreen #dns_actions Button,
 OVHSnapshotsScreen #snapshots_actions Button {
     height: auto;
@@ -403,7 +396,6 @@ ObjectStorageScreen .provider-aux-workspace .resource-action-buttons {
     min-width: 11;
 }
 
-ObjectStorageScreen .provider-aux-workspace #s3_actions Button,
 OVHStorageScreen .provider-aux-workspace #storage_actions Button {
     width: 1fr;
     min-width: 0;

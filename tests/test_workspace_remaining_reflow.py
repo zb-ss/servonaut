@@ -743,7 +743,8 @@ async def test_conversations_cloud_short_view_keeps_row_and_actions_visible(
         for button in screen.query_one("#convs_actions").query(Button):
             assert content(screen).region.contains_region(button.region)
             assert app.screen.region.contains_region(button.region)
-            assert button.region.height == 3
+            # A narrow layout shows the actions as one-row buttons.
+            assert button.region.height == 1
             assert app.get_widget_at(*button.region.center)[0] is button
             assert button.label.plain in _painted(app, button)
         assert (_state(screen), app.focused, app.ai_conversations_client.list.await_count) == before

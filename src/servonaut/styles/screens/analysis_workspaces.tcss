@@ -190,11 +190,6 @@ AIConversationsScreen #local_filter {
     background: $surface;
 }
 
-AIConversationsScreen #convs_search Button,
-AIConversationsScreen #local_search Button {
-    margin-left: 1;
-}
-
 AIConversationsScreen #convs_workspace,
 AIConversationsScreen #local_workspace {
     height: 1fr;
@@ -253,13 +248,6 @@ AIConversationsScreen #local_actions {
     margin: 0;
 }
 
-AIConversationsScreen #convs_actions Button,
-AIConversationsScreen #local_actions Button {
-    width: 100%;
-    min-width: 0;
-    margin: 0;
-}
-
 AIConversationsScreen.-content-narrow #convs_title {
     height: 1;
     border-bottom: none;
@@ -293,18 +281,9 @@ AIConversationsScreen.-content-narrow #local_listing {
 
 AIConversationsScreen.-content-narrow #convs_actions,
 AIConversationsScreen.-content-narrow #local_actions {
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: 3;
-    grid-gutter: 0 1;
+    layout: horizontal;
     height: auto;
     width: 100%;
     padding: 0;
-    margin: 0;
-}
-
-AIConversationsScreen.-content-narrow #convs_actions Button,
-AIConversationsScreen.-content-narrow #local_actions Button {
     margin: 0;
 }

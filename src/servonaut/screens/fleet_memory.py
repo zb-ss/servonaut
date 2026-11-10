@@ -71,21 +71,21 @@ logger = logging.getLogger(__name__)
 #: is not a state the scan service produces.
 STATUS_SHARED = "shared"
 
-_STATUS_CELL: Dict[str, str] = {
-    STATUS_FRESH: "[green]● Fresh[/green]",
-    STATUS_STALE: "[yellow]● Stale[/yellow]",
-    STATUS_NONE: "[dim]○ Not probed[/dim]",
-    STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
+_STATUS_CELL: Dict[str, Content] = {
+    STATUS_FRESH: literal("● Fresh", "$text-success"),
+    STATUS_STALE: literal("● Stale", "$text-warning"),
+    STATUS_NONE: literal("○ Not probed", "dim"),
+    STATUS_OPT_OUT: literal("⛔ Opted-out", "$text-error"),
     # A server a team shares, read from the team's copy (read-only).
-    STATUS_SHARED: "[blue]● Shared[/blue]",
+    STATUS_SHARED: literal("● Shared", "$text-accent"),
 }
 
 # Source column rendering (width 8)
-_SOURCE_CELL: Dict[str, str] = {
-    "local": "[dim]local[/dim]",
-    "remote": "[blue]cloud[/blue]",
-    "merged": "[green]synced[/green]",
-    "team": "[blue]team[/blue]",
+_SOURCE_CELL: Dict[str, Content] = {
+    "local": literal("local", "dim"),
+    "remote": literal("cloud", "$text-accent"),
+    "merged": literal("synced", "$text-success"),
+    "team": literal("team", "$text-accent"),
 }
 
 
@@ -326,15 +326,15 @@ class FleetMemoryScreen(WorkspaceScreen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh_view", "Refresh View", show=True),
-        Binding("s", "scan_all", "Scan All", show=True),
+        Binding("r", "refresh_view", "Refresh view", show=True),
+        Binding("s", "scan_all", "Scan all", show=True),
         Binding("S", "share_selected", "Share", show=True),
         Binding("space", "toggle_mark", "Mark", show=True),
         Binding("m", "mark_all", "Mark all", show=True),
-        Binding("f", "refresh_stale", "Refresh Stale", show=True),
+        Binding("f", "refresh_stale", "Refresh stale", show=True),
         Binding("enter", "open_selected", "Open", show=True),
         Binding("x", "clear_selected", "Clear", show=True),
-        Binding("a", "toggle_auto_scan", "Toggle Auto-scan", show=True),
+        Binding("a", "toggle_auto_scan", "Toggle auto-scan", show=True),
     ]
 
     # Row keys (see _row_key) of the servers marked to share together. Kept
@@ -366,13 +366,13 @@ class FleetMemoryScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("Fleet Memory")
+        yield WorkspaceControls("Fleet memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield Container(
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Container(
-                    Static("[bold]Fleet Memory[/bold]", id="memory-title"),
+                    Static("[bold]Fleet memory[/bold]", id="memory-title"),
                     Static(
                         "AI-queryable server memory across your fleet.",
                         id="memory-subtitle",
@@ -703,7 +703,7 @@ class FleetMemoryScreen(WorkspaceScreen):
 
             self._populate_table_from_merged(merged)
 
-    def _reason_cell(self, raw_id: str) -> str:
+    def _reason_cell(self, raw_id: str) -> Content | str:
         """Cell text for why the row's latest scan did not succeed, or ``—``.
 
         The reason stays on the scan service until that row is probed again,
@@ -725,7 +725,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             "",
         )
         text = row_reason_text(code)
-        return f"[red]{text}[/red]" if text else "—"
+        return literal(text, "$text-error") if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -1139,7 +1139,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             self._name_cell(row),
             escape(str(row["id"])),
             escape(str(row["provider"])),
-            _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
+            _SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"]),
             _STATUS_CELL.get(row["status"], "—"),
             self._shared_with_cell(row),
             str(row["modules"]) if row["modules"] else "—",
@@ -1148,16 +1148,16 @@ class FleetMemoryScreen(WorkspaceScreen):
             row["reason"],
         )
 
-    def _shared_with_cell(self, row: Dict[str, Any]) -> str:
+    def _shared_with_cell(self, row: Dict[str, Any]) -> Content:
         """The teams the user shares this server's memory with (stand-ins in demo mode)."""
         teams = list(row.get("shared_with") or [])
         if not teams:
-            return "[dim]—[/dim]"
+            return literal("—", "dim")
         redaction = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redaction is not None:
             teams = [redaction.redact_name(team) for team in teams]
         more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
-        return f"[blue]{escape(teams[0])}{more}[/blue]"
+        return literal(f"{teams[0]}{more}", "$text-accent")
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))
@@ -1602,7 +1602,7 @@ class FleetMemoryScreen(WorkspaceScreen):
     async def _do_bulk_scan(self, stale_only: bool, *_legacy_args: Any) -> None:
         """Delegate the fleet probe to FleetScanService (screen-scoped variant).
 
-        NOTE: the production "Scan All" path is now app-owned via
+        NOTE: the production "Scan all" path is now app-owned via
         ``ServonautApp.start_fleet_manual_scan`` (so it survives navigation);
         this method is retained because the demo-mode redaction coverage test
         drives it directly to exercise the ``_on_scan_progress`` redaction path.

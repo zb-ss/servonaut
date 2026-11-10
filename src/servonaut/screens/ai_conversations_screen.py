@@ -1,4 +1,4 @@
-"""Previous Chats — Servonaut hosted-AI conversation history screen.
+"""Previous chats — Servonaut hosted-AI conversation history screen.
 
 Loads server-side conversation summaries via :class:`AIConversationsClient`
 (Wave 1) and exposes the standard CRUD verbs (load, archive, delete, export).
@@ -26,11 +26,15 @@ from rich.markup import escape as _rich_escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, DataTable, Footer, Input, Static, TabbedContent, TabPane,
 )
 
+from servonaut.screens._compact_actions import sync_compact_buttons
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.dialogs import (
@@ -65,7 +69,7 @@ class _ExportPathModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield DialogNotificationSpace()
         yield DialogFrame(
-            heading=Static("[bold $text-accent]Export Conversation to Markdown[/bold $text-accent]"),
+            heading=Static("[bold $text-accent]Export conversation to Markdown[/bold $text-accent]"),
             body=DialogBody(Static(
                 "[dim]Path is resolved relative to the current directory. "
                 "Must stay inside CWD or ~/Downloads.[/dim]"
@@ -187,7 +191,7 @@ class AIConversationsScreen(WorkspaceScreen):
         Binding("r", "refresh", "Refresh", show=True),
         Binding("a", "archive", "Archive", show=True),
         Binding("d", "delete", "Delete", show=True),
-        Binding("e", "export", "Export to MD", show=True),
+        Binding("e", "export", "Export to Markdown", show=True),
         Binding("slash", "focus_filter", "Filter", show=True),
         Binding("enter", "open_selected", "Open", show=True),
     ]
@@ -237,12 +241,12 @@ class AIConversationsScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("Previous Chats")
+        yield WorkspaceControls("Previous chats")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Vertical(id="convs_container", classes="workspace-content"):
                 yield Static(
-                    "[bold $text-accent]Previous Chats[/bold $text-accent]",
+                    "[bold $text-accent]Previous chats[/bold $text-accent]",
                     id="convs_title",
                 )
                 yield Static(
@@ -259,7 +263,7 @@ class AIConversationsScreen(WorkspaceScreen):
                                 placeholder="Filter by title…",
                                 id="convs_filter",
                             )
-                            yield Button("Refresh (r)", id="btn_convs_refresh")
+                            yield ActionButton("Refresh", "r", id="btn_convs_refresh")
                         yield ProgressIndicator()
                         with Horizontal(id="convs_workspace"):
                             with Vertical(id="convs_listing"):
@@ -272,26 +276,19 @@ class AIConversationsScreen(WorkspaceScreen):
                                     yield Static("", id="convs_empty")
                                 with Horizontal(id="convs_pager"):
                                     yield Static("", id="convs_status")
-                                    yield Button("Load More", id="btn_convs_more")
-                            with Horizontal(id="convs_actions"):
-                                yield Button(
-                                    "Open", variant="primary", id="btn_convs_open",
-                                )
-                                yield Button("Archive (a)", id="btn_convs_archive")
-                                yield Button(
-                                    "Delete (d)", variant="error",
-                                    id="btn_convs_delete",
-                                )
-                                yield Button(
-                                    "Export to MD (e)", id="btn_convs_export",
-                                )
+                                    yield ActionButton("Load more", id="btn_convs_more")
+                            with ActionRow(id="convs_actions"):
+                                yield ActionButton("Open", "enter", role="primary", id="btn_convs_open")
+                                yield ActionButton("Archive", "a", id="btn_convs_archive")
+                                yield ActionButton("Delete", "d", role="error", id="btn_convs_delete")
+                                yield ActionButton("Export to Markdown", "e", short="Export", id="btn_convs_export")
                     with TabPane("Local", id="tab_local"):
                         with Horizontal(id="local_search"):
                             yield Input(
                                 placeholder="Filter by title…",
                                 id="local_filter",
                             )
-                            yield Button("Refresh (r)", id="btn_local_refresh")
+                            yield ActionButton("Refresh", "r", id="btn_local_refresh")
                         with Horizontal(id="local_workspace"):
                             with Vertical(id="local_listing"):
                                 with VerticalScroll(id="local_scroll"):
@@ -303,22 +300,22 @@ class AIConversationsScreen(WorkspaceScreen):
                                     yield Static("", id="local_empty")
                                 with Horizontal(id="local_pager"):
                                     yield Static("", id="local_status")
-                                    yield Button("Load More", id="btn_local_more")
-                            with Horizontal(id="local_actions"):
-                                yield Button(
-                                    "Open", variant="primary", id="btn_local_open",
-                                )
-                                yield Button(
-                                    "Delete (d)", variant="error",
-                                    id="btn_local_delete",
-                                )
+                                    yield ActionButton("Load more", id="btn_local_more")
+                            with ActionRow(id="local_actions"):
+                                yield ActionButton("Open", "enter", role="primary", id="btn_local_open")
+                                yield ActionButton("Delete", "d", role="error", id="btn_local_delete")
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         self.query_one("#convs_scroll").border_title = "Cloud conversations"
         self.query_one("#local_scroll").border_title = "Local sessions"
         table = self.query_one("#convs_table", DataTable)
-        table.add_columns("Title", "Last Activity", "Messages", "Model", "Status")
+        table.add_columns("Title", "Last activity", "Messages", "Model", "Status")
         self.query_one("#convs_empty", Static).update("")
 
         # Local-tab columns. "Where" surfaces the paired/local distinction
@@ -326,7 +323,7 @@ class AIConversationsScreen(WorkspaceScreen):
         # whether a row is uploaded.
         local_table = self.query_one("#local_table", DataTable)
         local_table.add_columns(
-            "Title", "Last Activity", "Messages", "Provider", "Where",
+            "Title", "Last activity", "Messages", "Provider", "Where",
         )
         self.query_one("#local_empty", Static).update("")
 
@@ -502,14 +499,9 @@ class AIConversationsScreen(WorkspaceScreen):
         return f"[dim]{group}[/dim] · {title}" if group else title
 
     @staticmethod
-    def _format_status_cell(status: str) -> str:
-        if status == "active":
-            return "[green]active[/green]"
-        if status == "archived":
-            return "[yellow]archived[/yellow]"
-        if status == "deleted":
-            return "[red]deleted[/red]"
-        return _rich_escape(status or "—")
+    def _format_status_cell(status: str) -> Content:
+        styles = {"active": "$text-success", "archived": "$text-warning", "deleted": "$text-error"}
+        return literal(status or "—", styles.get(status, ""))
 
     @staticmethod
     def _format_age(ts: str) -> str:
@@ -585,7 +577,7 @@ class AIConversationsScreen(WorkspaceScreen):
             self._set_status("")
             return
         if shown == n:
-            tail = "" if self._exhausted else " · more available — press [bold]Load More[/bold]"
+            tail = "" if self._exhausted else " · more available — press [bold]Load more[/bold]"
             self._set_status(f"[dim]{n} conversation{'s' if n != 1 else ''}{tail}[/dim]")
         else:
             self._set_status(
@@ -797,7 +789,7 @@ class AIConversationsScreen(WorkspaceScreen):
         title = conv.title or conv.id
         self.app.push_screen(
             _ConfirmModal(
-                title="Archive Conversation",
+                title="Archive conversation",
                 message=(
                     f"Archive [bold]{_rich_escape(title)}[/bold]?\n"
                     "[dim]Archived conversations stay on the server but are "
@@ -848,7 +840,7 @@ class AIConversationsScreen(WorkspaceScreen):
         title = conv.title or conv.id
         self.app.push_screen(
             _ConfirmModal(
-                title="Delete Conversation",
+                title="Delete conversation",
                 message=(
                     f"Permanently delete [bold]{_rich_escape(title)}[/bold]?\n"
                     "[dim]This cannot be undone from the TUI.[/dim]"
@@ -1024,7 +1016,7 @@ class AIConversationsScreen(WorkspaceScreen):
         items = self._local_filtered()
         end = self._local_offset + _PAGE_LIMIT
         self._local_exhausted = end >= len(items)
-        return items[: end]  # offset is always 0 here; "Load More" grows it
+        return items[: end]  # offset is always 0 here; "Load more" grows it
 
     def _render_local_table(self) -> None:
         table = self.query_one("#local_table", DataTable)
@@ -1049,8 +1041,8 @@ class AIConversationsScreen(WorkspaceScreen):
         for s in items:
             paired = bool(s.get("remote_conversation_id"))
             where = (
-                "[cyan]uploaded[/cyan]" if paired
-                else "[dim]local only[/dim]"
+                literal("uploaded", "$text-accent") if paired
+                else literal("local only", "dim")
             )
             provider = s.get("last_provider") or "—"
             table.add_row(
@@ -1070,7 +1062,7 @@ class AIConversationsScreen(WorkspaceScreen):
             return
         tail = (
             "" if self._local_exhausted else
-            " · more available — press [bold]Load More[/bold]"
+            " · more available — press [bold]Load more[/bold]"
         )
         if shown == n:
             self._set_local_status(
@@ -1154,7 +1146,7 @@ class AIConversationsScreen(WorkspaceScreen):
         )
         self.app.push_screen(
             _ConfirmModal(
-                title="Delete Local Session",
+                title="Delete local session",
                 message=msg,
                 danger=True,
             ),

@@ -13,7 +13,9 @@ from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS, describe_backup
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -45,7 +47,7 @@ class BackupConfirmModal(ModalScreen[bool]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Restore Local Backup[/bold $text-accent]",
+                "[bold $text-accent]Restore local backup[/bold $text-accent]",
                 id="bkp_confirm_title",
             ),
             body=DialogBody(Static(self._message, id="bkp_confirm_message")),
@@ -98,7 +100,7 @@ class BackupRestoreScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             yield VerticalScroll(
                 Container(
-                    Static("[bold $text-accent]Local Config Backups[/bold $text-accent]", id="backups_header"),
+                    Static("[bold $text-accent]Local config backups[/bold $text-accent]", id="backups_header"),
                     id="backups_context",
                 ),
                 Horizontal(
@@ -113,9 +115,9 @@ class BackupRestoreScreen(WorkspaceScreen):
                         Static("", id="backups_status"),
                         Container(
                             Static("Selected backup", classes="backup-panel-heading"),
-                            Horizontal(
-                                Button("Restore (r)", variant="primary", id="btn_bkp_restore"),
-                                Button("Refresh (F5)", id="btn_bkp_refresh"),
+                            ActionRow(
+                                ActionButton("Restore", "r", role="primary", id="btn_bkp_restore"),
+                                ActionButton("Refresh", "F5", id="btn_bkp_refresh"),
                                 id="backups_actions",
                             ),
                             classes="backup-action-panel",
@@ -135,9 +137,14 @@ class BackupRestoreScreen(WorkspaceScreen):
             )
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#backups_table", DataTable)
-        table.add_columns("#", "Timestamp", "Kind", "Size", "Custom Servers", "OVH Enabled")
+        table.add_columns("#", "Timestamp", "Kind", "Size", "Custom servers", "OVH enabled")
         self._refresh()
 
     # ------------------------------------------------------------------
