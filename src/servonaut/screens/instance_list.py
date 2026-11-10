@@ -85,13 +85,16 @@ class FleetSummaryLine(Static):
         self._texts = ("", "")
 
     def set_texts(self, full: str, short: str) -> None:
+        """Set the full wording and the shorter one used when the line is too narrow."""
         self._texts = (full, short)
         self._draw()
 
     def on_resize(self) -> None:
+        """Choose the wording again for the new width."""
         self._draw()
 
     def _draw(self) -> None:
+        """Show the full wording when it fits, the short one otherwise."""
         full, short = self._texts
         width = self.size.width
         self.update(full if width == 0 or cell_len(full) <= width else short)

@@ -57,3 +57,43 @@ def test_the_appearance_title_and_description_use_the_shared_header_styles() -> 
         assert title.region.y <= description.region.y
 
     _on(lambda: SettingsScreen("appearance"), check)
+
+
+def _appearance(size: tuple[int, int], *, navigation: str) -> tuple[bool, int, int]:
+    """(preview beside the cards, card columns, panel width) for a terminal size."""
+    from servonaut.screens.settings.shell import SettingsScreen
+
+    result: list = []
+
+    async def main() -> None:
+        app = _harness.SnapshotApp()
+        async with app.run_test(size=size) as pilot:
+            await _harness.wait_for_fleet(pilot)
+            if navigation == "hidden":
+                await pilot.click("#workspace_navigation")
+                await pilot.pause()
+            await app.push_screen(SettingsScreen("appearance"))
+            await _harness.wait_until(pilot, lambda: app.screen.query("#appearance_cards"), "the cards")
+            await pilot.pause()
+            await pilot.pause()
+            panel = app.screen.query_one("AppearancePanel")
+            side = app.screen.query_one("#appearance_layout").has_class("-side")
+            result.append((side, panel.card_columns, panel.size.width))
+
+    asyncio.run(main())
+    return result[0]
+
+
+def test_appearance_at_160x50_with_the_navigation_open_has_two_columns_and_the_preview_beside() -> None:
+    side, columns, width = _appearance((160, 50), navigation="open")
+    assert (side, columns) == (True, 2), width
+
+
+def test_appearance_at_160x50_with_the_navigation_hidden_has_two_columns_and_the_preview_beside() -> None:
+    side, columns, width = _appearance((160, 50), navigation="hidden")
+    assert (side, columns) == (True, 2), width
+
+
+def test_appearance_at_100x30_stacks_the_preview_and_keeps_two_columns() -> None:
+    side, columns, width = _appearance((100, 30), navigation="open")
+    assert not side and columns >= 2, width

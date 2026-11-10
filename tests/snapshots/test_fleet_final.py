@@ -115,7 +115,7 @@ def test_the_ssh_column_steps_aside_instead_of_making_the_table_scroll() -> None
                 ssh = next(c for c in table.columns.values() if str(c.key.value) == "ssh")
                 without = table.virtual_size.width - ssh.get_render_width(table)
                 assert without > table.scrollable_content_region.width, width
-            elif not scrolls:
+            elif not scrolls and "region" in keys:
                 stepped_aside = True
         assert stepped_aside
 
