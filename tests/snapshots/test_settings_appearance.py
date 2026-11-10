@@ -90,3 +90,17 @@ def test_appearance_name_prompt_asks_before_replacing(screen_snapshot: Any) -> N
         _harness.freeze_cursors(pilot.app)
 
     screen_snapshot(_harness.SnapshotApp(), _harness.SIZES["160x50"], before)
+
+
+@pytest.mark.parametrize("size", ["160x50", "100x30"])
+def test_appearance_shows_the_broken_file_and_a_warning_card(screen_snapshot: Any, size: str) -> None:
+    _write_user_themes()
+
+    async def before(pilot: Any) -> None:
+        await _open_appearance(pilot)
+        await _harness.wait_until(
+            pilot, lambda: bool(pilot.app.screen.query(".theme-card.-error")), "the broken file's card",
+        )
+        await pilot.pause()
+
+    screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], before)
