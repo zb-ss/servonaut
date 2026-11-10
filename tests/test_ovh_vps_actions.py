@@ -224,7 +224,7 @@ def test_server_info_shows_names_literally(instance, heading) -> None:
     plain = info.plain
     name = "web-[b]1[/b]"
     assert any(
-        plain[span.start:span.end] == name and str(span.style) == "bold $text-accent"
+        plain[span.start:span.end] == name and str(span.style) == "bold"
         for span in info.spans
     )
     assert name in plain

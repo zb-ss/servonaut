@@ -39,6 +39,42 @@ _MAX_HINTED_LINES = 2
 HINT_STYLE = "$text-muted 60%"
 
 
+def hint_style(widget: Widget) -> str:
+    """The hint style for the theme *widget* is shown in.
+
+    Terminal-colour themes have no muted colour of their own (it resolves to
+    the label's), so the hint is dimmed instead.
+    """
+    return "dim" if widget.app.current_theme.ansi else HINT_STYLE
+
+
+def with_theme_hints(widget: Widget, label: Content) -> Content:
+    """*label* with its key-hint span drawn in the style of the current theme."""
+    style = hint_style(widget)
+    if style == HINT_STYLE:
+        return label
+    return Content.assemble(*(
+        (label.plain[span.start:span.end], style) if str(span.style) == HINT_STYLE
+        else label.plain[span.start:span.end]
+        for span in _segments(label)
+    ))
+
+
+def _segments(label: Content) -> list:
+    """Spans covering the whole label, plain stretches included."""
+    from textual.content import Span
+
+    spans, position = [], 0
+    for span in sorted(label.spans, key=lambda item: item.start):
+        if span.start > position:
+            spans.append(Span(position, span.start, ""))
+        spans.append(span)
+        position = span.end
+    if position < len(label.plain):
+        spans.append(Span(position, len(label.plain), ""))
+    return spans
+
+
 def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
     """The label shown on an action: *text*, then *key* as a muted hint.
 
@@ -104,6 +140,9 @@ class ActionButton(Button):
         row = self.parent
         if isinstance(row, ActionRow):
             row.request_fit()
+
+    def render(self) -> Content:
+        return with_theme_hints(self, self.label)
 
     def watch_compact(self, compact: bool) -> None:
         """Use the short words when only one row is available."""

@@ -89,11 +89,12 @@ def _newest_probed_at(modules: Dict[str, Dict[str, Any]]) -> str:
     return max(stamps) if stamps else ""
 
 
-def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> Content:
+def render_memory_panel(modules: Dict[str, Dict[str, Any]], title: str = "Server Memory") -> Content:
     """Render the cached-memory snapshot as styled content.
 
     Args:
         modules: Mapping returned by ``MemoryService.get_all_modules``.
+        title: Heading shown above the snapshot.
 
     Returns:
         Content in which every probed value is shown literally. Empty
@@ -101,7 +102,7 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> Content:
     """
     if not modules:
         return Content.assemble(
-            Content.styled("Server Memory", "bold"),
+            Content.styled(title, "bold"),
             "\n\n",
             Content.styled("No memory cached yet.", "dim"),
             "\n",
@@ -118,7 +119,7 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> Content:
     age = human_age(_newest_probed_at(modules))
     partial = any(data.get("partial") for data in modules.values())
     header = Content.assemble(
-        Content.styled("Server Memory", "bold"),
+        Content.styled(title, "bold"),
         "  ",
         literal(f"· {age}", "dim"),
     )

@@ -147,46 +147,19 @@ class TestLiveStatsPanel:
 
 
 # ---------------------------------------------------------------------------
-# Focus-help line: clickable proxy for the focused action button
+# Action descriptions live in tooltips, not in a clickable help line
 # ---------------------------------------------------------------------------
 
-class TestActionHelpClick:
-    def _click_event(self, widget_id):
-        ev = MagicMock()
-        ev.widget = MagicMock()
-        ev.widget.id = widget_id
-        return ev
+class TestActionTooltips:
+    def test_the_help_line_and_its_click_proxy_are_gone(self):
+        assert "on_click" not in vars(ServerActionsScreen)
+        assert "on_descendant_focus" not in vars(ServerActionsScreen)
 
-    def test_click_on_help_line_presses_focused_button(self):
-        screen = _make_screen()
-        screen._focused_action_id = "btn_browse"
-        pressed = []
-        btn = MagicMock()
-        btn.press = lambda: pressed.append("pressed")
-        screen.query_one = lambda sel, *a: btn
-        screen.on_click(self._click_event("action_help"))
-        assert pressed == ["pressed"]
+    def test_every_described_action_button_carries_its_description_as_a_tooltip(self):
+        from servonaut.screens.server_actions import _ACTION_HELP, _tip
 
-    def test_click_elsewhere_is_ignored(self):
-        screen = _make_screen()
-        screen._focused_action_id = "btn_browse"
-        pressed = []
-        btn = MagicMock()
-        btn.press = lambda: pressed.append("pressed")
-        screen.query_one = lambda sel, *a: btn
-        # A click on some other widget must NOT press the focused button.
-        screen.on_click(self._click_event("server_info"))
-        assert pressed == []
-
-    def test_click_with_no_focused_action_is_noop(self):
-        screen = _make_screen()
-        screen._focused_action_id = None
-        pressed = []
-        btn = MagicMock()
-        btn.press = lambda: pressed.append("pressed")
-        screen.query_one = lambda sel, *a: btn
-        screen.on_click(self._click_event("action_help"))
-        assert pressed == []
+        assert _tip("btn_browse") == _ACTION_HELP["btn_browse"]
+        assert "filesystem" in _tip("btn_browse")
 
 
 # ---------------------------------------------------------------------------

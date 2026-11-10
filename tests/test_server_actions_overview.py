@@ -24,7 +24,7 @@ TOOLBAR_IDS = ["btn_back", "btn_browse", "btn_scp", "btn_command", "btn_ssh"]
 CARD_OF = {
     "btn_copy_id": "card_identity", "btn_copy_summary": "card_identity",
     "btn_use_vault_key": "card_network", "btn_manage_ssh_ref": "card_network",
-    "btn_verify_ssh": "card_network", "btn_live": "card_live",
+    "btn_verify_ssh": "card_network", "btn_live": "card_live", "btn_live_refresh": "card_live",
     "btn_memory": "card_memory", "btn_findings": "card_memory",
     "btn_db_creds": "card_memory", "btn_logs": "sa-diagnostics",
     "btn_ai_analysis": "sa-diagnostics", "btn_scan": "sa-diagnostics",
@@ -131,7 +131,7 @@ async def test_buttons_are_compact_exactly_when_the_layout_is_narrow() -> None:
         assert not any(button.compact for button in buttons)
         await pilot.resize_terminal(100, 30)
         await wait_until(lambda: all(button.compact for button in screen.query(ActionButton)))
-        assert screen.query_one("#btn_browse", ActionButton).label.plain.startswith("Browse  ")
+        assert screen.query_one("#btn_browse", ActionButton).label.plain.startswith("Browse")
         await wait_until(
             lambda: all(b.region.height == 1 for b in screen.query("#action_buttons ActionButton"))
         )
@@ -206,9 +206,9 @@ async def test_key_hints_match_real_bindings() -> None:
         for button in screen.query(ActionButton):
             hint = button.label.plain.rsplit("  ", 1)[-1] if "  " in button.label.plain else None
             if hint is not None:
-                assert hint.lower() in keys, button.id
+                assert {"esc": "escape"}.get(hint.lower(), hint.lower()) in keys, button.id
             else:
-                assert button.id in {"btn_copy_id", "btn_copy_summary"}, button.id
+                assert button.id in {"btn_copy_id", "btn_copy_summary", "btn_live_refresh"}, button.id
 
 
 @pytest.mark.asyncio
@@ -308,15 +308,15 @@ async def test_live_poll_label_follows_the_poller() -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
         label = lambda: screen.query_one("#btn_live", ActionButton).label.plain  # noqa: E731
-        assert label().startswith("Live poll: off")
+        assert label().startswith("Start monitoring")
         with patch("servonaut.screens.server_actions.format_live_stats", lambda stats: "stats"):
             await pilot.press("l")
-            await wait_until(lambda: label().startswith("Live poll: on"))
+            await wait_until(lambda: label().startswith("Stop monitoring"))
             await pilot.press("l")
-            await wait_until(lambda: label().startswith("Live poll: off"))
+            await wait_until(lambda: label().startswith("Start monitoring"))
             service.mode = "fail"
             await pilot.press("l")
-            await wait_until(lambda: label().startswith("Live poll: off") and not screen._live_on)
+            await wait_until(lambda: label().startswith("Start monitoring") and not screen._live_on)
 
 
 @pytest.mark.asyncio

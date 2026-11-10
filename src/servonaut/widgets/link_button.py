@@ -7,13 +7,13 @@ from typing import Any
 from textual.content import Content
 from textual.widgets import Button
 
-from servonaut.widgets.action_button import HINT_STYLE, _KEY_GAP, action_label
+from servonaut.widgets.action_button import _KEY_GAP, action_label, hint_style
 
 
-def action_label_underlined(words: str, key: str) -> Content:
-    """*words* underlined, then *key* as the usual quiet hint."""
+def action_label_underlined(words: str, key: str, style: str) -> Content:
+    """*words* underlined, then *key* as the usual quiet hint, in *style*."""
     hint = action_label("", key).plain
-    return Content.assemble((words, "underline"), (hint, HINT_STYLE))
+    return Content.assemble((words, "underline"), (hint, style))
 
 
 class LinkButton(Button):
@@ -44,5 +44,5 @@ class LinkButton(Button):
         plain = self.label.plain
         suffix = f"{_KEY_GAP}{self._key}" if self._key else ""
         if suffix and plain.endswith(suffix):
-            return action_label_underlined(plain[: -len(suffix)], self._key)
+            return action_label_underlined(plain[: -len(suffix)], self._key, hint_style(self))
         return Content.styled(plain, "underline")

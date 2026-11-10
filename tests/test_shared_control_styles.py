@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.containers import Vertical
 from textual.geometry import Region
 from textual.widgets import (
@@ -346,3 +347,92 @@ async def test_key_hints_are_painted_in_the_muted_text_colour(theme: str) -> Non
         assert _hex_of(app.query_one("#action"), "r") == muted
         assert _hex_of(app.query_one("#link"), "y") == muted
         assert _hex_of(app.query_one("#action"), "Refresh") != muted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+async def test_key_hints_are_dimmed_in_the_terminal_colour_themes(theme: str) -> None:
+    app = _HintColourApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 10)) as pilot:
+        app.set_focus(None)
+        await pilot.pause()
+        for selector, hint, words in (("#action", "r", "Refresh"), ("#link", "y", "Copy row")):
+            widget = app.query_one(selector)
+            styles = {}
+            for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+                for segment in strip:
+                    if segment.text.strip() in (hint, words) and segment.style is not None:
+                        styles[segment.text.strip()] = segment.style
+            assert styles[hint].dim and not styles[words].dim, selector
+
+
+class _DisabledApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Holder", id="holder")
+        yield ActionButton("Primary", role="primary", disabled=True, id="d_primary")
+        yield ActionButton("Error", role="error", disabled=True, id="d_error")
+        yield ActionButton("Neutral", disabled=True, id="d_default")
+        yield ActionButton("Live", role="primary", id="e_primary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+async def test_disabled_actions_use_the_disabled_border_in_every_role(theme: str) -> None:
+    app = _DisabledApp()
+    app.theme = theme
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        edges = {
+            name: app.query_one(f"#{name}").styles.border.top[1]
+            for name in ("d_primary", "d_error", "d_default")
+        }
+        assert len({str(colour) for colour in edges.values()}) == 1
+        enabled = app.query_one("#e_primary").styles.border.top[1]
+        assert edges["d_primary"] != enabled
+        if theme in ("servonaut", "servonaut-light"):
+            assert edges["d_primary"] == Color.parse(app.theme_variables["border-blurred"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+@pytest.mark.parametrize("compact", [False, True])
+async def test_disabled_actions_are_dimmed_and_do_not_react_to_hover_in_terminal_themes(
+    theme: str, compact: bool,
+) -> None:
+    class _App(_DisabledApp):
+        def compose(self) -> ComposeResult:
+            yield ActionButton("Holder", id="holder", compact=compact)
+            yield ActionButton("Primary", role="primary", disabled=True, id="d_primary", compact=compact)
+            yield ActionButton("Neutral", id="e_default", compact=compact)
+
+    app = _App()
+    app.theme = theme
+    async with app.run_test(size=(60, 12)) as pilot:
+        await pilot.pause()
+        disabled = app.query_one("#d_primary")
+
+        def word_style():
+            for strip in disabled.render_lines(Region(0, 0, disabled.outer_size.width, disabled.outer_size.height)):
+                for segment in strip:
+                    if "Primary" in segment.text:
+                        return segment.style
+            raise AssertionError("label not painted")
+
+        idle = word_style()
+        assert idle.dim and not idle.bold and not idle.underline
+        await pilot.hover("#d_primary")
+        await pilot.pause()
+        assert word_style() == idle
+        enabled = app.query_one("#e_default")
+        for strip in enabled.render_lines(Region(0, 0, enabled.outer_size.width, enabled.outer_size.height)):
+            for segment in strip:
+                if "Neutral" in segment.text:
+                    assert not segment.style.dim

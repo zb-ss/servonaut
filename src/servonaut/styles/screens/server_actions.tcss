@@ -9,23 +9,23 @@
     layout: vertical;
 }
 
-/* Full-width compact context banner leading the screen */
+/* One row of context: the shared screen header look, with no bar and no
+   bottom border. */
 #sa-context {
     width: 100%;
     height: auto;
+    /* A very long name or account scrolls here instead of starving the cards. */
     max-height: 4;
-    padding: 0 1;
+    padding: 0 2;
     background: transparent;
-    border-left: thick $accent;
-    border-bottom: solid $surface-lighten-1;
-    scrollbar-gutter: stable;
+}
+
+ServerActionsScreen.-short #sa-context {
+    padding: 0 1;
 }
 
 #server_context {
-    text-align: left;
-    content-align: left middle;
     height: auto;
-    padding: 0;
 }
 
 /* Primary actions: one row, Back at the left and the rest at the right.
@@ -34,8 +34,13 @@
     width: 100%;
     height: auto;
     layout: horizontal;
-    padding: 0 1;
+    padding: 0 2;
     background: $surface;
+    border-bottom: solid $border-blurred;
+}
+
+ServerActionsScreen.-short #action_buttons {
+    padding: 0 1;
 }
 
 #action_buttons.-wrap {
@@ -120,41 +125,23 @@
     padding: 0;
 }
 
-ServerActionsScreen.-narrow #sa-facts,
-ServerActionsScreen.-narrow #sa-monitoring,
-ServerActionsScreen.-content-narrow #sa-facts,
-ServerActionsScreen.-content-narrow #sa-monitoring {
+/* Below about 96 content columns the cards stack (the class is set by the
+   screen from the width the content really has; compact buttons are separate). */
+ServerActionsScreen.-stack-cards #sa-facts,
+ServerActionsScreen.-stack-cards #sa-monitoring {
     layout: vertical;
 }
 
-ServerActionsScreen.-narrow #sa-facts .sa-section,
-ServerActionsScreen.-narrow #sa-monitoring .sa-section,
-ServerActionsScreen.-content-narrow #sa-facts .sa-section,
-ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
+ServerActionsScreen.-stack-cards #sa-facts .sa-section,
+ServerActionsScreen.-stack-cards #sa-monitoring .sa-section {
+    width: 100%;
     height: auto;
     margin-bottom: 1;
-}
-
-ServerActionsScreen.-narrow #sa-facts .sa-section,
-ServerActionsScreen.-narrow #sa-monitoring .sa-section,
-ServerActionsScreen.-content-narrow #sa-facts .sa-section,
-ServerActionsScreen.-content-narrow #sa-monitoring .sa-section {
-    width: 100%;
 }
 
 ServerActionsScreen.-narrow .sa-card-actions,
 ServerActionsScreen.-content-narrow .sa-card-actions {
     padding: 0;
-}
-
-#action_help {
-    padding: 0 1;
-    height: auto;
-    color: $text-muted;
-}
-
-#action_help:hover {
-    color: $text;
 }
 
 /* Slow work indicator: pinned to bottom of detail pane */
