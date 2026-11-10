@@ -7,13 +7,13 @@ from typing import Any
 from textual.content import Content
 from textual.widgets import Button
 
-from servonaut.widgets.action_button import _KEY_GAP, action_label
+from servonaut.widgets.action_button import HINT_STYLE, _KEY_GAP, action_label
 
 
 def action_label_underlined(words: str, key: str) -> Content:
     """*words* underlined, then *key* as the usual quiet hint."""
     hint = action_label("", key).plain
-    return Content.assemble((words, "underline"), (hint, "$text-muted"))
+    return Content.assemble((words, "underline"), (hint, HINT_STYLE))
 
 
 class LinkButton(Button):

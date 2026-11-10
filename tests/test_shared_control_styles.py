@@ -15,6 +15,7 @@ from textual.widgets import (
     RadioButton,
     RadioSet,
     Select,
+    Static,
     TextArea,
 )
 
@@ -308,3 +309,40 @@ async def test_link_key_hint_is_quiet_and_not_underlined() -> None:
         assert [text for text, _ in hint_styles] == ["y"]
         assert hint_styles[0][1].color not in word_colours  # dimmer than the words
         assert link.label.plain == "Copy row  y"
+
+
+class _HintColourApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#muted { color: $text-muted; }"
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield Static("muted words", id="muted")
+        yield ActionButton("Refresh", "r", compact=True, id="action")
+        yield LinkButton("Copy row", key="y", id="link")
+
+
+def _hex_of(widget, text: str) -> str:
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if text == segment.text.strip() and segment.style is not None and segment.style.color is not None:
+                return segment.style.color.get_truecolor().hex.lower()
+    raise AssertionError(f"{text!r} is not painted")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light"])
+async def test_key_hints_are_painted_in_the_muted_text_colour(theme: str) -> None:
+    app = _HintColourApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 10)) as pilot:
+        app.set_focus(None)
+        await pilot.pause()
+        muted = _hex_of(app.query_one("#muted"), "muted words")
+        assert _hex_of(app.query_one("#action"), "r") == muted
+        assert _hex_of(app.query_one("#link"), "y") == muted
+        assert _hex_of(app.query_one("#action"), "Refresh") != muted

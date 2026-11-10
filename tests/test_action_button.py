@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 
+from servonaut.widgets.action_button import HINT_STYLE
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.action_button import ActionButton, ActionRow, action_label
 
@@ -24,7 +25,7 @@ class _Host(App[None]):
 def test_label_is_words_then_a_muted_key_hint() -> None:
     label = action_label("Browse files", "1")
     assert label.plain == "Browse files  1"
-    assert [(span.start, span.end, str(span.style)) for span in label.spans] == [(14, 15, "$text-muted")]
+    assert [(span.start, span.end, str(span.style)) for span in label.spans] == [(14, 15, HINT_STYLE)]
 
 
 def test_label_without_a_key_has_no_hint() -> None:
@@ -35,7 +36,7 @@ def test_label_without_a_key_has_no_hint() -> None:
 def test_hostile_text_stays_literal() -> None:
     label = action_label("[b]x[/b] [@click=app.bell]y", "[k]")
     assert label.plain == "[b]x[/b] [@click=app.bell]y  [k]"
-    assert [str(span.style) for span in label.spans] == ["$text-muted"]
+    assert [str(span.style) for span in label.spans] == [HINT_STYLE]
 
 
 @pytest.mark.asyncio

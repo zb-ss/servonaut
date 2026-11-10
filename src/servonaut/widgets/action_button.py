@@ -33,6 +33,10 @@ _MARGIN = 1
 _WRAP_GUTTER = 1
 # A wrapped row keeps its key hints while it needs no more lines than this.
 _MAX_HINTED_LINES = 2
+# The quiet colour of a key hint. "$text-muted" itself loses its 60% alpha inside
+# a Content span and renders as pure white or black; spelling the 60% out gives
+# exactly the colour muted text has elsewhere.
+HINT_STYLE = "$text-muted 60%"
 
 
 def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
@@ -43,7 +47,7 @@ def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Cont
     """
     if not key:
         return Content(text)
-    return Content.assemble(text, gap, (key, "$text-muted"))
+    return Content.assemble(text, gap, (key, HINT_STYLE))
 
 
 class ActionButton(Button):
