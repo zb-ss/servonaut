@@ -2093,7 +2093,7 @@ class ChatPanel(Widget):
         self._session = chat_service.create_session()
         # Drop the previous server-side conversation pointer so the next
         # turn creates a fresh /account/ai/conversations row instead of
-        # appending to the prior thread. Without this, "New Chat" looks
+        # appending to the prior thread. Without this, "New chat" looks
         # local-only but the server keeps writing to the old thread.
         self._remote_conversation_id = None
         self._total_tokens = 0
@@ -4241,7 +4241,7 @@ class ChatPanel(Widget):
         accumulated: str,
     ) -> None:
         """Append the final assistant message + persist + refresh display."""
-        from servonaut.services.chat_service import ChatMessage
+        from servonaut.services.chat_service import ChatMessage, is_unnamed_title
 
         stripped = accumulated.strip()
         if stripped:
@@ -4276,7 +4276,7 @@ class ChatPanel(Widget):
 
         # Auto-title from first user message (mirrors chat_service).
         if (
-            self._session.title == "New Chat"  # type: ignore[union-attr]
+            is_unnamed_title(self._session.title)  # type: ignore[union-attr]
             and len(self._session.messages) >= 2  # type: ignore[union-attr]
         ):
             first_msg = self._session.messages[0].content  # type: ignore[union-attr]

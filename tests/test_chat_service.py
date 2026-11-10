@@ -621,3 +621,18 @@ def test_agentic_loop_status_callback(tmp_path: Path) -> None:
 
     assert any("Thinking" in s for s in statuses)
     assert any("list_instances" in s for s in statuses)
+
+
+def test_a_session_saved_with_the_older_title_is_still_auto_titled(tmp_path: Path) -> None:
+    ai_service = MagicMock()
+    ai_service.analyze_text = AsyncMock(return_value={"content": "ok"})
+
+    svc = _make_service(tmp_path, ai_service)
+    session = svc.create_session()
+    session.title = "New Chat"
+    svc.save_session(session)
+
+    loaded = svc.load_session(session.id)
+    assert loaded is not None and loaded.title == "New Chat"
+    _run(svc.send_message(loaded, "How do I restart nginx?"))
+    assert loaded.title == "How do I restart nginx?"
