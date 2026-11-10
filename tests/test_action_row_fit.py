@@ -96,3 +96,35 @@ async def test_buttons_added_to_a_row_are_fitted_without_a_resize() -> None:
         await pilot.pause()
         assert row.size.width == width_before
         _assert_inside(app, "#box9")
+
+
+FIVE = (
+    ("Refresh memory", "r"), ("Scan server", "s"), ("Edit notes", "n"),
+    ("Share memory", "m"), ("Show findings", "f"),
+)
+
+
+class _WrapApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#host { width: 80; height: auto; } #host ActionRow { width: auto; }"
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            ActionRow(*(ActionButton(t, k, id=f"five{i}") for i, (t, k) in enumerate(FIVE))),
+            id="host",
+        )
+
+
+@pytest.mark.asyncio
+async def test_five_actions_wrap_into_two_lines_that_keep_their_hints() -> None:
+    app = _WrapApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        row = app.query_one(ActionRow)
+        buttons = list(row.query(ActionButton))
+        assert row.has_class("-wrap")
+        assert all(b.label.plain.endswith(k) for b, (_, k) in zip(buttons, FIVE))
+        assert len({b.region.y for b in buttons}) == 2
+        host = app.query_one("#host")
+        assert all(host.region.contains_region(b.region) for b in buttons)

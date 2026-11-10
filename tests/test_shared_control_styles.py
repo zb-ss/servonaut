@@ -189,3 +189,32 @@ async def test_borderless_buttons_gain_no_border_on_hover_or_focus(selector: str
         assert widget.has_focus
         assert widget.region == idle
         assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+
+class _BackApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Focus holder", id="holder")
+        yield ActionButton("Back", "esc", id="btn_back")
+        yield ActionButton("Refresh", "r", id="other_action")
+
+
+def _word_colour(widget, word: str):
+    """The foreground the label's words are painted with."""
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if word in segment.text and segment.style is not None:
+                return segment.style.color
+    raise AssertionError(f"{word!r} is not painted")
+
+
+@pytest.mark.asyncio
+async def test_back_action_words_are_not_muted() -> None:
+    app = _BackApp()
+    async with app.run_test(size=(60, 12)) as pilot:
+        app.query_one("#holder").focus()
+        await pilot.pause()
+        back = app.query_one("#btn_back", ActionButton)
+        other = app.query_one("#other_action", ActionButton)
+        assert _word_colour(back, "Back") == _word_colour(other, "Refresh")

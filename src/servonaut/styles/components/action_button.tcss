@@ -112,3 +112,54 @@ ActionButton.-textual-compact.-primary:ansi:focus {
     color: $block-cursor-foreground;
     text-style: not bold;
 }
+
+/* The plain-Button rules for #btn_back (a muted label) also match an
+   ActionButton with that id, which would dim the words while the key hint
+   stays bright. An id selector out-ranks the ActionButton rules above, so the
+   Back action restates them: the same look as every other action. */
+ActionButton#btn_back {
+    border: round $border-blurred;
+    color: $text;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton#btn_back:hover {
+    border: round $accent;
+    color: $text-accent;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton#btn_back:focus {
+    border: round $accent;
+    color: $text;
+    background: transparent;
+    text-style: bold;
+}
+
+ActionButton#btn_back:ansi {
+    color: $foreground;
+}
+
+ActionButton#btn_back:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    text-style: underline not bold;
+}
+
+ActionButton#btn_back:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+ActionButton#btn_back.-textual-compact {
+    border: none !important;
+}
+
+ActionButton#btn_back.-textual-compact:hover,
+ActionButton#btn_back.-textual-compact:focus {
+    background: $panel-lighten-2;
+}
