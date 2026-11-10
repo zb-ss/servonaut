@@ -15,7 +15,6 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from rich.markup import escape
 from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -234,20 +233,24 @@ class PinKeyModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         yield DialogNotificationSpace()
         current_display = (
-            escape(str(self._current_value))
-            if self._current_value else "[dim](none)[/dim]"
+            literal_text(str(self._current_value))
+            if self._current_value else Content.styled("(none)", "dim")
         )
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Pin value for "
-                f"[$text-warning]{escape(str(self._module))}[/$text-warning]."
-                f"[$text-warning]{escape(str(self._key))}[/$text-warning]"
-                "[/bold $text-accent]",
+                Content.assemble(
+                    literal_text("Pin value for ", "bold $text-accent"),
+                    literal_text(str(self._module), "bold $text-warning"),
+                    literal_text(".", "bold $text-accent"),
+                    literal_text(str(self._key), "bold $text-warning"),
+                ),
                 id="pin_modal_title",
             ),
             body=DialogBody(
                 Static(
-                    f"[dim]Current observed value:[/dim] {current_display}",
+                    Content.assemble(
+                        Content.styled("Current observed value:", "dim"), " ", current_display,
+                    ),
                     id="pin_modal_field",
                 ),
             ),
@@ -2179,7 +2182,7 @@ class MemoryScreen(WorkspaceScreen):
             message = redaction.scrub_stream(message)
         try:
             self.query_one("#memory-sync-status", Static).update(
-                f"[$text-accent]Cloud sync: {escape(message)}[/$text-accent]"
+                literal_text(f"Cloud sync: {message}", "$text-accent")
             )
         except Exception:
             pass
@@ -2412,12 +2415,12 @@ class MemoryScreen(WorkspaceScreen):
         # Step 2: show provider disclosure verbatim and ask for confirmation.
         # We push a confirm modal on the main thread; run the rest from its callback.
         from servonaut.screens.memory import SimpleConfirmModal
-        from rich.markup import escape as rich_escape
 
-        disclosure_text = (
-            f"[bold]AI Provider:[/bold] {rich_escape(provider_info.provider_name)}\n\n"
-            f"{rich_escape(provider_info.retention_text)}\n\n"
-            "Do you consent to submitting server memory data to this provider?"
+        disclosure_text = Content.assemble(
+            Content.styled("AI Provider:", "bold"), " ",
+            literal_text(provider_info.provider_name), "\n\n",
+            literal_text(provider_info.retention_text), "\n\n",
+            "Do you consent to submitting server memory data to this provider?",
         )
 
         async def _after_consent(confirmed: bool) -> None:

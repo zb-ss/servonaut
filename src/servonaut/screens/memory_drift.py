@@ -7,9 +7,8 @@ Tier-gated on ``memory_drift`` entitlement.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
@@ -86,13 +85,14 @@ class DriftDiffScreen(ModalScreen[None]):
         self._retrieval_service = retrieval_service
 
     def compose(self) -> ComposeResult:
-        instance_id = escape(str(getattr(self._event, "instance_id", "?")))
-        module = escape(str(getattr(self._event, "module", "?")))
+        instance_id = str(getattr(self._event, "instance_id", "?"))
+        module = str(getattr(self._event, "module", "?"))
         old_hash = str(getattr(self._event, "old_hash", "") or "")[:12]
         new_hash = str(getattr(self._event, "new_hash", "") or "")[:12]
-        header = (
-            f"[bold $text-accent]Drift Diff: {instance_id} / {module}[/bold $text-accent]\n"
-            f"[dim]old: {escape(old_hash)} → new: {escape(new_hash)}[/dim]"
+        header = Content.assemble(
+            literal(f"Drift diff: {instance_id} / {module}", "bold $text-accent"),
+            "\n",
+            literal(f"old: {old_hash} → new: {new_hash}", "dim"),
         )
         yield DialogNotificationSpace()
         yield DialogFrame(
@@ -136,17 +136,19 @@ class DriftDiffScreen(ModalScreen[None]):
             new_env = await self._retrieval_service.get_snapshot(
                 instance_id, module, new_id,
             )
-            diff_text = self._build_diff_text(old_env, new_env)
             # Scrub the raw JSON payload diff — it may contain hostnames,
             # paths, ports, package versions, and account IDs.
+            scrubber = None
             if self.app.demo_mode and self.app.redaction_service:
-                diff_text = self.app.redaction_service.scrub_stream(diff_text)
-            content.update(diff_text)
+                scrubber = self.app.redaction_service.scrub_stream
+            content.update(self._build_diff_text(old_env, new_env, scrubber))
         except Exception as exc:
             logger.exception("Drift diff fetch failed: %s", exc)
-            content.update(f"[$text-error]Diff fetch failed: {escape(str(exc))}[/$text-error]")
+            content.update(literal(f"Diff fetch failed: {exc}", "$text-error"))
 
-    def _build_diff_text(self, old_env: Any, new_env: Any) -> str:
+    def _build_diff_text(
+        self, old_env: Any, new_env: Any, scrubber: Optional[Callable[[str], str]] = None,
+    ) -> Content:
         import json
         import difflib
         old_payload = getattr(old_env, "plaintext", {}) if old_env is not None else {}
@@ -155,18 +157,20 @@ class DriftDiffScreen(ModalScreen[None]):
         new_lines = json.dumps(new_payload, indent=2, sort_keys=True).splitlines()
         diff = list(difflib.unified_diff(old_lines, new_lines, lineterm=""))
         if not diff:
-            return "[dim](no textual differences)[/dim]"
-        parts: List[str] = []
+            return Content.styled("(no textual differences)", "dim")
+        parts: List[Content] = []
         for line in diff:
+            if scrubber is not None:
+                line = scrubber(line)
             if line.startswith("+") and not line.startswith("+++"):
-                parts.append(f"[$text-success]{escape(line)}[/$text-success]")
+                parts.append(literal(line, "$text-success"))
             elif line.startswith("-") and not line.startswith("---"):
-                parts.append(f"[$text-error]{escape(line)}[/$text-error]")
+                parts.append(literal(line, "$text-error"))
             elif line.startswith("@@"):
-                parts.append(f"[$text-accent]{escape(line)}[/$text-accent]")
+                parts.append(literal(line, "$text-accent"))
             else:
-                parts.append(escape(line))
-        return "\n".join(parts)
+                parts.append(literal(line))
+        return Content("\n").join(parts)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss()
@@ -324,11 +328,11 @@ class MemoryDriftScreen(WorkspaceScreen):
                 raw_instance_id = self.app.redaction_service.redact_instance_id(
                     raw_instance_id
                 )
-            instance_id = escape(raw_instance_id)
-            module = escape(str(getattr(evt, "module", "?")))
+            instance_id = literal(raw_instance_id)
+            module = literal(str(getattr(evt, "module", "?")))
             severity = str(getattr(evt, "severity", "low"))
             status = "acknowledged" if getattr(evt, "acknowledged_at", None) else "open"
-            status = escape(status)
+            status = literal(status)
             detected_at = str(getattr(evt, "detected_at", ""))[:19].replace("T", " ")
             severity_cell = _SEVERITY_CELL.get(severity) or literal(severity)
             table.add_row(

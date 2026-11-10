@@ -51,6 +51,7 @@ from servonaut.utils.instance_resolver import (
     display_name,
     resolve_unique,
 )
+from servonaut.utils.markup import literal
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -150,23 +151,18 @@ def _recon_note(recon: Any) -> str:
     return note
 
 
-def _styled(styles: Dict[str, str], value: str, *, cell: bool) -> Union[str, Content]:
-    style = styles.get(value)
-    if cell:
-        return Content.styled(value or "unknown", style or "")
-    if style is None:
-        return escape(value or "unknown")
-    return f"[{style}]{value}[/{style}]"
+def _styled(styles: Dict[str, str], value: str) -> Content:
+    return literal(value or "unknown", styles.get(value, ""))
 
 
-def _severity_markup(severity: str, *, cell: bool = False) -> Union[str, Content]:
-    """*severity* in its colour; ``cell=True`` gives table-cell content."""
-    return _styled(_SEVERITY_STYLE, severity, cell=cell)
+def _severity_markup(severity: str, *, cell: bool = False) -> Content:
+    """*severity* in its colour, as literal content (also fit for a table cell)."""
+    return _styled(_SEVERITY_STYLE, severity)
 
 
-def _status_markup(status: str, *, cell: bool = False) -> Union[str, Content]:
-    """*status* in its colour; ``cell=True`` gives table-cell content."""
-    return _styled(_STATUS_STYLE, status, cell=cell)
+def _status_markup(status: str, *, cell: bool = False) -> Content:
+    """*status* in its colour, as literal content (also fit for a table cell)."""
+    return _styled(_STATUS_STYLE, status)
 
 
 class FindingsScreen(WorkspaceScreen):
@@ -233,17 +229,20 @@ class FindingsScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        scope = ""
+        scope = Content("")
         if self._instance is not None:
             name = self._display_name(self._instance)
-            scope = f" — [dim]{escape(name)}[/dim]"
+            scope = Content.assemble(" — ", literal(name, "dim"))
         yield SafeHeader()
         yield WorkspaceControls("Findings")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="findings_container", classes="workspace-content"):
                 yield Horizontal(
-                    Static(f"[bold]Monitoring findings[/bold]{scope}", id="findings_title"),
+                    Static(
+                        Content.assemble(literal("Monitoring findings", "bold"), scope),
+                        id="findings_title",
+                    ),
                     Static("", id="findings_status_pill"),
                     id="findings_heading",
                 )
@@ -444,7 +443,7 @@ class FindingsScreen(WorkspaceScreen):
         ]
         if reason:
             children.append(Static(
-                f"[dim]{escape(reason)}[/dim]",
+                literal(reason, "dim"),
                 classes="findings_card_note",
             ))
         body.mount(self._card("Upgrade required", *children, primary=True))
@@ -535,18 +534,18 @@ class FindingsScreen(WorkspaceScreen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = escape(str(finding.get("detector") or ""))
-            title = escape(redact_demo_text(
+            detector = literal(str(finding.get("detector") or ""))
+            title = literal(redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = escape(str(finding.get("detected_at") or ""))
+            detected = literal(str(finding.get("detected_at") or ""))
             row = [_severity_markup(severity, cell=True), _status_markup(status, cell=True)]
             if self._instance is None:
                 instance_id = str(finding.get("instance_id") or "")
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(escape(label))
+                row.append(literal(label))
             row.extend([detector, title, detected])
             table.add_row(*row)
         self._update_pill()
@@ -562,13 +561,15 @@ class FindingsScreen(WorkspaceScreen):
             sev = str(finding.get("severity") or "unknown")
             counts[sev] = counts.get(sev, 0) + 1
         parts = [
-            f"{_severity_markup(sev)} {counts[sev]}"
+            Content.assemble(_severity_markup(sev), f" {counts[sev]}")
             for sev in _SEVERITY_ORDER if sev in counts
         ]
         for sev in counts:
             if sev not in FINDING_SEVERITIES:
-                parts.append(f"{escape(sev)} {counts[sev]}")
-        pill.update("  ".join(parts) + f"  [dim]· {self._total} total[/dim]")
+                parts.append(Content.assemble(literal(sev), f" {counts[sev]}"))
+        pill.update(Content.assemble(
+            Content("  ").join(parts), literal(f"  · {self._total} total", "dim"),
+        ))
 
     def _update_filter_line(self) -> None:
         line = self.query_one("#findings_filter_line", Static)
@@ -626,7 +627,7 @@ class FindingsScreen(WorkspaceScreen):
             exclusive=True,
         )
 
-    def _set_progress(self, markup: Optional[str]) -> None:
+    def _set_progress(self, markup: Union[str, Content, None]) -> None:
         progress = self.query_one("#findings_progress", Static)
         if markup is None:
             progress.update("")
@@ -702,8 +703,10 @@ class FindingsScreen(WorkspaceScreen):
             if name == "scan.started":
                 self._set_progress("[$text-accent]Scan started…[/$text-accent]")
             elif name == "probe.started":
-                detector = escape(str(data.get("detector") or ""))
-                self._set_progress(f"[$text-accent]Probing:[/$text-accent] {detector}…")
+                detector = str(data.get("detector") or "")
+                self._set_progress(Content.assemble(
+                    literal("Probing:", "$text-accent"), " ", literal(detector), "…",
+                ))
             elif name == "probe.completed":
                 if data.get("ok") is False:
                     probes_failed += 1
@@ -905,27 +908,25 @@ class FindingDetailScreen(WorkspaceScreen):
         # re-render with no remediations can't leave a stale mapping.
         self._remediation_buttons = {}
 
-        safe_title = escape(redact_demo_text(
-            self.app, str(f.get("title") or "(untitled)"),
-        ))
-        title.update(f"🛡 [bold]{safe_title}[/bold]")
+        shown_title = redact_demo_text(self.app, str(f.get("title") or "(untitled)"))
+        title.update(Content.assemble("🛡 ", literal(shown_title, "bold")))
         severity = str(f.get("severity") or "")
         status = str(f.get("status") or "")
         scope = "team" if f.get("team_scoped") else "personal"
-        pill.update(
-            f"{_severity_markup(severity)} · {_status_markup(status)} · "
-            f"[dim]{scope}[/dim]"
-        )
+        pill.update(Content.assemble(
+            _severity_markup(severity), " · ", _status_markup(status), " · ",
+            literal(scope, "dim"),
+        ))
 
         rows = [
-            ("Instance", escape(redact_demo_instance(
+            ("Instance", literal(redact_demo_instance(
                 self.app, str(f.get("instance_id") or "—"),
             ))),
-            ("Detector", escape(str(f.get("detector") or "—"))),
-            ("Rule", escape(str(f.get("rule") or "—"))),
-            ("Detected", escape(str(f.get("detected_at") or "—"))),
-            ("Last seen", escape(str(f.get("last_seen_at") or "—"))),
-            ("Finding id", f"[dim]{escape(str(f.get('id') or '—'))}[/dim]"),
+            ("Detector", literal(str(f.get("detector") or "—"))),
+            ("Rule", literal(str(f.get("rule") or "—"))),
+            ("Detected", literal(str(f.get("detected_at") or "—"))),
+            ("Last seen", literal(str(f.get("last_seen_at") or "—"))),
+            ("Finding id", literal(str(f.get("id") or "—"), "dim")),
         ]
         body.mount(self._card(
             "Details",
@@ -946,7 +947,7 @@ class FindingDetailScreen(WorkspaceScreen):
         if description:
             body.mount(self._card(
                 "Description",
-                Static(escape(redact_demo_text(self.app, description))),
+                Static(literal(redact_demo_text(self.app, description))),
             ))
 
         lines = evidence_lines(f.get("evidence"))
@@ -955,9 +956,7 @@ class FindingDetailScreen(WorkspaceScreen):
                 "Evidence",
                 *[
                     Static(
-                        "[dim]"
-                        + escape(redact_demo_text(self.app, line))
-                        + "[/dim]",
+                        literal(redact_demo_text(self.app, line), "dim"),
                         classes="finding_evidence_line",
                     )
                     for line in lines
@@ -975,23 +974,26 @@ class FindingDetailScreen(WorkspaceScreen):
             for index, rem in enumerate(remediations):
                 if not isinstance(rem, dict):
                     continue
-                label = escape(str(rem.get("label") or "(unnamed)"))
-                desc = escape(str(rem.get("description") or ""))
+                label = str(rem.get("label") or "(unnamed)")
+                desc = str(rem.get("description") or "")
                 action = str(rem.get("action") or "")
-                risk = escape(str(rem.get("risk_tier") or "unknown"))
+                risk = str(rem.get("risk_tier") or "unknown")
                 reversible = "reversible" if rem.get("reversible") else "not reversible"
                 children.append(Static(
-                    f"[bold]{label}[/bold]  "
-                    f"[dim]({risk} risk · {reversible})[/dim]",
+                    Content.assemble(
+                        literal(label, "bold"), "  ",
+                        literal(f"({risk} risk · {reversible})", "dim"),
+                    ),
                     classes="finding_remediation_label",
                 ))
                 if desc:
                     children.append(Static(
-                        f"  {desc}", classes="finding_remediation_desc",
+                        Content.assemble("  ", literal(desc)),
+                        classes="finding_remediation_desc",
                     ))
                 if action:
                     children.append(Static(
-                        f"  [dim]{escape(action)}[/dim]",
+                        Content.assemble("  ", literal(action, "dim")),
                         classes="finding_remediation_action",
                     ))
                 # "investigate" is advisory prose — there is nothing to
