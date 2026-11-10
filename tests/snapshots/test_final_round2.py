@@ -40,3 +40,20 @@ def test_the_transfer_roles_read_the_same_after_toggling_both_ways() -> None:
         assert (local.visual.plain, remote.visual.plain) == opened
 
     _on(lambda: SCPTransferScreen({"id": "web-1", "name": "web-1"}), check)
+
+
+def test_the_appearance_title_and_description_use_the_shared_header_styles() -> None:
+    from servonaut.screens.settings.shell import SettingsScreen
+
+    async def check(pilot: Any, screen: Any) -> None:
+        heading = screen.query_one("#appearance_heading")
+        title = heading.query(".panel-title").first(Static)
+        description = screen.query_one("#appearance_description", Static)
+        assert title.styles.text_style.bold
+        assert not description.styles.text_style.bold
+        assert description.styles.color != title.styles.color
+        # No row of its own above the title: it shares the row with the buttons.
+        assert tuple(title.styles.margin) == (0, 0, 0, 0)
+        assert title.region.y <= description.region.y
+
+    _on(lambda: SettingsScreen("appearance"), check)

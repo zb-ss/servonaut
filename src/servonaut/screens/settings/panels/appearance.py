@@ -335,8 +335,8 @@ class AppearancePanel(SettingsPanel):
     def form_rows(self) -> ComposeResult:
         with Horizontal(id="appearance_header", classes="-wide"):
             with Vertical(id="appearance_heading"):
-                yield Static(escape(self.TITLE), classes="panel-title")
-                yield Static(self._hint(), id="appearance_description", classes="panel-description", markup=False)
+                yield Static(escape(self.TITLE), classes="panel-title screen-title")
+                yield Static(self._hint(), id="appearance_description", classes="panel-description screen-description", markup=False)
             with Horizontal(id="appearance_actions"):
                 for button_id, (label, _short) in _ACTION_LABELS.items():
                     yield Button(
