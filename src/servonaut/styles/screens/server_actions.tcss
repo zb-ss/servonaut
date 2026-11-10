@@ -38,14 +38,6 @@
     background: $surface;
 }
 
-/* No room: the actions wrap onto further lines instead of being cut off */
-ActionRow.-wrap {
-    layout: grid;
-    grid-size: 2;
-    grid-rows: auto;
-    grid-gutter: 0 1;
-}
-
 #action_buttons.-wrap {
     grid-size: 3;
 }
