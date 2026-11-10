@@ -351,7 +351,7 @@ OptionList:focus {
    the list, no frame. */
 CommandPalette CommandList {
     border-top: blank;
-    border-bottom: hkey black;
+    border-bottom: hkey $border-blurred;
     border-left: none;
     border-right: none;
 }

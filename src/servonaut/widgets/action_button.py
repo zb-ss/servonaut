@@ -136,6 +136,11 @@ class ActionRow(Horizontal):
     then no key hints, then it wraps onto further lines (class ``-wrap``).
     A row with ``keep_hints`` never drops the hints: it wraps instead, so every
     row of a screen shows the same hint state.
+
+    ``prefer_one_line`` makes the row lose its hints rather than wrap into
+    hinted lines (a tab strip stays on one line). It only chooses between
+    those two ways of saving space, so when both options are set ``keep_hints``
+    wins: the hints stay and the row wraps.
     """
 
     def __init__(
