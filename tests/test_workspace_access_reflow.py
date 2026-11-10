@@ -29,6 +29,8 @@ from tests.test_fleet_workspace_layout import _LayoutHost
 from tests.test_login_screen import _click_ready_login
 from tests.test_workspace_pilot import _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 _VIOLATIONS: list[str] = []
 

@@ -87,6 +87,7 @@ CSS_FILES = [
     _S / "screens/findings.tcss",
     _S / "screens/memory_key_change.tcss",
     _S / "components/workspace.tcss",
+    _S / "components/screen_header.tcss",
     _S / "components/link_button.tcss",
     _S / "components/sidebar.tcss",
     _S / "components/dialogs.tcss",

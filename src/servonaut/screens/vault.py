@@ -1125,7 +1125,7 @@ class VaultScreen(WorkspaceScreen):
                 with Vertical(id="vault_content", classes="workspace-content"):
                     with Vertical(id="vault_identity_panel"):
                         with Horizontal(id="vault_identity_heading"):
-                            yield Static("Vault", id="vault_title")
+                            yield Static("Vault", id="vault_title", classes="screen-title")
                             yield Static("Checking identity", id="vault_identity_state")
                             yield ActionButton("Refresh", "r", id="vault_refresh")
                         yield Static("Loading encrypted vault metadata…", id="vault_status")

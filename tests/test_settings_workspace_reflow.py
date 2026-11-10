@@ -45,6 +45,8 @@ from tests.test_settings_credentials_presentation import _CredentialsApp
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 USERNAME = "operator-café-Ω"
 ACCOUNT_FIELDS = {

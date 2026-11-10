@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
@@ -30,7 +31,8 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
-from servonaut.utils.markup import literal, with_bold_values
+from servonaut.screens._compact_actions import sync_compact_buttons
+from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -41,6 +43,7 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -110,7 +113,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 VerticalScroll(
                     Static(
-                        "[bold $text-accent]OVH Public Cloud SSH Keys[/bold $text-accent]",
+                        "[bold $text-accent]OVH Public Cloud SSH keys[/bold $text-accent]",
                         id="ovh_ssh_keys_header",
                     ),
                     AccountPicker.for_provider(
@@ -147,7 +150,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                     ),
                     Container(
                         Static(
-                            "[bold]Add SSH Key[/bold]",
+                            "[bold]Add SSH key[/bold]",
                             classes="section_header",
                         ),
                         Label("Key name:"),
@@ -164,17 +167,11 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                     ),
                     id="ovh_ssh_keys_document",
                 ),
-                Horizontal(
-                    Button("Refresh (r)", id="btn_refresh"),
-                    Button(
-                        "+ Add Key (n)", id="btn_add_key",
-                        variant="primary",
-                    ),
-                    Button(
-                        "Delete (d)", id="btn_delete_key",
-                        variant="error", disabled=True,
-                    ),
-                    Button("Back", id="btn_back"),
+                ActionRow(
+                    ActionButton("Refresh", "r", id="btn_refresh"),
+                    ActionButton("Add key", "n", role="primary", id="btn_add_key"),
+                    ActionButton("Delete", "d", role="error", id="btn_delete_key", disabled=True),
+                    ActionButton("Back", "esc", id="btn_back"),
                     id="ovh_ssh_keys_actions",
                 ),
                 Horizontal(
@@ -190,7 +187,12 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             )
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "Fingerprint", "Public Key (first 40 chars)")
@@ -312,9 +314,9 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                 public_key[:40] + "…" if len(public_key) > 40 else public_key
             )
             table.add_row(
-                _s(str(key.get("name", ""))),
-                "Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32],
-                "Hidden" if self.app.demo_mode else truncated,
+                Text(inert_text(_s(str(key.get("name", ""))))),
+                Text(inert_text("Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32])),
+                Text(inert_text("Hidden" if self.app.demo_mode else truncated)),
                 key=str(key.get("id", "")) or str(key.get("name", "")),
             )
         n = len(self._keys)
@@ -510,7 +512,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                     "New instances can no longer reference this key",
                 ],
                 confirm_text=key_name,
-                action_label="Delete Key",
+                action_label="Delete key",
                 severity="warning",
             )
         )

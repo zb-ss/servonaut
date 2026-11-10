@@ -22,23 +22,33 @@ def _ref(item_id="ssh-1", instance_id="i-1", name="web-1", status="verified"):
             "name": name, "verify_status": status}
 
 
+_THEME = {"text-success": "#8AD4A1", "text-error": "#D17E92", "text-warning": "#FFC473"}
+
+
+def _verify_cell(refs):
+    """The verify cell the screen draws, under a fixed theme."""
+    screen = MagicMock()
+    screen.app.get_css_variables.return_value = _THEME
+    return BwVaultManagerScreen._verify_cell(screen, refs)
+
+
 class TestCells:
     def test_verify_cell_all_verified_green(self):
-        cell = BwVaultManagerScreen._verify_cell([_ref(status="verified")])
-        assert "green" in cell and "verified" in cell
+        cell = _verify_cell([_ref(status="verified")])
+        assert cell.plain == "verified" and cell.style == "#8AD4A1"
 
     def test_verify_cell_failed_red(self):
-        cell = BwVaultManagerScreen._verify_cell(
+        cell = _verify_cell(
             [_ref(status="verified"), _ref(status="auth_failed")]
         )
-        assert "red" in cell and "auth_failed" in cell
+        assert cell.plain == "auth_failed" and cell.style == "#D17E92"
 
     def test_verify_cell_none_is_dash(self):
-        assert "—" in BwVaultManagerScreen._verify_cell([])
+        assert _verify_cell([]).plain == "—"
 
     def test_verify_cell_unknown_is_unverified(self):
-        cell = BwVaultManagerScreen._verify_cell([_ref(status=None)])
-        assert "unverified" in cell
+        cell = _verify_cell([_ref(status=None)])
+        assert cell.plain == "unverified" and cell.style == "#FFC473"
 
     def test_servers_cell_counts_and_truncates(self):
         refs = [_ref(instance_id=f"i-{n}", name=f"web-{n}") for n in range(5)]

@@ -15,6 +15,8 @@ from tests.test_workspace_secrets import (
     _SecretsHost, _inert_boundaries as _inert_boundaries, _opener,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 async def _actions_settled(pilot, screen) -> None:
     """Wait until every action row is fitted: wrapped exactly when it must be, buttons inside."""

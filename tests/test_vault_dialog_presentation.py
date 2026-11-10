@@ -35,6 +35,8 @@ from tests.test_workspace_vault_reflow import (
     stable_open,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @dataclass(frozen=True)
 class _Case:

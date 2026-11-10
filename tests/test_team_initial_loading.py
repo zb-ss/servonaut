@@ -25,6 +25,8 @@ from tests.test_workspace_team import (
     _open_teams,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 LOADING = "Loading teams…"
 # Short enough for the native Toast content even in the narrow viewport.

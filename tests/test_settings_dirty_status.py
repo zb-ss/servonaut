@@ -19,6 +19,8 @@ from tests.test_server_tool_identity_contrast import (
 )
 from tests.test_settings_presentation import _Host, _ready, _tab_to
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _assert_status_contrast(app: _Host, marker: Static) -> None:
     """Measure the complete visible word against its actual composed background."""

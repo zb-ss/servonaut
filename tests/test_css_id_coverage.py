@@ -52,6 +52,27 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "aws_mgr_identity",
         "hetzner_mgr_identity",
         "ovh_mgr_identity",
+        # components/screen_header.tcss: .screen-title / .screen-description / .screen-status
+        "aws_create_title",
+        "aws_mgr_header",
+        "bw_vault_mgr_header",
+        "bw_vault_mgr_hint",
+        "ca_description",
+        "ca_title",
+        "cloudtrail_context",
+        "cloudtrail_title",
+        "cloudwatch_context",
+        "cloudwatch_title",
+        "hetzner_mgr_header",
+        "hetzner_ssh_keys_header",
+        "keys_header",
+        "keys_intro",
+        "ovh_mgr_header",
+        "s3_title",
+        "secrets_subtitle",
+        "secrets_title",
+        "team_workspace_summary",
+        "vault_title",
         # action_button.tcss: ActionButton in an ActionRow at natural width
         "ca_audit",
         "ca_break_glass_scan",
@@ -348,6 +369,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_banner_scan",      # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
         "btn_empty_scan",       # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
+        "auto_bind_all",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_apply",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_back",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_fetch_keys",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_none",       # Reason: ActionButton; styled by components/action_button.tcss
         "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_summary",     # Reason: server-actions ActionButton; styled by components/action_button.tcss

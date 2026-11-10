@@ -28,6 +28,8 @@ from tests.test_workspace_pilot import _click
 from tests import test_workspace_secrets as parent
 from tests.test_workspace_secrets import _inert_boundaries as _inert_boundaries
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 

@@ -24,17 +24,21 @@ import webbrowser
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.screens.bw_unlock_modal import BwUnlockModal
 from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.theme_text import follow_theme, themed_text
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -61,7 +65,7 @@ class BwVaultManagerScreen(WorkspaceScreen):
         Binding("escape", "back", "Back", show=True),
         Binding("f5", "refresh", "Refresh", show=True),
         Binding("r", "refresh", "Refresh", show=False),
-        Binding("o", "open_in_bw", "Open in BW", show=True),
+        Binding("o", "open_in_bw", "Open in Bitwarden", show=True),
         Binding("e", "edit_ref", "Manage ref", show=True),
         Binding("a", "import_keys", "Import keys", show=True),
     ]
@@ -93,12 +97,13 @@ class BwVaultManagerScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with ScrollableContainer(id="bw_vault_mgr_container", classes="workspace-content"):
                 with Vertical(classes="bw_vault_mgr_overview"):
-                    yield Static("Bitwarden SSH vault", id="bw_vault_mgr_header")
+                    yield Static("Bitwarden SSH vault", id="bw_vault_mgr_header", classes="screen-title")
                     yield Static(
                         "SSH-key items in your Servonaut vault folder, joined with the "
                         "servers that reference them. Local-only — your vault never leaves this "
                         "machine. [o] Open in Bitwarden · [e] Manage ref for the selected key.",
                         id="bw_vault_mgr_hint",
+                        classes="screen-description",
                     )
                 yield Static("", id="bw_vault_mgr_status")
                 with Horizontal(id="bw_vault_mgr_workspace"):
@@ -116,17 +121,26 @@ class BwVaultManagerScreen(WorkspaceScreen):
                     with Horizontal(id="bw_vault_mgr_actions"):
                         with Vertical(classes="credential_task_group"):
                             yield Static("Catalog", classes="credential_action_heading")
-                            yield Button("Refresh (F5)", id="btn_bw_vault_refresh")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Refresh", "F5", id="btn_bw_vault_refresh")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Selected key", classes="credential_action_heading")
-                            yield Button("Open in BW (o)", id="btn_bw_vault_open")
-                            yield Button("Manage ref (e)", id="btn_bw_vault_edit")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Open in Bitwarden", "o", short="Open", id="btn_bw_vault_open")
+                                yield ActionButton("Manage ref", "e", id="btn_bw_vault_edit")
                         with Vertical(classes="credential_task_group"):
                             yield Static("Add keys", classes="credential_action_heading")
-                            yield Button("Import keys (a)", id="btn_bw_vault_import")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Import keys", "a", id="btn_bw_vault_import")
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        follow_theme(self, "#bw_vault_mgr_table", self._render_table)
+        sync_compact_buttons(self)
         table = self.query_one("#bw_vault_mgr_table", DataTable)
         table.add_columns("Name", "Item ID", "Servers", "Verify")
         self._refresh()
@@ -370,17 +384,16 @@ class BwVaultManagerScreen(WorkspaceScreen):
             shown += f" +{len(names) - 3}"
         return f"{len(refs)}: {shown}"
 
-    @staticmethod
-    def _verify_cell(refs: List[dict]) -> str:
+    def _verify_cell(self, refs: List[dict]) -> Text:
         if not refs:
-            return "[dim]—[/dim]"
+            return themed_text(self.app, "—", "dim")
         statuses = [r.get("verify_status") for r in refs]
         if all(s == _VERIFIED for s in statuses):
-            return "[green]verified[/green]"
+            return themed_text(self.app, "verified", "$text-success")
         failed = next((s for s in statuses if s in _FAILED_STATUSES), None)
         if failed is not None:
-            return f"[red]{escape(str(failed))}[/red]"
-        return "[yellow]unverified[/yellow]"
+            return themed_text(self.app, str(failed), "$text-error")
+        return themed_text(self.app, "unverified", "$text-warning")
 
     # ------------------------------------------------------------------
     # Selection + actions

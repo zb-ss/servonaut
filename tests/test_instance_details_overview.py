@@ -14,6 +14,8 @@ from servonaut.widgets.fleet_values import ValueRow
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import _LayoutHost
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.parametrize("extra, identity_value, network_value", [
     ({}, "Instance ID: server-1", "Private IP: 10.0.0.1"),

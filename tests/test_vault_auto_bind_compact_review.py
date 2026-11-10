@@ -21,6 +21,8 @@ from tests.test_workspace_vault_reflow import (
     HOST_KEY, _VaultHost, inert_services as _inert_services, stable_open,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ("servonaut", "servonaut-light", "ansi-dark", "ansi-light")
 TRUST_CAPTION = "I checked these host-key fingerprints: pin them"

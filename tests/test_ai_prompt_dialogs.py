@@ -491,18 +491,21 @@ async def test_topup_catalog_focus_has_a_visible_native_border_cue(
         frame = screen.query_one(DialogFrame)
         initial_frame = frame.region
         strips = screen._compositor.render_strips()
-        focused_border = strips[catalog.region.y].crop(
+        focused_strip = strips[catalog.region.y].crop(
             catalog.region.x + 2, catalog.region.right - 2,
-        ).text
+        )
+        focused_border = focused_strip.text
         screen.query_one("#btn_topup_cancel", Button).focus()
         await pilot.pause()
         strips = screen._compositor.render_strips()
-        blurred_border = strips[catalog.region.y].crop(
+        blurred_strip = strips[catalog.region.y].crop(
             catalog.region.x + 2, catalog.region.right - 2,
-        ).text
+        )
+        blurred_border = blurred_strip.text
         assert catalog.region == initial and frame.region == initial_frame
-        assert "━" in focused_border and "─" in blurred_border
-        assert focused_border != blurred_border
+        # Both borders are rounded; the cue is the colour the focused one takes.
+        assert "─" in focused_border and "─" in blurred_border
+        assert {seg.style for seg in focused_strip} != {seg.style for seg in blurred_strip}
         assert strips[frame.region.y].crop(frame.region.x, frame.region.x + 1).text == "╭"
         catalog.focus()
         await pilot.press("enter")

@@ -38,7 +38,8 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import inert_text, with_bold_values
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
     ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
@@ -208,7 +209,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             yield ScrollableContainer(
                 Vertical(
                     Horizontal(
-                        Static("OVHcloud servers", id="ovh_mgr_header"),
+                        Static("OVHcloud servers", id="ovh_mgr_header", classes="screen-title"),
                         Static(
                             "Inventory", id="ovh_mgr_overview",
                             classes="provider-manager-overview", markup=False,
@@ -232,6 +233,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         yield Footer()
 
     def on_mount(self) -> None:
+        follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
         # Keep state and addressing visible when a cloud composite ID is long.
         for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
@@ -347,30 +349,29 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             for idx, inst in enumerate(self._instances, start=1):
                 table.add_row(
                     str(idx),
-                    display_name(inst),
-                    str(inst.get("type", "")),
-                    str(inst.get("provider_type", "—")),
+                    Text(inert_text(display_name(inst))),
+                    Text(inert_text(str(inst.get("type", "")))),
+                    Text(inert_text(str(inst.get("provider_type", "—")))),
                     self._colorize_state(str(inst.get("state", ""))),
-                    str(inst.get("public_ip", "") or "—"),
-                    str(inst.get("region", "")),
-                    str(inst.get("id", "")),
+                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
+                    Text(inert_text(str(inst.get("region", "")))),
+                    Text(inert_text(str(inst.get("id", "")))),
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()
         self._update_resource_context()
 
-    @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(self, state: str) -> Text:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return themed_text(self.app, state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return themed_text(self.app, state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding", "building"}:
-            return f"[blue]{state}[/blue]"
+            return themed_text(self.app, state, "$text-accent")
         if s == "error":
-            return f"[red]{state}[/red]"
-        return state
+            return themed_text(self.app, state, "$text-error")
+        return Text(inert_text(state))
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -683,7 +684,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                     "Billing for this instance stops immediately",
                 ],
                 confirm_text="delete",
-                action_label="Delete Instance",
+                action_label="Delete instance",
                 severity="danger",
             )
         )

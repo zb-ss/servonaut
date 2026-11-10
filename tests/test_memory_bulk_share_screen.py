@@ -24,7 +24,7 @@ from tests._bulk_share_fakes import (
     team_memory_service,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("navigation_open")]
 
 TARGETS = [
     ShareTarget("web-1", "web-1"),

@@ -25,6 +25,8 @@ from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
 from tests.test_settings_presentation import _tab_to
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ("ansi-dark", "ansi-light")
 

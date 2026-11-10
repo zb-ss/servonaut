@@ -13,6 +13,8 @@ from tests.test_basic_dialogs import BasicDialogHost, assert_exposed
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 LONG_SITE = "shop.example.com/" + "nested-path-segment/" * 40
 

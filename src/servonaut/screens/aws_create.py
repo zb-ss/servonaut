@@ -140,8 +140,9 @@ class AWSCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "[bold $text-accent]Launch EC2 Instance[/bold $text-accent]",
+                        "Launch EC2 Instance",
                         id="aws_create_title",
+                        classes="screen-title",
                     ),
                     Static(
                         "AWS EC2: choose a region before selecting regional resources.",

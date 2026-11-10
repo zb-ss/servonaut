@@ -29,6 +29,8 @@ from tests._workspace_reflow_conformance import (
 )
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 class _SetupHost(_Host):
     """The accepted native workspace host with an in-memory config."""

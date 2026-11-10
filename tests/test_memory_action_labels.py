@@ -12,6 +12,8 @@ from tests.test_workspace_memory_core import (
     _local_services_only as _local_services_only,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])

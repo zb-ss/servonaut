@@ -81,8 +81,9 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
             yield ScrollableContainer(
                 Vertical(
                     Static(
-                        f"[bold $text-accent]Firewall: {escape(str(instance_name))}[/bold $text-accent]",
+                        f"Firewall: {escape(str(instance_name))}",
                         id="firewall_title",
+                        classes="screen-title",
                     ),
                     Static(
                         "OVH edge firewall: review its state and the rules for this server's IP.",
@@ -302,7 +303,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         # The displayed row is redacted and restored in place by the app.
         name = self._instance.get("name") or self._instance.get("id") or "Unknown"
         self.query_one("#firewall_title", Static).update(
-            f"[bold $text-accent]Firewall: {escape(str(name))}[/bold $text-accent]"
+            f"Firewall: {escape(str(name))}"
         )
 
     def _update_status_widget(self) -> None:

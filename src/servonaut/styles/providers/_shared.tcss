@@ -120,13 +120,6 @@
     align: left middle;
 }
 
-#hetzner_ssh_keys_actions Button,
-#bw_vault_mgr_actions Button,
-#s3_actions Button {
-    margin: 0 1 0 0;
-    min-width: 14;
-}
-
 #hetzner_mgr_status,
 #hetzner_ssh_keys_status,
 #ovh_mgr_status,
@@ -142,8 +135,7 @@
 #hetzner_mgr_hint,
 #hetzner_ssh_keys_hint,
 #ovh_mgr_hint,
-#aws_mgr_hint,
-#bw_vault_mgr_hint {
+#aws_mgr_hint {
     padding: 0 1;
     margin: 0 0 1 0;
     color: $text-muted;
@@ -246,20 +238,6 @@ TeamManagementScreen.-content-narrow #member_actions_row Button {
 .form_actions_row Button {
     margin: 0 1 0 0;
     min-width: 12;
-}
-
-#hetzner_mgr_header,
-#hetzner_ssh_keys_header,
-#ovh_mgr_header,
-#aws_mgr_header,
-#bw_vault_mgr_header,
-#s3_title,
-#aws_create_title {
-    text-align: center;
-    padding: 1;
-    margin-bottom: 1;
-    color: $accent;
-    text-style: bold;
 }
 
 /* S3 account picker — shown only when the provider has several accounts */
@@ -365,11 +343,6 @@ TeamManagementScreen.-content-narrow #member_actions_row Button {
     height: auto;
     padding: 0 1;
     align: left middle;
-}
-
-#ovh_ssh_keys_actions Button {
-    margin: 0 1 0 0;
-    min-width: 14;
 }
 
 #ovh_ssh_keys_status {
@@ -500,7 +473,6 @@ TeamManagementScreen.-content-narrow #member_actions_row Button {
    CONFIG SYNC — modals & screens
    =================================================================== */
 
-
 /* ---- Passphrase modal ---- */
 
 PassphraseModal {
@@ -590,7 +562,7 @@ PassphraseModal Container#passphrase_container #passphrase_buttons {
     align: left middle;
 }
 
-#snapshots_actions Button {
+OVHSnapshotsScreen #snapshots_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
 }
@@ -629,18 +601,6 @@ PassphraseModal Container#passphrase_container #passphrase_buttons {
     color: $text-muted;
 }
 
-#backups_actions {
-    layout: horizontal;
-    height: auto;
-    padding: 0 1;
-    align: left middle;
-}
-
-#backups_actions Button {
-    margin: 0 1 0 0;
-    min-width: 14;
-}
-
 /* Provider action rows reflow within the available workspace column. */
 OVHDNSScreen.-content-narrow #dns_actions {
     layout: grid;
@@ -657,20 +617,8 @@ BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions {
 }
 
 /* Eleven storage actions need two rows at wide widths, four when narrow. */
-ObjectStorageScreen #s3_actions {
-    layout: grid;
-    grid-size: 6;
-    grid-rows: 3;
-    grid-gutter: 0 1;
-}
 
-ObjectStorageScreen.-content-narrow #s3_actions {
-    grid-size: 3;
-}
-
-BwVaultManagerScreen.-content-narrow #bw_vault_mgr_actions Button,
-OVHDNSScreen.-content-narrow #dns_actions Button,
-ObjectStorageScreen #s3_actions Button {
+OVHDNSScreen.-content-narrow #dns_actions Button {
     width: 1fr;
     margin: 0;
 }
@@ -708,8 +656,7 @@ OVHSetupScreen .ovh_action_row > Button {
 /* Keep resource actions inside narrow content without shrinking native buttons. */
 OVHSnapshotsScreen.-content-narrow #snapshots_actions,
 OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions,
-OVHStorageScreen.-content-narrow #storage_actions,
-SnapshotManagerScreen.-content-narrow #snapshots_actions {
+OVHStorageScreen.-content-narrow #storage_actions {
     layout: grid;
     height: auto;
     grid-rows: 3;
@@ -722,15 +669,12 @@ OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions {
     grid-size: 2;
 }
 
-OVHStorageScreen.-content-narrow #storage_actions,
-SnapshotManagerScreen.-content-narrow #snapshots_actions {
+OVHStorageScreen.-content-narrow #storage_actions {
     grid-size: 3;
 }
 
 OVHSnapshotsScreen.-content-narrow #snapshots_actions Button,
-OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_actions Button,
-OVHStorageScreen.-content-narrow #storage_actions Button,
-SnapshotManagerScreen.-content-narrow #snapshots_actions Button {
+OVHStorageScreen.-content-narrow #storage_actions Button {
     width: 1fr;
     margin: 0;
 }

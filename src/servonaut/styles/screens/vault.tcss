@@ -12,11 +12,6 @@
     overflow-y: auto;
 }
 
-#ca_title {
-    text-style: bold;
-    margin-bottom: 1;
-}
-
 #ca_status {
     margin-bottom: 1;
 }
@@ -40,21 +35,12 @@ VaultScreen #vault_records_header {
     min-height: 1;
 }
 
-/* Title and status share the row of the Refresh label, not its top border.
-   The compact (one-row) button needs no offset. */
-VaultScreen #vault_identity_heading #vault_title,
+/* The status shares the title's row, which the shared header keeps one row
+   below the top of the content. */
 VaultScreen #vault_identity_heading #vault_identity_state {
     margin-top: 1;
 }
 
-VaultScreen.-narrow #vault_identity_heading #vault_title,
-VaultScreen.-narrow #vault_identity_heading #vault_identity_state,
-VaultScreen.-content-narrow #vault_identity_heading #vault_title,
-VaultScreen.-content-narrow #vault_identity_heading #vault_identity_state {
-    margin-top: 0;
-}
-
-VaultScreen #vault_title,
 VaultScreen #vault_records_heading {
     width: auto;
     height: auto;
@@ -72,6 +58,12 @@ VaultScreen #vault_records_context {
 
 VaultScreen #vault_refresh {
     margin: 0 0 0 1;
+}
+
+/* The one-row (compact) button sits on the title's row, one below the top. */
+VaultScreen.-narrow #vault_refresh,
+VaultScreen.-content-narrow #vault_refresh {
+    margin-top: 1;
 }
 
 VaultScreen #vault_status {
@@ -272,7 +264,20 @@ VaultScreen.-identity-pending #vault_danger_group {
 VaultScreen.-identity-pending #vault_identity_panel {
     border: round $panel;
     background: transparent;
-    padding: 1 2;
+    padding: 0 2;
+}
+
+/* Inside a bordered card the border already keeps the title off the top
+   edge, so the shared title margin and the status offset are dropped. */
+VaultScreen.-identity-pending #vault_title,
+VaultScreen.-identity-error #vault_title,
+VaultScreen.-identity-pending #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-error #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-pending.-narrow #vault_refresh,
+VaultScreen.-identity-pending.-content-narrow #vault_refresh,
+VaultScreen.-identity-error.-narrow #vault_refresh,
+VaultScreen.-identity-error.-content-narrow #vault_refresh {
+    margin-top: 0;
 }
 
 VaultScreen.-identity-pending #vault_identity_state {
@@ -346,7 +351,6 @@ VaultScreen.-content-narrow #vault_inspector {
 VaultScreen.-content-narrow #vault_actions {
     margin-top: 1;
 }
-
 
 VaultScreen.-content-narrow #vault_identity_panel {
     margin-bottom: 0;
@@ -618,16 +622,6 @@ VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
     margin-top: 1;
 }
 
-#auto_bind_actions #auto_bind_apply,
-#auto_bind_actions #auto_bind_fetch_keys,
-#auto_bind_actions #auto_bind_all,
-#auto_bind_actions #auto_bind_none,
-#auto_bind_actions #auto_bind_back {
-    width: 100%;
-    min-width: 0;
-    margin: 0;
-}
-
 VaultAutoBindScreen.-content-narrow #auto_bind_content {
     padding: 0 1;
 }
@@ -895,7 +889,6 @@ VaultSecretPromptModal #vault_secret_input_field > .secret-reveal {
     min-width: 10;
 }
 
-
 /* Auto-bind keeps vault scope, server matches and host-key review distinct. */
 VaultAutoBindScreen #auto_bind_content {
     overflow-y: auto;
@@ -1011,10 +1004,4 @@ VaultAutoBindScreen.-short #auto_bind_detail_scroll {
 
 VaultAutoBindScreen.-short #auto_bind_detail {
     max-height: initial;
-}
-
-VaultAutoBindScreen.-short #auto_bind_actions Button {
-    height: 1;
-    border: none;
-    padding: 0 1;
 }

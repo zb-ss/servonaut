@@ -89,7 +89,7 @@ def test_key_table_masks_fingerprint_and_public_key(is_demo: bool) -> None:
         asyncio.run(screen._load_keys())
         assert screen._selected_key() is key
         assert ("private-project" != screen._display_project_id()) is is_demo
-    row = table.add_row.call_args.args
+    row = tuple(str(cell) for cell in table.add_row.call_args.args)
     assert (row[1] == "Hidden") is is_demo
     assert (row[2] == "Hidden") is is_demo
     assert screen._keys[0] == key

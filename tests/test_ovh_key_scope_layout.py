@@ -12,6 +12,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
 from tests.test_workspace_ovh_resources import _ResourceApp
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _painted(app, widget) -> str:
     strips = app.screen._compositor.render_strips()
@@ -47,6 +49,10 @@ async def test_focused_narrow_ovh_keys_keep_account_project_and_actions(
         table.focus()
         table.move_cursor(row=key_count - 1)
         await pilot.pause()
+        actions = screen.query_one("#ovh_ssh_keys_actions")
+        # The action row re-fits for the narrow width before the geometry is read.
+        await wait_until(lambda: 4 <= table.region.height <= 6 and table.region.bottom <= actions.region.y
+                         and all(screen.region.contains_region(b.region) for b in actions.query(Button)))
 
         assert screen.focused is table
         assert "backup" in _painted(app, picker)
@@ -82,7 +88,9 @@ async def test_overlong_ovh_scope_retains_keyboard_scroll_and_full_value(monkeyp
         scope = screen.query_one("#ovh_ssh_keys_scope", VerticalScroll)
         scope.focus()
         await pilot.pause()
-        assert scope.region.height <= 6 and scope.max_scroll_y > 0
+        # The action row re-fits its buttons for the narrow width over a few frames.
+        await wait_until(lambda: scope.region.height <= 6)
+        assert scope.max_scroll_y > 0
         assert app.focused is scope
         await pilot.press("end")
         await pilot.wait_for_scheduled_animations()

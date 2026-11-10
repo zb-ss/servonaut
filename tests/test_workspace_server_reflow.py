@@ -41,6 +41,8 @@ from tests.test_selection_copy import clipboard as clipboard
 from tests.test_workspace_reflow import _painted
 from tests.test_workspace_server_screens import _ServerWorkspaceApp, _server
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.fixture(autouse=True)
 def _isolated_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:

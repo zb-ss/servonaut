@@ -22,6 +22,8 @@ from tests.test_fleet_workspace_layout import (
     _LayoutHost, _assert_values_painted, _open_chat,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 class _Config:
     def __init__(self) -> None:

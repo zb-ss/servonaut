@@ -61,10 +61,11 @@ class SecretsListScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with Container(id="secrets_list_container", classes="workspace-content"):
                 with Vertical(classes="secrets_list_heading"):
-                    yield Static("Stored secrets", id="secrets_list_title")
+                    yield Static("Stored secrets", id="secrets_list_title", classes="screen-title")
                     yield Static(
                         "Only secret names are listed. Values are never fetched or displayed.",
                         id="secrets_list_subtitle",
+                        classes="screen-description",
                     )
                 with Vertical(id="secrets_list_records"):
                     with Horizontal(id="secrets_list_toolbar"):

@@ -19,6 +19,8 @@ from servonaut.styles import CSS_FILES
 from servonaut.widgets.busy_indicator import BusyIndicator
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 _VAULT = {"vault_id": "vault-1", "name": "Personal", "kind": "personal", "my_grant": {"version": 1}, "counts": {}}
 
 

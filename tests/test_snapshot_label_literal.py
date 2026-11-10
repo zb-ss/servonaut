@@ -17,6 +17,8 @@ from servonaut.services.redaction_service import RedactionService
 from tests._async_bounds import wait_until
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # The neutral public address exercises demo scrubbing before literal rendering.
 LABEL = "daily [red] café Ω 8.8.8.8"
@@ -149,6 +151,14 @@ async def test_snapshot_native_label_save_keeps_success_toast_literal(
         screen = await _open(app, pilot)
         table = screen.query_one("#snapshots_table", DataTable)
         await wait_until(lambda: table.row_count == 1)
+        # The action rows re-fit their buttons over a few frames; click once the
+        # first data row is under the pointer.
+        def _first_row_hit() -> bool:
+            x = table.content_region.x + 1
+            y = table.content_region.y + table.header_height
+            return app.get_widget_at(x, y)[0] is table
+
+        await wait_until(_first_row_hit)
         assert await pilot.click(table, offset=(
             table.content_region.x - table.region.x + 1,
             table.content_region.y - table.region.y + table.header_height,

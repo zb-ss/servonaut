@@ -20,6 +20,8 @@ from servonaut.screens.instance_list import FleetSearchInput, InstanceListScreen
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 # The single-letter fleet shortcuts (``/`` itself moves to the search box).
 _SHORTCUT_KEYS = {"r", "o", "s", "f", "p", "D", "k", "v", "y"}
 # The inspector's buttons show these with their keys, so the footer leaves them out.

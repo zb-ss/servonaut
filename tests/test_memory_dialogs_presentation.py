@@ -29,6 +29,8 @@ from tests._async_bounds import wait_until
 from tests.test_basic_dialogs import BasicDialogHost
 from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SIZES = [(160, 50), (100, 30)]
 # Native original consent keeps scroll focus and Enter makes no decision.

@@ -25,6 +25,8 @@ from tests.test_workspace_pilot import _click
 from tests import test_workspace_security_reflow as parent
 from tests.test_workspace_security_reflow import _fake_boundaries as _fake_boundaries
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 

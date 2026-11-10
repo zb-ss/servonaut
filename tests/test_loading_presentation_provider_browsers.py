@@ -26,6 +26,8 @@ from tests.test_workspace_provider_browsers import (
     _inert_boundaries as _inert_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 

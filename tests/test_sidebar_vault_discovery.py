@@ -15,6 +15,8 @@ from textual.widgets import Button
 
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 VAULT_NAV_IDS = ("nav_vault", "nav_ca")
 
 

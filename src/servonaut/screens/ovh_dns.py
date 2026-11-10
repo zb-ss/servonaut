@@ -109,7 +109,7 @@ class OVHDNSScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Horizontal(
                     Vertical(
-                        Static("[bold $text-accent]OVH DNS Management[/bold $text-accent]", id="dns_title"),
+                        Static("OVH DNS Management", id="dns_title", classes="screen-title"),
                         Static(
                             "Select a domain to manage its zone records; reverse DNS "
                             "is listed separately.",

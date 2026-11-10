@@ -24,6 +24,8 @@ from servonaut.services.vault.errors import VaultUserError
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 PERSONAL_VAULT = "11111111-1111-4111-8111-111111111111"
 HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 
@@ -985,7 +987,7 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
             )
         assert table.scroll_y > 0
         for button in actions.query(Button):
-            assert str(button.label) == expected_labels[button.id]
+            assert button.words == expected_labels[button.id]
             assert screen.can_view_entire(button)
             assert app.get_widget_at(*button.content_region.center)[0] is button
             assert str(button.label) in _painted(app, button)

@@ -309,6 +309,10 @@ class Sidebar(Widget):
         self.remove_class("--navigation-mode")
         self._sync_navigation_focusable()
         self.display = self._navigation_previous_display
+        # The terminal may have changed width class while the rail was open.
+        apply_workspace_state = getattr(self.screen, "apply_workspace_state", None)
+        if apply_workspace_state is not None:
+            apply_workspace_state()
         if restore_focus:
             restore = getattr(self.screen, "restore_navigation_focus", None)
             if restore is not None and restore(previous):

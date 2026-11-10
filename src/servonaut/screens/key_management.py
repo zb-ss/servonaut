@@ -51,10 +51,11 @@ class KeyManagementScreen(WorkspaceScreen):
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with ScrollableContainer(id="keys_container", classes="workspace-content"):
-                yield Static("SSH keys", id="keys_header")
+                yield Static("SSH keys", id="keys_header", classes="screen-title")
                 yield Static(
                     "Set your connection default, then add exceptions for individual servers.",
                     id="keys_intro",
+                    classes="screen-description",
                 )
                 with Horizontal(id="keys_sections"):
                     with Vertical(id="key_connection_column"):

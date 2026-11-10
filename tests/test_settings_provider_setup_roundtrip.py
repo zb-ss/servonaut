@@ -31,6 +31,8 @@ from tests.test_settings_provider_presentation import (
 from tests.test_settings_presentation import _tab_to
 from tests.test_workspace_provider_setup import IDS, SCREENS, _inert_boundaries
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 DRAFT = 'Keep this provider discussion\nSecond line café Ω'
 NEW_USERNAME = 'journey-user'

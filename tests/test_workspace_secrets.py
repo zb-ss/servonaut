@@ -33,6 +33,8 @@ from tests.test_secrets_screen import _mock_auth, _mock_guard
 from tests.test_workspace_pilot import _Host
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # One name carries markup-like brackets and non-ASCII text to prove literal copy.
 NAMES = ["db-password", "café [literal] Ω"]

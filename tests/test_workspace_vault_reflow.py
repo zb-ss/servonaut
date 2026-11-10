@@ -30,6 +30,8 @@ from tests._workspace_reflow_conformance import (
 from tests.test_workspace_pilot import _Host, _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 # Pin the existing 71-cell reveal-width contract using synthetic material.
@@ -613,3 +615,16 @@ async def test_auto_bind_count_digit_growth_repaints_without_resize(
             assert app.focused is table and table.cursor_row == 0
         assert app.vault_command_service.reads == reads
         assert not app.vault_command_service.operations and app._exception is None
+
+
+@pytest.mark.asyncio
+async def test_auto_bind_action_hints_are_bindings_and_the_key_matches_the_click() -> None:
+    from tests._hint_conformance import assert_hints_match_bindings, record_actions
+
+    case = case_for("auto")
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        calls: list[str] = []
+        record_actions(screen, calls)
+        await assert_hints_match_bindings(pilot, screen, calls)

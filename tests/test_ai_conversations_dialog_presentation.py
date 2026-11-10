@@ -23,6 +23,8 @@ from tests.test_workspace_remaining_reflow import (
     _opener,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,value,expected", [

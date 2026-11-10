@@ -31,6 +31,8 @@ from tests._workspace_reflow_conformance import (
 )
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 LOGS = ["/var/log/syslog", "/var/log/app.log"]
 

@@ -43,6 +43,8 @@ from tests.test_settings_presentation import _Host as _SettingsHost
 from tests.test_settings_presentation import _ready, _tab_to
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 DRAFT = "Keep this draft Ω [literal] café\n  Preserve trailing space  "
 SELECTION = "this draft Ω [literal] café"

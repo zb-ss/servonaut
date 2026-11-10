@@ -164,8 +164,8 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with Container(id="cloudwatch_outer", classes="workspace-content"):
                 yield Horizontal(
-                    Label("[bold]CloudWatch logs[/bold]", id="cloudwatch_title"),
-                    Static("No events loaded", id="cloudwatch_context"),
+                    Label("[bold]CloudWatch logs[/bold]", id="cloudwatch_title", classes="screen-title"),
+                    Static("No events loaded", id="cloudwatch_context", classes="screen-status"),
                     id="cloudwatch_heading",
                 )
                 yield Container(

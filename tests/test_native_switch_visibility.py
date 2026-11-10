@@ -31,6 +31,8 @@ from tests._async_bounds import wait_until
 from tests.test_navigation_dialog_contrast import PALETTES, _contrast, _paint_colours
 from tests.test_settings_presentation import _Host as _SettingsHost, _ready, _tab_to
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 THEMES = ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"]
 

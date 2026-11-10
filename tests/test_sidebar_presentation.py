@@ -30,6 +30,8 @@ from tests.test_navigation_dialog_contrast import (
 )
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 THEMES = ("servonaut", "servonaut-light", "ansi-dark", "ansi-light")
 
 

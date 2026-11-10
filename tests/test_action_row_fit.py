@@ -181,3 +181,95 @@ async def test_bordered_buttons_drop_hints_before_wrapping_into_a_second_line() 
         assert not row.has_class("-wrap")
         assert len({b.region.y for b in buttons}) == 1
         assert [b.label.plain for b in buttons] == ["Browse", "SCP", "Command", "SSH"]
+
+
+def _uniform_buttons(count: int) -> list[ActionButton]:
+    # Each button needs 14 cells (label 9, chrome 4, margin 1).
+    return [ActionButton(f"Item {chr(65 + i)}", str(i), compact=True, id=f"u{i}") for i in range(count)]
+
+
+class _UniformApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self, width: int, **row_options) -> None:
+        super().__init__()
+        self._width = width
+        self._row_options = row_options
+
+    def compose(self) -> ComposeResult:
+        host = Vertical(
+            ActionRow(*_uniform_buttons(5), **self._row_options), id="host",
+        )
+        host.styles.width = self._width
+        yield host
+
+
+def _lines(app: App) -> list[int]:
+    rows: dict[int, int] = {}
+    for button in app.query(ActionButton):
+        rows[button.region.y] = rows.get(button.region.y, 0) + 1
+    return [rows[y] for y in sorted(rows)]
+
+
+@pytest.mark.asyncio
+async def test_five_buttons_that_fit_four_across_wrap_three_and_two() -> None:
+    # 66 cells hold four 14-cell columns but not five, so an unbalanced wrap
+    # would put four on the first line and one alone on the second.
+    app = _UniformApp(66)
+    async with app.run_test(size=(100, 30)) as pilot:
+        row = app.query_one(ActionRow)
+        await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
+        await pilot.pause()
+        assert row.has_class("-wrap")
+        assert _lines(app) == [3, 2]
+
+
+@pytest.mark.asyncio
+async def test_prefer_one_line_drops_hints_instead_of_wrapping() -> None:
+    app = _UniformApp(66, prefer_one_line=True)
+    async with app.run_test(size=(100, 30)) as pilot:
+        row = app.query_one(ActionRow)
+        await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
+        await pilot.pause()
+        assert not row.has_class("-wrap")
+        assert _lines(app) == [5]
+        assert all(b.label.plain.startswith("Item") and not b.label.plain.rstrip().endswith(str(i))
+                   for i, b in enumerate(app.query(ActionButton)))
+
+
+@pytest.mark.asyncio
+async def test_keep_hints_wins_over_prefer_one_line() -> None:
+    app = _UniformApp(66, prefer_one_line=True, keep_hints=True)
+    async with app.run_test(size=(100, 30)) as pilot:
+        row = app.query_one(ActionRow)
+        await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
+        await pilot.pause()
+        assert row.has_class("-wrap")
+        assert all(b.label.plain.rstrip().endswith(str(i)) for i, b in enumerate(app.query(ActionButton)))
+
+
+class _CompactWrapApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#host { width: 40; height: auto; }"
+
+    def compose(self) -> ComposeResult:
+        labels = [("Scan all (2)", "s"), ("Stale", "f"), ("Auto: off", "a"), ("Refresh", "r"), ("Share", "S")]
+        yield Vertical(
+            ActionRow(*(ActionButton(t, k, compact=True, id=f"c{i}") for i, (t, k) in enumerate(labels))),
+            id="host",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_row_of_compact_buttons_never_folds_a_label() -> None:
+    app = _CompactWrapApp()
+    async with app.run_test(size=(80, 20)) as pilot:
+        row = app.query_one(ActionRow)
+        buttons = list(app.query(ActionButton))
+        await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in buttons))
+        await pilot.pause()
+        assert row.has_class("-wrap")
+        for button in buttons:
+            # Button pads its label by one cell on each side.
+            assert button.content_size.width >= button.label.cell_length + 2 * button.styles.line_pad, button.id
+            assert button.region.height == 1

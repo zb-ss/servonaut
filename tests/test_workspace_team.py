@@ -39,6 +39,8 @@ from tests.test_team_management_screen import _SAMPLE_TEAMS, _make_team_service
 from tests.test_workspace_pilot import _click, _Host
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 _SHARED_CSS = (
     Path(__file__).resolve().parents[1] / "src/servonaut/styles/providers/_shared.tcss"
 )

@@ -2749,6 +2749,7 @@ class ServonautApp(App):
         navigation_visible = not sidebar.display
         sidebar.exit_navigation_mode()
         self.workspace_state.navigation_visible = navigation_visible
+        self.workspace_state.navigation_choice_class = screen.navigation_width_class()
         screen.apply_workspace_state()
 
     def action_focus_navigation(self) -> None:

@@ -31,6 +31,8 @@ from tests._workspace_reflow_conformance import (
 from tests.test_consent_dialogs import fake_payload
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SERVERS = ("web-1", "db-1", "cache-1")
 

@@ -27,6 +27,8 @@ from tests.test_workspace_memory_fleet_reflow import (
     _fake_memory_boundaries as _fake_memory_boundaries,
 )
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 FAILURE = "Example read failed [literal] Ω"
 
