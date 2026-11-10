@@ -27,6 +27,8 @@ from tests._async_bounds import wait_until
 from tests.test_workspace_characterization import _ContentScreen, _WorkspaceApp, _open_chat
 from tests.test_workspace_pilot import _Host, _click
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 class _UnmigratedScreen(_ContentScreen):
     def compose(self) -> ComposeResult:

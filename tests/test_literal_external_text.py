@@ -33,6 +33,8 @@ from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.memory_prompt import MemoryPrompt
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 HOSTILE = [
     "[ @click=app.bell]x",
     "x [/",

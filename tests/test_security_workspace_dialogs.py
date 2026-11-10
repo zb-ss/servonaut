@@ -27,6 +27,8 @@ from tests.test_workspace_security_reflow import (
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,value,expected", [

@@ -34,6 +34,8 @@ from tests.test_memory_screens import _auth_with_feature, _make_drift_service
 from tests.test_selection_copy import _Clipboard
 from tests.test_selection_copy import clipboard as clipboard
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 SUMMARY = "# Local summary\n\nFacts café [literal] Ω.\n"
 _REAL_FLEET_APP = FleetMemoryScreen.__dict__["app"]

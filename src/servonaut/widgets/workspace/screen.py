@@ -89,17 +89,18 @@ class WorkspaceScreen(Screen):
         """An explicit choice made in this width class, else the automatic rule."""
         width_class = self.navigation_width_class()
         state = getattr(self.app, "workspace_state", None)
-        if state is None:
-            return width_class == "wide"
-        if state.navigation_choice_class is not None:
-            if state.navigation_choice_class == width_class:
-                return state.navigation_visible
-            # The width class changed: the old choice has run its course.
+        if state is not None and state.navigation_choice_class == width_class:
+            return state.navigation_visible
+        return width_class == "wide"
+
+    def expire_stale_navigation_choice(self) -> None:
+        """Forget an explicit choice once the terminal is in the other width class."""
+        state = getattr(self.app, "workspace_state", None)
+        if state is None or state.navigation_choice_class is None:
+            return
+        if state.navigation_choice_class != self.navigation_width_class():
             state.navigation_choice_class = None
             state.navigation_visible = True
-        elif not state.navigation_visible:
-            return False  # hidden by a preference set before any width was known
-        return width_class == "wide"
 
     def workspace_sidebar(self) -> Sidebar:
         """Set visibility before the first layout, including on a new screen."""
@@ -111,11 +112,9 @@ class WorkspaceScreen(Screen):
         sidebar = next(iter(self.query(Sidebar)), None)
         if sidebar is None:
             return
+        self.expire_stale_navigation_choice()
         if not sidebar.navigation_mode:
             sidebar.display = self.navigation_should_show()
-        if not sidebar.display and sidebar.has_focus_within:
-            sidebar.exit_navigation_mode()
-            self.set_focus(None)
         self.sync_workspace_controls()
 
     def sync_workspace_controls(self) -> None:

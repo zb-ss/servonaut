@@ -47,6 +47,8 @@ from tests.test_workspace_ovh_resources import _ResourceApp, _screen
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 MUTATIONS = {
     "storage": ("create_volume", "delete_volume", "attach_volume", "detach_volume",

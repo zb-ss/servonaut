@@ -21,6 +21,8 @@ from servonaut.screens.settings.widgets import EnvVarInput
 from servonaut.widgets.secret_input import SecretInput
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 VARIABLE = "SERVONAUT_S2A_TEST_KEY"
 RESOLVED_FIXTURE = "fabricated-resolved-value-51a2"

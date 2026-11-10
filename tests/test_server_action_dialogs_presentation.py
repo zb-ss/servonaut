@@ -30,6 +30,8 @@ from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import tab_to
 from tests.test_navigation_dialog_contrast import _assert_readable, _painted_text_styles
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SIZES = ((160, 50), (100, 30))
 THEMES = ("servonaut", "servonaut-light", "ansi-dark", "ansi-light")
 KINDS = ("scope", "own", "verify-ref", "binding")

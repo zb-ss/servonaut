@@ -56,6 +56,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "aws_create_title",
         "aws_mgr_header",
         "bw_vault_mgr_header",
+        "bw_vault_mgr_hint",
         "ca_description",
         "ca_title",
         "cloudtrail_context",

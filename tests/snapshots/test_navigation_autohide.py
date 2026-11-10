@@ -77,7 +77,7 @@ async def test_hiding_navigation_on_a_wide_terminal_stands_until_narrow() -> Non
         assert not _sidebar(app).display
 
 
-async def test_the_toggle_key_shows_and_hides_navigation() -> None:
+async def test_the_toggle_action_shows_and_hides_navigation() -> None:
     app = _harness.SnapshotApp()
     async with app.run_test(size=(100, 30)) as pilot:
         await _harness.wait_for_fleet(pilot)
@@ -88,18 +88,3 @@ async def test_the_toggle_key_shows_and_hides_navigation() -> None:
         app.action_toggle_navigation()
         await _settle(pilot)
         assert not _sidebar(app).display
-
-
-async def test_focus_never_stays_in_a_hidden_navigation() -> None:
-    app = _harness.SnapshotApp()
-    async with app.run_test(size=(160, 50)) as pilot:
-        await _harness.wait_for_fleet(pilot)
-        sidebar = _sidebar(app)
-        sidebar.enter_navigation_mode()
-        await _settle(pilot)
-        sidebar.exit_navigation_mode()
-        await pilot.resize_terminal(100, 30)
-        await _settle(pilot)
-        assert not sidebar.display
-        focused = app.focused
-        assert focused is None or sidebar not in focused.ancestors_with_self

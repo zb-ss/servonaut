@@ -25,6 +25,8 @@ from servonaut.widgets.sidebar import Sidebar
 from tests._async_bounds import wait_until
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # Explicit terminal palettes keep ANSI assertions independent of the test
 # runner's terminal and include both dark and light terminal configurations.

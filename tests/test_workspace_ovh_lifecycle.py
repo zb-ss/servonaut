@@ -31,6 +31,8 @@ from tests._workspace_reflow_conformance import (
 from tests.test_workspace_pilot import _Host, _click
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 PROJECT = "proj-1"
 # A stopped VPS (start applies) and a running Public Cloud instance (stop,

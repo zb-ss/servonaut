@@ -17,6 +17,8 @@ from servonaut.services.redaction_service import RedactionService
 from tests._async_bounds import wait_until
 from tests.test_workspace_pilot import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # The neutral public address exercises demo scrubbing before literal rendering.
 LABEL = "daily [red] café Ω 8.8.8.8"

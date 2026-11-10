@@ -27,6 +27,8 @@ from tests._workspace_reflow_conformance import assert_button_label_painted
 from tests.test_workspace_ovh_lifecycle import ROWS as OVH_ROWS, _OvhHost
 from tests.test_workspace_reflow import _painted
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _rows(*, hetzner: bool = False) -> list[dict]:
     return [

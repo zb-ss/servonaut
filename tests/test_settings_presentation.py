@@ -27,6 +27,8 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.fixture
 def manager(tmp_path: Path) -> ConfigManager:

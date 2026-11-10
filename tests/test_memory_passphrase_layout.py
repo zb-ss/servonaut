@@ -14,6 +14,8 @@ from textual.widgets import Button, Input, Static, Switch
 from tests.test_memory_screens import _EnrolApp, _StyledEnrolApp
 from servonaut.styles import CSS_FILES
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SIZES = [(60, 20), (80, 24), (100, 30), (100, 40), (120, 30), (160, 50)]
 # At 44x10, the full app styles leave 35 columns and three scroll rows.
 SMALL_SIZES = [(44, 10), (44, 12), (50, 16)]

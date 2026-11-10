@@ -25,6 +25,8 @@ from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.instance_table import InstanceTable
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @dataclass
 class _Clipboard:

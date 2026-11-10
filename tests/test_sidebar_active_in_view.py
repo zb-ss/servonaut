@@ -13,6 +13,8 @@ from textual.widgets import Button
 
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 class IPBanScreen(Screen):
     """Named like the real screen, which is how the sidebar finds its entry."""

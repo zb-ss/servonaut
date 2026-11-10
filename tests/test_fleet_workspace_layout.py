@@ -31,6 +31,8 @@ from tests.test_selection_copy import _Clipboard, _drag
 from tests.test_selection_copy import clipboard as clipboard
 from tests.test_workspace_pilot import _Host, _click, _row
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 @pytest.fixture(autouse=True)
 def _no_chat_provider(monkeypatch: pytest.MonkeyPatch) -> None:

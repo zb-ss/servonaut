@@ -181,24 +181,37 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     _home_isolation.arm(_HOME_ISOLATION, allowed)
 
 
-@pytest.fixture(autouse=True)
-def _navigation_stays_open_in_layout_tests(request):
-    """Keep the navigation open at any width, except in the screenshot tests, which use the real rule.
+class _ChoiceInEveryWidthClass(str):
+    """An explicit navigation choice that counts as made in whichever width class applies."""
 
-    Most layout tests were written for a sidebar that is always there. The
-    screenshot tests and the auto-hide tests use the real 110-column rule.
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+@pytest.fixture
+def navigation_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every workspace session with the navigation as the test's state says.
+
+    Below 110 columns the navigation hides by itself. Layout tests that set the
+    navigation (open or hidden) and expect it to stay that way at any width use
+    this (``pytestmark = pytest.mark.usefixtures("navigation_open")``): it makes
+    the explicit choice a user makes, held in every width class, instead of
+    patching the rule.
     """
-    from servonaut.widgets.workspace import WorkspaceScreen
+    from servonaut.widgets.workspace.state import WorkspaceState
 
-    if "snapshots" in str(request.node.fspath):
-        yield
-        return
-    previous = WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH
-    WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH = 0
-    try:
-        yield
-    finally:
-        WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH = previous
+    original = WorkspaceState.__init__
+
+    def init(self, *args, **kwargs) -> None:
+        original(self, *args, **kwargs)
+        self.navigation_choice_class = _ChoiceInEveryWidthClass("any")
+
+    monkeypatch.setattr(WorkspaceState, "__init__", init)
 
 
 @pytest.fixture(autouse=True)
