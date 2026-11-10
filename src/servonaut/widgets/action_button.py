@@ -92,6 +92,12 @@ class ActionButton(Button):
         if self.parent is not None:
             self.parent.refresh(layout=True)
 
+    def on_mount(self) -> None:
+        """Tell the row this button joined, so it fits with it counted."""
+        row = self.parent
+        if isinstance(row, ActionRow):
+            row.request_fit()
+
     def watch_compact(self, compact: bool) -> None:
         """Use the short words when only one row is available."""
         self._refresh_label()
@@ -132,9 +138,30 @@ class ActionRow(Horizontal):
     def __init__(self, *children: Widget, keep_hints: bool = False, **kwargs) -> None:
         super().__init__(*children, **kwargs)
         self._keep_hints = keep_hints
+        self._fit_requested = False
 
     def on_resize(self, event: Resize) -> None:
         self.fit()
+
+    def on_mount(self) -> None:
+        self.request_fit()
+
+    def request_fit(self) -> None:
+        """Fit once the pending layout is done; many requests make one fit.
+
+        The first Resize of a freshly mounted row can arrive before its
+        buttons are mounted, so the row also fits when the row or one of its
+        buttons mounts, not only when its size changes.
+        """
+        if self._fit_requested:
+            return
+        self._fit_requested = True
+        self.call_after_refresh(self._fit_requested_now)
+
+    def _fit_requested_now(self) -> None:
+        self._fit_requested = False
+        if self.is_attached:
+            self.fit()
 
     def fit(self) -> None:
         """Choose words, hints and wrapping for the width the row has now."""
