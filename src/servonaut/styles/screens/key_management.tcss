@@ -41,7 +41,8 @@ KeyManagementScreen .key-section {
     border: round $border-blurred;
     background: transparent;
 }
-KeyManagementScreen #default_key_section {
+/* Only the card being edited is lit, so no card reads as focused by default. */
+KeyManagementScreen .key-section:focus-within {
     border: round $primary;
 }
 KeyManagementScreen .key-section-title {
@@ -110,6 +111,10 @@ KeyManagementScreen .key-field Input {
 KeyManagementScreen .setting_row Button {
     margin: 0;
 }
+/* The overrides row has a label above each input: drop the button level with the inputs. */
+KeyManagementScreen #key_mapping_fields #btn_add_mapping {
+    margin: 2 0 0 0;
+}
 KeyManagementScreen.-content-narrow #keys_container {
     padding: 0 1 1 1;
 }
@@ -129,8 +134,10 @@ KeyManagementScreen.-content-narrow .setting_row Input {
     width: 100%;
     margin: 0 0 1 0;
 }
-KeyManagementScreen.-content-narrow .setting_row Button {
+KeyManagementScreen.-content-narrow .setting_row Button,
+KeyManagementScreen.-content-narrow #key_mapping_fields #btn_add_mapping {
     width: 100%;
+    margin: 0;
 }
 KeyManagementScreen.-content-narrow .key-field {
     width: 100%;
