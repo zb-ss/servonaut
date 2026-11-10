@@ -55,7 +55,7 @@ Button.link-button:ansi:focus {
     border: none;
     background: $block-cursor-background;
     color: $block-cursor-foreground;
-    text-style: none;
+    text-style: bold;
 }
 
 Button.link-button:ansi:disabled:hover {

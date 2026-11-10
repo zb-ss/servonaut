@@ -100,10 +100,11 @@ class _LinkApp(App):
         yield Button("Plain", id="spacer_button")
         yield LinkButton("Refresh (r)", id="link_idle")
         yield LinkButton("Copy row (y)", id="link_disabled", disabled=True)
+        yield LinkButton("Update to v1.2.3", id="link_with_classes", classes="extra")
         yield WorkspaceControls("Fleet")
 
 
-LINK_IDS = ("#link_idle", "#link_disabled", "#workspace_navigation", "#workspace_chat")
+LINK_IDS = ("#link_idle", "#link_disabled", "#link_with_classes", "#workspace_navigation", "#workspace_chat")
 
 
 @pytest.mark.asyncio

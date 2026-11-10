@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual.content import Content
 from textual.widgets import Button
 
@@ -15,7 +17,10 @@ class LinkButton(Button):
     and is keyed on the ``link-button`` class.
     """
 
-    DEFAULT_CLASSES = "link-button"
+    def __init__(self, *args: Any, classes: str | None = None, **kwargs: Any) -> None:
+        # Textual drops DEFAULT_CLASSES when a caller passes classes, so the
+        # link class is added here to stay on every instance.
+        super().__init__(*args, classes=f"link-button {classes or ''}".strip(), **kwargs)
 
     def render(self) -> Content:
         return Content.styled(self.label.plain, "underline")
