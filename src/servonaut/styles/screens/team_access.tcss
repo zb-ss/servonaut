@@ -238,10 +238,9 @@ CaScreen #ca_actions {
     height: auto;
 }
 
-CaScreen #ca_content #ca_actions Button {
+CaScreen #ca_actions ActionRow {
     width: 100%;
-    min-width: 0;
-    margin: 0;
+    height: auto;
 }
 
 CaScreen.-content-narrow #ca_workspace {

@@ -1133,7 +1133,7 @@ class VaultScreen(WorkspaceScreen):
                         with Horizontal(id="vault_busy_row"):
                             yield BusyIndicator(id="vault_busy")
                             yield ActionButton("Stop waiting", id="vault_cancel_wait", role="error", disabled=True)
-                    with ActionRow(id="vault_views"):
+                    with ActionRow(id="vault_views", prefer_one_line=True):
                         for button_id, text, key, short in _VIEW_TABS:
                             yield ActionButton(text, key, short=short, id=button_id, classes="vault_view")
                     with Horizontal(id="vault_workspace"):

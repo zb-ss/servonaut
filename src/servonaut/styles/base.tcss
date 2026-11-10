@@ -65,7 +65,7 @@ Switch:ansi.-on:hover .switch--slider {
 
 /* A visible native frame keeps the slider's left/right position readable. */
 Switch:ansi:enabled:blur {
-    border: tall $foreground;
+    border: round $foreground;
 }
 
 /* Global default: every ModalScreen centres its dialog. Individual modals
@@ -201,6 +201,15 @@ Button.-error:focus {
     text-style: bold underline;
 }
 
+/* A compact button (a chip, a toolbar action) has no frame at all. The hover
+   and focus rules above out-rank any class selector that sets `border: none`
+   (a pseudo-class counts as a class), so without this the frame appears the
+   moment the pointer or focus arrives and the button grows by two rows. */
+Button.-textual-compact {
+    height: 1;
+    border: none !important;
+}
+
 #btn_back {
     background: transparent;
     color: $text-muted;
@@ -281,6 +290,86 @@ Input.-invalid {
     border: round $error;
 }
 
+/* A Select draws the same rounded frame as every other control: its closed
+   box, its focused box and the open option list. Textual's own rules use a
+   half-block border, whose corners stand out next to the rounded ones. The
+   fill stays transparent so nothing square shows outside the curve. */
+SelectCurrent {
+    border: round $primary-background;
+    background: transparent;
+}
+
+Select:focus > SelectCurrent {
+    border: round $accent;
+    background: transparent;
+    background-tint: transparent;
+}
+
+Select > SelectOverlay {
+    border: round $primary-background;
+    background: $surface;
+}
+
+Select > SelectOverlay:focus {
+    border: round $accent;
+    background-tint: transparent;
+}
+
+Select.-textual-compact > SelectCurrent {
+    border: none;
+}
+
+SelectCurrent:ansi {
+    border: round $primary-background;
+    background: transparent;
+}
+
+Select:ansi:focus > SelectCurrent {
+    border: round $border;
+}
+
+/* The other framed controls follow the same rounded frame, in the Input's
+   idle colour: Textual draws them with half-block borders, which would sit
+   oddly beside the Input. */
+TextArea,
+Checkbox,
+RadioSet,
+Switch,
+OptionList {
+    border: round $primary-background;
+}
+
+TextArea:focus,
+Checkbox:focus,
+RadioSet:focus,
+Switch:focus,
+OptionList:focus {
+    border: round $accent;
+}
+
+/* The command palette's result list keeps Textual's own look: a rule under
+   the list, no frame. */
+CommandPalette CommandList {
+    border-top: blank;
+    border-bottom: hkey black;
+    border-left: none;
+    border-right: none;
+}
+
+CommandPalette CommandList:focus {
+    border: blank;
+}
+
+CommandPalette CommandList.--populating {
+    border-bottom: none;
+}
+
+Checkbox,
+RadioSet,
+Switch {
+    background: transparent;
+}
+
 /* Keep the selected label readable on the theme's native cursor fill. */
 SelectOverlay:focus > .option-list--option-highlighted {
     color: auto 100%;
@@ -301,7 +390,7 @@ CopyModeScreen #copy-mode-text:ansi:enabled:blur,
 TextEditorModal #text-editor-area:ansi:enabled:blur,
 CustomServersScreen #input_extra_ssh_options:ansi:enabled:blur,
 BugReportScreen #description:ansi:enabled:blur {
-    border: tall $foreground;
+    border: round $foreground;
 }
 
 /* ===================================================================

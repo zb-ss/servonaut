@@ -142,24 +142,3 @@ InstanceListScreen.-chat-open #fleet_inspector {
     text-style: bold;
 }
 
-#fleet_copy_row {
-    width: 16;
-    min-width: 0;
-    height: 1;
-    border: none;
-    margin: 0;
-    padding: 0 1;
-    background: $boost;
-    color: $text;
-    text-style: underline;
-}
-
-#fleet_copy_row:hover {
-    background: $panel-lighten-1;
-    color: $text-accent;
-}
-
-#fleet_copy_row:focus {
-    background: $panel-lighten-2;
-    color: $text;
-}

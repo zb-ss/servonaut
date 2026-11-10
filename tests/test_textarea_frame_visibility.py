@@ -129,7 +129,7 @@ async def test_enabled_blurred_native_editor_extent(
             service_calls = [list(mock.mock_calls) for mock in
                              (services.analysis, services.reports, services.servers)]
             rows.append(_sample(app, editor, palette, 'focused', text))
-            assert rows[-1]['border_kinds'] == ['tall'] * 4
+            assert rows[-1]['border_kinds'] == ['round'] * 4
             if editor.read_only:
                 await pilot.press('x')
                 await pilot.pause()
