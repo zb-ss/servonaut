@@ -329,3 +329,58 @@ def test_the_search_box_reads_the_boards_words(size: str) -> None:
             assert label.region.bottom == screen.query_one("#search_input").region.y
 
     _run(scenario, size)
+
+
+# --- copy follow-ups -------------------------------------------------------
+
+
+def test_a_drag_that_ends_outside_the_value_returns_the_focus() -> None:
+    from textual.widgets import Input
+
+    async def scenario(pilot: Any) -> None:
+        screen = _screen(pilot)
+        await _harness.select_fleet_row(pilot, "mail-1")
+        await pilot.press("slash")
+        search = screen.query_one("#search_input", Input)
+        assert pilot.app.focused is search
+        from servonaut.widgets.fleet_values import ValueRow
+
+        row = screen.query_one("#fleet_values").query_one("#fleet_value_list_name", ValueRow)
+        table = screen.query_one(InstanceTable)
+        assert await pilot.mouse_down(row.value_widget, offset=(1, 0))
+        assert isinstance(pilot.app.focused, ValueRow)
+        await pilot.hover(table, offset=(5, 3))
+        assert await pilot.mouse_up(table, offset=(5, 3))
+        await pilot.pause()
+        assert pilot.app.focused is search
+
+    _run(scenario)
+
+
+@pytest.mark.parametrize("size", list(_harness.SIZES))
+def test_y_copies_exactly_the_values_the_inspector_lists(size: str) -> None:
+    from servonaut.utils import platform_utils
+    from servonaut.widgets.fleet_values import FleetValueLine, FleetValues, ValueRow
+
+    async def scenario(pilot: Any) -> None:
+        copied: list = []
+        previous = platform_utils.clipboard_writer()
+        platform_utils.set_clipboard_writer(lambda text: copied.append(text) or True)
+        try:
+            screen = _screen(pilot)
+            row = dict(_harness.AWS_ROWS[0])
+            row.update(username="deploy", port=2200, group="edge", login_user="team-user")
+            screen._instances = [row]
+            screen._update_table()
+            screen._update_detail_panel()
+            await pilot.pause()
+            host = FleetValueLine if size == "100x30" else FleetValues
+            shown = [r.value for r in screen.query(host).first().query(ValueRow) if r.display]
+            assert {"deploy", "2200", "edge", "team-user"} <= set(shown)
+            await pilot.press("y")
+            await pilot.pause()
+        finally:
+            platform_utils.set_clipboard_writer(previous)
+        assert copied == ["  ".join(shown)]
+
+    _run(scenario, size)

@@ -24,7 +24,7 @@ from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
 from servonaut.widgets.action_button import ActionButton, ActionRole, action_label
 from servonaut.widgets.fleet_skeleton import FleetSkeleton
-from servonaut.widgets.fleet_values import FleetValueLine, FleetValues
+from servonaut.widgets.fleet_values import FleetValueLine, FleetValues, ValueRow, instance_values
 from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
@@ -226,6 +226,14 @@ class InstanceListScreen(WorkspaceScreen):
         """Re-fit the footer to the new width."""
         self.refresh_bindings()
         self.call_after_refresh(self._sync_roomy)
+
+    def on_mouse_up(self) -> None:
+        """A drag that began in a value may end anywhere: the value hands the focus back."""
+        self.app.call_later(self._values_give_focus_back)
+
+    def _values_give_focus_back(self) -> None:
+        for row in self.query(ValueRow):
+            row.give_focus_back()
 
     def _set_layout_class(self, name: str, enabled: bool) -> None:
         super()._set_layout_class(name, enabled)
@@ -1898,18 +1906,8 @@ class InstanceListScreen(WorkspaceScreen):
             self.app.notify("No instance selected", severity="warning")
             return
 
-        fields = [
-            ("Name", display_name(instance)),
-            ("ID", instance.get('id', '')),
-            ("Type", instance.get('type', '')),
-            ("State", instance.get('state', '')),
-            ("Public IP", instance.get('public_ip', '')),
-            ("Private IP", instance.get('private_ip', '')),
-            ("Region", instance.get('region', '')),
-            ("Provider", instance.get('provider', '')),
-            ("Key", instance.get('key_name', '')),
-        ]
-        text = "  ".join(f"{v}" for _, v in fields if v)
+        # The same values, in the same order, as the inspector lists them.
+        text = "  ".join(instance_values(instance).values())
 
         name = instance.get('name') or instance.get('id', '')
         outcome = copy_text(self.app, text)
