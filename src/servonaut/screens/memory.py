@@ -631,8 +631,13 @@ class MemoryScreen(WorkspaceScreen):
     # Mount
     # ------------------------------------------------------------------
 
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        self.call_after_refresh(self._render_modules)
+
     def on_mount(self) -> None:
         """Set up DataTable columns and populate data on mount."""
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
         table = self.query_one("#memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Module", key="module")

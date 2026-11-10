@@ -8,10 +8,11 @@ verbatim) in a theme colour resolved at the time the row is added.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from rich.text import Text
 from textual.color import Color, ColorParseError
+from textual.widgets import DataTable
 
 from servonaut.utils.markup import inert_text
 
@@ -36,8 +37,29 @@ def themed_cell(app: Any, value: str, style: str = "") -> Text:
 
 
 def _colour(app: Any, token: str) -> str:
+    """The Rich colour for a theme token, or "" when the theme gives none.
+
+    The terminal-colour themes give names such as ``ansi_red``, which Rich
+    spells ``red`` (``ansi_bright_red`` -> ``bright_red``); passing the
+    Textual spelling would make Rich drop the whole style.
+    """
     try:
         value = app.get_css_variables()[token]
-        return Color.parse(value).hex if isinstance(value, str) else ""
+        if not isinstance(value, str):
+            return ""
+        colour = Color.parse(value).hex
     except (KeyError, ColorParseError, AttributeError):
         return ""
+    return colour.removeprefix("ansi_")
+
+
+def rebuild_keeping_cursor(table: DataTable, rebuild: Callable[[], None]) -> None:
+    """Run *rebuild* (which refills *table*) and put the cursor back on its row.
+
+    Used when cells carry theme colours: they are fixed when a row is added, so
+    a table rebuilds its rows when the app theme changes.
+    """
+    row = table.cursor_row
+    rebuild()
+    if table.row_count:
+        table.move_cursor(row=min(row, table.row_count - 1), animate=False)

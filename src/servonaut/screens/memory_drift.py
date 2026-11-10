@@ -21,7 +21,7 @@ from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.markup import literal
-from servonaut.utils.table_text import themed_cell
+from servonaut.utils.table_text import rebuild_keeping_cursor, themed_cell
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -269,7 +269,16 @@ class MemoryDriftScreen(WorkspaceScreen):
     # Mount
     # ------------------------------------------------------------------
 
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        self.call_after_refresh(
+            rebuild_keeping_cursor,
+            self.query_one("#drift-table", DataTable),
+            self._render_table,
+        )
+
     def on_mount(self) -> None:
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
         auth = getattr(self.app, "auth_service", None)
         if auth and not auth.has_feature("memory_drift"):
             from servonaut.widgets.upsell_modal import UpsellModal

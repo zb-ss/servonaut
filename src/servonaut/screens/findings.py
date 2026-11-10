@@ -52,7 +52,7 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.utils.markup import literal
-from servonaut.utils.table_text import themed_cell
+from servonaut.utils.table_text import rebuild_keeping_cursor, themed_cell
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -273,7 +273,17 @@ class FindingsScreen(WorkspaceScreen):
                     )
         yield Footer()
 
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        if self._rows:
+            self.call_after_refresh(
+                rebuild_keeping_cursor,
+                self.query_one("#findings_table", DataTable),
+                self._populate_table,
+            )
+
     def on_mount(self) -> None:
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
         self.query_one("#findings_table_card").border_title = "Findings inbox"
         table = self.query_one("#findings_table", DataTable)
         table.cursor_type = "row"
