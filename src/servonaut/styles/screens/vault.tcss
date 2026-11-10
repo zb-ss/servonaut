@@ -40,6 +40,20 @@ VaultScreen #vault_records_header {
     min-height: 1;
 }
 
+/* Title and status share the row of the Refresh label, not its top border.
+   The compact (one-row) button needs no offset. */
+VaultScreen #vault_identity_heading #vault_title,
+VaultScreen #vault_identity_heading #vault_identity_state {
+    margin-top: 1;
+}
+
+VaultScreen.-narrow #vault_identity_heading #vault_title,
+VaultScreen.-narrow #vault_identity_heading #vault_identity_state,
+VaultScreen.-content-narrow #vault_identity_heading #vault_title,
+VaultScreen.-content-narrow #vault_identity_heading #vault_identity_state {
+    margin-top: 0;
+}
+
 VaultScreen #vault_title,
 VaultScreen #vault_records_heading {
     width: auto;
