@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 from textual.color import Color
-from textual.widgets import Button
+from textual.widgets import Button, DataTable
 
 from servonaut.styles import CSS_FILES
 from servonaut.styles.themes import SERVONAUT_THEMES
@@ -71,3 +71,66 @@ async def test_every_button_role_shows_focus_and_hover(button_id: str) -> None:
         await pilot.hover(button)
         await pilot.pause()
         assert (_edge(button), button.styles.text_style) != idle
+
+
+class _TableApp(_ThemedApp):
+    def compose(self) -> ComposeResult:
+        table = DataTable(id="table", cursor_type="row")
+        table.add_columns("Name", "State")
+        for row in range(4):
+            table.add_row(f"web-{row}", "running")
+        yield table
+
+
+def _luminance(colour) -> float:
+    def linear(value: int) -> float:
+        channel = value / 255
+        return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(colour.red) + 0.7152 * linear(colour.green) + 0.0722 * linear(colour.blue)
+
+
+def _contrast(style) -> float:
+    lighter, darker = sorted((_luminance(style.color.get_truecolor()), _luminance(style.bgcolor.get_truecolor())), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light"])
+@pytest.mark.parametrize("focused", [True, False])
+async def test_cursor_row_is_a_muted_fill_with_readable_normal_text(theme: str, focused: bool) -> None:
+    app = _TableApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 20)) as pilot:
+        table = app.query_one(DataTable)
+        table.focus() if focused else app.set_focus(None)
+        await pilot.pause()
+        style = table.get_component_rich_style("datatable--cursor")
+        assert not style.reverse
+        assert _contrast(style) >= 4.5
+        surface = app.theme_variables["surface"]
+        assert style.bgcolor.get_truecolor().hex != Color.parse(surface).hex
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+async def test_terminal_themes_keep_the_reversed_cursor_row(theme: str) -> None:
+    app = _TableApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 20)) as pilot:
+        table = app.query_one(DataTable)
+        table.focus()
+        await pilot.pause()
+        assert table.get_component_rich_style("datatable--cursor").reverse
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light"])
+async def test_table_header_text_is_readable_on_its_fill(theme: str) -> None:
+    app = _TableApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 20)) as pilot:
+        await pilot.pause()
+        style = app.query_one(DataTable).get_component_rich_style("datatable--header")
+        assert _contrast(style) >= 4.5, (theme, style)
+        assert style.color.get_truecolor().hex.lower() == Color.parse(app.theme_variables["background"]).hex.lower()
