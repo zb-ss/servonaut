@@ -173,6 +173,14 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Only displays instance counts, cache age, filter state, "
                    "and the DEMO badge constant — no user-origin streaming data."),
 
+    # fleet_values.py — the selected server's values come from the fleet
+    # table's own rows, which are already redacted in demo mode; the same
+    # strings are what gets copied.
+    AllowlistEntry("widgets/fleet_values.py", "_paint", "update",
+                   "Draws values taken from the fleet table's selected row, which "
+                   "holds the redacted stand-ins in demo mode; fixed labels and "
+                   "the copy confirmation are constants."),
+
     # safe_header.py — _refresh_title renders the app and screen titles,
     # which come from code-controlled TITLE / SUB_TITLE constants; it only
     # replaces the refresh Textual's own Header performs.

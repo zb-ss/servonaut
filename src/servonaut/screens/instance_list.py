@@ -135,7 +135,9 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Check that the selected server's SSH key works"),
         Binding("y", "copy_row", "Copy", show=True,
                 tooltip="Copy the selected server's details"),
-        Binding("Y", "copy_value", "Copy value", show=True,
+        # Not in the footer (it is full at common widths); the help screen
+        # lists it.
+        Binding("Y", "copy_value", "Copy value", show=False,
                 tooltip="Pick one value of the selected server to copy"),
     ]
 
@@ -161,7 +163,6 @@ class InstanceListScreen(WorkspaceScreen):
         "refresh",
         "ai_analysis",
         "copy_row",
-        "copy_value",
         "verify_ssh",
         "manage_ssh_ref",
         "fleet_db_scan",
