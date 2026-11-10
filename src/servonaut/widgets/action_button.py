@@ -15,6 +15,7 @@ from typing import Literal
 
 from textual.containers import Horizontal
 from textual.content import Content, ContentText
+from textual.css.scalar import Scalar
 from textual.events import Resize
 from textual.widget import Widget
 from textual.widgets import Button
@@ -137,9 +138,12 @@ class ActionRow(Horizontal):
     row of a screen shows the same hint state.
     """
 
-    def __init__(self, *children: Widget, keep_hints: bool = False, **kwargs) -> None:
+    def __init__(
+        self, *children: Widget, keep_hints: bool = False, prefer_one_line: bool = False, **kwargs,
+    ) -> None:
         super().__init__(*children, **kwargs)
         self._keep_hints = keep_hints
+        self._prefer_one_line = prefer_one_line
         self._fit_requested = False
 
     def on_resize(self, event: Resize) -> None:
@@ -193,20 +197,45 @@ class ActionRow(Horizontal):
             if sum(b.natural_width(short=short, hint=True) for b in buttons) <= width:
                 self._apply(buttons, short=short, hint=True, wrap=False)
                 return
+        one_line_without_hints = (
+            not self._keep_hints
+            and sum(b.natural_width(short=True, hint=False) for b in buttons) <= width
+        )
+        # A wrapped line of bordered buttons costs three rows, so for those
+        # (and for a row that asks for one line) losing the hints is cheaper.
+        bordered = any(not b.compact for b in buttons)
+        if one_line_without_hints and (bordered or self._prefer_one_line):
+            self._apply(buttons, short=True, hint=False, wrap=False)
+            return
         columns = self._column_count(buttons, hint=True, width=width)
         if -(-len(buttons) // columns) <= _MAX_HINTED_LINES or len(buttons) == 1:
             self._apply(buttons, short=True, hint=True, wrap=True)
-        elif not self._keep_hints and sum(b.natural_width(short=True, hint=False) for b in buttons) <= width:
+        elif one_line_without_hints:
             self._apply(buttons, short=True, hint=False, wrap=False)
         else:
             self._apply(buttons, short=True, hint=self._keep_hints, wrap=True)
 
     @staticmethod
-    def _column_count(buttons: list[ActionButton], *, hint: bool, width: int) -> int:
-        """Equal columns for a wrapped row, each wide enough for the widest button."""
-        widest = max(b.natural_width(short=True, hint=hint) for b in buttons)
-        columns = (width + _WRAP_GUTTER) // (widest + _WRAP_GUTTER)
-        return max(1, min(len(buttons), columns))
+    def _column_widths(buttons: list[ActionButton], columns: int, *, hint: bool) -> list[int]:
+        """Width each column needs when the buttons fill it row by row."""
+        natural = [b.natural_width(short=True, hint=hint) for b in buttons]
+        return [max(natural[start::columns]) for start in range(columns)]
+
+    @classmethod
+    def _column_count(cls, buttons: list[ActionButton], *, hint: bool, width: int) -> int:
+        """Most balanced column count whose columns, sized by content, fit *width*.
+
+        Starts from as many columns as could fit; the lines that needs are then
+        shared out evenly (five buttons on two lines are 3 + 2, not 4 + 1).
+        """
+        count = len(buttons)
+        for columns in range(count, 1, -1):
+            lines = -(-count // columns)
+            balanced = -(-count // lines)
+            widths = cls._column_widths(buttons, balanced, hint=hint)
+            if sum(widths) + (balanced - 1) * _WRAP_GUTTER <= width + _MARGIN:
+                return balanced
+        return 1
 
     def wrapped_columns(self, buttons: list[ActionButton], *, hint: bool) -> int:
         """Columns a wrapped row would have at the width it may use now."""
@@ -223,8 +252,15 @@ class ActionRow(Horizontal):
         # out-rank the class rule, leaving a "wrapped" row on one line.
         self.styles.layout = "grid" if wrap else None
         # Columns follow the labels as they are now shown, so none is squeezed.
-        self.styles.grid_size_columns = (
-            self._column_count(buttons, hint=hint, width=width) if wrap else None
+        columns = self._column_count(buttons, hint=hint, width=width) if wrap else None
+        self.styles.grid_size_columns = columns
+        # Each column is as wide as its own widest button, so the lines align
+        # on one grid without every column taking the widest label's width.
+        # A single column takes the width there is, so a label too long for
+        # the row is squeezed rather than pushed past the edge.
+        track = "auto" if columns and columns > 1 else "1fr"
+        self.styles.grid_columns = (
+            tuple(Scalar.parse(track) for _ in range(columns)) if columns else None
         )
         # Widths are measured from the labels, which changed during a layout
         # pass: ask for another pass once this one is done.

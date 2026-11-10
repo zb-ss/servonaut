@@ -101,7 +101,7 @@ class _RowHost(App[None]):
 @pytest.mark.parametrize("width,labels,wrapped", [
     (80, ["Use vault key  u", "Verify SSH  v", "Scan results  5"], False),
     (56, ["Vault key  u", "Verify SSH  v", "Scan  5"], False),
-    (46, ["Vault key  u", "Verify SSH  v", "Scan  5"], True),
+    (46, ["Vault key", "Verify SSH", "Scan"], False),
     (30, ["Vault key", "Verify SSH", "Scan"], True),
 ])
 async def test_row_saves_space_in_order_and_never_clips(width, labels, wrapped) -> None:
