@@ -346,3 +346,21 @@ async def test_key_hints_are_painted_in_the_muted_text_colour(theme: str) -> Non
         assert _hex_of(app.query_one("#action"), "r") == muted
         assert _hex_of(app.query_one("#link"), "y") == muted
         assert _hex_of(app.query_one("#action"), "Refresh") != muted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+async def test_key_hints_are_dimmed_in_the_terminal_colour_themes(theme: str) -> None:
+    app = _HintColourApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 10)) as pilot:
+        app.set_focus(None)
+        await pilot.pause()
+        for selector, hint, words in (("#action", "r", "Refresh"), ("#link", "y", "Copy row")):
+            widget = app.query_one(selector)
+            styles = {}
+            for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+                for segment in strip:
+                    if segment.text.strip() in (hint, words) and segment.style is not None:
+                        styles[segment.text.strip()] = segment.style
+            assert styles[hint].dim and not styles[words].dim, selector
