@@ -182,6 +182,26 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _navigation_stays_open_in_layout_tests(request):
+    """Keep the navigation open at any width, except in the screenshot tests, which use the real rule.
+
+    Most layout tests were written for a sidebar that is always there. The
+    screenshot tests and the auto-hide tests use the real 110-column rule.
+    """
+    from servonaut.widgets.workspace import WorkspaceScreen
+
+    if "snapshots" in str(request.node.fspath):
+        yield
+        return
+    previous = WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH
+    WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH = 0
+    try:
+        yield
+    finally:
+        WorkspaceScreen.NAVIGATION_AUTO_HIDE_WIDTH = previous
+
+
+@pytest.fixture(autouse=True)
 def _refuse_real_home_writes():
     """Fail the test that tried to write under the real home directory."""
     mark = _home_isolation.violation_count()

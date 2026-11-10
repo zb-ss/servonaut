@@ -89,11 +89,16 @@ class WorkspaceScreen(Screen):
         """An explicit choice made in this width class, else the automatic rule."""
         width_class = self.navigation_width_class()
         state = getattr(self.app, "workspace_state", None)
-        if state is not None and state.navigation_choice_class is not None:
+        if state is None:
+            return width_class == "wide"
+        if state.navigation_choice_class is not None:
             if state.navigation_choice_class == width_class:
                 return state.navigation_visible
             # The width class changed: the old choice has run its course.
             state.navigation_choice_class = None
+            state.navigation_visible = True
+        elif not state.navigation_visible:
+            return False  # hidden by a preference set before any width was known
         return width_class == "wide"
 
     def workspace_sidebar(self) -> Sidebar:
