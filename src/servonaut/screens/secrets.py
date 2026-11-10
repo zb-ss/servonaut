@@ -70,11 +70,17 @@ class SecretsScreen(WorkspaceScreen):
     # Keep each selectable action description readable beside its native key.
     CONTENT_NARROW_WIDTH = 96
 
-    # Compact words for a row that is too narrow for the full ones.
+    # Compact words for a row that is too narrow for the full ones, by label.
     _ACTION_SHORT = {
-        "g": "Set up Bitwarden", "v": "DB coverage", "r": "Refresh",
-        "l": "List secrets", "o": "Open settings", "i": "Install bws",
-        "c": "Clear cache",
+        "Guided Bitwarden setup": "Set up Bitwarden",
+        "Set up Bitwarden": "Set up Bitwarden",
+        "DB-vault coverage": "DB coverage",
+        "Refresh from server": "Refresh",
+        "List stored secrets": "List secrets",
+        "Open team settings": "Open settings",
+        "Install bws": "Install bws",
+        "Clear cached config": "Clear cache",
+        "Upgrade for team secrets": "Upgrade",
     }
     _ACTION_NAMES = {
         "r": "refresh", "l": "list_secrets", "c": "clear_cache",
@@ -179,7 +185,7 @@ class SecretsScreen(WorkspaceScreen):
             *[
                 ActionButton(
                     label, key, role=self._action_role(index, key),
-                    short=self._ACTION_SHORT.get(key), id=f"secrets_action_{key}",
+                    short=self._ACTION_SHORT.get(label), id=f"secrets_action_{key}",
                     classes="secrets_action",
                 )
                 for index, (key, label) in enumerate(items)
