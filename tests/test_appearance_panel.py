@@ -7,7 +7,9 @@ from typing import Callable
 
 import pytest
 from textual import events
+from textual.color import Color
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
 from servonaut.app import ServonautApp
@@ -16,6 +18,7 @@ from servonaut.config.schema import AppConfig
 from servonaut.screens.settings.panels.appearance import (
     AppearancePanel,
     EditFileButton,
+    SwatchStrip,
     ThemeCard,
     ThemeErrorCard,
 )
@@ -108,7 +111,7 @@ async def test_cards_show_built_in_and_user_themes_with_the_active_marker(
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _ready(app, pilot)
         names = [card.theme_name for card in panel.query(ThemeCard)]
-        assert names[:3] == ["servonaut", "servonaut-light", "ocean"]
+        assert names[:3] == ["servonaut", "ocean", "servonaut-light"]
         assert "nord" in names
         assert _active(panel) == ["servonaut"]
         assert "✓ active" in _card_text(_card(panel, "servonaut"))
@@ -369,7 +372,8 @@ async def test_reload_picks_up_new_files_and_fixed_ones(manager: ConfigManager, 
         (folder / "river.toml").write_text(OCEAN, encoding="utf-8")
         await pilot.click("#appearance_reload")
         await _until(lambda: not panel.query(ThemeErrorCard) and any(c.theme_name == "ocean" for c in panel.query(ThemeCard)))
-        assert any(card.theme_name == "river" for card in panel.query(ThemeCard))
+        await _until(lambda: any(card.theme_name == "river" for card in panel.query(ThemeCard)))
+        await app.workers.wait_for_complete()  # the reload ends before the screen is torn down
 
 
 @pytest.mark.asyncio
@@ -567,18 +571,237 @@ async def test_a_card_can_be_reached_with_tab_too(manager: ConfigManager) -> Non
         assert {"servonaut", "servonaut-light"} <= reached
 
 
+BROKEN = 'primary = "#5EB1FF"\naccent = "#ff88"\n'
+
+
+def _visible(panel: AppearancePanel, widget: Widget) -> bool:
+    """Whether *widget* is laid out inside the scrolling cards area without scrolling."""
+    area = panel.query_one("#appearance_layout").region
+    return widget.region.height > 0 and area.contains_region(widget.region)
+
+
 @pytest.mark.asyncio
-async def test_the_readability_verdict_of_the_focused_card_is_visible_without_scrolling_at_100x30(
+async def test_cards_are_ordered_active_yours_broken_then_built_in(manager: ConfigManager, folder: Path) -> None:
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "broken.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        slots = list(panel.query_one("#appearance_cards").children)
+        kinds = ["error" if isinstance(slot, ThemeErrorCard) else slot.theme_name for slot in slots]
+        assert kinds[:4] == ["servonaut", "ocean", "error", "servonaut-light"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_file_and_a_warning_card_are_visible_without_scrolling_at_160x50(
     manager: ConfigManager, folder: Path,
 ) -> None:
     (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "broken.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        assert _visible(panel, _card(panel, "pale"))
+        assert _visible(panel, next(iter(panel.query(ThemeErrorCard))))
+
+
+@pytest.mark.asyncio
+async def test_only_a_theme_with_a_contrast_warning_gets_the_warning_border(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        pale, ocean = _card(panel, "pale"), _card(panel, "ocean")
+        assert pale.has_class("-warning") and not ocean.has_class("-warning")
+        assert pale.styles.border_top[0] == "round"
+        assert pale.styles.border_top[1].hex == Color.parse(app.get_css_variables()["warning"]).hex
+        assert pale.styles.border_top != ocean.styles.border_top
+
+
+@pytest.mark.asyncio
+async def test_a_user_card_is_as_tall_as_a_built_in_card_and_edit_file_shares_the_path_row(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        ocean, built_in = _card(panel, "ocean"), _card(panel, "servonaut-light")
+        assert ocean.region.height == built_in.region.height
+        edit = ocean.query_one(EditFileButton)
+        path = ocean.query_one(".theme-card-path .theme-card-detail")
+        assert edit.region.height == 1 and edit.region.y == path.region.y
+
+
+@pytest.mark.asyncio
+async def test_the_header_is_one_row_when_wide_and_two_rows_of_cards_show_at_100x30(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        title = panel.query_one("#appearance_heading .panel-title")
+        buttons = panel.query_one("#appearance_actions")
+        assert buttons.region.y < title.region.y + 3 and buttons.region.x >= title.region.right
+        assert not panel.query("#appearance_verdict") and not panel.query("#appearance_folder")
+    narrow = _Host(manager)
+    async with narrow.run_test(size=(100, 30)) as pilot:
+        panel = await _ready(narrow, pilot)
+        shown = {card.region.y for card in panel.query(ThemeCard) if _visible(panel, card)}
+        assert len(shown) >= 2
+
+
+@pytest.mark.asyncio
+async def test_swatches_span_the_card_width(manager: ConfigManager, folder: Path) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        strip = _card(panel, "servonaut").query_one(SwatchStrip)
+        assert strip.content_size.width > 24
+        assert len(strip.render().plain) == strip.content_size.width
+
+
+@pytest.mark.asyncio
+async def test_the_preview_draws_outlined_buttons_with_the_apps_labels(manager: ConfigManager, folder: Path) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        preview = _text(panel.query_one("#appearance_preview", Static))
+        for label in ("SSH connect", "Browse files", "Ban IP…", "Terminate…"):
+            assert f"│ {label} │" in preview
+        assert preview.count("╭") == 4 and preview.count("╰") == 4
+
+
+@pytest.mark.asyncio
+async def test_the_readability_note_explains_what_a_theme_sets(manager: ConfigManager, folder: Path) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        note = _text(panel.query_one("#appearance_hint", Static))
+        assert "optional extras" in note and "servonaut theme check <file>" in note
+
+
+@pytest.mark.asyncio
+async def test_the_screen_context_names_the_panel(manager: ConfigManager, folder: Path) -> None:
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _ready(app, pilot)
+        context = app.screen.query_one("#workspace_context", Static)
+        assert _text(context) == "Settings › Appearance"
+
+
+def _rows_fully_visible(panel: AppearancePanel) -> int:
+    area = panel.query_one("#appearance_layout").region
+    return len({c.region.y for c in panel.query(".theme-card") if c.region.height and area.contains_region(c.region)})
+
+
+def _title_cells(card: Widget) -> tuple:
+    """The card's title text style: the focus cue, which must not depend on the state border."""
+    return card.query_one(".theme-card-title").styles.text_style
+
+
+@pytest.mark.asyncio
+async def test_every_kind_of_card_shows_when_it_has_focus(manager: ConfigManager, folder: Path) -> None:
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        kinds = {"built-in": "servonaut-light", "active": "servonaut", "user": "ocean", "warning": "pale"}
+        for kind, name in kinds.items():
+            card = _card(panel, name)
+            blurred = _title_cells(card)
+            card.focus()
+            await pilot.pause()
+            assert _title_cells(card) != blurred, f"a focused {kind} card looks the same"
+            assert _title_cells(card).underline, f"a focused {kind} card's title is not underlined"
+
+
+@pytest.mark.asyncio
+async def test_two_rows_of_cards_show_at_100x30_with_user_themes_and_a_broken_file(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "broken.toml").write_text(BROKEN, encoding="utf-8")
     app = _Host(manager)
     async with app.run_test(size=(100, 30)) as pilot:
         panel = await _ready(app, pilot)
-        verdict = panel.query_one("#appearance_verdict", Static)
-        assert "✓" in _text(verdict) and "Servonaut" in _text(verdict)
-        _card(panel, "pale").focus()
-        await _until(lambda: "⚠" in _text(verdict))
-        assert "Pale" in _text(verdict) and "4.5:1" in _text(verdict)
-        assert 0 <= verdict.region.y and verdict.region.bottom <= 30 and verdict.region.height >= 1
-        assert panel.region.contains_region(verdict.region)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        await pilot.pause()
+        assert _rows_fully_visible(panel) >= 2
+        assert panel.query_one("#appearance_new", Button).compact, "a stacked header uses one-row buttons"
+        assert _card(panel, "ocean").query_one(".theme-card-path .theme-card-detail").region.height == 1
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_card_shows_the_file_name_and_keeps_the_full_path_in_its_tooltip(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _ready(app, pilot)
+        card = _card(panel, "ocean")
+        assert "ocean.toml" in _card_text(card) and ".servonaut" not in _card_text(card)
+        assert "~/.servonaut/themes/ocean.toml" in str(card.tooltip)
+
+
+@pytest.mark.asyncio
+async def test_default_layout_with_navigation_open_keeps_special_cards_visible_and_user_cards_short(
+    manager: ConfigManager, folder: Path,
+) -> None:
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "broken.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    app.workspace_state.navigation_visible = True
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        await pilot.pause()
+        assert _visible(panel, _card(panel, "pale"))
+        assert _visible(panel, next(iter(panel.query(ThemeErrorCard))))
+        assert _card(panel, "ocean").region.height == _card(panel, "servonaut-light").region.height
+
+
+@pytest.mark.asyncio
+async def test_arrow_keys_step_over_the_broken_files_card(manager: ConfigManager, folder: Path) -> None:
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "broken.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        assert panel.card_columns == 2
+        # Slots: servonaut, ocean / error, servonaut-light / atom-one-dark, ...
+        _card(panel, "servonaut").focus()
+        await pilot.press("down")
+        assert app.focused.theme_name == "atom-one-dark", "down from the first column steps over the error card"
+        await pilot.press("up")
+        assert app.focused.theme_name == "servonaut", "up steps back over it"
+        _card(panel, "ocean").focus()
+        await pilot.press("right")
+        assert app.focused.theme_name == "servonaut-light", "right from the last card of a row steps over it"
+        await pilot.press("left")
+        assert app.focused.theme_name == "ocean"
+
+
+@pytest.mark.asyncio
+async def test_every_card_with_a_file_shows_its_full_path_when_it_fits(manager: ConfigManager, folder: Path) -> None:
+    # Slots: servonaut, ocean / pale, sunset (broken): the broken file sits in the right-hand column.
+    (folder / "ocean.toml").write_text(OCEAN, encoding="utf-8")
+    (folder / "pale.toml").write_text(PALE, encoding="utf-8")
+    (folder / "sunset.toml").write_text(BROKEN, encoding="utf-8")
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        await _until(lambda: bool(panel.query(ThemeErrorCard)))
+        error_card = next(iter(panel.query(ThemeErrorCard)))
+        await _until(lambda: "~/.servonaut/themes/sunset.toml" in _card_text(error_card))
+        assert "~/.servonaut/themes/ocean.toml" in _card_text(_card(panel, "ocean"))
