@@ -74,12 +74,6 @@
 #ip_ban_actions {
     height: auto;
     margin: 1 0 0 0;
-    align: right middle;
-}
-
-#ip_ban_actions Button {
-    min-width: 0;
-    margin: 0 0 0 1;
 }
 
 #ip_ban_main_content {
@@ -157,16 +151,6 @@ IPBanScreen #ip_ban_scope_hint {
     margin-bottom: 1;
 }
 
-IPBanScreen #ip_ban_selection_actions {
-    height: 3;
-}
-
-IPBanScreen #ip_ban_selection_actions Button {
-    width: 1fr;
-    min-width: 0;
-    margin: 0;
-}
-
 IPBanScreen.-content-narrow #ip_ban_container {
     padding: 0 1;
 }
@@ -193,19 +177,6 @@ IPBanScreen.-content-narrow #ip_ban_audit_col {
     width: 100%;
     height: 12;
     margin: 0 0 1 0;
-}
-
-IPBanScreen.-content-narrow #ip_ban_actions {
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: 3;
-    grid-gutter: 0 1;
-}
-
-IPBanScreen.-content-narrow #ip_ban_actions Button {
-    width: 100%;
-    margin: 0;
 }
 
 /* Put the access change beside its live address inventory. */
@@ -244,14 +215,10 @@ IPBanScreen #banned_table {
     border: none;
     background: $surface;
 }
-IPBanScreen #ip_ban_selection_actions { height: auto; margin: 1 0 0 0; }
-IPBanScreen #ip_ban_selection_actions Button {
-    width: 1fr;
+IPBanScreen #ip_ban_selection_actions { width: 100%; height: auto; margin: 1 0 0 0; }
+IPBanScreen #ip_ban_use_selected,
+IPBanScreen #ip_ban_copy_selected {
     min-width: 0;
-    height: auto;
-    min-height: 3;
-    margin: 0;
-    padding: 0 1;
 }
 IPBanScreen #ip_ban_audit_col {
     width: 100%;
@@ -265,22 +232,10 @@ IPBanScreen #ip_ban_actions {
     dock: bottom;
     width: 100%;
     height: auto;
-    layout: grid;
-    grid-size: 4;
-    grid-columns: 1fr;
-    grid-rows: auto;
-    grid-gutter: 0 1;
-    margin: 0;
-    border-top: solid $border-blurred;
-    background: $surface;
-}
-IPBanScreen #ip_ban_actions Button {
-    width: 1fr;
-    min-width: 0;
-    height: auto;
-    min-height: 3;
     margin: 0;
     padding: 0 1;
+    border-top: solid $border-blurred;
+    background: $surface;
 }
 IPBanScreen.-content-narrow #ip_ban_container { padding: 0 1 1 1; }
 IPBanScreen.-content-narrow #ip_ban_main_content { layout: vertical; height: auto; min-height: 0; }
@@ -292,7 +247,6 @@ IPBanScreen.-content-narrow #ip_ban_audit_col {
     height: auto;
     margin: 0 0 1 0;
 }
-IPBanScreen.-content-narrow #ip_ban_actions { grid-size: 2; grid-rows: auto; }
 
 /* Header-only tables can use the existing floor in a narrow workflow. */
 IPBanScreen.-content-narrow #banned_table {

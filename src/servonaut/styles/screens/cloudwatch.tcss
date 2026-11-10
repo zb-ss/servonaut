@@ -28,8 +28,8 @@
 
 #cloudwatch_filter_bar {
     layout: grid;
-    grid-size: 6 1;
-    grid-columns: 3fr 3fr 22 2fr 10 10;
+    grid-size: 5 1;
+    grid-columns: 3fr 3fr 22 2fr 34;
     grid-rows: auto;
     grid-gutter: 0 1;
     height: auto;
@@ -66,30 +66,39 @@
     max-width: 64;
 }
 
-#cloudwatch_filter_bar Button {
+/* Fetch and Back keep their natural width and line up with the controls. */
+#cw_filter_actions {
     width: 100%;
-    min-width: 0;
+    height: auto;
     margin: 1 0 0 0;
 }
 
 CloudWatchBrowserScreen.-content-narrow #cloudwatch_filter_bar {
     grid-size: 4 2;
-    grid-columns: 6fr 8fr 9 9;
+    grid-columns: 6fr 8fr 12 12;
 }
 
-CloudWatchBrowserScreen.-content-narrow #cw_filter_time_range,
+CloudWatchBrowserScreen.-content-narrow #cw_filter_time_range {
+    column-span: 2;
+}
+
 CloudWatchBrowserScreen.-content-narrow #cw_filter_pattern {
     column-span: 2;
 }
 
+CloudWatchBrowserScreen.-content-narrow #cw_filter_actions {
+    width: 100%;
+    column-span: 2;
+}
+
 #cloudwatch_filter_bar.-with-account {
-    grid-size: 7 1;
-    grid-columns: 18 3fr 3fr 22 2fr 10 10;
+    grid-size: 6 1;
+    grid-columns: 18 3fr 3fr 22 2fr 34;
 }
 
 CloudWatchBrowserScreen.-content-narrow #cloudwatch_filter_bar.-with-account {
     grid-size: 5 2;
-    grid-columns: 16 6fr 8fr 9 9;
+    grid-columns: 16 6fr 8fr 12 12;
 }
 
 CloudWatchBrowserScreen.-content-narrow #cloudwatch_filter_bar.-with-account #cw_filter_pattern {
@@ -161,14 +170,7 @@ CloudWatchBrowserScreen.-content-narrow #cloudwatch_inspector {
 }
 
 #cw_btn_ip_filter {
-    width: auto;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    color: $text-muted;
-    padding: 0 1;
     margin: 0;
-    height: 1;
 }
 
 #cloudwatch_ips_table {
@@ -184,14 +186,10 @@ CloudWatchBrowserScreen.-content-narrow #cloudwatch_inspector {
     background: $panel;
 }
 
-#cloudwatch_pager Button {
-    margin: 0;
-    width: 1fr;
-    min-width: 8;
-}
-
 #cw_page_controls {
+    width: 100%;
     height: auto;
+    align: center middle;
 }
 
 #cw_page_info {
@@ -203,9 +201,7 @@ CloudWatchBrowserScreen.-content-narrow #cloudwatch_inspector {
     color: $text-muted;
 }
 
-#cloudwatch_ips_panel Button {
-    width: 100%;
-    min-width: 0;
+#cw_btn_ban_ip {
     margin-top: 1;
 }
 
@@ -234,15 +230,9 @@ CloudWatchBrowserScreen.-short #cloudwatch_heading {
     margin-bottom: 0;
 }
 
-CloudWatchBrowserScreen.-short #cloudwatch_pager Button,
-CloudWatchBrowserScreen.-short #cloudwatch_ips_panel Button {
-    height: 1;
-    border: none;
+CloudWatchBrowserScreen.-short #cloudwatch_pager ActionButton,
+CloudWatchBrowserScreen.-short #cw_btn_ban_ip {
     margin: 0;
-}
-
-CloudWatchBrowserScreen.-short #cloudwatch_pager Button {
-    min-width: 10;
 }
 
 

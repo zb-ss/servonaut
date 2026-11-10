@@ -41,13 +41,9 @@ CustomServersScreen #custom_servers_toolbar .custom-section-title {
     content-align: left middle;
 }
 CustomServersScreen .add_row {
-    width: auto;
+    width: 64;
+    max-width: 100%;
     height: auto;
-}
-CustomServersScreen .add_row Button {
-    width: auto;
-    min-width: 10;
-    margin: 0 0 0 1;
 }
 CustomServersScreen #custom_servers_table {
     width: 100%;
@@ -110,10 +106,6 @@ CustomServersScreen #add_form_actions {
     background: $surface;
     align: left middle;
 }
-CustomServersScreen #add_form_actions Button {
-    margin: 0 1 0 0;
-    min-width: 14;
-}
 CustomServersScreen.-content-narrow #custom_servers_workspace {
     padding: 0 1 1 1;
 }
@@ -124,8 +116,8 @@ CustomServersScreen.-content-narrow #custom_servers_toolbar .custom-section-titl
     height: 1;
     margin: 1 0;
 }
-CustomServersScreen.-content-narrow .add_row Button {
-    margin: 0 1 0 0;
+CustomServersScreen.-content-narrow .add_row {
+    width: 100%;
 }
 CustomServersScreen.-content-narrow #add_form {
     padding: 1;

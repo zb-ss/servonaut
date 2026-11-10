@@ -77,16 +77,9 @@
 }
 
 #findings_actions {
-    layout: vertical;
-    width: 24;
-    height: 100%;
-    margin-right: 1;
-}
-
-#findings_actions Button {
     width: 100%;
-    min-width: 0;
-    margin: 0 0 1 0;
+    height: auto;
+    margin-bottom: 1;
 }
 
 .findings_card {
@@ -215,16 +208,9 @@
 }
 
 #finding_detail_actions {
-    layout: vertical;
-    width: 24;
-    height: 100%;
-    margin-right: 1;
-}
-
-#finding_detail_actions Button {
     width: 100%;
-    min-width: 0;
-    margin: 0 0 1 0;
+    height: auto;
+    margin-bottom: 1;
 }
 
 .finding_evidence_line {
@@ -255,31 +241,11 @@
 
 .finding_remediation_run {
     margin: 0 0 0 2;
-    min-width: 16;
-    height: 3;
 }
 
 /* Keep validation visible above the application's default Static text role. */
 DangerousToolConfirmModal #dangerous_confirm_error {
     color: $error;
-}
-
-/* Five complete actions use two rows when the workspace is narrow. */
-FindingsScreen.-content-narrow #findings_actions {
-    layout: grid;
-    grid-size: 3 2;
-    grid-columns: 1fr 1fr 1fr;
-    grid-rows: 3;
-    grid-gutter: 0 1;
-    height: 6;
-    width: 100%;
-    margin: 0 0 1 0;
-}
-
-FindingsScreen.-content-narrow #findings_actions Button {
-    width: 100%;
-    min-width: 0;
-    margin: 0;
 }
 
 FindingsScreen.-content-narrow #findings_heading {
@@ -290,22 +256,6 @@ FindingsScreen.-content-narrow #findings_status_pill {
     width: 100%;
     max-width: 100%;
     text-align: left;
-}
-
-FindingDetailScreen.-content-narrow #finding_detail_actions {
-    layout: grid;
-    grid-size: 2 2;
-    grid-columns: 1fr 1fr;
-    grid-rows: 3;
-    grid-gutter: 0 1;
-    height: 6;
-    width: 100%;
-    margin: 0 0 1 0;
-}
-
-FindingDetailScreen.-content-narrow #finding_detail_actions Button {
-    width: 100%;
-    margin: 0;
 }
 
 /* Child margins preserve card spacing in native descendant scrolling. */
@@ -321,25 +271,21 @@ FindingDetailScreen #finding_detail_body > .findings_card > .findings_card_body 
     margin: 0 2 1 2;
 }
 
-/* Wide views keep triage actions beside the reading surface. */
+/* The actions sit above the reading surface and keep their natural width. */
 #findings_triage_workspace {
-    height: 1fr;
-    min-height: 20;
-}
-
-#finding_detail_workspace {
-    height: 1fr;
-    min-height: 16;
-}
-
-FindingsScreen.-content-narrow #findings_triage_workspace,
-FindingDetailScreen.-content-narrow #finding_detail_workspace {
     layout: vertical;
+    height: 1fr;
     min-height: 14;
 }
 
-FindingsScreen.-content-narrow #findings_table_card,
-FindingDetailScreen.-content-narrow #finding_detail_body {
+#finding_detail_workspace {
+    layout: vertical;
+    height: 1fr;
+    min-height: 14;
+}
+
+#findings_table_card,
+#finding_detail_body {
     width: 100%;
     height: 1fr;
 }

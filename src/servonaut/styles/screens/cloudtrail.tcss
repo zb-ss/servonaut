@@ -29,9 +29,9 @@
 
 #cloudtrail_filters {
     layout: grid;
-    grid-size: 7 1;
-    grid-columns: 3fr 19 2fr 2fr 2fr 10 10;
-    min-width: 88;
+    grid-size: 6 1;
+    grid-columns: 3fr 19 2fr 2fr 2fr 34;
+    min-width: 102;
     grid-rows: auto;
     grid-gutter: 0 1;
     height: auto;
@@ -73,9 +73,10 @@
     max-width: 46;
 }
 
-#cloudtrail_filters Button {
+/* Fetch and Back keep their natural width and line up with the controls. */
+#ct_filter_actions {
     width: 100%;
-    min-width: 0;
+    height: auto;
     margin: 1 0 0 0;
 }
 
@@ -89,10 +90,15 @@ CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters Vertical {
     column-span: 2;
 }
 
+CloudTrailBrowserScreen.-content-narrow #ct_filter_actions {
+    width: 100%;
+    column-span: 2;
+}
+
 #cloudtrail_filters.-with-account {
-    grid-size: 8 1;
-    grid-columns: 1fr 17 19 1fr 1fr 1fr 10 10;
-    min-width: 101;
+    grid-size: 7 1;
+    grid-columns: 1fr 17 19 1fr 1fr 1fr 34;
+    min-width: 115;
 }
 
 CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account {
@@ -103,6 +109,10 @@ CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account {
 
 CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account Vertical {
     column-span: 1;
+}
+
+CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account #ct_filter_actions {
+    column-span: 2;
 }
 
 #cloudtrail_workspace {
@@ -137,10 +147,6 @@ CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account Vertic
     background: $panel;
 }
 
-#cloudtrail_pager Button {
-    margin: 0;
-    min-width: 8;
-}
 
 #ct_page_info {
     height: auto;
@@ -191,8 +197,3 @@ CloudTrailBrowserScreen.-short #cloudtrail_heading {
     margin-bottom: 0;
 }
 
-CloudTrailBrowserScreen.-short #cloudtrail_pager Button {
-    height: 1;
-    border: none;
-    margin: 0;
-}

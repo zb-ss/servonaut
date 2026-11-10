@@ -15,11 +15,11 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from rich.markup import escape
 from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.markup import literal as literal_text
+from servonaut.utils.table_text import themed_cell
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.content import Content
@@ -65,6 +65,7 @@ from servonaut.services.memory.status import (
     STATUS_STALE,
     compute_memory_status,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.dialogs import (
@@ -233,20 +234,24 @@ class PinKeyModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         yield DialogNotificationSpace()
         current_display = (
-            escape(str(self._current_value))
-            if self._current_value else "[dim](none)[/dim]"
+            literal_text(str(self._current_value))
+            if self._current_value else Content.styled("(none)", "dim")
         )
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Pin value for "
-                f"[$text-warning]{escape(str(self._module))}[/$text-warning]."
-                f"[$text-warning]{escape(str(self._key))}[/$text-warning]"
-                "[/bold $text-accent]",
+                Content.assemble(
+                    literal_text("Pin value for ", "bold $text-accent"),
+                    literal_text(str(self._module), "bold $text-warning"),
+                    literal_text(".", "bold $text-accent"),
+                    literal_text(str(self._key), "bold $text-warning"),
+                ),
                 id="pin_modal_title",
             ),
             body=DialogBody(
                 Static(
-                    f"[dim]Current observed value:[/dim] {current_display}",
+                    Content.assemble(
+                        Content.styled("Current observed value:", "dim"), " ", current_display,
+                    ),
                     id="pin_modal_field",
                 ),
             ),
@@ -396,16 +401,16 @@ class MemoryScreen(WorkspaceScreen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh_all", "Refresh All", show=True),
-        Binding("m", "refresh_module", "Refresh Module", show=True),
+        Binding("r", "refresh_all", "Refresh all", show=True),
+        Binding("m", "refresh_module", "Refresh module", show=True),
         Binding("p", "pin_key", "Pin", show=True),
         Binding("c", "clear_module", "Clear", show=True),
         Binding("a", "annotate", "Annotate", show=True),
         Binding("e", "export", "Export", show=True),
-        Binding("v", "view_summary", "View Summary", show=True),
-        Binding("S", "sync_now", "Sync Server", show=True),
-        Binding("A", "enhance_with_ai", "Enhance Local", show=True),
-        Binding("H", "build_ai_summary", "Generate Hosted", show=True),
+        Binding("v", "view_summary", "View summary", show=True),
+        Binding("S", "sync_now", "Sync server", show=True),
+        Binding("A", "enhance_with_ai", "Enhance local", show=True),
+        Binding("H", "build_ai_summary", "Generate hosted", show=True),
         Binding("f", "toggle_superseded", "Superseded", show=False),
     ]
 
@@ -481,8 +486,6 @@ class MemoryScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         """Compose the memory screen layout."""
-        from rich.markup import escape
-
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = display_name(self._instance) or instance_id
         yield SafeHeader()
@@ -492,7 +495,7 @@ class MemoryScreen(WorkspaceScreen):
             yield Container(
                 Container(
                     Static(
-                        f"[bold $text-accent]Server Memory: {escape(str(instance_name))}[/bold $text-accent]",
+                        self._title_content(instance_name),
                         id="memory-title",
                     ),
                     Static(
@@ -517,20 +520,20 @@ class MemoryScreen(WorkspaceScreen):
                         "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
                         id="memory-empty-state-label",
                     ),
-                    Button(
-                        "r. Probe server now", variant="primary", id="btn_empty_probe"
+                    ActionButton(
+                        "Probe server now", "r", role="primary", id="btn_empty_probe"
                     ),
                     id="memory-empty-state",
                     classes="hidden",
                 ),
                 Container(
                     Static("Manage memory", classes="memory-panel-heading"),
-                    Container(
-                        Button("r. Refresh All", id="btn_refresh_all"),
-                        Button("m. Refresh Module", id="btn_refresh_module"),
-                        Button("p. Pin Key", id="btn_pin_key"),
-                        Button("c. Clear Module", id="btn_clear_module"),
-                        Button("a. Annotate", id="btn_annotate"),
+                    ActionRow(
+                        ActionButton("Refresh all", "r", id="btn_refresh_all"),
+                        ActionButton("Refresh module", "m", id="btn_refresh_module"),
+                        ActionButton("Pin key", "p", id="btn_pin_key"),
+                        ActionButton("Clear module", "c", short="Clear", id="btn_clear_module"),
+                        ActionButton("Annotate", "a", id="btn_annotate"),
                         id="memory-actions",
                     ),
                     id="memory-manage-panel",
@@ -572,9 +575,9 @@ class MemoryScreen(WorkspaceScreen):
                             "available without an AI plan.[/dim]",
                             id="memory-summary-status",
                         ),
-                        Horizontal(
-                            Button("v. View Summary", variant="primary", id="btn_view_summary"),
-                            Button("e. Export", id="btn_export"),
+                        ActionRow(
+                            ActionButton("View summary", "v", role="primary", id="btn_view_summary"),
+                            ActionButton("Export", "e", id="btn_export"),
                             classes="memory-row-buttons",
                         ),
                         id="memory-summary-row",
@@ -583,15 +586,15 @@ class MemoryScreen(WorkspaceScreen):
                         Static(
                             "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
                         ),
-                        Horizontal(
-                            Button("S. Sync This Server", id="btn_sync_now"),
+                        ActionRow(
+                            ActionButton("Sync this server", "S", short="Sync", id="btn_sync_now"),
                             classes="memory-row-buttons",
                         ),
                         # Kept beside sync tools; setup preserves its tier-aware copy.
                         Container(
                             Static("", id="memory-cloud-banner-text"),
-                            Button(
-                                "Set up →", variant="primary", id="btn_open_memory_sync_setup"
+                            ActionButton(
+                                "Set up", role="primary", id="btn_open_memory_sync_setup"
                             ),
                             id="memory-cloud-banner",
                             classes="hidden",
@@ -602,9 +605,13 @@ class MemoryScreen(WorkspaceScreen):
                         Static(
                             "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
                         ),
-                        Horizontal(
-                            Button("A. Enhance Local Summary", id="btn_enhance_ai"),
-                            Button("H. Generate from Memory Sync", id="btn_build_ai"),
+                        ActionRow(
+                            ActionButton(
+                                "Enhance local summary", "A", short="Enhance", id="btn_enhance_ai"
+                            ),
+                            ActionButton(
+                                "Generate from Memory Sync", "H", short="Generate", id="btn_build_ai"
+                            ),
                             classes="memory-row-buttons",
                         ),
                         id="memory-ai-row",
@@ -624,8 +631,13 @@ class MemoryScreen(WorkspaceScreen):
     # Mount
     # ------------------------------------------------------------------
 
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        self.call_after_refresh(self._render_modules)
+
     def on_mount(self) -> None:
         """Set up DataTable columns and populate data on mount."""
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
         table = self.query_one("#memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Module", key="module")
@@ -689,13 +701,17 @@ class MemoryScreen(WorkspaceScreen):
         self._render_title()
         self._render_table()
 
-    def _render_title(self) -> None:
-        from rich.markup import escape
-
-        name = display_name(self._instance) or self._instance.get("id") or "unknown"
-        self.query_one("#memory-title", Static).update(
-            f"[bold $text-accent]Server Memory: {escape(str(name))}[/bold $text-accent]"
+    @staticmethod
+    def _title_content(name: object) -> Content:
+        """The heading; the server name is outside text and stays literal."""
+        return Content.assemble(
+            literal_text("Server memory: ", "bold $text-accent"),
+            literal_text(str(name), "bold $text-accent"),
         )
+
+    def _render_title(self) -> None:
+        name = display_name(self._instance) or self._instance.get("id") or "unknown"
+        self.query_one("#memory-title", Static).update(self._title_content(name))
 
     # ------------------------------------------------------------------
     # Table rendering
@@ -801,7 +817,7 @@ class MemoryScreen(WorkspaceScreen):
             is_stale = module_name in stale_names
 
             if is_stale:
-                age_display = f"[yellow]{age_display}[/yellow]"
+                age_display = themed_cell(self.app, age_display, "$text-warning")
 
             if not observed:
                 # Show a placeholder row for modules with no observed keys
@@ -1909,7 +1925,7 @@ class MemoryScreen(WorkspaceScreen):
             )
             self.app.push_screen(
                 MemorySummaryScreen(
-                    title=f"Memory Summary: {instance_name}",
+                    title=f"Memory summary: {instance_name}",
                     summary=summary,
                     source_label=(
                         "Local · deterministic · built on this device · "
@@ -2172,7 +2188,7 @@ class MemoryScreen(WorkspaceScreen):
             message = redaction.scrub_stream(message)
         try:
             self.query_one("#memory-sync-status", Static).update(
-                f"[$text-accent]Cloud sync: {escape(message)}[/$text-accent]"
+                literal_text(f"Cloud sync: {message}", "$text-accent")
             )
         except Exception:
             pass
@@ -2405,12 +2421,12 @@ class MemoryScreen(WorkspaceScreen):
         # Step 2: show provider disclosure verbatim and ask for confirmation.
         # We push a confirm modal on the main thread; run the rest from its callback.
         from servonaut.screens.memory import SimpleConfirmModal
-        from rich.markup import escape as rich_escape
 
-        disclosure_text = (
-            f"[bold]AI Provider:[/bold] {rich_escape(provider_info.provider_name)}\n\n"
-            f"{rich_escape(provider_info.retention_text)}\n\n"
-            "Do you consent to submitting server memory data to this provider?"
+        disclosure_text = Content.assemble(
+            Content.styled("AI Provider:", "bold"), " ",
+            literal_text(provider_info.provider_name), "\n\n",
+            literal_text(provider_info.retention_text), "\n\n",
+            "Do you consent to submitting server memory data to this provider?",
         )
 
         async def _after_consent(confirmed: bool) -> None:

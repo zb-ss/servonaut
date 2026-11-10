@@ -62,9 +62,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # link_button.tcss: Button.link-button (LinkButton)
         "fleet_copy_row",
         "fleet_refresh",
-        # memory.tcss: MemoryDriftScreen #drift-actions Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn-drift-diff",
-        # memory_screen.tcss: MemoryScreen .memory-row-buttons Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn_enhance_ai",
         "btn_view_summary",
         # main_menu.tcss: MainMenuScreen #dashboard-content .action-card
