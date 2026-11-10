@@ -306,7 +306,7 @@ class SecretsScreen(WorkspaceScreen):
         body.mount(self._card(
             "Actions",
             self._actions(
-                ("s", "Open Login"),
+                ("s", "Open login"),
                 ("o", "Open docs"),
             ),
         ))
@@ -337,7 +337,7 @@ class SecretsScreen(WorkspaceScreen):
         body.mount(self._card(
             "Actions",
             self._actions(
-                ("u", "Open Pricing"),
+                ("u", "Open pricing"),
                 ("o", "Open docs"),
             ),
         ))

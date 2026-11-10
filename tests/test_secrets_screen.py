@@ -243,7 +243,7 @@ class TestSecretsScreenStates:
             await pilot.pause(0.05)
             text = _collect_rendered_text(app)
             assert "Not signed in" in text
-            assert "Open Login" in text
+            assert "Open login" in text
 
     @pytest.mark.asyncio
     async def test_free_tier_state(self):
@@ -255,7 +255,7 @@ class TestSecretsScreenStates:
             await pilot.pause(0.05)
             text = _collect_rendered_text(app)
             assert "Upgrade required" in text
-            assert "Open Pricing" in text
+            assert "Open pricing" in text
 
     @pytest.mark.asyncio
     async def test_local_provider_state(self):

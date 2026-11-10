@@ -8,6 +8,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from servonaut.widgets.action_button import ActionButton
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Footer, Static, Input, Button, DataTable, Label
@@ -21,7 +22,7 @@ class KeyManagementScreen(WorkspaceScreen):
 
     CHAT_REFLOW = True
     # Body padding and scrollbar (4) plus the widest fixed row: two
-    # mapping inputs with their margins beside the Add Mapping button.
+    # mapping inputs with their margins beside the Add mapping button.
     CHAT_MIN_CONTENT_WIDTH = 48
     # Below this width, connection settings and local-agent tools stack.
     CONTENT_NARROW_WIDTH = 104
@@ -29,6 +30,7 @@ class KeyManagementScreen(WorkspaceScreen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("delete", "remove_mapping", "Remove override", show=True),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -58,7 +60,7 @@ class KeyManagementScreen(WorkspaceScreen):
                             yield Label("Key path")
                             with Horizontal(classes="setting_row"):
                                 yield Input(placeholder="~/.ssh/id_ed25519", id="input_default_key")
-                                yield Button("Set Default", id="btn_set_default", variant="primary")
+                                yield Button("Set default", id="btn_set_default", variant="primary")
                         with Vertical(id="instance_key_section", classes="key-section"):
                             yield Static("Per-server overrides", classes="key-section-title")
                             yield Static("Use a different key for a specific instance ID.", classes="key-section-note")
@@ -69,9 +71,13 @@ class KeyManagementScreen(WorkspaceScreen):
                                 with Vertical(classes="key-field"):
                                     yield Label("Key path")
                                     yield Input(placeholder="~/.ssh/server_key", id="input_mapping_key")
-                                yield Button("Add Mapping", id="btn_add_mapping", variant="primary")
+                                yield Button("Add mapping", id="btn_add_mapping", variant="primary")
                             yield DataTable(id="instance_keys_table")
-                            yield Static("Select a mapping row to remove the override.", classes="key-section-note")
+                            yield ActionButton(
+                                "Remove override", "Del", role="error",
+                                id="btn_remove_mapping", classes="key-remove",
+                            )
+                            yield Static("Select a mapping row, then remove its override.", classes="key-section-note")
                     with Vertical(id="key_local_column"):
                         yield Static("On this computer", classes="key-column-title")
                         with Vertical(id="agent_key_section", classes="key-section"):
@@ -80,8 +86,8 @@ class KeyManagementScreen(WorkspaceScreen):
                             yield Label("Key to load into the agent")
                             with Horizontal(classes="setting_row"):
                                 yield Input(placeholder="Path to SSH key", id="input_agent_key")
-                                yield Button("Add to Agent", id="btn_add_agent", variant="primary")
-                            yield Button("List Agent Keys", id="btn_list_agent")
+                                yield Button("Add to agent", id="btn_add_agent", variant="primary")
+                            yield Button("List agent keys", id="btn_list_agent")
                             yield Static("", id="agent_keys_output")
                         with Vertical(id="available_key_section", classes="key-section"):
                             yield Static("Available key files", classes="key-section-title")
@@ -138,7 +144,7 @@ class KeyManagementScreen(WorkspaceScreen):
 
         # Clear and setup table
         table.clear(columns=True)
-        table.add_columns("Instance ID", "Key Path", "Actions")
+        table.add_columns("Instance ID", "Key path")
 
         def _k(x: str) -> str:
             # Key paths carry real names; show the same fake the fleet uses.
@@ -157,11 +163,11 @@ class KeyManagementScreen(WorkspaceScreen):
         self._mapping_ids = {}
         if config.instance_keys:
             for instance_id, key_path in config.instance_keys.items():
-                row_key = table.add_row(_i(instance_id), _k(key_path), "[Remove]")
+                row_key = table.add_row(_i(instance_id), _k(key_path))
                 self._mapping_ids[row_key] = instance_id
         else:
             # Show empty state
-            table.add_row("[dim]No instance-specific keys configured[/dim]", "", "")
+            table.add_row("[dim]No instance-specific keys configured[/dim]", "")
 
     def _check_agent_status(self) -> None:
         """Check SSH agent status. Auto-start if not running."""
@@ -186,7 +192,7 @@ class KeyManagementScreen(WorkspaceScreen):
                     self.app.notify("SSH agent started automatically")
                 else:
                     self.query_one("#agent_status", Static).update(
-                        "Status: [bold $text-error]Not Running[/bold $text-error] — "
+                        "Status: [bold $text-error]Not running[/bold $text-error] — "
                         "could not auto-start. Run: eval $(ssh-agent)"
                     )
         except Exception as e:
@@ -202,7 +208,7 @@ class KeyManagementScreen(WorkspaceScreen):
 
         # Clear and setup table
         table.clear(columns=True)
-        table.add_columns("Key Path")
+        table.add_columns("Key path")
 
         def _k(x: str) -> str:
             # Key paths carry real names; show the same fake the fleet uses.
@@ -229,6 +235,8 @@ class KeyManagementScreen(WorkspaceScreen):
             self._set_default_key()
         elif button_id == "btn_add_mapping":
             self._add_instance_mapping()
+        elif button_id == "btn_remove_mapping":
+            self.action_remove_mapping()
         elif button_id == "btn_add_agent":
             self._add_key_to_agent()
         elif button_id == "btn_list_agent":
@@ -298,12 +306,23 @@ class KeyManagementScreen(WorkspaceScreen):
             self.notify(f"Error adding key mapping: {e}", severity="error", markup=False)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle row selection on instance keys table — remove mapping."""
-        table = event.data_table
-        if table.id != "instance_keys_table":
-            return
+        """Selecting a mapping row removes its override."""
+        if event.data_table.id == "instance_keys_table":
+            self._remove_mapping(event.row_key)
 
-        row_key = event.row_key
+    def action_remove_mapping(self) -> None:
+        """Remove the override of the highlighted mapping row."""
+        table = self.query_one("#instance_keys_table", DataTable)
+        if table.row_count == 0:
+            return
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        if row_key not in getattr(self, "_mapping_ids", {}):
+            self.notify("No key override to remove", severity="warning")
+            return
+        self._remove_mapping(row_key)
+
+    def _remove_mapping(self, row_key) -> None:
+        table = self.query_one("#instance_keys_table", DataTable)
         row_data = table.get_row(row_key)
         if not row_data or len(row_data) < 2:
             return
