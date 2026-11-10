@@ -280,3 +280,31 @@ async def test_command_palette_list_stays_unframed() -> None:
         palette_list = app.screen.query_one("CommandList")
         assert palette_list.styles.border.left[0] in ("", "none")
         assert palette_list.styles.border.right[0] in ("", "none")
+
+
+class _HintedLinkApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield LinkButton("Copy row", key="y", id="hinted")
+        yield LinkButton("Hide navigation", id="plain")
+
+
+@pytest.mark.asyncio
+async def test_link_key_hint_is_quiet_and_not_underlined() -> None:
+    app = _HintedLinkApp()
+    async with app.run_test(size=(60, 8)) as pilot:
+        await pilot.pause()
+        link = app.query_one("#hinted", LinkButton)
+        underlined, hint_styles, word_colours = "", [], set()
+        for strip in link.render_lines(Region(0, 0, link.size.width, link.size.height)):
+            for segment in strip:
+                if segment.style is not None and segment.style.underline:
+                    underlined += segment.text
+                    word_colours.add(segment.style.color)
+                elif segment.text.strip():
+                    hint_styles.append((segment.text.strip(), segment.style))
+        assert underlined == "Copy row"
+        assert [text for text, _ in hint_styles] == ["y"]
+        assert hint_styles[0][1].color not in word_colours  # dimmer than the words
+        assert link.label.plain == "Copy row  y"
