@@ -29,12 +29,13 @@ from __future__ import annotations
 
 import logging
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Union
 
 from rich.markup import escape
 from textual.binding import Binding
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -50,6 +51,7 @@ from servonaut.utils.instance_resolver import (
     display_name,
     resolve_unique,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -61,23 +63,21 @@ logger = logging.getLogger(__name__)
 _UPGRADE_URL = "https://servonaut.dev/pricing"
 _DOCS_URL = "https://servonaut.dev/docs/proactive-monitoring"
 
-# Severity / status → (style in table cells, style everywhere else). Table
-# cells are read as Rich markup, where colour names follow the theme's ANSI
-# palette; other text is Textual markup, which takes the theme's colours.
-_SEVERITY_STYLE: Dict[str, Tuple[str, str]] = {
-    "critical": ("bold red", "bold $text-error"),
-    "high": ("red", "$text-error"),
-    "medium": ("yellow", "$text-warning"),
-    "low": ("cyan", "$text-accent"),
-    "info": ("dim", "dim"),
+# Severity / status → the theme style they are shown in.
+_SEVERITY_STYLE: Dict[str, str] = {
+    "critical": "bold $text-error",
+    "high": "$text-error",
+    "medium": "$text-warning",
+    "low": "$text-accent",
+    "info": "dim",
 }
 
-_STATUS_STYLE: Dict[str, Tuple[str, str]] = {
-    "detected": ("yellow", "$text-warning"),
-    "acked": ("cyan", "$text-accent"),
-    "remediating": ("magenta", "$text-primary"),
-    "resolved": ("green", "$text-success"),
-    "suppressed": ("dim", "dim"),
+_STATUS_STYLE: Dict[str, str] = {
+    "detected": "$text-warning",
+    "acked": "$text-accent",
+    "remediating": "$text-primary",
+    "resolved": "$text-success",
+    "suppressed": "dim",
 }
 
 # Severity order for the summary line, worst first.
@@ -150,21 +150,22 @@ def _recon_note(recon: Any) -> str:
     return note
 
 
-def _styled(styles: Dict[str, Tuple[str, str]], value: str, *, cell: bool) -> str:
+def _styled(styles: Dict[str, str], value: str, *, cell: bool) -> Union[str, Content]:
     style = styles.get(value)
+    if cell:
+        return Content.styled(value or "unknown", style or "")
     if style is None:
         return escape(value or "unknown")
-    tag = style[0] if cell else style[1]
-    return f"[{tag}]{value}[/{tag}]"
+    return f"[{style}]{value}[/{style}]"
 
 
-def _severity_markup(severity: str, *, cell: bool = False) -> str:
-    """*severity* in its colour; ``cell=True`` for a table cell."""
+def _severity_markup(severity: str, *, cell: bool = False) -> Union[str, Content]:
+    """*severity* in its colour; ``cell=True`` gives table-cell content."""
     return _styled(_SEVERITY_STYLE, severity, cell=cell)
 
 
-def _status_markup(status: str, *, cell: bool = False) -> str:
-    """*status* in its colour; ``cell=True`` for a table cell."""
+def _status_markup(status: str, *, cell: bool = False) -> Union[str, Content]:
+    """*status* in its colour; ``cell=True`` gives table-cell content."""
     return _styled(_STATUS_STYLE, status, cell=cell)
 
 
@@ -178,12 +179,12 @@ class FindingsScreen(WorkspaceScreen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
-        Binding("s", "scan_now", "Scan Now", show=True),
+        Binding("s", "scan_now", "Scan now", show=True),
         Binding("enter", "open_selected", "Open", show=True),
-        Binding("f", "cycle_status", "Status Filter", show=True),
-        Binding("v", "cycle_severity", "Severity Filter", show=True),
-        Binding("n", "next_page", "Next Page", show=False),
-        Binding("p", "prev_page", "Prev Page", show=False),
+        Binding("f", "cycle_status", "Status filter", show=True),
+        Binding("v", "cycle_severity", "Severity filter", show=True),
+        Binding("n", "next_page", "Next page", show=False),
+        Binding("p", "prev_page", "Previous page", show=False),
         Binding("u", "open_upgrade", "Upgrade", show=False),
         Binding("o", "open_docs", "Docs", show=False),
         Binding("l", "open_login", "Sign in", show=False),
@@ -257,12 +258,12 @@ class FindingsScreen(WorkspaceScreen):
                 yield Static("", id="findings_progress", classes="hidden")
                 yield VerticalScroll(id="findings_state_body", classes="hidden")
                 with Horizontal(id="findings_triage_workspace"):
-                    yield Horizontal(
-                        Button("s. Scan Now", id="btn_findings_scan", variant="primary"),
-                        Button("r. Refresh", id="btn_findings_refresh"),
-                        Button("enter. Open", id="btn_findings_open"),
-                        Button("f. Status Filter", id="btn_findings_status_filter"),
-                        Button("v. Severity Filter", id="btn_findings_severity_filter"),
+                    yield ActionRow(
+                        ActionButton("Scan now", "s", role="primary", id="btn_findings_scan"),
+                        ActionButton("Refresh", "r", id="btn_findings_refresh"),
+                        ActionButton("Open", "enter", id="btn_findings_open"),
+                        ActionButton("Status filter", "f", short="Status", id="btn_findings_status_filter"),
+                        ActionButton("Severity filter", "v", short="Severity", id="btn_findings_severity_filter"),
                         id="findings_actions",
                     )
                     yield Container(
@@ -417,7 +418,7 @@ class FindingsScreen(WorkspaceScreen):
         body.mount(self._card(
             "Actions",
             self._actions_list(
-                ("l", "Open Login"),
+                ("l", "Open login"),
                 ("o", "Open docs"),
             ),
         ))
@@ -450,7 +451,7 @@ class FindingsScreen(WorkspaceScreen):
         body.mount(self._card(
             "Actions",
             self._actions_list(
-                ("u", "Open Pricing"),
+                ("u", "Open pricing"),
                 ("o", "Open docs"),
             ),
         ))
@@ -860,7 +861,7 @@ class FindingDetailScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("Finding Detail")
+        yield WorkspaceControls("Finding detail")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="finding_detail_container", classes="workspace-content"):
@@ -870,11 +871,11 @@ class FindingDetailScreen(WorkspaceScreen):
                     id="finding_detail_context",
                 )
                 with Horizontal(id="finding_detail_workspace"):
-                    yield Horizontal(
-                        Button("a. Acknowledge", id="btn_finding_ack", variant="primary"),
-                        Button("r. Resolve", id="btn_finding_resolve", variant="success"),
-                        Button("x. Suppress", id="btn_finding_suppress"),
-                        Button("esc. Back", id="btn_finding_back"),
+                    yield ActionRow(
+                        ActionButton("Acknowledge", "a", short="Ack", role="primary", id="btn_finding_ack"),
+                        ActionButton("Resolve", "r", id="btn_finding_resolve"),
+                        ActionButton("Suppress", "x", id="btn_finding_suppress"),
+                        ActionButton("Back", "esc", id="btn_finding_back"),
                         id="finding_detail_actions",
                     )
                     yield VerticalScroll(id="finding_detail_body")
@@ -1015,15 +1016,14 @@ class FindingDetailScreen(WorkspaceScreen):
                         and is_automatable):
                     button_id = f"btn_finding_remediate_{index}"
                     self._remediation_buttons[button_id] = dict(rem)
-                    # Button labels are Rich-markup parsed — escape the
-                    # server-authored label (slice first so escape can't
-                    # be split mid-tag).
-                    run_label = escape(str(rem.get("label") or action)[:40])
-                    children.append(Button(
+                    # ActionButton labels are literal, so the server-authored
+                    # text needs no escaping.
+                    run_label = str(rem.get("label") or action)[:40]
+                    children.append(ActionButton(
                         f"Run: {run_label}…",
                         id=button_id,
                         classes="finding_remediation_run",
-                        variant="warning",
+                        role="warning",
                     ))
                     any_runnable = True
             if any_runnable:
@@ -1051,11 +1051,11 @@ class FindingDetailScreen(WorkspaceScreen):
                     "This finding's remediation can be reverted.",
                     classes="finding_revert_desc",
                 ),
-                Button(
+                ActionButton(
                     "Undo remediation…",
                     id="btn_finding_revert",
                     classes="finding_remediation_run",
-                    variant="warning",
+                    role="warning",
                 ),
                 Static(
                     "[dim]Undo… fetches a server-signed preview of the exact "

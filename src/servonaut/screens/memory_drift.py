@@ -13,6 +13,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
@@ -20,16 +21,18 @@ from textual.widgets.data_table import CellDoesNotExist
 from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.dialogs import DialogActions, DialogFrame, DialogNotificationSpace
 
 logger = logging.getLogger(__name__)
 
-_SEVERITY_CELL: Dict[str, str] = {
-    "high": "[bold red]high[/bold red]",
-    "medium": "[yellow]medium[/yellow]",
-    "low": "[dim]low[/dim]",
+_SEVERITY_CELL: Dict[str, Content] = {
+    "high": Content.styled("high", "bold $text-error"),
+    "medium": Content.styled("medium", "$text-warning"),
+    "low": Content.styled("low", "dim"),
 }
 
 
@@ -199,7 +202,7 @@ class MemoryDriftScreen(WorkspaceScreen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("a", "ack_selected", "Ack", show=True),
-        Binding("u", "toggle_unack", "Unack only", show=True),
+        Binding("u", "toggle_unack", "Unacknowledged only", show=True),
         Binding("enter", "view_diff", "Diff", show=True),
     ]
 
@@ -220,14 +223,14 @@ class MemoryDriftScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("Memory Drift")
+        yield WorkspaceControls("Memory drift")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield Container(
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Container(
                     Static(
-                        "[bold $text-accent]Memory Drift Events[/bold $text-accent]",
+                        "[bold $text-accent]Memory drift events[/bold $text-accent]",
                         id="drift-title",
                     ),
                     Static("", id="drift-filter-label"),
@@ -235,11 +238,11 @@ class MemoryDriftScreen(WorkspaceScreen):
                 ),
                 Container(
                     Static("Event actions", classes="memory-secondary-heading"),
-                    Horizontal(
-                        Button("r. Refresh", id="btn-drift-refresh"),
-                        Button("enter. View diff", id="btn-drift-diff"),
-                        Button("a. Acknowledge", id="btn-drift-ack"),
-                        Button("u. Unack Only", id="btn-drift-unack"),
+                    ActionRow(
+                        ActionButton("Refresh", "r", id="btn-drift-refresh"),
+                        ActionButton("View diff", "enter", id="btn-drift-diff"),
+                        ActionButton("Acknowledge", "a", short="Ack", id="btn-drift-ack"),
+                        ActionButton("Unacknowledged only", "u", short="Unack only", id="btn-drift-unack"),
                         id="drift-actions",
                     ),
                     id="drift-tools",
@@ -327,7 +330,7 @@ class MemoryDriftScreen(WorkspaceScreen):
             status = "acknowledged" if getattr(evt, "acknowledged_at", None) else "open"
             status = escape(status)
             detected_at = str(getattr(evt, "detected_at", ""))[:19].replace("T", " ")
-            severity_cell = _SEVERITY_CELL.get(severity, severity)
+            severity_cell = _SEVERITY_CELL.get(severity) or literal(severity)
             table.add_row(
                 detected_at,
                 instance_id,

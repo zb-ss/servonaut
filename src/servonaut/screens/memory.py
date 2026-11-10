@@ -65,6 +65,7 @@ from servonaut.services.memory.status import (
     STATUS_STALE,
     compute_memory_status,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.dialogs import (
@@ -396,16 +397,16 @@ class MemoryScreen(WorkspaceScreen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh_all", "Refresh All", show=True),
-        Binding("m", "refresh_module", "Refresh Module", show=True),
+        Binding("r", "refresh_all", "Refresh all", show=True),
+        Binding("m", "refresh_module", "Refresh module", show=True),
         Binding("p", "pin_key", "Pin", show=True),
         Binding("c", "clear_module", "Clear", show=True),
         Binding("a", "annotate", "Annotate", show=True),
         Binding("e", "export", "Export", show=True),
-        Binding("v", "view_summary", "View Summary", show=True),
-        Binding("S", "sync_now", "Sync Server", show=True),
-        Binding("A", "enhance_with_ai", "Enhance Local", show=True),
-        Binding("H", "build_ai_summary", "Generate Hosted", show=True),
+        Binding("v", "view_summary", "View summary", show=True),
+        Binding("S", "sync_now", "Sync server", show=True),
+        Binding("A", "enhance_with_ai", "Enhance local", show=True),
+        Binding("H", "build_ai_summary", "Generate hosted", show=True),
         Binding("f", "toggle_superseded", "Superseded", show=False),
     ]
 
@@ -492,7 +493,7 @@ class MemoryScreen(WorkspaceScreen):
             yield Container(
                 Container(
                     Static(
-                        f"[bold $text-accent]Server Memory: {escape(str(instance_name))}[/bold $text-accent]",
+                        f"[bold $text-accent]Server memory: {escape(str(instance_name))}[/bold $text-accent]",
                         id="memory-title",
                     ),
                     Static(
@@ -517,20 +518,20 @@ class MemoryScreen(WorkspaceScreen):
                         "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
                         id="memory-empty-state-label",
                     ),
-                    Button(
-                        "r. Probe server now", variant="primary", id="btn_empty_probe"
+                    ActionButton(
+                        "Probe server now", "r", role="primary", id="btn_empty_probe"
                     ),
                     id="memory-empty-state",
                     classes="hidden",
                 ),
                 Container(
                     Static("Manage memory", classes="memory-panel-heading"),
-                    Container(
-                        Button("r. Refresh All", id="btn_refresh_all"),
-                        Button("m. Refresh Module", id="btn_refresh_module"),
-                        Button("p. Pin Key", id="btn_pin_key"),
-                        Button("c. Clear Module", id="btn_clear_module"),
-                        Button("a. Annotate", id="btn_annotate"),
+                    ActionRow(
+                        ActionButton("Refresh all", "r", id="btn_refresh_all"),
+                        ActionButton("Refresh module", "m", id="btn_refresh_module"),
+                        ActionButton("Pin key", "p", id="btn_pin_key"),
+                        ActionButton("Clear module", "c", short="Clear", id="btn_clear_module"),
+                        ActionButton("Annotate", "a", id="btn_annotate"),
                         id="memory-actions",
                     ),
                     id="memory-manage-panel",
@@ -572,9 +573,9 @@ class MemoryScreen(WorkspaceScreen):
                             "available without an AI plan.[/dim]",
                             id="memory-summary-status",
                         ),
-                        Horizontal(
-                            Button("v. View Summary", variant="primary", id="btn_view_summary"),
-                            Button("e. Export", id="btn_export"),
+                        ActionRow(
+                            ActionButton("View summary", "v", role="primary", id="btn_view_summary"),
+                            ActionButton("Export", "e", id="btn_export"),
                             classes="memory-row-buttons",
                         ),
                         id="memory-summary-row",
@@ -583,15 +584,15 @@ class MemoryScreen(WorkspaceScreen):
                         Static(
                             "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
                         ),
-                        Horizontal(
-                            Button("S. Sync This Server", id="btn_sync_now"),
+                        ActionRow(
+                            ActionButton("Sync this server", "S", short="Sync", id="btn_sync_now"),
                             classes="memory-row-buttons",
                         ),
                         # Kept beside sync tools; setup preserves its tier-aware copy.
                         Container(
                             Static("", id="memory-cloud-banner-text"),
-                            Button(
-                                "Set up →", variant="primary", id="btn_open_memory_sync_setup"
+                            ActionButton(
+                                "Set up", role="primary", id="btn_open_memory_sync_setup"
                             ),
                             id="memory-cloud-banner",
                             classes="hidden",
@@ -602,9 +603,13 @@ class MemoryScreen(WorkspaceScreen):
                         Static(
                             "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
                         ),
-                        Horizontal(
-                            Button("A. Enhance Local Summary", id="btn_enhance_ai"),
-                            Button("H. Generate from Memory Sync", id="btn_build_ai"),
+                        ActionRow(
+                            ActionButton(
+                                "Enhance local summary", "A", short="Enhance", id="btn_enhance_ai"
+                            ),
+                            ActionButton(
+                                "Generate from Memory Sync", "H", short="Generate", id="btn_build_ai"
+                            ),
                             classes="memory-row-buttons",
                         ),
                         id="memory-ai-row",
@@ -694,7 +699,7 @@ class MemoryScreen(WorkspaceScreen):
 
         name = display_name(self._instance) or self._instance.get("id") or "unknown"
         self.query_one("#memory-title", Static).update(
-            f"[bold $text-accent]Server Memory: {escape(str(name))}[/bold $text-accent]"
+            f"[bold $text-accent]Server memory: {escape(str(name))}[/bold $text-accent]"
         )
 
     # ------------------------------------------------------------------
@@ -801,7 +806,7 @@ class MemoryScreen(WorkspaceScreen):
             is_stale = module_name in stale_names
 
             if is_stale:
-                age_display = f"[yellow]{age_display}[/yellow]"
+                age_display = Content.styled(age_display, "$text-warning")
 
             if not observed:
                 # Show a placeholder row for modules with no observed keys
@@ -1909,7 +1914,7 @@ class MemoryScreen(WorkspaceScreen):
             )
             self.app.push_screen(
                 MemorySummaryScreen(
-                    title=f"Memory Summary: {instance_name}",
+                    title=f"Memory summary: {instance_name}",
                     summary=summary,
                     source_label=(
                         "Local · deterministic · built on this device · "

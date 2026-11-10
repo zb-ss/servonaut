@@ -15,7 +15,10 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
@@ -115,7 +118,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         Binding("n", "next_page", "Next", show=True),
         Binding("p", "prev_page", "Prev", show=True),
         Binding("f", "cycle_ip_filter", "Filter IPs", show=True),
-        Binding("i", "ip_info", "IP Info", show=True),
+        Binding("i", "ip_info", "IP info", show=True),
     ]
 
     _IP_FILTERS = ["All", "Allowed", "Blocked"]
@@ -156,12 +159,12 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("CloudWatch Logs")
+        yield WorkspaceControls("CloudWatch logs")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="cloudwatch_outer", classes="workspace-content"):
                 yield Horizontal(
-                    Label("[bold]CloudWatch Logs[/bold]", id="cloudwatch_title"),
+                    Label("[bold]CloudWatch logs[/bold]", id="cloudwatch_title"),
                     Static("No events loaded", id="cloudwatch_context"),
                     id="cloudwatch_heading",
                 )
@@ -181,7 +184,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         id="cw_filter_region",
                     ),
                     Vertical(
-                        Label("Log Group"),
+                        Label("Log group"),
                         Select(
                             [],
                             prompt="Select region first",
@@ -191,7 +194,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         id="cw_filter_log_group",
                     ),
                     Vertical(
-                        Label("Time Range"),
+                        Label("Time range"),
                         Select(
                             _TIME_RANGE_OPTIONS,
                             value=60,
@@ -201,15 +204,18 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         id="cw_filter_time_range",
                     ),
                     Vertical(
-                        Label("Filter Pattern"),
+                        Label("Filter pattern"),
                         Input(
                             placeholder="e.g. ERROR",
                             id="cw_input_filter_pattern",
                         ),
                         id="cw_filter_pattern",
                     ),
-                    Button("Fetch", id="cw_btn_fetch", variant="primary"),
-                    Button("Back", id="cw_btn_back", variant="default"),
+                    ActionRow(
+                        ActionButton("Fetch", "f5", role="primary", id="cw_btn_fetch"),
+                        ActionButton("Back", "esc", id="cw_btn_back"),
+                        id="cw_filter_actions",
+                    ),
                     id="cloudwatch_filter_bar",
                 )
                 with Horizontal(id="cloudwatch_main_content"):
@@ -217,9 +223,9 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         DataTable(id="cloudwatch_events_table"),
                         Vertical(
                             Static("", id="cw_page_info"),
-                            Horizontal(
-                                Button("◀ Prev", id="cw_btn_prev", variant="default"),
-                                Button("Next ▶", id="cw_btn_next", variant="default"),
+                            ActionRow(
+                                ActionButton("Previous", "p", short="Prev", id="cw_btn_prev"),
+                                ActionButton("Next", "n", id="cw_btn_next"),
                                 id="cw_page_controls",
                             ),
                             id="cloudwatch_pager",
@@ -230,11 +236,11 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         yield Vertical(
                             Horizontal(
                                 Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
-                                Static("[dim]\\[All][/dim]", id="cw_btn_ip_filter"),
+                                ActionButton("Show all", "f", compact=True, id="cw_btn_ip_filter"),
                                 id="cw_top_ips_header",
                             ),
                             DataTable(id="cloudwatch_ips_table"),
-                            Button("Ban Selected IP", id="cw_btn_ban_ip", variant="error"),
+                            ActionButton("Ban selected IP", "b", role="error", id="cw_btn_ban_ip"),
                             id="cloudwatch_ips_panel",
                         )
                         yield VerticalScroll(
@@ -479,6 +485,8 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
             self.action_prev_page()
         elif btn_id == "cw_btn_next":
             self.action_next_page()
+        elif btn_id == "cw_btn_ip_filter":
+            self._cycle_ip_filter()
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -586,20 +594,13 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
     def action_cycle_ip_filter(self) -> None:
         self._cycle_ip_filter()
 
-    def on_click(self, event) -> None:
-        """Handle click on the IP filter toggle."""
-        widget = event.widget
-        if widget is not None and getattr(widget, "id", None) == "cw_btn_ip_filter":
-            self._cycle_ip_filter()
-
     def _cycle_ip_filter(self) -> None:
         """Cycle through All / Allowed / Blocked filter for Top IPs."""
         self._ip_filter_index = (self._ip_filter_index + 1) % len(self._IP_FILTERS)
         label = self._IP_FILTERS[self._ip_filter_index]
-        colors = {"All": "dim", "Allowed": "$text-success", "Blocked": "$text-error"}
-        color = colors.get(label, "dim")
-        toggle = self.query_one("#cw_btn_ip_filter", Static)
-        toggle.update(f"[{color}]\\[{label}][/{color}]")
+        toggle = self.query_one("#cw_btn_ip_filter", ActionButton)
+        toggle.set_text(f"Show {label.lower()}", "f")
+        toggle.set_role("error" if label == "Blocked" else "default")
         self._refresh_ips_table()
 
     def _refresh_ips_table(self) -> None:
@@ -617,7 +618,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
 
         ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
         self._selected_ip_row = None
-        rows: List[Tuple[str, str, Text]] = []
+        rows: List[Tuple[str, str, Content]] = []
         for entry in self._top_ips:
             display_ip = entry["ip"]
             if self.app.demo_mode and self.app.redaction_service:
@@ -640,17 +641,17 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         ]
 
     @staticmethod
-    def _ip_action_label(entry: Dict[str, Any]) -> Text:
+    def _ip_action_label(entry: Dict[str, Any]) -> Content:
         """What WAF did with an address's requests: all allowed, all blocked or both."""
         allowed = entry.get("allowed", 0)
         blocked = entry.get("blocked", 0)
         if blocked > 0 and allowed == 0:
-            return Text("BLOCKED", style="red")
+            return Content.styled("BLOCKED", "$text-error")
         if allowed > 0 and blocked == 0:
-            return Text("ALLOWED", style="green")
+            return Content.styled("ALLOWED", "$text-success")
         if blocked > 0 and allowed > 0:
-            return Text("MIXED", style="yellow")
-        return Text("—", style="dim")
+            return Content.styled("MIXED", "$text-warning")
+        return Content.styled("—", "$text-muted")
 
     # ------------------------------------------------------------------
     # Event detail / selection
@@ -781,16 +782,19 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         ``display_ip`` is used for all UI text so recordings stay safe.
         """
         import asyncio
-        from rich.text import Text
 
         # Separate display_ip (redacted, for UI) from ip (raw, for httpx).
         display_ip = ip
         if self.app.demo_mode and self.app.redaction_service:
             display_ip = self.app.redaction_service.redact_ip(ip)
 
-        detail = Text()
-        detail.append(f"IP Info: {display_ip}\n", style="bold")
-        detail.append("─" * 40 + "\n")
+        parts: List[Content] = [
+            literal(f"IP Info: {display_ip}\n", "bold"),
+            Content("─" * 40 + "\n"),
+        ]
+
+        def add(text: object, style: str = "") -> None:
+            parts.append(literal(str(text), style))
 
         # ip-api.com — free, no key needed
         geo = await self._fetch_ip_geo(ip)
@@ -800,24 +804,24 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         # ISP/org strings are too varied for regex scrubbing.
         demo = self.app.demo_mode and self.app.redaction_service
         if demo:
-            detail.append("\nGeolocation: ", style="bold cyan")
-            detail.append("[redacted in demo mode]\n", style="dim")
+            add("\nGeolocation: ", "bold $text-accent")
+            add("[redacted in demo mode]\n", "dim")
         elif geo:
-            detail.append("\nGeolocation\n", style="bold cyan")
-            detail.append(f"  Country:  {geo.get('country', '?')} ({geo.get('countryCode', '')})\n")
-            detail.append(f"  City:     {geo.get('city', '?')}, {geo.get('regionName', '?')}\n")
-            detail.append(f"  ISP:      {geo.get('isp', '?')}\n")
-            detail.append(f"  Org:      {geo.get('org', '?')}\n")
-            detail.append(f"  AS:       {geo.get('as', '?')}\n")
+            add("\nGeolocation\n", "bold $text-accent")
+            add(f"  Country:  {geo.get('country', '?')} ({geo.get('countryCode', '')})\n")
+            add(f"  City:     {geo.get('city', '?')}, {geo.get('regionName', '?')}\n")
+            add(f"  ISP:      {geo.get('isp', '?')}\n")
+            add(f"  Org:      {geo.get('org', '?')}\n")
+            add(f"  AS:       {geo.get('as', '?')}\n")
             if geo.get("hosting"):
-                detail.append("  Type:     ", style="bold")
-                detail.append("Hosting/Datacenter\n", style="yellow")
+                add("  Type:     ", "bold")
+                add("Hosting/Datacenter\n", "$text-warning")
             if geo.get("proxy"):
-                detail.append("  Proxy:    ", style="bold")
-                detail.append("Yes\n", style="red")
+                add("  Proxy:    ", "bold")
+                add("Yes\n", "$text-error")
         else:
-            detail.append("\nGeolocation: ", style="bold cyan")
-            detail.append("lookup failed\n", style="red")
+            add("\nGeolocation: ", "bold $text-accent")
+            add("lookup failed\n", "$text-error")
 
         # AbuseIPDB — only if API key configured
         abuse = await self._fetch_abuse_info(ip)
@@ -827,27 +831,31 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         if abuse is False:
             pass  # No API key, skip silently
         elif demo and abuse is not None:
-            detail.append("\nAbuseIPDB: ", style="bold cyan")
-            detail.append("[redacted in demo mode]\n", style="dim")
+            add("\nAbuseIPDB: ", "bold $text-accent")
+            add("[redacted in demo mode]\n", "dim")
         elif abuse is not None:
             score = abuse.get("abuseConfidenceScore", 0)
             total_reports = abuse.get("totalReports", 0)
-            detail.append("\nAbuseIPDB\n", style="bold cyan")
-            detail.append(f"  Abuse Score:    ")
-            score_style = "green" if score < 25 else "yellow" if score < 75 else "red bold"
-            detail.append(f"{score}%\n", style=score_style)
-            detail.append(f"  Total Reports:  {total_reports}\n")
-            detail.append(f"  Usage Type:     {abuse.get('usageType', '?')}\n")
-            detail.append(f"  Domain:         {abuse.get('domain', '?')}\n")
-            isp = abuse.get("isp", "?")
-            detail.append(f"  ISP:            {isp}\n")
+            add("\nAbuseIPDB\n", "bold $text-accent")
+            add("  Abuse score:    ")
+            score_style = (
+                "$text-success" if score < 25
+                else "$text-warning" if score < 75
+                else "bold $text-error"
+            )
+            add(f"{score}%\n", score_style)
+            add(f"  Total reports:  {total_reports}\n")
+            add(f"  Usage type:     {abuse.get('usageType', '?')}\n")
+            add(f"  Domain:         {abuse.get('domain', '?')}\n")
+            add(f"  ISP:            {abuse.get('isp', '?')}\n")
             if abuse.get("isTor"):
-                detail.append("  Tor Exit:       ", style="bold")
-                detail.append("Yes\n", style="red")
+                add("  Tor exit:       ", "bold")
+                add("Yes\n", "$text-error")
         else:
-            detail.append("\nAbuseIPDB: ", style="bold cyan")
-            detail.append("lookup failed\n", style="red")
+            add("\nAbuseIPDB: ", "bold $text-accent")
+            add("lookup failed\n", "$text-error")
 
+        detail = Content.assemble(*parts)
         self.query_one("#cloudwatch_detail_text", Static).update(detail)
 
     async def _fetch_ip_geo(self, ip: str) -> Optional[Dict[str, Any]]:
