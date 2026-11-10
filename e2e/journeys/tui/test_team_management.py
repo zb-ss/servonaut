@@ -169,7 +169,7 @@ async def test_owner_invites_promotes_removes_and_shares(tui, seed, fake_cloud):
         # Make the colleague an admin.
         await _pick_member(t, 1)
         await _press(t, "#btn_change_role")
-        await t.wait_until(lambda: _text(t, "#change_role_header") == f"Change Role: {COLLEAGUE}",
+        await t.wait_until(lambda: _text(t, "#change_role_header") == f"Change role: {COLLEAGUE}",
                            desc="change-role form for the colleague")
         await _choose(t, "#select_change_role", "Admin")
         await _press(t, "#btn_save_role")
@@ -305,7 +305,7 @@ async def test_servers_leave_for_the_team_only_when_the_owner_confirms(tui, seed
         await t.wait_until(lambda: str(share.label) == "Share 1 server", desc="one server ticked")
         await _press(t, "#share_confirm_share")
         await t.wait_for_toast(
-            rf"^Share All: Shared 1, left out {len(offered) - 1}, skipped 1 already shared\.$"
+            rf"^Share all: Shared 1, left out {len(offered) - 1}, skipped 1 already shared\.$"
         )
         [posted] = fake_cloud.requests(servers_url, "POST")
         assert (posted["body"]["name"], posted["body"]["hostname"]) == (fleet.APP_1.name, fleet.APP_1.private_ip)

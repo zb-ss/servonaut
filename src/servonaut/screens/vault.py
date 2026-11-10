@@ -377,7 +377,7 @@ async def show_pending_device(app: Any, service: Any, device: Mapping[str, Any])
     app.push_screen(VaultPendingDeviceModal(device), reviewed)
 
 
-_NO_SHARED_SERVERS = "No shared servers in this team: share one from Team Management."
+_NO_SHARED_SERVERS = "No shared servers in this team: share one from Team management."
 
 
 class VaultSharedServerPicker(Vertical):
@@ -540,7 +540,7 @@ class VaultSharedServerPicker(Vertical):
             return
         if not choices:
             select.prompt = "No teams"
-            self._say("No teams yet: create or join one from Team Management.")
+            self._say("No teams yet: create or join one from Team management.")
             return
         self._team_choices = choices
         select.prompt = "Choose a team"

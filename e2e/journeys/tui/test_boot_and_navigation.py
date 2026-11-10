@@ -137,7 +137,7 @@ async def test_sidebar_tour_reaches_every_destination(tui, seed, size, leg):
 async def test_palette_reaches_screens_and_respects_sign_in_gates(tui, seed):
     _seed_fleet(seed)
     async with tui() as t:
-        await t.palette("Go to Custom Servers")
+        await t.palette("Go to Custom servers")
         await t.wait_for_screen("CustomServersScreen")
 
         # Teams needs a Teams subscription: the user is told and stays put.
@@ -146,7 +146,7 @@ async def test_palette_reaches_screens_and_respects_sign_in_gates(tui, seed):
         assert t.screen_name() == "CustomServersScreen"
 
         # Config snapshots need an account: the user is sent to sign in.
-        await t.palette("Go to Sync Config")
+        await t.palette("Go to Sync config")
         await t.wait_for_toast("Sign in to manage config snapshots")
         await t.wait_for_screen("LoginScreen")
 
@@ -163,7 +163,7 @@ async def test_help_back_to_root_and_quit(tui, seed):
         await t.wait_for_screen("InstanceListScreen")
 
         # Leaving a top-level screen returns to the fleet, never to nothing.
-        await t.palette("Go to SSH Keys")
+        await t.palette("Go to SSH keys")
         await t.wait_for_screen("KeyManagementScreen")
         await t.press("escape")
         await t.wait_for_screen("InstanceListScreen")

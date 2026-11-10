@@ -235,7 +235,7 @@ async def test_category_group_can_be_focused_and_expanded_by_keyboard(
     app = _Host(manager)
     async with app.run_test(size=(100, 30)) as pilot:
         await _ready(app, pilot)
-        section = app.screen._sections["Cloud Providers"]
+        section = app.screen._sections["Cloud providers"]
         header = section.query_one(".section-header", Button)
         await pilot.press("ctrl+f")
         assert app.focused is app.screen.query_one("#settings-search")

@@ -36,7 +36,7 @@ async def test_edit_share_all_remove_single_and_multiple_and_show_config_author(
         await t.fill("#share_confirm_port", "2202")
         await _press(t, "#share_confirm_share")
         await t.wait_for_screen("TeamManagementScreen")
-        await t.wait_for_toast(r"Share All: Shared 2")
+        await t.wait_for_toast(r"Share all: Shared 2")
         await _screen_idle(t)
         posts = fake_cloud.requests(path, "POST")
         assert [(r["body"]["name"], r["body"]["username"], r["body"]["port"]) for r in posts] == [

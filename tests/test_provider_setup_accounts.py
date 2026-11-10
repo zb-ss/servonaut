@@ -581,7 +581,7 @@ class TestOvhAddAccount:
             app.screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert ovh_service.built == []
-            assert any("Consumer Key" in m for m in app.messages)
+            assert any("Consumer key" in m for m in app.messages)
         assert _reread(tmp_path).ovh.accounts == []
 
     async def test_refused_credentials_are_not_saved(self, tmp_path, ovh_service) -> None:

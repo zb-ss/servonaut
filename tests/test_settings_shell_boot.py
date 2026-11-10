@@ -185,15 +185,15 @@ async def test_nav_sections_collapsible_and_search_aware():
         # Switching to a panel in another group expands that group only.
         screen._switch_to("aws")
         await pilot.pause()
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].collapsed is True
 
         # Search must surface a match even though its group could be collapsed:
         # the group is shown + expanded, non-matching groups are hidden.
         screen._apply_filter("hetzner")
         await pilot.pause()
-        assert sections["Cloud Providers"].display is True
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].display is True
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].display is False
         assert screen.query_one("#navbtn_hetzner").display is True
 
@@ -201,7 +201,7 @@ async def test_nav_sections_collapsible_and_search_aware():
         screen._apply_filter("")
         await pilot.pause()
         assert all(s.display for s in sections.values())
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].collapsed is True
 
 

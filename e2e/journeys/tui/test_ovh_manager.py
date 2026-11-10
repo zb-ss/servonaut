@@ -167,7 +167,7 @@ async def test_deleting_a_cloud_instance_needs_the_typed_confirmation(tui, seed,
         # Cancelled: nothing is deleted.
         await press(t, "#btn_ovh_mgr_delete")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Delete OVH Cloud Instance", screen_only=True)
+        await t.wait_for_text("Delete OVH Public Cloud instance", screen_only=True)
         await press(t, "#btn_cancel")
         await t.wait_for_screen("OVHManagerScreen")
         assert providers.mutations("ovh") == []
@@ -275,7 +275,7 @@ async def test_the_next_key_acts_on_the_instance_the_action_was_for(tui, seed, p
 
         await t.press("d")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Delete OVH Cloud Instance", BATCH_2.name, screen_only=True)
+        await t.wait_for_text("Delete OVH Public Cloud instance", BATCH_2.name, screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("OVHManagerScreen")
 

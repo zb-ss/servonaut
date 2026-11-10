@@ -159,7 +159,7 @@ class BulkShareScreen(WorkspaceScreen):
                 with Container(id="bulk-container"):
                     yield Static(
                         Content.from_markup(
-                            "[bold $text-accent]Share Memory: $servers[/bold $text-accent]",
+                            "[bold $text-accent]Share memory: $servers[/bold $text-accent]",
                             servers=servers,
                         ),
                         id="bulk-title",
