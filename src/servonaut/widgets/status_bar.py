@@ -8,27 +8,12 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
-    """Status bar showing instance counts, cache age, and filter status."""
+    """Status bar showing the cache age and the demo badge."""
 
     def __init__(self) -> None:
         """Initialize status bar."""
         super().__init__("")
-        self._total_count = 0
-        self._filtered_count = 0
         self._cache_age: Optional[timedelta] = None
-        self._filter_active = False
-        self._update_display()
-
-    def update_instance_count(self, total: int, filtered: int) -> None:
-        """Update instance counts.
-
-        Args:
-            total: Total number of instances.
-            filtered: Number of filtered instances shown.
-        """
-        self._total_count = total
-        self._filtered_count = filtered
-        self._filter_active = (total != filtered)
         self._update_display()
 
     def update_cache_age(self, age: Optional[timedelta]) -> None:
@@ -44,20 +29,11 @@ class StatusBar(Static):
         """Update the status bar display text."""
         parts = []
 
-        # Instance count
-        if self._filter_active:
-            parts.append(f"{self._filtered_count}/{self._total_count} instances")
-        else:
-            parts.append(f"{self._total_count} instances")
-
+        # The count and the filter live in the list's own summary line.
         # Cache age
         if self._cache_age is not None:
             age_str = self._format_age(self._cache_age)
             parts.append(f"Cache: {age_str}")
-
-        # Filter status
-        if self._filter_active:
-            parts.append("[$text-warning]Filter: active[/$text-warning]")
 
         # Demo mode badge
         try:

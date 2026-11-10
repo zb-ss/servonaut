@@ -105,6 +105,7 @@ InstanceListScreen.-roomy #fleet_provider_chips {
 
 InstanceListScreen.-roomy .fleet-chip {
     height: 3;
+    padding: 0;
     border: round $border-blurred;
     background: transparent;
     color: $text;
@@ -160,23 +161,43 @@ InstanceListScreen.-roomy .fleet-chip:ansi:focus {
     text-style: bold underline;
 }
 
-#fleet_summary_row {
+/* Freshness and Refresh sit at the right of the chip row. */
+#fleet_fresh {
+    width: 1fr;
+    min-width: 12;
+    height: 1;
+    align-horizontal: right;
+}
+
+InstanceListScreen.-roomy #fleet_fresh {
+    height: 3;
+    align-vertical: middle;
+}
+
+InstanceListScreen.-narrow #fleet_fresh,
+InstanceListScreen.-content-narrow #fleet_fresh,
+InstanceListScreen.-chat-open #fleet_fresh {
     width: 100%;
     height: 1;
 }
 
-#fleet_summary {
+#fleet_updated {
     width: 1fr;
+    padding: 0;
     color: $text-muted;
-    /* One row at any width: a long summary is cut, not wrapped. */
+    text-align: right;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
 
-#fleet_updated {
-    width: auto;
+/* One row under the table at any width: a long summary is cut, not wrapped. */
+#fleet_summary {
+    width: 100%;
+    height: 1;
     padding: 0 1;
     color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #keyword_matches_label {

@@ -19,7 +19,7 @@
 
 #instance_list_container InstanceTable {
     width: 1fr;
-    height: 100%;
+    height: 1fr;
     margin-top: 0;
 }
 

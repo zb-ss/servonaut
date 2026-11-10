@@ -143,7 +143,7 @@ def test_placeholder_rows_are_not_servers() -> None:
         assert skeleton.display and not skeleton.can_focus
         # Nothing counts them: table, summary, chips and the status bar.
         assert table.row_count == 1 and len(table._all_instances) == 1
-        assert screen.query_one("#fleet_summary", Static).visual.plain.startswith("1 server")
+        assert screen.query_one("#fleet_summary", Static).visual.plain.startswith("Showing 1 of 1")
         # The cursor cannot leave the listed servers.
         table.focus()
         await pilot.press("down", "down", "end")

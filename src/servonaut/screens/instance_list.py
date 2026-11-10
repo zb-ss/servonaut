@@ -284,6 +284,7 @@ class InstanceListScreen(WorkspaceScreen):
                     with Vertical(id="fleet_table_column"):
                         yield InstanceTable()
                         yield FleetSkeleton(id="fleet_skeleton")
+                        yield Static("", id="fleet_summary", markup=False)
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
                         yield Static(
                             "[bold]Selected Server[/bold]\n[dim]No server selected[/dim]",
@@ -330,12 +331,11 @@ class InstanceListScreen(WorkspaceScreen):
                 yield Static("│", classes="fleet-chip-divider", markup=False)
                 for provider in PROVIDERS:
                     yield FleetChip("provider", provider, PROVIDER_LABELS[provider])
-        with Horizontal(id="fleet_summary_row"):
-            yield Static("", id="fleet_summary", markup=False)
-            yield Static("", id="fleet_updated", markup=False)
-            refresh = LinkButton("Refresh (r)", id="fleet_refresh")
-            refresh.can_focus = False
-            yield refresh
+            with Horizontal(id="fleet_fresh"):
+                yield Static("", id="fleet_updated", markup=False)
+                refresh = LinkButton(action_label("Refresh", "r"), id="fleet_refresh")
+                refresh.can_focus = False
+                yield refresh
 
     @staticmethod
     def _copy_row_button(button_id: str) -> Button:
@@ -930,16 +930,7 @@ class InstanceListScreen(WorkspaceScreen):
         banner.display = not has_any
 
     def _update_status_bar(self) -> None:
-        """Update status bar with current counts and cache age."""
-        status_bar = self.query_one(StatusBar)
-        table = self.query_one(InstanceTable)
-
-        # Update counts: the servers listed (a shared server that is also
-        # one of the user's own is listed once).
-        total = len(table._all_instances)
-        filtered = len(table._filtered_instances)
-        status_bar.update_instance_count(total, filtered)
-
+        """Refresh the cache age and the filter-driven parts of the screen."""
         # The cache age is shown once, next to the summary (see _updated_text);
         # reading it here also keeps the file off the once-a-second path.
         self._note_cache_age(self.app.cache_service.get_age())
@@ -1021,7 +1012,7 @@ class InstanceListScreen(WorkspaceScreen):
         if text == self._updated_shown:
             return
         try:
-            self.query_one("#fleet_updated", Static).update(text)
+            self.query_one("#fleet_updated", Static).update(f"{text} ·" if text else "")
         except NoMatches:
             return
         self._updated_shown = text

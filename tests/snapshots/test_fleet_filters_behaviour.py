@@ -59,6 +59,9 @@ def _chip_text(pilot: Any, group: str, value: str) -> str:
     return _chip(pilot, group, value).label.plain
 
 
+_HINT = " · f cycle state filter · p cycle provider"
+
+
 def _summary(pilot: Any) -> str:
     return _screen(pilot).query_one("#fleet_summary", Static).visual.plain
 
@@ -84,7 +87,7 @@ def test_chips_count_the_fleet_and_show_only_what_is_present() -> None:
             assert _chip_text(pilot, "provider", provider).endswith(str(count))
         # No team servers: no Team chip.
         assert not _chip(pilot, "provider", "shared").display
-        assert _summary(pilot) == "7 servers"
+        assert _summary(pilot) == "Showing 7 of 7 · filters: none"+_HINT
 
     _run(scenario)
 
@@ -107,7 +110,7 @@ def test_clicking_a_state_chip_filters_and_all_clears() -> None:
         assert set(_names(pilot)) == RUNNING
         assert _chip(pilot, "state", "running").has_class("--chosen")
         assert not _chip(pilot, "state", "all").has_class("--chosen")
-        assert _summary(pilot) == "Showing 4 of 7 · Running"
+        assert _summary(pilot) == "Showing 4 of 7 · filters: Running" + _HINT
         await _click(pilot, "state", "all")
         assert len(_names(pilot)) == 7
         assert _chip(pilot, "state", "all").has_class("--chosen")
@@ -120,7 +123,7 @@ def test_state_and_provider_combine_and_all_clears_both() -> None:
         await _click(pilot, "state", "stopped")
         await _click(pilot, "provider", "aws")
         assert _names(pilot) == ["db-1"]
-        assert _summary(pilot) == "Showing 1 of 7 · Stopped · AWS"
+        assert _summary(pilot) == "Showing 1 of 7 · filters: Stopped, AWS" + _HINT
         # Each group is single-select: a second provider replaces the first.
         await _click(pilot, "provider", "ovh")
         assert _names(pilot) == ["batch-1"]
@@ -140,7 +143,7 @@ def test_the_all_chip_clears_state_and_provider_together() -> None:
         assert set(_names(pilot)) == {"app-1", "bastion-1"}
         await _click(pilot, "state", "all")
         assert len(_names(pilot)) == 7
-        assert _summary(pilot) == "7 servers"
+        assert _summary(pilot) == "Showing 7 of 7 · filters: none"+_HINT
 
     _run(scenario)
 
@@ -168,7 +171,7 @@ def test_the_search_narrows_the_counts_and_combines_with_the_chips() -> None:
         assert _chip_text(pilot, "provider", "aws").endswith("AWS 0")
         await _click(pilot, "provider", "aws")
         assert _names(pilot) == []
-        assert _summary(pilot) == "Showing 0 of 7 · AWS · search"
+        assert _summary(pilot) == "Showing 0 of 7 · filters: AWS, search" + _HINT
         await _click(pilot, "provider", "ovh")
         assert _names(pilot) == ["mail-1"]
 
@@ -181,7 +184,7 @@ def test_an_empty_result_clears_the_inspector() -> None:
         await _click(pilot, "provider", "hetzner")
         screen = _screen(pilot)
         assert screen.query_one(InstanceTable).row_count == 0
-        assert _summary(pilot) == "Showing 0 of 7 · Stopped · Hetzner"
+        assert _summary(pilot) == "Showing 0 of 7 · filters: Stopped, Hetzner" + _HINT
         header = screen.query_one("#fleet_inspector_header", Static).visual.plain
         assert "No server selected" in header
         assert all(b.disabled for b in screen.query("#fleet_inspector Button"))
@@ -264,8 +267,13 @@ def test_inactive_chips_have_a_visible_pill_background_in_one_row() -> None:
         for chip in _screen(pilot).query(FleetChip):
             if not chip.display or chip.has_class("--chosen"):
                 continue
-            assert chip.styles.background.a > 0, chip.id
-            assert chip.region.height == 1
+            # One row with a fill on short terminals; an outlined pill (three
+            # rows, no fill) on roomy ones.
+            if _screen(pilot).has_class("-roomy"):
+                assert chip.region.height == 3 and chip.styles.border_top[0] == "round", chip.id
+            else:
+                assert chip.styles.background.a > 0, chip.id
+                assert chip.region.height == 1
 
     _run(scenario)
 
@@ -362,7 +370,7 @@ def test_first_run_lists_rows_as_providers_answer() -> None:
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the load to end")
         await pilot.pause()
         assert not status.display
-        assert screen._updated_text() == "Updated just now"
+        assert screen._updated_text() == "Updated just now ·"
 
     _run(scenario)
 
@@ -486,7 +494,8 @@ def test_the_chips_never_push_the_table_off_screen(size: str) -> None:
         for chip in screen.query(FleetChip):
             if not chip.display:
                 continue
-            assert chip.region.width > 0 and chip.region.height == 1
+            assert chip.region.width > 0
+            assert chip.region.height == (3 if screen.has_class("-roomy") else 1)
             assert chip.region.right <= content.region.right
             assert chip.region.bottom <= table.region.y
         refresh = screen.query_one("#fleet_refresh", Button)
@@ -563,7 +572,7 @@ def test_one_provider_answering_is_an_update_even_if_another_failed() -> None:
         gates["ovh"].release(error="offline")
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
-        assert screen._updated_text() == "Updated just now"
+        assert screen._updated_text() == "Updated just now ·"
 
     _run(scenario)
 
@@ -572,7 +581,7 @@ def test_the_cache_age_is_shown_in_one_place_at_a_time() -> None:
     async def scenario(pilot: Any) -> None:
         screen = _screen(pilot)
         updated = screen.query_one("#fleet_updated", Static)
-        assert updated.visual.plain == "Cached 5 min ago"
+        assert updated.visual.plain == "Cached 5 min ago ·"
         assert "Cache:" not in screen.query_one("StatusBar").render().plain
         gates = _harness.gate_providers(pilot.app)
         screen.action_refresh()
@@ -584,7 +593,7 @@ def test_the_cache_age_is_shown_in_one_place_at_a_time() -> None:
             gate.release()
         await _harness.wait_until(pilot, lambda: not screen._load.active, "the refresh to end")
         await pilot.pause()
-        assert updated.visual.plain == "Updated just now"
+        assert updated.visual.plain == "Updated just now ·"
 
     _run(scenario)
 

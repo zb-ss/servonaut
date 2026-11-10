@@ -86,13 +86,15 @@ def test_next_choice_leaves_a_choice_that_is_no_longer_present() -> None:
 
 
 def test_summary_says_only_fixed_words() -> None:
+    hint = " · f cycle state filter · p cycle provider"
     assert summary(9, 12, FleetFilter(state="running", provider="aws")) == (
-        "Showing 9 of 12 · Running · AWS"
+        "Showing 9 of 12 · filters: Running, AWS" + hint
     )
-    assert summary(12, 12, FleetFilter()) == "12 servers"
-    assert summary(1, 1, FleetFilter()) == "1 server"
-    assert summary(0, 0, FleetFilter()) == "0 servers"
-    assert summary(2, 12, FleetFilter(), "secret-name") == "Showing 2 of 12 · search"
+    assert summary(12, 12, FleetFilter()) == "Showing 12 of 12 · filters: none" + hint
+    assert summary(0, 0, FleetFilter()) == "Showing 0 of 0 · filters: none" + hint
+    assert summary(2, 12, FleetFilter(), "secret-name") == (
+        "Showing 2 of 12 · filters: search" + hint
+    )
 
 
 # ---- load reporting ------------------------------------------------------
