@@ -16,7 +16,7 @@ def stats_bar(pct: float | None, width: int = 12) -> str:
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
 
 
-def format_live_stats(stats: LiveStats) -> str:
+def format_live_stats(stats: LiveStats, *, note: str = "press [b]L[/b] to stop") -> str:
     """Render a Linux resource snapshot without implying historical coverage."""
     cpu = f"{stats.cpu_pct:.0f}%" if stats.cpu_pct is not None else "?"
     memory = "?"
@@ -29,7 +29,7 @@ def format_live_stats(stats: LiveStats) -> str:
         disk = f"{stats.disk_pct}% [dim]({stats.disk_used_gb}/{stats.disk_total_gb} GB)[/dim]"
     uptime = escape(stats.uptime) if stats.uptime else "?"
     return (
-        "[bold]Live via SSH[/bold]  [dim]· press [b]L[/b] to stop[/dim]\n\n"
+        f"[bold]Live via SSH[/bold]  [dim]· {note}[/dim]\n\n"
         f"  [dim]CPU [/dim] {stats_bar(stats.cpu_pct)} {cpu}\n"
         f"  [dim]RAM [/dim] {stats_bar(stats.mem_pct)} {memory}\n"
         f"  [dim]Load[/dim] {load}    [dim]Disk[/dim] {stats_bar(stats.disk_pct)} {disk}\n"

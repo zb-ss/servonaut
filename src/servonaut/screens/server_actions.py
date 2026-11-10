@@ -63,6 +63,7 @@ from servonaut.utils.markup import literal
 #: Per-action one-line help shown in the detail pane on focus.
 # How many findings the count looks at, and the statuses that no longer count as open.
 _FINDINGS_COUNT_LIMIT = 100
+_FINDINGS_SHOWN_MAX = 99
 _CLOSED_FINDING_STATUSES = ("resolved", "suppressed")
 
 # Footer keys that appear only on a wide terminal.
@@ -70,6 +71,8 @@ _WIDE_FOOTER_KEYS = ("6", "8")
 
 # The cards stack into one column when the content column is narrower than this.
 _STACK_CARDS_BELOW = 96
+
+_LIVE_ALREADY_UPDATING = "Monitoring is already updating"
 
 # Seconds a failed one-off sample stays on the live card before it clears.
 _SAMPLE_ERROR_SECONDS = 6.0
@@ -150,8 +153,9 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
 
 def _card_actions(*buttons: ActionButton) -> ActionRow:
     """The row of actions that belong to one card."""
-    # keep_hints: every card row shows the same hint state, so none drops its keys.
-    return ActionRow(*buttons, classes="sa-card-actions", keep_hints=True)
+    # A card row shortens its words, then drops its hints, before it wraps onto a
+    # second line of buttons.
+    return ActionRow(*buttons, classes="sa-card-actions", prefer_one_line=True)
 
 
 def _card(card_id: str, body: Static, *buttons: ActionButton) -> Vertical:
@@ -830,6 +834,19 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         })
 
 
+class _ActionsBody(Vertical):
+    """The content column; tells the screen when its own width changes.
+
+    The cards stack by the room this column has, and that changes when the
+    navigation shows or hides without the screen itself being resized.
+    """
+
+    def on_resize(self) -> None:
+        sync = getattr(self.screen, "_sync_card_layout", None)
+        if sync is not None:
+            self.call_after_refresh(sync)
+
+
 class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     """Screen displaying available actions for a selected EC2 instance.
 
@@ -874,6 +891,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # Defaults the layout hooks read before (or without) ``__init__``.
     _short_cards = False
     _sampling = False
+    _sample_timer = None
     _findings_count = 0
 
     AUTO_FOCUS = "#btn_browse"
@@ -938,10 +956,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 Vertical(
                     Static("[bold]OVH[/bold]", classes="sa-card-title"),
                     _card_actions(
-                        ActionButton("Reinstall OS", id="btn_ovh_reinstall", role="error"),
-                        ActionButton("Resize / upgrade", short="Resize", id="btn_ovh_resize"),
-                        ActionButton("Snapshots", id="btn_ovh_snapshots"),
-                        ActionButton("Firewall", id="btn_ovh_firewall"),
+                        ActionButton("Reinstall OS", id="btn_ovh_reinstall", role="error", tooltip=_tip("btn_ovh_reinstall")),
+                        ActionButton("Resize / upgrade", short="Resize", id="btn_ovh_resize", tooltip=_tip("btn_ovh_resize")),
+                        ActionButton("Snapshots", id="btn_ovh_snapshots", tooltip=_tip("btn_ovh_snapshots")),
+                        ActionButton("Firewall", id="btn_ovh_firewall", tooltip=_tip("btn_ovh_firewall")),
                     ),
                     id="sa-provider",
                     classes="sa-section",
@@ -1002,7 +1020,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         yield WorkspaceControls(self._workspace_context())
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
-            with Vertical(id="sa-body", classes="workspace-content"):
+            with _ActionsBody(id="sa-body", classes="workspace-content"):
                 heading, identity, connection = self._server_info_sections()
                 self._server_info_text = Content("\n\n").join((heading, identity, connection))
                 # One row of context: name, state, provider and facts, route
@@ -1028,15 +1046,15 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             _card(
                                 "card_identity",
                                 Static(identity, id="server_identity"),
-                                ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id"),
-                                ActionButton("Copy summary", id="btn_copy_summary"),
+                                ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id", tooltip=_tip("btn_copy_id")),
+                                ActionButton("Copy summary", id="btn_copy_summary", tooltip=_tip("btn_copy_summary")),
                             ),
                             _card(
                                 "card_network",
                                 Static(connection, id="server_info"),
-                                ActionButton("Use vault key", "u", short="Vault key", id="btn_use_vault_key"),
-                                ActionButton("SSH ref", "r", id="btn_manage_ssh_ref"),
-                                ActionButton("Verify SSH", "v", short="Verify", id="btn_verify_ssh"),
+                                ActionButton("Use vault key", "u", short="Vault key", id="btn_use_vault_key", tooltip=_tip("btn_use_vault_key")),
+                                ActionButton("SSH ref", "r", id="btn_manage_ssh_ref", tooltip=_tip("btn_manage_ssh_ref")),
+                                ActionButton("Verify SSH", "v", short="Verify", id="btn_verify_ssh", tooltip=_tip("btn_verify_ssh")),
                             ),
                             id="sa-facts",
                         ),
@@ -1503,6 +1521,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         except NoMatches:
             return
         button.set_text("Stop monitoring" if self._live_on else "Start monitoring")
+        self._sync_refresh_button()
 
     def sync_workspace_controls(self) -> None:
         super().sync_workspace_controls()
@@ -1515,10 +1534,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         changed = False
         for key in _WIDE_FOOTER_KEYS:
             bindings = self._bindings.key_to_bindings.get(key, [])
-            for index, binding in enumerate(bindings):
-                if binding.show != wide:
-                    bindings[index] = replace(binding, show=wide)
-                    changed = True
+            if any(binding.show != wide for binding in bindings):
+                # A new list: the one in the map may be shared with the class.
+                self._bindings.key_to_bindings[key] = [replace(b, show=wide) for b in bindings]
+                changed = True
         if changed:
             self.refresh_bindings()
 
@@ -1627,11 +1646,12 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             return
         if not self._validate_instance_connection():
             return
+        self._cancel_sample_timer()
         self._sampling = True
         self._sync_refresh_button()
-        self._set_live_text(
-            "[bold]Live via SSH[/bold]\n\n[$text-accent]Sampling…[/$text-accent]"
-        )
+        self._set_live_text(Content.assemble(
+            Content.styled("Live via SSH", "bold"), "\n\n", Content.styled("Sampling…", "$text-accent"),
+        ))
         self.run_worker(self._sample_once(), group="live_sample", exclusive=True)
 
     async def _sample_once(self) -> None:
@@ -1641,24 +1661,45 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             with self._busy.running("Sampling over SSH…"):
                 stats = await service.collect(self._instance)
         except LiveStatsError as exc:
-            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]")
-            self.set_timer(_SAMPLE_ERROR_SECONDS, self._restore_live_idle)
+            self._show_sample_error(str(exc))
+        except Exception as exc:  # noqa: BLE001 - a sample must never take the app down
+            logger.warning("Live stats sample failed: %s", type(exc).__name__, exc_info=True)
+            self._show_sample_error("The sample failed. See the log for details.")
         else:
-            self._set_live_text(format_live_stats(stats))
+            self._cancel_sample_timer()
+            self._set_live_text(format_live_stats(
+                stats, note=f"sampled {datetime.now().strftime('%H:%M:%S')}",
+            ))
         finally:
             self._sampling = False
             if self.is_attached:
                 self._sync_refresh_button()
 
+    def _show_sample_error(self, message: str) -> None:
+        """Show a failed sample's error literally, then clear it after a moment."""
+        self._cancel_sample_timer()
+        self._set_live_text(literal(message, "$text-error"))
+        self._sample_timer = self.set_timer(_SAMPLE_ERROR_SECONDS, self._restore_live_idle)
+
+    def _cancel_sample_timer(self) -> None:
+        """A newer sample owns the pane: the old error's clear-up must not fire."""
+        if self._sample_timer is not None:
+            self._sample_timer.stop()
+            self._sample_timer = None
+
     def _restore_live_idle(self) -> None:
+        self._sample_timer = None
         if not self._live_on and not self._sampling:
             self._set_live_text(self._live_stats_idle_text())
 
     def _sync_refresh_button(self) -> None:
+        """Refresh is off while a sample runs or the poll already keeps the card current."""
         try:
-            self.query_one("#btn_live_refresh", ActionButton).disabled = self._sampling
+            button = self.query_one("#btn_live_refresh", ActionButton)
         except NoMatches:
-            pass
+            return
+        button.disabled = self._sampling or self._live_on
+        button.tooltip = _LIVE_ALREADY_UPDATING if self._live_on else _tip("btn_live_refresh")
 
     def _stop_live_stats(self) -> None:
         """Stop the poller and reset the pane to its idle text."""
@@ -1679,16 +1720,23 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             async for stats in service.watch(self._instance):
                 self._set_live_text(format_live_stats(stats))
         except LiveStatsError as exc:
-            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press l to retry.[/dim]")
+            self._set_live_text(Content.assemble(
+                literal(str(exc), "$text-error"), "\n", Content.styled("Press l to retry.", "dim"),
+            ))
             self._live_on = False
             self._sync_live_button()
 
-    def _set_live_text(self, markup: str) -> None:
+    def _set_live_text(self, markup: "str | Content") -> None:
         """Update the live-stats pane defensively (screen may be torn down)."""
         try:
             self.query_one("#live_stats", Static).update(markup)
         except Exception:  # noqa: BLE001
             pass
+
+    def on_screen_resume(self) -> None:
+        """Count the open findings again: the inbox may have changed them."""
+        if getattr(self.app, "findings_service", None) is not None:
+            self.run_worker(self._load_findings_count(), group="findings_count", exclusive=True)
 
     def on_screen_suspend(self) -> None:
         """Stop live polling when navigating away (no background SSH traffic)."""
@@ -2398,7 +2446,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         except NoMatches:
             return
         count = self._findings_count
-        label = f"Findings ({count})" if count else "Findings"
+        shown = "99+" if count > _FINDINGS_SHOWN_MAX else str(count)
+        label = f"Findings {shown}" if count else "Findings"
         button.set_text(label, short=label)
 
     def action_open_findings(self) -> None:

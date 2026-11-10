@@ -183,9 +183,7 @@ ActionButton.-error:disabled,
 ActionButton:disabled:hover,
 ActionButton.-primary:disabled:hover,
 ActionButton.-warning:disabled:hover,
-ActionButton.-error:disabled:hover,
-ActionButton:ansi:disabled,
-ActionButton:ansi:disabled:hover {
+ActionButton.-error:disabled:hover {
     border: round $border-blurred;
     color: $text-muted;
     background: transparent;
@@ -194,4 +192,18 @@ ActionButton:ansi:disabled:hover {
 
 ActionButton.-textual-compact:disabled {
     border: none !important;
+}
+
+/* Terminal-colour themes have no muted colour, so a disabled action is dimmed
+   instead, and neither hover nor a compact primary's bold changes that. */
+ActionButton:ansi:disabled,
+ActionButton:ansi:disabled:hover,
+ActionButton.-primary:ansi:disabled,
+ActionButton.-primary:ansi:disabled:hover,
+ActionButton.-textual-compact.-primary:ansi:disabled,
+ActionButton.-textual-compact.-primary:ansi:disabled:hover,
+ActionButton.-textual-compact:ansi:disabled:hover {
+    background: transparent;
+    color: $foreground;
+    text-style: dim not bold not underline;
 }

@@ -399,3 +399,40 @@ async def test_disabled_actions_use_the_disabled_border_in_every_role(theme: str
         assert edges["d_primary"] != enabled
         if theme in ("servonaut", "servonaut-light"):
             assert edges["d_primary"] == Color.parse(app.theme_variables["border-blurred"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+@pytest.mark.parametrize("compact", [False, True])
+async def test_disabled_actions_are_dimmed_and_do_not_react_to_hover_in_terminal_themes(
+    theme: str, compact: bool,
+) -> None:
+    class _App(_DisabledApp):
+        def compose(self) -> ComposeResult:
+            yield ActionButton("Holder", id="holder", compact=compact)
+            yield ActionButton("Primary", role="primary", disabled=True, id="d_primary", compact=compact)
+            yield ActionButton("Neutral", id="e_default", compact=compact)
+
+    app = _App()
+    app.theme = theme
+    async with app.run_test(size=(60, 12)) as pilot:
+        await pilot.pause()
+        disabled = app.query_one("#d_primary")
+
+        def word_style():
+            for strip in disabled.render_lines(Region(0, 0, disabled.outer_size.width, disabled.outer_size.height)):
+                for segment in strip:
+                    if "Primary" in segment.text:
+                        return segment.style
+            raise AssertionError("label not painted")
+
+        idle = word_style()
+        assert idle.dim and not idle.bold and not idle.underline
+        await pilot.hover("#d_primary")
+        await pilot.pause()
+        assert word_style() == idle
+        enabled = app.query_one("#e_default")
+        for strip in enabled.render_lines(Region(0, 0, enabled.outer_size.width, enabled.outer_size.height)):
+            for segment in strip:
+                if "Neutral" in segment.text:
+                    assert not segment.style.dim
