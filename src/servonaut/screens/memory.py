@@ -482,8 +482,6 @@ class MemoryScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         """Compose the memory screen layout."""
-        from rich.markup import escape
-
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = display_name(self._instance) or instance_id
         yield SafeHeader()
@@ -493,7 +491,7 @@ class MemoryScreen(WorkspaceScreen):
             yield Container(
                 Container(
                     Static(
-                        f"[bold $text-accent]Server memory: {escape(str(instance_name))}[/bold $text-accent]",
+                        self._title_content(instance_name),
                         id="memory-title",
                     ),
                     Static(
@@ -694,13 +692,17 @@ class MemoryScreen(WorkspaceScreen):
         self._render_title()
         self._render_table()
 
-    def _render_title(self) -> None:
-        from rich.markup import escape
-
-        name = display_name(self._instance) or self._instance.get("id") or "unknown"
-        self.query_one("#memory-title", Static).update(
-            f"[bold $text-accent]Server memory: {escape(str(name))}[/bold $text-accent]"
+    @staticmethod
+    def _title_content(name: object) -> Content:
+        """The heading; the server name is outside text and stays literal."""
+        return Content.assemble(
+            literal_text("Server memory: ", "bold $text-accent"),
+            literal_text(str(name), "bold $text-accent"),
         )
+
+    def _render_title(self) -> None:
+        name = display_name(self._instance) or self._instance.get("id") or "unknown"
+        self.query_one("#memory-title", Static).update(self._title_content(name))
 
     # ------------------------------------------------------------------
     # Table rendering

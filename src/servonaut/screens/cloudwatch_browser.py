@@ -224,8 +224,8 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         Vertical(
                             Static("", id="cw_page_info"),
                             ActionRow(
-                                ActionButton("Previous", "p", short="Prev", id="cw_btn_prev"),
-                                ActionButton("Next", "n", id="cw_btn_next"),
+                                ActionButton("Previous", "p", short="Prev", compact=True, id="cw_btn_prev"),
+                                ActionButton("Next", "n", compact=True, id="cw_btn_next"),
                                 id="cw_page_controls",
                             ),
                             id="cloudwatch_pager",
@@ -240,7 +240,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                                 id="cw_top_ips_header",
                             ),
                             DataTable(id="cloudwatch_ips_table"),
-                            ActionButton("Ban selected IP", "b", role="error", id="cw_btn_ban_ip"),
+                            ActionButton("Ban selected IP", "b", role="error", compact=True, id="cw_btn_ban_ip"),
                             id="cloudwatch_ips_panel",
                         )
                         yield VerticalScroll(

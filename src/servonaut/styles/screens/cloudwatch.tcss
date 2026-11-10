@@ -232,8 +232,6 @@ CloudWatchBrowserScreen.-short #cloudwatch_heading {
 
 CloudWatchBrowserScreen.-short #cloudwatch_pager ActionButton,
 CloudWatchBrowserScreen.-short #cw_btn_ban_ip {
-    height: 1;
-    border: none;
     margin: 0;
 }
 

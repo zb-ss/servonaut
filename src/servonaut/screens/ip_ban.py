@@ -509,6 +509,18 @@ class IPBanScreen(WorkspaceScreen):
             self.app.copy_to_clipboard(ip)
             self.notify(f"Copied {ip} to clipboard")
 
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        """Enter or a click on a banned address uses it.
+
+        A focused table consumes Enter for its own select binding, so the
+        screen-level ``enter`` binding never fires there; the table reports
+        the choice as ``CellSelected``.
+        """
+        if event.data_table.id != "banned_table":
+            return
+        event.stop()
+        self.action_use_selected_ip()
+
     def action_use_selected_ip(self) -> None:
         """Copy the selected IP into the input field (bound to its real address)."""
         table = self.query_one("#banned_table", DataTable)
