@@ -87,6 +87,11 @@ AppearancePanel .theme-card.-error {
 AppearancePanel .theme-card-title {
     height: auto;
 }
+/* After the state rules: the border carries the state colour, so focus is shown on the title. */
+AppearancePanel .theme-card:focus .theme-card-title {
+    background: $boost;
+    text-style: bold underline;
+}
 AppearancePanel .theme-card-swatches {
     height: 1;
 }
@@ -107,7 +112,7 @@ AppearancePanel .theme-card-path .theme-edit-file {
     width: auto;
     min-width: 0;
     height: 1;
-    margin: 0;
+    margin: 0 0 0 2;
     border: none;
     padding: 0;
     text-style: underline;

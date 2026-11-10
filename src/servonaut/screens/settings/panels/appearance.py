@@ -64,6 +64,15 @@ DETAILS_WIDTH = 36
 # At this panel width the title, hint and the three buttons share one row.
 HEADER_ROW_MIN_WIDTH = 120
 SWATCH_MIN_CELLS = 2
+# Border and padding of a card, and the room the "Edit file" link and its gap need beside a path.
+CARD_CHROME_CELLS = 4
+EDIT_LINK_CELLS = 11
+
+
+def _path_for_row(path: Path, room: int) -> str:
+    """The whole path when it fits beside the Edit link, otherwise just the file name."""
+    full = tildify(str(path))
+    return full if room <= 0 or len(full) + EDIT_LINK_CELLS <= room else path.name
 _SWATCH_ROLES = ("background", "surface", "panel", "primary", "accent", "warning", "error", "success")
 _ANSI_SWATCHES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 
@@ -155,6 +164,7 @@ class ThemeCard(Vertical):
         self.theme_name = info.name
         self._info = info
         self._warning = warning
+        self._room = 0
 
     def compose(self) -> ComposeResult:
         yield Static(self._title(), classes="theme-card-title")
@@ -166,6 +176,15 @@ class ThemeCard(Vertical):
                 yield EditFileButton(self._info.path)
         if self._warning is not None:
             yield Static(Content.assemble((_warning_text(self._warning), "$text-warning")), classes="theme-card-warning")
+
+    def fit_path(self, room: int) -> None:
+        """Show the file name alone when the card is too narrow for the path and Edit link."""
+        self._room = room
+        if self._info.path is None:
+            return
+        self.tooltip = tildify(str(self._info.path))
+        for detail in self.query(".theme-card-path .theme-card-detail"):
+            detail.update(self._detail())
 
     def set_active(self, is_active: bool) -> None:
         self.set_class(is_active, "-active")
@@ -183,7 +202,7 @@ class ThemeCard(Vertical):
     def _detail(self) -> Content:
         info = self._info
         if info.source == SOURCE_USER and info.path is not None:
-            return Content(tildify(str(info.path)))
+            return Content(_path_for_row(info.path, self._room))
         kind = "follows your terminal" if info.theme.ansi else ("dark" if info.theme.dark else "light")
         return Content(f"Built in · {kind}")
 
@@ -230,6 +249,11 @@ class EditFileButton(Button):
     def __init__(self, path: Path) -> None:
         super().__init__("Edit file", classes="theme-edit-file", compact=True)
         self.path = path
+        self.styles.line_pad = 0
+
+    def get_content_width(self, container, viewport) -> int:
+        """Just the words: the stock button adds a cell each side, which a link does not want."""
+        return self.label.cell_length
 
 
 # How many of a file's problems its card lists; the rest are counted.
@@ -253,6 +277,14 @@ class ThemeErrorCard(Vertical):
         super().__init__(classes="theme-card -error")
         self._errors = errors
         self._path = path
+        self._room = 0
+
+    def fit_path(self, room: int) -> None:
+        """Show the file name alone when the card is too narrow for the path and Edit link."""
+        self._room = room
+        self.tooltip = tildify(str(self._path))
+        for detail in self.query(".theme-card-path .theme-card-detail"):
+            detail.update(Content(_path_for_row(self._path, room)))
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -265,7 +297,7 @@ class ThemeErrorCard(Vertical):
         )
         if _can_edit(self._path):
             with Horizontal(classes="theme-card-path"):
-                yield Static(Content(tildify(str(self._path))), classes="theme-card-detail")
+                yield Static(Content(_path_for_row(self._path, self._room)), classes="theme-card-detail")
                 yield EditFileButton(self._path)
         elif self._path.is_symlink():
             yield Static("This file is a link, so it cannot be opened from here.", classes="theme-card-detail")
@@ -291,6 +323,7 @@ class AppearancePanel(SettingsPanel):
     def __init__(self) -> None:
         super().__init__()
         self._previewed: str = ""
+        self._path_room = 0
 
     # ------------------------------------------------------------------
     # Composition
@@ -356,14 +389,21 @@ class AppearancePanel(SettingsPanel):
         layout = self.query_one("#appearance_layout", Container)
         layout.set_class(wide, "-side")
         layout.set_class(not wide, "-stacked")
-        self._fit_actions(event.size.width < COMPACT_ACTIONS_MAX_WIDTH)
-        header = self.query_one("#appearance_header", Horizontal)
-        header.set_class(event.size.width >= HEADER_ROW_MIN_WIDTH, "-wide")
+        header_wide = event.size.width >= HEADER_ROW_MIN_WIDTH
+        self._fit_actions(event.size.width < COMPACT_ACTIONS_MAX_WIDTH, one_row=not header_wide)
+        self.query_one("#appearance_header", Horizontal).set_class(header_wide, "-wide")
         cards_width = event.size.width - (DETAILS_WIDTH + 2 if wide else 0)
         columns = max(1, min(MAX_CARD_COLUMNS, cards_width // CARD_MIN_WIDTH))
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
             grid.set_class(count == columns, f"-cols-{count}")
+        self._path_room = (cards_width - 2 - (columns - 1)) // columns - CARD_CHROME_CELLS
+        self._fit_card_paths()
+
+    def _fit_card_paths(self) -> None:
+        for card in self.query(".theme-card"):
+            if isinstance(card, (ThemeCard, ThemeErrorCard)):
+                card.fit_path(self._path_room)
 
     @property
     def card_columns(self) -> int:
@@ -392,12 +432,12 @@ class AppearancePanel(SettingsPanel):
             slots[target].focus()
             slots[target].scroll_visible()
 
-    def _fit_actions(self, compact: bool) -> None:
-        """Borderless buttons with short labels when the panel is too narrow for three."""
+    def _fit_actions(self, short_labels: bool, one_row: bool) -> None:
+        """Short labels when the panel is too narrow for three buttons; one-row buttons when stacked."""
         for button_id, (full, short) in _ACTION_LABELS.items():
             button = self.query_one(f"#{button_id}", Button)
-            button.compact = compact
-            button.label = short if compact else full
+            button.compact = short_labels or one_row
+            button.label = short if short_labels else full
 
     # ------------------------------------------------------------------
     # Cards
@@ -409,6 +449,7 @@ class AppearancePanel(SettingsPanel):
         grid = self.query_one("#appearance_cards", Grid)
         await grid.remove_children()
         await grid.mount_all(cards)
+        self._fit_card_paths()
         for description in self.query("#appearance_description"):  # none once the panel is closing
             description.update(self._hint())
         self._show_details(self._previewed or app.theme)
