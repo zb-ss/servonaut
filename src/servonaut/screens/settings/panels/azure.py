@@ -76,7 +76,7 @@ class AzurePanel(SettingsPanel):
                 id="azure_subscription_ids",
             )
         with Vertical(classes="settings-form-section settings-provider-section"):
-            yield Static("Resource Groups", classes="section-label settings-group-title")
+            yield Static("Resource groups", classes="section-label settings-group-title")
             yield Static(
                 "Limit discovery to these resource groups (leave empty for all)",
                 classes="panel-status",

@@ -27,7 +27,7 @@ class ScanResultsScreen(WorkspaceScreen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("s", "scan_now", "Scan Now", show=True),
+        Binding("s", "scan_now", "Scan now", show=True),
     ]
 
     AUTO_FOCUS = "#scan_button"
@@ -59,7 +59,7 @@ class ScanResultsScreen(WorkspaceScreen):
                 )
                 with Vertical(id="results_container"):
                     yield Horizontal(
-                        Button("Trigger New Scan", variant="primary", id="scan_button"),
+                        Button("Trigger new scan", variant="primary", id="scan_button"),
                         Static("", id="scan_status"),
                         id="scan_controls",
                     )

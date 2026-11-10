@@ -942,7 +942,7 @@ class VaultAddDeviceModal(ModalScreen[Optional[str]]):
             ),
             actions=DialogActions(
                 Button("Cancel", id="vault_add_device_cancel"),
-                Button("Use Recover instead", id="vault_add_device_recover"),
+                Button("Use recover instead", id="vault_add_device_recover"),
                 Button("Start", variant="primary", id="vault_add_device_start"),
             ),
             size="large", id="vault_add_device_modal",

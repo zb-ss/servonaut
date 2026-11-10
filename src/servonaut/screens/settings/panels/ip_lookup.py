@@ -26,7 +26,7 @@ class IpLookupPanel(SettingsPanel):
     """Settings panel for IP lookup integrations (AbuseIPDB)."""
 
     PANEL_ID = "ip_lookup"
-    TITLE = "IP Lookup"
+    TITLE = "IP lookup"
     DESCRIPTION = 'API credentials used when you inspect an IP address.'
 
     DEFAULT_CSS = """

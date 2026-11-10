@@ -174,7 +174,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 classes="msync_card_body",
             ),
             Horizontal(
-                Button("Open Login →", variant="primary", id="msync_btn_login"),
+                Button("Open login →", variant="primary", id="msync_btn_login"),
                 classes="msync_card_actions",
             ),
             classes="msync_card msync_card_primary",
@@ -213,7 +213,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                     classes="msync_card_body",
                 ),
                 Horizontal(
-                    Button("Open Billing →", variant="primary", id="msync_btn_billing"),
+                    Button("Open billing →", variant="primary", id="msync_btn_billing"),
                     Button("Compare plans", id="msync_btn_compare"),
                     classes="msync_card_actions",
                 ),

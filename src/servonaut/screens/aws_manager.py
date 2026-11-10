@@ -604,7 +604,7 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Terminate EC2 Instance",
+                title="Terminate EC2 instance",
                 description=with_bold_values(
                     "Terminate {} ({}) in {}?", name, inst.get('type', ''), region,
                 ),

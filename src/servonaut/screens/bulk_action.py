@@ -80,8 +80,8 @@ class BulkActionModal(ModalScreen[list[str] | None]):
                 Static(Text(self._description_text()), id="bulk_action_description"),
                 SelectionList(id="bulk_action_list"),
                 Horizontal(
-                    Button("Select All", id="bulk_action_all"),
-                    Button("Select None", id="bulk_action_none"),
+                    Button("Select all", id="bulk_action_all"),
+                    Button("Select none", id="bulk_action_none"),
                 ),
                 *acknowledgement,
                 id="bulk_action_body",

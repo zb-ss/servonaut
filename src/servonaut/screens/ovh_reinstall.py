@@ -99,7 +99,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         ),
                         Horizontal(
                             Button(
-                                "Reinstall Selected",
+                                "Reinstall selected",
                                 variant="error",
                                 id="btn_reinstall",
                             ),
@@ -217,7 +217,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     "SSH keys will need to be re-applied",
                 ],
                 confirm_text=instance_name,
-                action_label="Reinstall Now",
+                action_label="Reinstall now",
                 severity="danger",
             )
         )

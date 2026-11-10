@@ -67,7 +67,7 @@ PANELS: List[PanelSpec] = [
     ),
     PanelSpec(
         id="history_paths",
-        title="History & Paths",
+        title="History & paths",
         group="General",
         keywords=["keywords", "command", "history", "chat", "paths", "store"],
         factory=_panel("history_paths", "HistoryPathsPanel"),
@@ -89,14 +89,14 @@ PANELS: List[PanelSpec] = [
     ),
     PanelSpec(
         id="custom_servers",
-        title="Custom Servers",
+        title="Custom servers",
         group="Connections",
         keywords=["custom", "servers", "non-aws", "hosts", "provider"],
         factory=_panel("custom_servers", "CustomServersPanel"),
     ),
     PanelSpec(
         id="ssh_keys",
-        title="SSH Keys",
+        title="SSH keys",
         group="Connections",
         keywords=["ssh", "keys", "instance", "default", "key", "pem"],
         factory=_panel("ssh_keys", "SshKeysPanel"),
@@ -144,14 +144,14 @@ PANELS: List[PanelSpec] = [
     # --------------------------------------------------- Security & Network
     PanelSpec(
         id="ip_ban",
-        title="IP Ban",
+        title="IP ban",
         group="Security & Network",
         keywords=["ip", "ban", "waf", "security", "group", "nacl", "block"],
         factory=_panel("ip_ban", "IpBanPanel"),
     ),
     PanelSpec(
         id="ip_lookup",
-        title="IP Lookup",
+        title="IP lookup",
         group="Security & Network",
         keywords=["abuseipdb", "ip", "lookup", "reputation", "geolocation", "abuse"],
         factory=_panel("ip_lookup", "IpLookupPanel"),
@@ -172,14 +172,14 @@ PANELS: List[PanelSpec] = [
     ),
     PanelSpec(
         id="log_viewer",
-        title="Log Viewer",
+        title="Log viewer",
         group="Security & Network",
         keywords=["log", "viewer", "paths", "tail", "lines", "scan", "depth"],
         factory=_panel("log_viewer", "LogViewerPanel"),
     ),
     PanelSpec(
         id="mcp",
-        title="MCP Server",
+        title="MCP server",
         group="Security & Network",
         keywords=["mcp", "guard", "allowlist", "blocklist", "audit", "agents"],
         factory=_panel("mcp", "McpPanel"),
@@ -193,7 +193,7 @@ PANELS: List[PanelSpec] = [
     ),
     PanelSpec(
         id='vault',
-        title="Team Vault",
+        title="Team vault",
         group="Security & Network",
         keywords=["vault", "identity", "recovery", "grant", "verification", "ssh agent"],
         factory=_panel("vault", "VaultPanel"),
@@ -201,7 +201,7 @@ PANELS: List[PanelSpec] = [
     # ------------------------------------------------------------------- AI
     PanelSpec(
         id="ai_provider",
-        title="AI Provider",
+        title="AI provider",
         group="AI",
         keywords=["ai", "provider", "openai", "anthropic", "gemini", "ollama",
                   "model", "api key", "temperature"],
@@ -209,14 +209,14 @@ PANELS: List[PanelSpec] = [
     ),
     PanelSpec(
         id="ai_chat",
-        title="AI Chat",
+        title="AI chat",
         group="AI",
         keywords=["ai", "chat", "prompt", "tool", "iterations", "guard", "memory"],
         factory=_panel("ai_chat", "AiChatPanel"),
     ),
     PanelSpec(
         id="voice",
-        title="Voice Input",
+        title="Voice input",
         group="AI",
         keywords=["voice", "speech", "microphone", "mic", "dictation", "stt",
                   "whisper", "transcribe", "audio", "tts", "speak", "spoken",

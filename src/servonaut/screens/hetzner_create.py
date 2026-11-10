@@ -115,7 +115,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "Create Hetzner Cloud Server",
+                        "Create Hetzner Cloud server",
                         id="hetzner_create_title",
                         classes="screen-title",
                     ),
@@ -132,7 +132,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                             registry_for(self.app, "hetzner"), "hetzner",
                             value=self._account or None, id="hetzner_create_account",
                         ),
-                        Static("[bold]Server Name[/bold]", classes="section_header"),
+                        Static("[bold]Server name[/bold]", classes="section_header"),
                         Static(
                             "[dim]Display name for the server — appears in the "
                             "Hetzner console and Servonaut's instance list. "
@@ -146,7 +146,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                     Vertical(
                         Vertical(
                             Static("Compute and image", classes="compute-section-title"),
-                            Static("[bold]Select Server Type[/bold]",
+                            Static("[bold]Select server type[/bold]",
                                    classes="section_header"),
                             Static(
                                 "[dim]Hetzner server types vary by architecture (x86 vs "
@@ -155,7 +155,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                                 classes="note",
                             ),
                             DataTable(id="hetzner_types_table"),
-                            Static("[bold]Select Image[/bold]", classes="section_header"),
+                            Static("[bold]Select image[/bold]", classes="section_header"),
                             Static(
                                 "[dim]Stock OS images only (snapshots and backups are "
                                 "managed elsewhere). [b]Arch[/b] must match the "
@@ -167,11 +167,11 @@ class HetznerCreateScreen(WorkspaceScreen):
                         ),
                         Vertical(
                             Static("Location and access", classes="compute-section-title"),
-                            Static("[bold]Select Location[/bold]",
+                            Static("[bold]Select location[/bold]",
                                    classes="section_header"),
                             DataTable(id="hetzner_locations_table"),
                             Static(
-                                "[bold]SSH Key (optional)[/bold]",
+                                "[bold]SSH key (optional)[/bold]",
                                 classes="section_header",
                             ),
                             Static(
@@ -196,7 +196,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                         classes="compute-review-note",
                     ),
                     Horizontal(
-                        Button("Create Server", variant="primary",
+                        Button("Create server", variant="primary",
                                id="btn_hetzner_create_submit"),
                         Button("Back", variant="default",
                                id="btn_hetzner_create_back"),
@@ -565,7 +565,7 @@ class HetznerCreateScreen(WorkspaceScreen):
         )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Create Hetzner Cloud Server",
+                title="Create Hetzner Cloud server",
                 description=(
                     with_bold_values(
                         "Create {} in {} as {} / {} with SSH key {} in project {}.",
@@ -582,7 +582,7 @@ class HetznerCreateScreen(WorkspaceScreen):
                     "Charges continue until the server is deleted",
                 ],
                 confirm_text="create",
-                action_label="Create Server",
+                action_label="Create server",
                 severity="warning",
             )
         )

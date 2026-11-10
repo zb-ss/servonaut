@@ -554,7 +554,7 @@ class ChatPanel(Widget):
             with Vertical(id="chat-header"):
                 yield Static(SERVONAUT_LOGO, id="chat-logo")
                 with Horizontal(id="chat-controls"):
-                    yield Button("New Chat", id="btn-chat-new", classes="chat-btn")
+                    yield Button("New chat", id="btn-chat-new", classes="chat-btn")
                     yield Button("History", id="btn-chat-history", classes="chat-btn")
                     # Per-session provider indicator (S/O/A/G/L). Click
                     # to open the picker and override for this session

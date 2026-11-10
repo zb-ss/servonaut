@@ -32,7 +32,7 @@ class CustomServersPanel(SettingsPanel):
     """
 
     PANEL_ID = "custom_servers"
-    TITLE = "Custom Servers"
+    TITLE = "Custom servers"
 
     DEFAULT_CSS = """
     CustomServersPanel .custom-servers-note {
@@ -64,7 +64,7 @@ class CustomServersPanel(SettingsPanel):
             yield Static("", id="custom_servers_count", classes="custom-servers-count")
             yield Horizontal(
                 Button(
-                    "Open Custom Servers",
+                    "Open custom servers",
                     id="open_custom_servers",
                     variant="primary",
                 ),

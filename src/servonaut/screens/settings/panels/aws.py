@@ -127,7 +127,7 @@ class AwsPanel(SettingsPanel):
             )
         with Vertical(classes="settings-form-section settings-provider-section"):
             # --- S3 object storage ----------------------------------------------
-            yield Static("S3 Object Storage", classes="aws-subheader settings-group-title")
+            yield Static("S3 object storage", classes="aws-subheader settings-group-title")
             yield setting_row(
                 "Access key",
                 EnvVarInput(

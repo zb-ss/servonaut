@@ -113,7 +113,7 @@ class ConnectionsPanel(SettingsPanel):
         """Yield the connection profiles section and connection rules section."""
         with VerticalGroup(classes="settings-access-section"):
             with VerticalGroup(classes="settings-access-context"):
-                yield Static("Connection Profiles", classes="conn-section-header")
+                yield Static("Connection profiles", classes="conn-section-header")
                 yield Static(
                     "Define SSH bastion/proxy configurations that can be applied to instances.",
                     classes="conn-note",
@@ -173,7 +173,7 @@ class ConnectionsPanel(SettingsPanel):
 
         with VerticalGroup(classes="settings-access-section"):
             with VerticalGroup(classes="settings-access-context"):
-                yield Static("Connection Rules", classes="conn-section-header")
+                yield Static("Connection rules", classes="conn-section-header")
                 yield Static(
                     "Rules map instance match conditions to a connection profile. "
                     "The first matching rule wins.",

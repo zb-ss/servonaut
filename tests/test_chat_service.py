@@ -43,7 +43,7 @@ def test_create_session(tmp_path: Path) -> None:
     session = svc.create_session()
 
     assert session.id != ""
-    assert session.title == "New Chat"
+    assert session.title == "New chat"
     # File persisted
     saved = tmp_path / "chats" / f"{session.id}.json"
     assert saved.exists()
@@ -252,7 +252,7 @@ def test_auto_title(tmp_path: Path) -> None:
 
     svc = _make_service(tmp_path, ai_service)
     session = svc.create_session()
-    assert session.title == "New Chat"
+    assert session.title == "New chat"
 
     _run(svc.send_message(session, "How do I restart nginx?"))
     assert session.title == "How do I restart nginx?"

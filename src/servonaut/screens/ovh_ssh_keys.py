@@ -195,7 +195,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         sync_compact_buttons(self)
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Name", "Fingerprint", "Public Key (first 40 chars)")
+        table.add_columns("Name", "Fingerprint", "Public key (first 40 chars)")
         picker = self.query_one("#ovh_ssh_keys_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
@@ -501,7 +501,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             key_name = redactor.redact_key_name(key_name) if redactor else "Hidden"
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete SSH Key",
+                title="Delete SSH key",
                 description=with_bold_values(
                     "Remove {} from project {}.", key_name, self._display_project_id(),
                 ),

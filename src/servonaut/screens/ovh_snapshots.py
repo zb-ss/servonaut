@@ -97,17 +97,17 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         )
                         yield Horizontal(
                             Button(
-                                "Create Snapshot",
+                                "Create snapshot",
                                 variant="primary",
                                 id="btn_create",
                             ),
                             Button(
-                                "Restore Selected",
+                                "Restore selected",
                                 variant="error",
                                 id="btn_restore",
                             ),
                             Button(
-                                "Delete Selected",
+                                "Delete selected",
                                 variant="error",
                                 id="btn_delete",
                             ),
@@ -117,7 +117,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         if is_vps:
                             with Vertical(classes="resource-panel provider-lifecycle-backup"):
                                 yield Static(
-                                    "[bold]Automated Backups[/bold]",
+                                    "[bold]Automated backups[/bold]",
                                     id="backup_section_title",
                                 )
                                 yield Static(
@@ -125,7 +125,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                                     id="backup_status",
                                 )
                                 yield Button(
-                                    "Configure Backup",
+                                    "Configure backup",
                                     variant="default",
                                     id="btn_configure_backup",
                                 )
@@ -456,7 +456,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Restore Snapshot",
+                title="Restore snapshot",
                 description=with_bold_values(
                     "Restore {} from snapshot {}.", instance_name, snap_name,
                 ),
@@ -465,7 +465,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     "All changes made after the snapshot was taken will be lost",
                 ],
                 confirm_text=instance_name,
-                action_label="Restore Now",
+                action_label="Restore now",
                 severity="danger",
             )
         )
@@ -529,14 +529,14 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Snapshot",
+                title="Delete snapshot",
                 description=with_bold_values("Delete snapshot {}.", snap_name),
                 consequences=[
                     "The snapshot will be permanently deleted",
                     "This cannot be undone",
                 ],
                 confirm_text=str(snap_name),
-                action_label="Delete Snapshot",
+                action_label="Delete snapshot",
                 severity="warning",
             )
         )

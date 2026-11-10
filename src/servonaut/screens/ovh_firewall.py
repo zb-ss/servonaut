@@ -101,7 +101,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         classes="provider-firewall-status",
                     ),
                     Button(
-                        "Toggle Firewall", variant="default", id="btn_toggle"
+                        "Toggle firewall", variant="default", id="btn_toggle"
                     ),
                     classes="resource-panel provider-firewall-state",
                 ),
@@ -119,16 +119,16 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         ),
                         Horizontal(
                             Button(
-                                "Add Rule", variant="primary", id="btn_add_rule"
+                                "Add rule", variant="primary", id="btn_add_rule"
                             ),
                             Button(
-                                "Delete Rule", variant="error", id="btn_delete_rule"
+                                "Delete rule", variant="error", id="btn_delete_rule"
                             ),
                             Button("Back", variant="default", id="btn_back"),
                             id="firewall_actions",
                         ),
                         Static(
-                            "[bold]Add Firewall Rule[/bold]",
+                            "[bold]Add firewall rule[/bold]",
                             id="add_rule_title",
                             classes="form_section hidden",
                         ),
@@ -158,7 +158,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                             classes="hidden",
                         ),
                         Button(
-                            "Save Rule",
+                            "Save rule",
                             variant="primary",
                             id="btn_save_rule",
                             classes="hidden",
@@ -431,7 +431,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Add Firewall Rule",
+                title="Add firewall rule",
                 description=Content.assemble(
                     "Add rule ", literal(f"#{sequence}", "bold"), ": ",
                     literal(
@@ -445,7 +445,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     "The new rule will be applied to incoming traffic immediately",
                 ],
                 confirm_text="confirm",
-                action_label="Add Rule",
+                action_label="Add rule",
                 severity="warning",
             )
         )
@@ -506,7 +506,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Firewall Rule",
+                title="Delete firewall rule",
                 description=with_bold_values(
                     "Delete firewall rule {} from {}.", f"#{sequence}", self._display_ip,
                 ),
@@ -515,7 +515,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     "Traffic previously matched by this rule will no longer be filtered",
                 ],
                 confirm_text="confirm",
-                action_label="Delete Rule",
+                action_label="Delete rule",
                 severity="warning",
             )
         )

@@ -393,7 +393,7 @@ class TestHetznerPrimary:
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
             screen = app.screen
-            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save & Enable"
+            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save & enable"
             keep_off = screen.query_one("#btn_hetzner_disable", Button)
             assert str(keep_off.label) == "Save"
             _fill(screen, {
@@ -723,7 +723,7 @@ class TestOvhPrimary:
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
             screen = app.screen
-            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save & Enable"
+            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save & enable"
             keep_off = screen.query_one("#btn_ovh_disable", Button)
             assert str(keep_off.label) == "Save"
             _fill(screen, {

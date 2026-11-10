@@ -27,7 +27,7 @@ class HistoryPathsPanel(SettingsPanel):
     """Edit keyword store, command history, and chat history paths."""
 
     PANEL_ID = "history_paths"
-    TITLE = "History & Paths"
+    TITLE = "History & paths"
     DESCRIPTION = "Local files for scan keywords, commands and chat history."
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.

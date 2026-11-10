@@ -29,13 +29,13 @@ class MainMenuScreen(WorkspaceScreen):
     CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
-        Binding("1", "option_1", "List Instances", show=False),
-        Binding("2", "option_2", "SSH Keys", show=False),
-        Binding("3", "option_3", "Scan Servers", show=False),
+        Binding("1", "option_1", "List instances", show=False),
+        Binding("2", "option_2", "SSH keys", show=False),
+        Binding("3", "option_3", "Scan servers", show=False),
         Binding("4", "option_4", "Settings", show=False),
-        Binding("5", "option_5", "Custom Servers", show=False),
+        Binding("5", "option_5", "Custom servers", show=False),
         Binding("6", "option_6", "CloudTrail", show=False),
-        Binding("7", "option_7", "IP Ban Manager", show=False),
+        Binding("7", "option_7", "IP ban manager", show=False),
         Binding("8", "option_8", "CloudWatch", show=False),
         Binding("0", "quit", "Quit", show=False),
         Binding("q", "quit", "Quit", show=True),
@@ -94,8 +94,8 @@ class MainMenuScreen(WorkspaceScreen):
                                 id="card_list", classes="action-card dashboard-primary",
                             )
                             with Horizontal(id="dashboard-secondary-actions"):
-                                yield Button("Custom Servers", id="card_custom_servers", classes="action-card")
-                                yield Button("SSH Keys", id="card_keys", classes="action-card")
+                                yield Button("Custom servers", id="card_custom_servers", classes="action-card")
+                                yield Button("SSH keys", id="card_keys", classes="action-card")
                                 yield Button("Settings", id="card_settings", classes="action-card")
                     with Vertical(id="dashboard-inventory"):
                         yield Static("Loaded inventory", classes="dashboard-section-title")

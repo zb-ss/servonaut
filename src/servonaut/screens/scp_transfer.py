@@ -64,15 +64,15 @@ class SCPTransferScreen(WorkspaceScreen):
                     Vertical(
                         Static("Transfer direction", id="direction_label"),
                         RadioSet(
-                            RadioButton("Upload (Local → Remote)", value=True, id="radio_upload"),
-                            RadioButton("Download (Remote → Local)", id="radio_download"),
+                            RadioButton("Upload (local → remote)", value=True, id="radio_upload"),
+                            RadioButton("Download (remote → local)", id="radio_download"),
                             id="direction_selector"
                         ),
                         Horizontal(
                             Vertical(
                                 Horizontal(
                                     Static("Local path", id="local_path_label"),
-                                    Static("Source · This computer", id="local_path_role", classes="transfer-path-role"),
+                                    Static("Source · this computer", id="local_path_role", classes="transfer-path-role"),
                                     classes="transfer-path-heading",
                                 ),
                                 Input(placeholder="/path/to/local/file", id="local_path_input"),
@@ -81,7 +81,7 @@ class SCPTransferScreen(WorkspaceScreen):
                             Vertical(
                                 Horizontal(
                                     Static("Remote path", id="remote_path_label"),
-                                    Static("Destination · Remote server", id="remote_path_role", classes="transfer-path-role"),
+                                    Static("Destination · remote server", id="remote_path_role", classes="transfer-path-role"),
                                     classes="transfer-path-heading",
                                 ),
                                 Input(placeholder="/path/to/remote/file", id="remote_path_input"),
@@ -90,11 +90,11 @@ class SCPTransferScreen(WorkspaceScreen):
                             id="transfer_paths",
                         ),
                         Static(
-                            "Review both paths, then choose Start Transfer.",
+                            "Review both paths, then choose Start transfer.",
                             id="transfer_manual_hint", markup=False,
                         ),
                         Horizontal(
-                            Button("Start Transfer", id="transfer_button", variant="primary"),
+                            Button("Start transfer", id="transfer_button", variant="primary"),
                             Button("Cancel", variant="default", id="cancel_button"),
                             id="button_container"
                         ),

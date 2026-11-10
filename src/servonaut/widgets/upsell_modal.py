@@ -93,7 +93,7 @@ class UpsellModal(ModalScreen[None]):
             body=DialogBody(Static(description, id="upsell-body")),
             actions=DialogActions(
                 Button("Close", variant="default", id="upsell-btn-close"),
-                Button("View Plans", variant="warning", id="upsell-btn-upgrade"),
+                Button("View plans", variant="warning", id="upsell-btn-upgrade"),
                 id="upsell-btn-row",
             ),
             id="upsell-container",

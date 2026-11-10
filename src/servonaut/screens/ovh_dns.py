@@ -109,7 +109,7 @@ class OVHDNSScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Horizontal(
                     Vertical(
-                        Static("OVH DNS Management", id="dns_title", classes="screen-title"),
+                        Static("OVH DNS management", id="dns_title", classes="screen-title"),
                         Static(
                             "Select a domain to manage its zone records; reverse DNS "
                             "is listed separately.",
@@ -132,25 +132,25 @@ class OVHDNSScreen(WorkspaceScreen):
                         classes="resource-panel provider-dns-domains",
                     ),
                     Vertical(
-                        Static("[bold]DNS Records[/bold]", classes="section_header", id="records_section_header"),
+                        Static("[bold]DNS records[/bold]", classes="section_header", id="records_section_header"),
                         Static("", id="selected_zone"),
                         DataTable(id="records_table"),
                         Horizontal(
-                            Button("Add Record", variant="primary", id="btn_add"),
-                            Button("Edit Record", variant="default", id="btn_edit"),
-                            Button("Delete Record", variant="error", id="btn_delete"),
-                            Button("Refresh Zone", variant="default", id="btn_refresh_zone"),
+                            Button("Add record", variant="primary", id="btn_add"),
+                            Button("Edit record", variant="default", id="btn_edit"),
+                            Button("Delete record", variant="error", id="btn_delete"),
+                            Button("Refresh zone", variant="default", id="btn_refresh_zone"),
                             Button("Back", variant="default", id="btn_back"),
                             id="dns_actions",
                         ),
                         Container(
-                            Static("[bold]Record Details[/bold]", classes="section_header"),
+                            Static("[bold]Record details[/bold]", classes="section_header"),
                             Input(placeholder="A, AAAA, CNAME, MX, TXT, SRV", id="input_type"),
                             Input(placeholder="www, mail, @", id="input_subdomain"),
                             Input(placeholder="192.0.2.1 or hostname", id="input_target"),
                             Input(placeholder="3600", id="input_ttl"),
                             Horizontal(
-                                Button("Save Record", variant="primary", id="btn_save"),
+                                Button("Save record", variant="primary", id="btn_save"),
                                 Button("Cancel", variant="default", id="btn_cancel_form"),
                                 classes="add_row",
                             ),
@@ -171,7 +171,7 @@ class OVHDNSScreen(WorkspaceScreen):
                         id="rdns_actions",
                     ),
                     Container(
-                        Static("[bold]Reverse DNS Details[/bold]", classes="section_header"),
+                        Static("[bold]Reverse DNS details[/bold]", classes="section_header"),
                         Static("", id="rdns_form_ip_label"),
                         Input(placeholder="server.example.com", id="input_rdns_hostname"),
                         Horizontal(
@@ -247,7 +247,7 @@ class OVHDNSScreen(WorkspaceScreen):
 
         rdns_tbl = self.query_one("#rdns_table", DataTable)
         rdns_tbl.cursor_type = "row"
-        rdns_tbl.add_columns("IP Address", "Hostname", "IP Block")
+        rdns_tbl.add_columns("IP address", "Hostname", "IP block")
 
     # ------------------------------------------------------------------
     # Form visibility helpers
@@ -756,7 +756,7 @@ class OVHDNSScreen(WorkspaceScreen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete DNS Record",
+                    title="Delete DNS record",
                     description=with_bold_values(
                         "Permanently delete {} record {} pointing to {}.",
                         record.get('fieldType', ''), display_subdomain, confirm_text,
@@ -766,7 +766,7 @@ class OVHDNSScreen(WorkspaceScreen):
                         "DNS propagation may take time depending on upstream TTL caching",
                     ],
                     confirm_text=confirm_text,
-                    action_label="Delete Record",
+                    action_label="Delete record",
                     severity="warning",
                 )
             )
@@ -899,7 +899,7 @@ class OVHDNSScreen(WorkspaceScreen):
         async def _confirm_and_delete_rdns() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Reverse DNS",
+                    title="Delete reverse DNS",
                     description=with_bold_values(
                         "Remove reverse DNS for {} (currently {}).",
                         display_ip, display_hostname or 'not set',

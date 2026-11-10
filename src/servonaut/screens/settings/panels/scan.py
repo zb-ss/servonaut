@@ -97,7 +97,7 @@ class ScanPanel(SettingsPanel):
     def form_rows(self) -> ComposeResult:
         """Yield the scan-paths list editor and the scan-rules CRUD panel."""
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Default Scan Paths", classes="scan-section-title")
+            yield Static("Default scan paths", classes="scan-section-title")
             yield Static(
                 "Paths scanned on every instance during a global scan.",
                 classes="scan-rule-sublabel",
@@ -109,7 +109,7 @@ class ScanPanel(SettingsPanel):
             self._scan_paths_editor = scan_paths_editor
             yield scan_paths_editor
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Scan Rules", classes="scan-section-title")
+            yield Static("Scan rules", classes="scan-section-title")
             yield Static(
                 "Rules apply conditional scanning based on instance attributes. "
                 "First-match wins when multiple rules target the same instance.",
@@ -128,7 +128,7 @@ class ScanPanel(SettingsPanel):
                     id="scan_new_rule_name",
                     classes="scan-new-rule-name",
                 ),
-                Button("+ Add Rule", id="scan_btn_add_rule", variant="primary"),
+                Button("+ Add rule", id="scan_btn_add_rule", variant="primary"),
                 classes="scan-add-rule-row",
             )
 
@@ -200,11 +200,11 @@ class ScanPanel(SettingsPanel):
             ),
             Static("Name:", classes="scan-rule-sublabel"),
             name_input,
-            Static("Match Conditions (key → value):", classes="scan-rule-sublabel"),
+            Static("Match conditions (key → value):", classes="scan-rule-sublabel"),
             conditions_editor,
-            Static("Scan Paths:", classes="scan-rule-sublabel"),
+            Static("Scan paths:", classes="scan-rule-sublabel"),
             paths_editor,
-            Static("Scan Commands:", classes="scan-rule-sublabel"),
+            Static("Scan commands:", classes="scan-rule-sublabel"),
             commands_editor,
             id=card_id,
             classes="scan-rule-card",

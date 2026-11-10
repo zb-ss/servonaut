@@ -35,7 +35,7 @@ def _toast(app, pending) -> str:
 def test_the_toast_names_the_server_and_where_to_confirm_but_not_the_member():
     message = _toast(_app(), _pending())
     assert "web-1" in message
-    assert "Fleet Memory" in message and "S" in message
+    assert "Fleet memory" in message and "S" in message
     assert "Real Person" not in message
 
 

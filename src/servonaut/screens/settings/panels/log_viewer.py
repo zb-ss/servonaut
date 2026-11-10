@@ -46,7 +46,7 @@ class LogViewerPanel(SettingsPanel):
     """
 
     PANEL_ID = "log_viewer"
-    TITLE = "Log Viewer"
+    TITLE = "Log viewer"
     DESCRIPTION = "Reading limits and paths used for remote log discovery."
 
     DEFAULT_CSS = """

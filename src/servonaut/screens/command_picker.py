@@ -52,7 +52,7 @@ class CommandPickerModal(ModalScreen[str]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Vertical(
-                Static("[bold $text-accent]Command Picker[/bold $text-accent]", id="picker_header"),
+                Static("[bold $text-accent]Command picker[/bold $text-accent]", id="picker_header"),
                 Static(
                     "Type to filter, Enter to select, Escape to cancel",
                     id="picker_hint",
@@ -198,7 +198,7 @@ class SaveCommandModal(ModalScreen[str]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Save Command[/bold $text-accent]",
+                "[bold $text-accent]Save command[/bold $text-accent]",
                 id="save_header",
             ),
             body=DialogBody(

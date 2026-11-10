@@ -53,7 +53,7 @@ class MemoryPanel(SettingsPanel):
     """
 
     PANEL_ID = "memory"
-    TITLE = "Memory & Sync"
+    TITLE = "Memory & sync"
     DESCRIPTION = 'Local memory collection, privacy, freshness and agent findings.'
 
     DEFAULT_CSS = """

@@ -133,7 +133,7 @@ class TeamManagementScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             yield ScrollableContainer(
                 Container(
-                    Static("[bold]Team Management[/bold]", id="team_mgmt_header", classes="screen-title"),
+                    Static("[bold]Team management[/bold]", id="team_mgmt_header", classes="screen-title"),
                     Static("Choose a team to review its members, shared servers and configuration.", id="team_workspace_summary", classes="screen-description"),
 
                     # No-auth notice (shown when not authenticated)
@@ -144,22 +144,22 @@ class TeamManagementScreen(WorkspaceScreen):
 
                     # --- Teams section (curved card) ---
                     Container(
-                        Static("[bold]Your Teams[/bold]", id="section_teams", classes="section_header"),
-                        Static("Select a team, then View Team to open its workspace.", classes="team_section_hint"),
+                        Static("[bold]Your teams[/bold]", id="section_teams", classes="section_header"),
+                        Static("Select a team, then View team to open its workspace.", classes="team_section_hint"),
                         BusyIndicator(id="team_list_busy"),
                         DataTable(id="teams_table"),
                         Horizontal(
-                            Button("Create Team", variant="primary", id="btn_create_team"),
-                            Button("View Team", variant="default", id="btn_view_team"),
+                            Button("Create team", variant="primary", id="btn_create_team"),
+                            Button("View team", variant="default", id="btn_view_team"),
                             classes="add_row",
                             id="team_actions_row",
                         ),
                         Container(
-                            Static("[bold]Create Team[/bold]", classes="section_header"),
+                            Static("[bold]Create team[/bold]", classes="section_header"),
                             Static("Team name", classes="team_field_label"),
                             Input(placeholder="Team Name", id="input_team_name"),
                             Horizontal(
-                                Button("Save Team", variant="primary", id="btn_save_team"),
+                                Button("Save team", variant="primary", id="btn_save_team"),
                                 Button("Cancel", variant="default", id="btn_cancel_create_team"),
                                 classes="form_actions_row",
                             ),
@@ -180,16 +180,16 @@ class TeamManagementScreen(WorkspaceScreen):
                             Static("Review member roles and invitation status. Owner and admin permissions govern changes.", classes="team_section_hint"),
                             DataTable(id="members_table"),
                             Horizontal(
-                                Button("Invite Member", variant="primary", id="btn_invite"),
-                                Button("Change Role", variant="default", id="btn_change_role"),
-                                Button("Resend Invite", variant="default", id="btn_resend"),
-                                Button("Copy Accept URL", variant="default", id="btn_copy_url"),
-                                Button("Remove Member", variant="error", id="btn_remove"),
+                                Button("Invite member", variant="primary", id="btn_invite"),
+                                Button("Change role", variant="default", id="btn_change_role"),
+                                Button("Resend invite", variant="default", id="btn_resend"),
+                                Button("Copy accept URL", variant="default", id="btn_copy_url"),
+                                Button("Remove member", variant="error", id="btn_remove"),
                                 classes="add_row",
                                 id="member_actions_row",
                             ),
                             Container(
-                                Static("[bold]Invite Member[/bold]", classes="section_header"),
+                                Static("[bold]Invite member[/bold]", classes="section_header"),
                                 Static("Email address", classes="team_field_label"),
                                 Input(placeholder="Email", id="input_invite_email"),
                                 Static("Team role", classes="team_field_label"),
@@ -200,14 +200,14 @@ class TeamManagementScreen(WorkspaceScreen):
                                     id="select_invite_role",
                                 ),
                                 Horizontal(
-                                    Button("Send Invite", variant="primary", id="btn_send_invite"),
+                                    Button("Send invite", variant="primary", id="btn_send_invite"),
                                     Button("Cancel", variant="default", id="btn_cancel_invite"),
                                     classes="form_actions_row",
                                 ),
                                 id="invite_form",
                             ),
                             Container(
-                                Static("[bold]Change Role[/bold]", id="change_role_header", classes="section_header"),
+                                Static("[bold]Change role[/bold]", id="change_role_header", classes="section_header"),
                                 Static("New team role", classes="team_field_label"),
                                 Select(
                                     options=_ROLE_OPTIONS,
@@ -216,7 +216,7 @@ class TeamManagementScreen(WorkspaceScreen):
                                     id="select_change_role",
                                 ),
                                 Horizontal(
-                                    Button("Save Role", variant="primary", id="btn_save_role"),
+                                    Button("Save role", variant="primary", id="btn_save_role"),
                                     Button("Cancel", variant="default", id="btn_cancel_change_role"),
                                     classes="form_actions_row",
                                 ),
@@ -228,14 +228,14 @@ class TeamManagementScreen(WorkspaceScreen):
 
                         # --- Shared Servers section (curved card) ---
                         Container(
-                            Static("[bold]Shared Servers[/bold]", id="section_servers", classes="section_header"),
+                            Static("[bold]Shared servers[/bold]", id="section_servers", classes="section_header"),
                             Static("Connect to a shared server or review the hosts available to this team.", classes="team_section_hint"),
                             BusyIndicator(id="team_servers_busy"),
                             DataTable(id="servers_table"),
                             Horizontal(
                                 Button("Connect", variant="success", id="btn_connect_shared"),
-                                Button("Share Server", variant="primary", id="btn_share"),
-                                Button("Share All", variant="default", id="btn_share_all"),
+                                Button("Share server", variant="primary", id="btn_share"),
+                                Button("Share all", variant="default", id="btn_share_all"),
                                 classes="add_row",
                                 id="server_actions_row",
                             ),
@@ -246,7 +246,7 @@ class TeamManagementScreen(WorkspaceScreen):
                                 id="server_remove_actions_row",
                             ),
                             Container(
-                                Static("[bold]Share Server[/bold]", classes="section_header"),
+                                Static("[bold]Share server[/bold]", classes="section_header"),
                                 Static("Server to share", classes="team_field_label"),
                                 Select(
                                     options=[("(no servers available)", Select.BLANK)],
@@ -289,7 +289,7 @@ class TeamManagementScreen(WorkspaceScreen):
                     Horizontal(
                         # --- Shared Configs section (curved card) ---
                         Container(
-                            Static("[bold]Shared Configs[/bold]", id="section_configs", classes="section_header"),
+                            Static("[bold]Shared configs[/bold]", id="section_configs", classes="section_header"),
                             Static(
                                 "[dim]Push a sanitised snapshot of your local config "
                                 "(connection profiles, scan rules, custom servers) so "
@@ -298,18 +298,18 @@ class TeamManagementScreen(WorkspaceScreen):
                             ),
                             DataTable(id="configs_table"),
                             Horizontal(
-                                Button("Push Current", variant="primary", id="btn_push_config"),
-                                Button("Pull Latest", variant="default", id="btn_pull_config"),
+                                Button("Push current", variant="primary", id="btn_push_config"),
+                                Button("Pull latest", variant="default", id="btn_pull_config"),
                                 classes="add_row",
                                 id="config_actions_row",
                             ),
                             Container(
-                                Static("[bold]Push Current Config[/bold]", classes="section_header"),
+                                Static("[bold]Push current config[/bold]", classes="section_header"),
                                 Static("", id="push_config_servers_label"),
                                 SelectionList(id="push_config_servers"),
                                 Horizontal(
-                                    Button("Select All", variant="default", id="btn_push_servers_all"),
-                                    Button("Select None", variant="default", id="btn_push_servers_none"),
+                                    Button("Select all", variant="default", id="btn_push_servers_all"),
+                                    Button("Select none", variant="default", id="btn_push_servers_none"),
                                     classes="form_actions_row",
                                     id="push_config_server_actions",
                                 ),
@@ -328,7 +328,7 @@ class TeamManagementScreen(WorkspaceScreen):
                                 id="push_config_form",
                             ),
                             Container(
-                                Static("[bold]Pull Latest Config[/bold]", classes="section_header"),
+                                Static("[bold]Pull latest config[/bold]", classes="section_header"),
                                 Static("", id="pull_config_preview"),
                                 Static(
                                     "[$text-warning]Pulling REPLACES your local connection profiles, "
@@ -425,7 +425,7 @@ class TeamManagementScreen(WorkspaceScreen):
 
         configs_tbl = self.query_one("#configs_table", DataTable)
         configs_tbl.cursor_type = "row"
-        configs_tbl.add_columns("Version", "Description", "Pushed", "Pushed By")
+        configs_tbl.add_columns("Version", "Description", "Pushed", "Pushed by")
 
     # ------------------------------------------------------------------
     # Visibility helpers
@@ -1635,7 +1635,7 @@ class TeamManagementScreen(WorkspaceScreen):
         async def _confirm_and_remove() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Remove Member",
+                    title="Remove member",
                     description=with_bold_values("Remove {} from the team?", email),
                     consequences=["Member will lose access to all shared servers"],
                     confirm_text=email,

@@ -72,7 +72,7 @@ class IpBanPanel(SettingsPanel):
     """
 
     PANEL_ID = "ip_ban"
-    TITLE = "IP Ban Configurations"
+    TITLE = "IP ban configurations"
     DESCRIPTION = 'Reusable AWS targets for WAF, security-group and network-ACL bans.'
 
     DEFAULT_CSS = """
@@ -282,7 +282,7 @@ class IpBanPanel(SettingsPanel):
             ),
             # Form action buttons
             Horizontal(
-                Button("Save Entry", id="btn_ipban_save", variant="primary"),
+                Button("Save entry", id="btn_ipban_save", variant="primary"),
                 Button("Cancel", id="btn_ipban_cancel"),
                 classes="ipban-form-actions",
             ),

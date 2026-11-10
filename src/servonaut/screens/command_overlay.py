@@ -584,7 +584,7 @@ class CommandOverlay(ModalScreen):
         from servonaut.screens.copy_mode import CopyModeScreen
 
         text = "\n".join(self._output_lines)
-        self.app.push_screen(CopyModeScreen(text, title="Command Output — Copy Mode"))
+        self.app.push_screen(CopyModeScreen(text, title="Command output — copy mode"))
 
     def action_close_overlay(self) -> None:
         """Close the command overlay modal, terminating any running process."""

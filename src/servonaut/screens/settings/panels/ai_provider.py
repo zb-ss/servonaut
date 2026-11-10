@@ -61,7 +61,7 @@ class AiProviderPanel(SettingsPanel):
     """AI provider configuration: keys, model, limits, preference."""
 
     PANEL_ID = "ai_provider"
-    TITLE = "AI Provider"
+    TITLE = "AI provider"
     DESCRIPTION = "Provider access, analysis defaults and chat preference."
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.

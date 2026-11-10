@@ -53,7 +53,7 @@ class LogPickerModal(ModalScreen[str]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
-        Binding("f2", "manage_paths", "Manage Paths", show=True),
+        Binding("f2", "manage_paths", "Manage paths", show=True),
     ]
 
     DEFAULT_CLASSES = "dialog-screen"
@@ -107,7 +107,7 @@ class LogPickerModal(ModalScreen[str]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Vertical(
-                Static("[bold $text-accent]Log Picker[/bold $text-accent]", id="log_picker_header"),
+                Static("[bold $text-accent]Log picker[/bold $text-accent]", id="log_picker_header"),
                 Static("Type to filter, Enter to select, Escape to cancel", id="log_picker_hint"),
             ),
             body=DialogContent(
@@ -409,7 +409,7 @@ class AddPathModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield DialogNotificationSpace()
         yield DialogFrame(
-            heading=Static('[bold $text-accent]Add Custom Log Path[/bold $text-accent]', id='add_path_header'),
+            heading=Static('[bold $text-accent]Add custom log path[/bold $text-accent]', id='add_path_header'),
             body=DialogBody(
                 Label("Remote file path", classes="log_path_field_label"),
                 Input(placeholder='/var/log/myapp/app.log', id='add_path_input'),
@@ -471,7 +471,7 @@ class AddDirectoryModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield DialogNotificationSpace()
         yield DialogFrame(
-            heading=Static('[bold $text-accent]Add Log Directory[/bold $text-accent]', id='add_dir_header'),
+            heading=Static('[bold $text-accent]Add log directory[/bold $text-accent]', id='add_dir_header'),
             body=DialogBody(
                 Label("Remote directory", classes="log_path_field_label"),
                 Input(placeholder='/var/log/myapp', id='add_dir_input'),
@@ -555,7 +555,7 @@ class ManagePathsModal(ModalScreen[str]):
         yield DialogFrame(
             heading=Vertical(
                 Static(
-                    "[bold $text-accent]Manage Custom Paths[/bold $text-accent]",
+                    "[bold $text-accent]Manage custom paths[/bold $text-accent]",
                     id="manage_paths_header",
                 ),
                 Static(
@@ -691,7 +691,7 @@ class EditPathModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield DialogNotificationSpace()
         yield DialogFrame(
-            heading=Static('[bold $text-accent]Edit Custom Log Path[/bold $text-accent]', id='edit_path_header'),
+            heading=Static('[bold $text-accent]Edit custom log path[/bold $text-accent]', id='edit_path_header'),
             body=DialogBody(
                 Label("Saved path", classes="log_path_field_label"),
                 Input(value=self._current_path, id='edit_path_input'),
@@ -764,9 +764,9 @@ class BrowseRemoteScreen(WorkspaceScreen):
         # priority: the focused Tree binds Enter itself (select + expand), so
         # a plain screen binding never fires. Directories are handed back to
         # the tree, so Enter still expands them.
-        Binding("enter", "select_node", "Add file / Open dir", show=True, priority=True),
-        Binding("f", "select_as_file", "Add as File", show=True),
-        Binding("d", "select_as_dir", "Add as Dir", show=True),
+        Binding("enter", "select_node", "Add file / open dir", show=True, priority=True),
+        Binding("f", "select_as_file", "Add as file", show=True),
+        Binding("d", "select_as_dir", "Add as dir", show=True),
     ]
 
     def __init__(self, instance: dict) -> None:

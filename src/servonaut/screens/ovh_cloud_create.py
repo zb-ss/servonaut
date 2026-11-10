@@ -101,7 +101,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "Create Cloud Instance",
+                        "Create cloud instance",
                         id="cloud_create_title",
                         classes="screen-title",
                     ),
@@ -119,7 +119,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                             registry_for(self.app, "ovh"), "ovh",
                             value=self._account or None, id="cloud_create_account",
                         ),
-                        Static("[bold]Instance Name[/bold]", classes="section_header"),
+                        Static("[bold]Instance name[/bold]", classes="section_header"),
                         Static(
                             "[dim]Display name for the new instance — appears in the "
                             "OVH console and Servonaut's instance list.[/dim]",
@@ -145,15 +145,15 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                     Vertical(
                         Vertical(
                             Static("Compute and image", classes="compute-section-title"),
-                            Static("[bold]Select Flavor[/bold]", classes="section_header"),
+                            Static("[bold]Select flavor[/bold]", classes="section_header"),
                             DataTable(id="flavors_table"),
-                            Static("[bold]Select Image[/bold]", classes="section_header"),
+                            Static("[bold]Select image[/bold]", classes="section_header"),
                             DataTable(id="images_table"),
                             classes="compute-form-section",
                         ),
                         Vertical(
                             Static("Server access", classes="compute-section-title"),
-                            Static("[bold]SSH Key (optional)[/bold]", classes="section_header"),
+                            Static("[bold]SSH key (optional)[/bold]", classes="section_header"),
                             Static("", id="keys_hint", classes="note hidden"),
                             DataTable(id="keys_table"),
                             classes="compute-form-section",
@@ -169,7 +169,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                         classes="compute-review-note",
                     ),
                     Horizontal(
-                        Button("Create Instance", variant="primary", id="btn_create"),
+                        Button("Create instance", variant="primary", id="btn_create"),
                         Button("Back", variant="default", id="btn_back"),
                         id="cloud_create_actions",
                     ),
@@ -264,7 +264,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
         flavors_tbl.cursor_type = "row"
 
         images_tbl = self.query_one("#images_table", DataTable)
-        images_tbl.add_columns("Name", "OS Type", "Min Disk", "Region")
+        images_tbl.add_columns("Name", "OS type", "Min disk", "Region")
         images_tbl.cursor_type = "row"
 
         keys_tbl = self.query_one("#keys_table", DataTable)
@@ -640,7 +640,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
         )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Create Cloud Instance",
+                title="Create cloud instance",
                 description=(
                     with_bold_values(
                         "Create instance {} in {} using {} / {} in account {}.",
@@ -657,7 +657,7 @@ class OVHCloudCreateScreen(WorkspaceScreen):
                     "Ongoing charges apply until the instance is deleted",
                 ],
                 confirm_text="create",
-                action_label="Create Instance",
+                action_label="Create instance",
                 severity="warning",
             )
         )

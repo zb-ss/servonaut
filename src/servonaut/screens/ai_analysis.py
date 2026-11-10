@@ -72,7 +72,7 @@ class AIAnalysisScreen(WorkspaceScreen):
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="ai_container", classes="workspace-content"):
-                yield Static("[bold $text-accent]AI Log Analysis[/bold $text-accent]", id="ai_header")
+                yield Static("[bold $text-accent]AI log analysis[/bold $text-accent]", id="ai_header")
                 yield Static("", id="ai_provider_info")
                 with Horizontal(id="ai_workbench"):
                     with Vertical(id="ai_source_panel"):
@@ -100,7 +100,7 @@ class AIAnalysisScreen(WorkspaceScreen):
                             id="ai_user_prompt",
                         )
                     with Horizontal(id="ai_action_row"):
-                        yield Button("Fetch Logs", id="btn_fetch_logs", variant="default")
+                        yield Button("Fetch logs", id="btn_fetch_logs", variant="default")
                         yield Button("Analyze (F5)", id="btn_analyze", variant="primary")
                         yield Button("Back", id="btn_back")
         yield Footer()

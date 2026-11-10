@@ -374,7 +374,7 @@ class InstanceListScreen(WorkspaceScreen):
                         yield Static(
                             "Click a value to copy it", id="fleet_values_hint", markup=False,
                         )
-                yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
+                yield Label("[bold]Keyword matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
         with Vertical(id="fleet-bottom"):
             with Horizontal(id="fleet_value_bar"):

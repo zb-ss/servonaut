@@ -93,14 +93,14 @@ class HetznerPanel(SettingsPanel):
             )
         with Vertical(classes="settings-form-section settings-provider-section"):
             # Server creation policy
-            yield Static("Server Creation", classes="section-heading settings-group-title")
+            yield Static("Server creation", classes="section-heading settings-group-title")
             yield setting_row(
                 "Require SSH keys on create",
                 Switch(id="hetzner_require_ssh_keys"),
             )
         with Vertical(classes="settings-form-section settings-provider-section"):
             # Cache / paths / alerts
-            yield Static("Cache & Paths", classes="section-heading settings-group-title")
+            yield Static("Cache & paths", classes="section-heading settings-group-title")
             yield setting_row(
                 "Cache TTL (seconds)",
                 Input(placeholder="300", id="hetzner_cache_ttl"),

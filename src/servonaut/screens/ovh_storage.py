@@ -93,7 +93,7 @@ class OVHStorageScreen(WorkspaceScreen):
                 Horizontal(
                     Static("Volumes", classes="resource-action-label"),
                     Horizontal(
-                        Button("Create Volume", id="btn_create", variant="primary"),
+                        Button("Create volume", id="btn_create", variant="primary"),
                         Button("Attach", id="btn_attach", variant="default"),
                         Button("Detach", id="btn_detach", variant="default"),
                         Button("Delete", id="btn_delete", variant="error"),
@@ -122,7 +122,7 @@ class OVHStorageScreen(WorkspaceScreen):
                 ),
                 actions,
                 Container(
-                    Static("[bold]Create Volume[/bold]", classes="section_header"),
+                    Static("[bold]Create volume[/bold]", classes="section_header"),
                     Label("Name:"),
                     Input(placeholder="my-volume", id="input_vol_name"),
                     Label("Size (GB):"),
@@ -132,14 +132,14 @@ class OVHStorageScreen(WorkspaceScreen):
                     Label("Type:"),
                     Input(placeholder="classic", id="input_vol_type"),
                     Horizontal(
-                        Button("Save Volume", id="btn_save_vol", variant="primary"),
+                        Button("Save volume", id="btn_save_vol", variant="primary"),
                         Button("Cancel", id="btn_cancel_form", variant="default"),
                         classes="add_row",
                     ),
                     id="create_vol_form",
                 ),
                 Container(
-                    Static("[bold]Attach Volume[/bold]", classes="section_header"),
+                    Static("[bold]Attach volume[/bold]", classes="section_header"),
                     Label("Instance ID:"),
                     Input(placeholder="instance-uuid", id="input_attach_instance_id"),
                     Horizontal(
@@ -150,11 +150,11 @@ class OVHStorageScreen(WorkspaceScreen):
                     id="attach_vol_form",
                 ),
                 Container(
-                    Static("[bold]Create Snapshot[/bold]", classes="section_header"),
-                    Label("Snapshot Name:"),
+                    Static("[bold]Create snapshot[/bold]", classes="section_header"),
+                    Label("Snapshot name:"),
                     Input(placeholder="snapshot-name", id="input_snapshot_name"),
                     Horizontal(
-                        Button("Create Snapshot", id="btn_confirm_snapshot", variant="primary"),
+                        Button("Create snapshot", id="btn_confirm_snapshot", variant="primary"),
                         Button("Cancel", id="btn_cancel_snapshot", variant="default"),
                         classes="add_row",
                     ),
@@ -168,7 +168,7 @@ class OVHStorageScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static(
-                            "OVH Block Storage",
+                            "OVH block storage",
                             id="storage_title",
                             classes="screen-title",
                         ),
@@ -496,14 +496,14 @@ class OVHStorageScreen(WorkspaceScreen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Volume",
+                    title="Delete volume",
                     description=with_bold_values("Permanently delete volume {}.", self._display_name(volume_name)),
                     consequences=[
                         "All data on this volume will be permanently lost",
                         "Any remaining snapshots may also be affected",
                     ],
                     confirm_text=self._display_name(volume_name),
-                    action_label="Delete Volume",
+                    action_label="Delete volume",
                     severity="danger",
                 )
             )
@@ -570,7 +570,7 @@ class OVHStorageScreen(WorkspaceScreen):
         async def _confirm_and_attach() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Attach Volume",
+                    title="Attach volume",
                     description=with_bold_values(
                         "Attach volume {} to instance {}.",
                         self._display_name(volume_name), self._display_instance_id(instance_id),
@@ -637,7 +637,7 @@ class OVHStorageScreen(WorkspaceScreen):
         async def _confirm_and_detach() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Detach Volume",
+                    title="Detach volume",
                     description=with_bold_values(
                         "Detach volume {} from instance {}.",
                         self._display_name(volume_name), self._display_instance_id(instance_id),

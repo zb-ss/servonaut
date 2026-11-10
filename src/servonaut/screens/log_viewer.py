@@ -573,7 +573,7 @@ class LogViewerScreen(WorkspaceScreen):
         self._pause_stream_for_modal()
         text = "\n".join(self._content_buffer)
         self.app.push_screen(
-            CopyModeScreen(text, title="Log Viewer — Copy Mode"),
+            CopyModeScreen(text, title="Log viewer — copy mode"),
             callback=lambda _: self._resume_stream_after_modal(),
         )
 

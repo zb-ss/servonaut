@@ -184,7 +184,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         else:
             rows = [
                 Static(
-                    "[bold $text-accent]Hetzner Cloud Setup[/bold $text-accent]",
+                    "[bold $text-accent]Hetzner Cloud setup[/bold $text-accent]",
                     id="hetzner_setup_header",
                 ),
                 Static(
@@ -197,7 +197,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         if self._label_shown:
             rows.append(
                 Horizontal(
-                    Static("Project Label:", classes="label"),
+                    Static("Project label:", classes="label"),
                     Input(placeholder=placeholder, id="hetzner_input_label"),
                     classes="setting_row",
                     id="hetzner_label_row",
@@ -218,7 +218,7 @@ class HetznerSetupScreen(WorkspaceScreen):
             )
         return [
             # Step 1 — API token
-            Static("[bold]Step 1: API Token[/bold]", classes="section_header"),
+            Static("[bold]Step 1: API token[/bold]", classes="section_header"),
             Static(
                 "[dim]Create a token at https://console.hetzner.cloud → "
                 "Project → Security → API Tokens. Use a [b]Read & Write[/b] "
@@ -226,7 +226,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("API Token:", classes="label"),
+                Static("API token:", classes="label"),
                 SecretInput(
                     placeholder="Hetzner API token, $ENV_VAR, or file:/path",
                     id="hetzner_input_token",
@@ -238,7 +238,7 @@ class HetznerSetupScreen(WorkspaceScreen):
     def _ssh_rows(self) -> List[Widget]:
         return [
             # Step 2 — SSH defaults
-            Static("[bold]Step 2: SSH Defaults[/bold]", classes="section_header"),
+            Static("[bold]Step 2: SSH defaults[/bold]", classes="section_header"),
             Static(
                 "[dim][b]Hetzner-side SSH Key[/b] is the [i]name[/i] (or numeric ID) "
                 "of an SSH key already registered on your Hetzner Cloud project — "
@@ -248,7 +248,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("Hetzner SSH Key:", classes="label"),
+                Static("Hetzner SSH key:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_remote_ssh_key",
@@ -258,7 +258,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Local SSH Key:", classes="label"),
+                Static("Local SSH key:", classes="label"),
                 Input(
                     placeholder="~/.ssh/id_rsa or ~/.ssh/hetzner_key",
                     id="hetzner_input_local_ssh_key",
@@ -266,7 +266,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Username:", classes="label"),
+                Static("Default username:", classes="label"),
                 Input(
                     placeholder="root",
                     id="hetzner_input_username",
@@ -280,7 +280,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         return [
             # Step 3 — Create-time defaults
             Static(
-                "[bold]Step 3: hetzner create Defaults[/bold]",
+                "[bold]Step 3: hetzner create defaults[/bold]",
                 classes="section_header",
             ),
             Static(
@@ -292,7 +292,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("Default Image:", classes="label"),
+                Static("Default image:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_image",
@@ -302,7 +302,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Server Type:", classes="label"),
+                Static("Default server type:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_server_type",
@@ -312,7 +312,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Location:", classes="label"),
+                Static("Default location:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_location",
@@ -341,7 +341,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("Access Key:", classes="label"),
+                Static("Access key:", classes="label"),
                 SecretInput(
                     placeholder="your-key or $HETZNER_S3_ACCESS_KEY or file:/path",
                     id="hetzner_input_s3_access_key",
@@ -349,7 +349,7 @@ class HetznerSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Secret Key:", classes="label"),
+                Static("Secret key:", classes="label"),
                 SecretInput(
                     placeholder="your-secret or $HETZNER_S3_SECRET_KEY or file:/path",
                     id="hetzner_input_s3_secret_key",
@@ -380,11 +380,11 @@ class HetznerSetupScreen(WorkspaceScreen):
         ]
 
     def _action_buttons(self) -> List[Widget]:
-        test = Button("Test Connection", id="btn_hetzner_test", variant="default")
+        test = Button("Test connection", id="btn_hetzner_test", variant="default")
         back = Button("Back", id="btn_hetzner_back")
         if self._account_mode:
-            return [test, Button("Test & Save", id="btn_hetzner_save", variant="primary"), back]
-        save = Button("Save & Enable", id="btn_hetzner_save", variant="primary")
+            return [test, Button("Test & save", id="btn_hetzner_save", variant="primary"), back]
+        save = Button("Save & enable", id="btn_hetzner_save", variant="primary")
         keep_off = Button("Save", id="btn_hetzner_disable")
         self._label_save_buttons(
             save, keep_off, self.app.config_manager.get().hetzner.enabled
@@ -393,7 +393,7 @@ class HetznerSetupScreen(WorkspaceScreen):
             test,
             save,
             keep_off,
-            Button("Add Another Project", id="btn_hetzner_add_project"),
+            Button("Add another project", id="btn_hetzner_add_project"),
             back,
         ]
 
@@ -405,7 +405,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         "Disable Hetzner" while it is on, a plain "Save" while it is off (an
         Object-Storage-only setup saves its keys without listing servers).
         """
-        save.label = "Save" if enabled else "Save & Enable"
+        save.label = "Save" if enabled else "Save & enable"
         keep_off.label = "Disable Hetzner" if enabled else "Save"
         keep_off.variant = "error" if enabled else "default"
 

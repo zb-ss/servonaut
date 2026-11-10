@@ -180,7 +180,7 @@ class LoginScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 Container(
                     Horizontal(
-                        Static("[bold]Servonaut Account[/bold]", id="login_title"),
+                        Static("[bold]Servonaut account[/bold]", id="login_title"),
                         Static("Checking sign-in status…", id="account_state_summary"),
                         id="account_heading",
                     ),

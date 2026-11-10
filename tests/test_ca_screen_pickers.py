@@ -496,7 +496,7 @@ async def test_no_teams_explains_where_to_join_one_and_refresh_lists_them_again(
         await pilot.press("r")
         await wait_until(lambda: not team.disabled)
         assert _labels(team) == ["Ops (ops)", "Platform (platform)"]
-        assert "Team Management" not in _text(screen, "ca_hint")
+        assert "Team management" not in _text(screen, "ca_hint")
 
 
 @pytest.mark.asyncio

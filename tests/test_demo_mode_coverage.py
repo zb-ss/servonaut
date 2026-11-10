@@ -570,7 +570,7 @@ class TestChatPanelDemoMode:
 
         session = MagicMock()
         session.messages = []
-        session.title = "New Chat"
+        session.title = "New chat"
         panel._session = session
         panel._turn_tool_calls = 0
 

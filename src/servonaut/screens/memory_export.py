@@ -89,7 +89,7 @@ class MemoryExportScreen(WorkspaceScreen):
                                 id="export-date-fields",
                             ),
                             Horizontal(
-                                Button("ctrl+s. Start Export", variant="primary", id="btn-export-start"),
+                                Button("Start export", variant="primary", id="btn-export-start"),
                                 Button("Back", variant="default", id="btn-export-back"),
                                 id="export-btn-row",
                             ),

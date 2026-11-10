@@ -99,8 +99,8 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
             body=DialogBody(
                 Static("", id="share_confirm_intro"),
                 Horizontal(
-                    Button("Select All", id="share_confirm_all"),
-                    Button("Select None", id="share_confirm_none"),
+                    Button("Select all", id="share_confirm_all"),
+                    Button("Select none", id="share_confirm_none"),
                     id="share_confirm_pick",
                 ),
                 SelectionList(id="share_confirm_list"),

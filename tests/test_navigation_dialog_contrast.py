@@ -157,7 +157,7 @@ async def test_ansi_navigation_painted_labels_keep_contrast_in_each_focus_state(
         if state == "focused-active":
             assert all(style.underline for style in active_styles)
         elif state == "focused-alternate":
-            alternate_styles = _painted_text_styles(alternate, "Custom Servers")
+            alternate_styles = _painted_text_styles(alternate, "Custom servers")
             _assert_readable(alternate_styles, context=f"{theme}/{context}/{state}")
             assert all(style.underline for style in alternate_styles)
         assert active.has_class("--active")

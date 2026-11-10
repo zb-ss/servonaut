@@ -252,7 +252,7 @@ class ShareInstanceScreen(WorkspaceScreen):
                                     classes="share-field-row",
                                 ),
                                 Container(
-                                    Label("Required Role"),
+                                    Label("Required role"),
                                     Select(
                                         options=_ROLE_OPTIONS,
                                         value="viewer",
