@@ -23,17 +23,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.markup import escape as _rich_escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, DataTable, Footer, Input, Static, TabbedContent, TabPane,
 )
 
 from servonaut.screens._compact_actions import sync_compact_buttons
-from servonaut.utils.markup import literal
+from servonaut.utils.theme_text import themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -498,10 +498,9 @@ class AIConversationsScreen(WorkspaceScreen):
         title = _rich_escape(conv.title or "(untitled)")
         return f"[dim]{group}[/dim] · {title}" if group else title
 
-    @staticmethod
-    def _format_status_cell(status: str) -> Content:
-        styles = {"active": "$text-success", "archived": "$text-warning", "deleted": "$text-error"}
-        return literal(status or "—", styles.get(status, ""))
+    def _format_status_cell(self, status: str) -> Text:
+        tokens = {"active": "text-success", "archived": "text-warning", "deleted": "text-error"}
+        return themed_text(self.app, status or "—", tokens.get(status, "text"))
 
     @staticmethod
     def _format_age(ts: str) -> str:
@@ -1041,8 +1040,8 @@ class AIConversationsScreen(WorkspaceScreen):
         for s in items:
             paired = bool(s.get("remote_conversation_id"))
             where = (
-                literal("uploaded", "$text-accent") if paired
-                else literal("local only", "dim")
+                themed_text(self.app, "uploaded", "text-accent") if paired
+                else themed_text(self.app, "local only", "dim")
             )
             provider = s.get("last_provider") or "—"
             table.add_row(

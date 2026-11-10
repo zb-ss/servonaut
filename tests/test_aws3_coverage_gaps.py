@@ -288,38 +288,42 @@ def _mgr_app(*, aws_service=None, demo_mode=False, redaction_service=None):
     return app
 
 
-def _cell_styles(cell) -> set:
-    """The styles a table cell paints, as the strings the stylesheet knows."""
-    return {str(span.style) for span in cell.spans}
+_THEME = {"text-success": "#8AD4A1", "text-warning": "#FFC473", "text-accent": "#FFC473"}
+
+
+def _colorize(state: str):
+    """The cell the manager draws for *state*, under a fixed theme."""
+    screen = MagicMock()
+    screen.app.get_css_variables.return_value = _THEME
+    return AWSManagerScreen._colorize_state(screen, state)
 
 
 class TestAWSManagerColorize:
 
     def test_running_success(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("running")) == {"$text-success"}
+        assert _colorize("running").style == "#8AD4A1"
 
     def test_stopped_warning(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("stopped")) == {"$text-warning"}
+        assert _colorize("stopped").style == "#FFC473"
 
     def test_pending_accent(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("pending")) == {"$text-accent"}
+        assert _colorize("pending").style == "#FFC473"
 
     def test_terminated_dim(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("terminated")) == {"dim"}
+        assert _colorize("terminated").style == "dim"
 
     def test_shutting_down_dim(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("shutting-down")) == {"dim"}
+        assert _colorize("shutting-down").style == "dim"
 
     def test_unknown_passthrough(self) -> None:
-        result = AWSManagerScreen._colorize_state("weird-state")
-        assert result.plain == "weird-state" and not result.spans
+        result = _colorize("weird-state")
+        assert result.plain == "weird-state" and not result.style
 
     def test_rebooting_accent(self) -> None:
-        assert _cell_styles(AWSManagerScreen._colorize_state("rebooting")) == {"$text-accent"}
+        assert _colorize("rebooting").style == "#FFC473"
 
     def test_state_text_is_never_read_as_markup(self) -> None:
-        result = AWSManagerScreen._colorize_state("running[red]")
-        assert result.plain == "running[red]"
+        assert _colorize("running[red]").plain == "running[red]"
 
 
 class TestAWSManagerRenderTable:
@@ -334,7 +338,8 @@ class TestAWSManagerRenderTable:
         # An empty table: the redraw keeps the selected row (none here).
         mock_table = MagicMock(row_count=0, cursor_row=0)
         with patch.object(screen, "query_one", return_value=mock_table), \
-             patch.object(screen, "_sync_action_buttons"):
+             patch.object(screen, "_sync_action_buttons"), \
+             patch.object(AWSManagerScreen, "app", new=MagicMock(get_css_variables=lambda: _THEME)):
             screen._render_table()
         mock_table.clear.assert_called_once()
         mock_table.add_row.assert_called_once()
@@ -350,7 +355,8 @@ class TestAWSManagerRenderTable:
         mock_table = MagicMock(row_count=0, cursor_row=0)
         mock_table.add_row = MagicMock(side_effect=lambda *a, **kw: rows_added.append(a))
         with patch.object(screen, "query_one", return_value=mock_table), \
-             patch.object(screen, "_sync_action_buttons"):
+             patch.object(screen, "_sync_action_buttons"), \
+             patch.object(AWSManagerScreen, "app", new=MagicMock(get_css_variables=lambda: _THEME)):
             screen._render_table()
         assert "—" in rows_added[0]
 

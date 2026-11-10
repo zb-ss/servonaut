@@ -16,11 +16,13 @@ from servonaut.utils.markup import inert_text
 
 
 def theme_style(app: App, token: str, *, bold: bool = False) -> str:
-    """A Rich style in the theme colour named by *token* (e.g. ``text-error``)."""
+    """A Rich style in the theme colour named by *token* (e.g. ``text-error``), or ``dim``."""
     styles = ["bold"] if bold else []
+    if token == "dim":
+        return " ".join(styles + ["dim"])
     try:
         styles.append(Color.parse(app.get_css_variables()[token]).hex)
-    except (KeyError, ColorParseError):
+    except (KeyError, TypeError, ColorParseError):
         pass
     return " ".join(styles)
 

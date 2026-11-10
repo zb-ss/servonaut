@@ -26,6 +26,7 @@ from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -45,6 +46,7 @@ from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
+from servonaut.utils.theme_text import themed_text
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -71,21 +73,21 @@ logger = logging.getLogger(__name__)
 #: is not a state the scan service produces.
 STATUS_SHARED = "shared"
 
-_STATUS_CELL: Dict[str, Content] = {
-    STATUS_FRESH: literal("● Fresh", "$text-success"),
-    STATUS_STALE: literal("● Stale", "$text-warning"),
-    STATUS_NONE: literal("○ Not probed", "dim"),
-    STATUS_OPT_OUT: literal("⛔ Opted-out", "$text-error"),
+# Table cells as (text, theme colour); drawn by ``_styled_cell`` because a
+# table cell cannot resolve a theme token itself.
+_STATUS_CELL: Dict[str, tuple[str, str]] = {
+    STATUS_FRESH: ("● Fresh", "text-success"),
+    STATUS_STALE: ("● Stale", "text-warning"),
+    STATUS_NONE: ("○ Not probed", "dim"),
+    STATUS_OPT_OUT: ("⛔ Opted-out", "text-error"),
     # A server a team shares, read from the team's copy (read-only).
-    STATUS_SHARED: literal("● Shared", "$text-accent"),
+    STATUS_SHARED: ("● Shared", "text-accent"),
 }
-
-# Source column rendering (width 8)
-_SOURCE_CELL: Dict[str, Content] = {
-    "local": literal("local", "dim"),
-    "remote": literal("cloud", "$text-accent"),
-    "merged": literal("synced", "$text-success"),
-    "team": literal("team", "$text-accent"),
+_SOURCE_CELL: Dict[str, tuple[str, str]] = {
+    "local": ("local", "dim"),
+    "remote": ("cloud", "text-accent"),
+    "merged": ("synced", "text-success"),
+    "team": ("team", "text-accent"),
 }
 
 
@@ -703,7 +705,7 @@ class FleetMemoryScreen(WorkspaceScreen):
 
             self._populate_table_from_merged(merged)
 
-    def _reason_cell(self, raw_id: str) -> Content | str:
+    def _reason_cell(self, raw_id: str) -> Text | str:
         """Cell text for why the row's latest scan did not succeed, or ``—``.
 
         The reason stays on the scan service until that row is probed again,
@@ -725,7 +727,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             "",
         )
         text = row_reason_text(code)
-        return literal(text, "$text-error") if text else "—"
+        return themed_text(self.app, text, "text-error") if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -1139,8 +1141,8 @@ class FleetMemoryScreen(WorkspaceScreen):
             self._name_cell(row),
             escape(str(row["id"])),
             escape(str(row["provider"])),
-            _SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"]),
-            _STATUS_CELL.get(row["status"], "—"),
+            self._styled_cell(_SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"])),
+            self._styled_cell(_STATUS_CELL.get(row["status"], ("—", "dim"))),
             self._shared_with_cell(row),
             str(row["modules"]) if row["modules"] else "—",
             str(row["drift_7d"]) if row.get("drift_7d") else "—",
@@ -1148,16 +1150,21 @@ class FleetMemoryScreen(WorkspaceScreen):
             row["reason"],
         )
 
-    def _shared_with_cell(self, row: Dict[str, Any]) -> Content:
+    def _styled_cell(self, cell: tuple[str, str]) -> Text:
+        """A table cell for fixed *text* in the theme colour named by its token."""
+        text, token = cell
+        return themed_text(self.app, text, token)
+
+    def _shared_with_cell(self, row: Dict[str, Any]) -> Text:
         """The teams the user shares this server's memory with (stand-ins in demo mode)."""
         teams = list(row.get("shared_with") or [])
         if not teams:
-            return literal("—", "dim")
+            return themed_text(self.app, "—", "dim")
         redaction = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redaction is not None:
             teams = [redaction.redact_name(team) for team in teams]
         more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
-        return literal(f"{teams[0]}{more}", "$text-accent")
+        return themed_text(self.app, f"{teams[0]}{more}", "text-accent")
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))
@@ -1583,7 +1590,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
             for key, value in (
-                ("status", _STATUS_CELL.get(new_status, "—")),
+                ("status", self._styled_cell(_STATUS_CELL.get(new_status, ("—", "dim")))),
                 ("modules", str(new_modules) if new_modules else "—"),
                 ("age", new_age),
                 ("reason", row["reason"]),

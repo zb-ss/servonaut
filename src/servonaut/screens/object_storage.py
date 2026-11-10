@@ -39,7 +39,8 @@ from rich.markup import escape as markup_escape
 from rich.text import Text
 from textual.app import ComposeResult
 from servonaut.screens._compact_actions import sync_compact_buttons
-from servonaut.utils.markup import literal, with_bold_values
+from servonaut.utils.markup import with_bold_values
+from servonaut.utils.theme_text import themed_text
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
@@ -605,7 +606,7 @@ class ObjectStorageScreen(WorkspaceScreen):
                 self.scrub_key(folder.removeprefix(self._prefix))
             )
             table.add_row(
-                literal("folder", "bold $text-accent"),
+                themed_text(self.app, "folder", "text-accent", bold=True),
                 display_name,
                 "",
                 "",

@@ -24,10 +24,10 @@ import webbrowser
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.content import Content
 from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
 from servonaut.screens._compact_actions import sync_compact_buttons
@@ -38,7 +38,7 @@ from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
-from servonaut.utils.markup import literal
+from servonaut.utils.theme_text import themed_text
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -382,17 +382,16 @@ class BwVaultManagerScreen(WorkspaceScreen):
             shown += f" +{len(names) - 3}"
         return f"{len(refs)}: {shown}"
 
-    @staticmethod
-    def _verify_cell(refs: List[dict]) -> Content:
+    def _verify_cell(self, refs: List[dict]) -> Text:
         if not refs:
-            return literal("—", "dim")
+            return themed_text(self.app, "—", "dim")
         statuses = [r.get("verify_status") for r in refs]
         if all(s == _VERIFIED for s in statuses):
-            return literal("verified", "$text-success")
+            return themed_text(self.app, "verified", "text-success")
         failed = next((s for s in statuses if s in _FAILED_STATUSES), None)
         if failed is not None:
-            return literal(str(failed), "$text-error")
-        return literal("unverified", "$text-warning")
+            return themed_text(self.app, str(failed), "text-error")
+        return themed_text(self.app, "unverified", "text-warning")
 
     # ------------------------------------------------------------------
     # Selection + actions
