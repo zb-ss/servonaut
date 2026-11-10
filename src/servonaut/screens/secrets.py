@@ -38,6 +38,7 @@ from servonaut.services.secrets_status import (
     compute_secrets_status,
     format_relative_age,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRole, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -69,6 +70,12 @@ class SecretsScreen(WorkspaceScreen):
     # Keep each selectable action description readable beside its native key.
     CONTENT_NARROW_WIDTH = 96
 
+    # Compact words for a row that is too narrow for the full ones.
+    _ACTION_SHORT = {
+        "g": "Set up Bitwarden", "v": "DB coverage", "r": "Refresh",
+        "l": "List secrets", "o": "Open settings", "i": "Install bws",
+        "c": "Clear cache",
+    }
     _ACTION_NAMES = {
         "r": "refresh", "l": "list_secrets", "c": "clear_cache",
         "o": "open_team_settings", "u": "open_upgrade", "i": "install_bws",
@@ -166,30 +173,35 @@ class SecretsScreen(WorkspaceScreen):
             classes="secrets_kv_grid",
         )
 
-    def _actions(self, *items: tuple[str, str]) -> Vertical:
-        """Pair the existing hotkeys with native mouse and keyboard controls."""
-        return Vertical(
+    def _actions(self, *items: tuple[str, str]) -> ActionRow:
+        """One standard button per action, each showing its own hotkey."""
+        return ActionRow(
             *[
-                Horizontal(
-                    Button(
-                        key, name=self._ACTION_NAMES[key], compact=True,
-                        id=f"secrets_action_{key}",
-                        classes="secrets_action_key", tooltip=label,
-                    ),
-                    Static(label, classes="secrets_action_label"),
-                    classes="secrets_action_row",
+                ActionButton(
+                    label, key, role=self._action_role(index, key),
+                    short=self._ACTION_SHORT.get(key), id=f"secrets_action_{key}",
+                    classes="secrets_action",
                 )
-                for key, label in items
+                for index, (key, label) in enumerate(items)
             ],
+            keep_hints=True,
             classes="secrets_actions",
         )
 
+    @staticmethod
+    def _action_role(index: int, key: str) -> ActionRole:
+        """The first action leads; clearing the cache is the one risky step."""
+        if key == "c":
+            return "warning"
+        return "primary" if index == 0 else "default"
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if (
-            event.button.has_class("secrets_action_key")
-            and event.button.name in self._ACTION_NAMES.values()
-        ):
-            getattr(self, f"action_{event.button.name}")()
+        button = event.button
+        if not button.has_class("secrets_action") or button.id is None:
+            return
+        name = self._ACTION_NAMES.get(button.id.removeprefix("secrets_action_"))
+        if name is not None:
+            getattr(self, f"action_{name}")()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -430,12 +442,12 @@ class SecretsScreen(WorkspaceScreen):
         body.mount(self._card(
             "Actions",
             self._actions(
-                ("g", "Guided Bitwarden setup (pick project + test)"),
-                ("v", "DB-vault coverage (which servers are stored)"),
+                ("g", "Guided Bitwarden setup"),
+                ("v", "DB-vault coverage"),
                 ("r", "Refresh from server"),
-                ("l", "List stored secrets (names only)"),
-                ("o", "Open team settings (web)"),
-                ("i", "Install / re-install bws"),
+                ("l", "List stored secrets"),
+                ("o", "Open team settings"),
+                ("i", "Install bws"),
                 ("c", "Clear cached config"),
             ),
         ))
@@ -487,10 +499,10 @@ class SecretsScreen(WorkspaceScreen):
                 warning=True,
             ))
         actions = [
-            ("g", "Set up Bitwarden (guided)"),
-            ("v", "DB-vault coverage (which servers are stored)"),
-            ("l", "List stored secrets (names only)"),
-            ("u", "Upgrade for team-shared secrets"),
+            ("g", "Set up Bitwarden"),
+            ("v", "DB-vault coverage"),
+            ("l", "List stored secrets"),
+            ("u", "Upgrade for team secrets"),
             ("o", "Open docs"),
         ]
         # If a server-supplied config is cached (e.g. a broken team config that
