@@ -265,7 +265,8 @@ class InstanceListScreen(WorkspaceScreen):
         """
         try:
             filters = self.query_one("#fleet_filters")
-            chips = self.query_one("#fleet_chip_row").outer_size.width
+            # The last chip's one-cell margin sits outside the row's own width.
+            chips = self.query_one("#fleet_chip_row").outer_size.width + 1
             refresh = self.query_one("#fleet_refresh").outer_size.width
         except NoMatches:
             return
@@ -273,7 +274,8 @@ class InstanceListScreen(WorkspaceScreen):
             self.has_class("-narrow") or self.has_class("-content-narrow")
             or self.has_class("-chat-open")
         )
-        age = cell_len(self._inline_age(self._updated_text()))
+        inline_age = self._inline_age(self._updated_text())
+        age = cell_len(f"{inline_age} ·") if inline_age else 0
         inline = not stacked and 0 < chips and chips + age + refresh <= filters.size.width
         if filters.has_class("-fresh-inline") != inline:
             filters.set_class(inline, "-fresh-inline")
@@ -1051,7 +1053,12 @@ class InstanceListScreen(WorkspaceScreen):
                 number = counts.providers[chip.value]
                 active = self._filter.provider == chip.value
                 shown = chip.value in present or active
-            chip.label = self._chip_label(chip, number)
+            label = self._chip_label(chip, number)
+            if label != chip.label:
+                chip.label = label
+                # The chip is as wide as its words: measure them again.
+                chip.refresh(layout=True)
+                self.call_after_refresh(self._sync_fresh_layout)
             chip.set_class(active, "--chosen")
             chip.display = shown
 
