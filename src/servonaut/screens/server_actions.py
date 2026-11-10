@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Dict, Optional, Union
 
 from rich.markup import escape
@@ -63,6 +64,9 @@ from servonaut.utils.markup import literal
 # How many findings the count looks at, and the statuses that no longer count as open.
 _FINDINGS_COUNT_LIMIT = 100
 _CLOSED_FINDING_STATUSES = ("resolved", "suppressed")
+
+# Footer keys that appear only on a wide terminal.
+_WIDE_FOOTER_KEYS = ("6", "8")
 
 # The cards stack into one column when the content column is narrower than this.
 _STACK_CARDS_BELOW = 96
@@ -841,24 +845,28 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     9. Back - Return to instance list
     """
 
+    # The footer shows the four main keys and "? All keys"; Logs and Ban IP join
+    # them on a wide terminal (see ``_sync_footer_keys``). Every other key works
+    # but stays out of the footer.
     BINDINGS = [
-        Binding("1", "action_1", "Browse Files", show=True),
-        Binding("2", "action_2", "Run Command", show=True),
-        Binding("3", "action_3", "SSH Connect", show=True),
-        Binding("4", "action_4", "SCP Transfer", show=True),
-        Binding("5", "action_5", "Scan Results", show=True),
-        Binding("6", "action_6", "View Logs", show=True),
-        Binding("7", "action_7", "AI Analysis", show=True),
-        Binding("8", "action_8", "Ban IP", show=True),
-        Binding("m", "open_memory", "Memory", show=True),
-        Binding("d", "scan_db_creds", "Scan DB", show=True),
-        Binding("f", "open_findings", "Monitoring", show=True),
+        Binding("1", "action_1", "Browse", show=True),
+        Binding("2", "action_2", "Command", show=True),
+        Binding("3", "action_3", "SSH", show=True),
+        Binding("4", "action_4", "SCP", show=True),
+        Binding("5", "action_5", "Keyword scan", show=False),
+        Binding("6", "action_6", "Logs", show=False),
+        Binding("7", "action_7", "AI analysis", show=False),
+        Binding("8", "action_8", "Ban IP", show=False),
+        Binding("m", "open_memory", "Memory", show=False),
+        Binding("d", "scan_db_creds", "Scan DB", show=False),
+        Binding("f", "open_findings", "Findings", show=False),
         Binding("l", "toggle_live", "Monitoring", show=False),
         Binding("L", "toggle_live", "Monitoring", show=False),
         Binding("R", "refresh_live", "Refresh stats", show=False),
-        Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
-        Binding("v", "verify_ssh", "Verify SSH", show=True),
-        Binding("u", "use_vault_key", "Vault Key", show=False),
+        Binding("r", "manage_ssh_ref", "SSH ref", show=False),
+        Binding("v", "verify_ssh", "Verify SSH", show=False),
+        Binding("u", "use_vault_key", "Vault key", show=False),
+        Binding("question_mark", "app.show_help", "All keys", show=True),
         Binding("9", "back", "Back", show=False),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -1495,6 +1503,19 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._sync_compact_buttons()
         self._sync_card_layout()
 
+    def _sync_footer_keys(self) -> None:
+        """Show Logs and Ban IP in the footer only on a wide terminal."""
+        wide = self.has_class("-wide")
+        changed = False
+        for key in _WIDE_FOOTER_KEYS:
+            bindings = self._bindings.key_to_bindings.get(key, [])
+            for index, binding in enumerate(bindings):
+                if binding.show != wide:
+                    bindings[index] = replace(binding, show=wide)
+                    changed = True
+        if changed:
+            self.refresh_bindings()
+
     def _sync_card_layout(self) -> None:
         """Stack the cards only when the content is narrow; shorten them on a short terminal.
 
@@ -1509,6 +1530,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         if width <= 0:
             return
         self.set_class(width < _STACK_CARDS_BELOW, "-stack-cards")
+        self._sync_footer_keys()
         short = self.has_class("-short")
         if short != self._short_cards:
             self._short_cards = short
