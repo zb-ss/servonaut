@@ -571,7 +571,7 @@ class TestOvhAddAccount:
             app.screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert ovh_service.built == []
-            assert "Enter the Client ID and Client Secret to test." in app.messages
+            assert "Enter the Client ID and Client secret to test." in app.messages
 
     async def test_an_incomplete_key_set_is_not_tested(self, tmp_path, ovh_service) -> None:
         app = Host(_manager(tmp_path, _ovh_config()), lambda: OVHSetupScreen(add_extra=True))

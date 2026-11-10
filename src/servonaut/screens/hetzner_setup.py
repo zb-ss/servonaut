@@ -328,7 +328,7 @@ class HetznerSetupScreen(WorkspaceScreen):
         return [
             # Object Storage (S3-compatible) credentials
             Static(
-                f"[bold]Step {step}: Object Storage (S3-compatible)[/bold]",
+                f"[bold]Step {step}: Object storage (S3-compatible)[/bold]",
                 classes="section_header",
             ),
             Static(

@@ -796,7 +796,7 @@ class OVHSetupScreen(WorkspaceScreen):
         if values.get('auth') == self._AUTH_OAUTH:
             if not (values['client_id'] and values['client_secret']):
                 self.app.notify(
-                    "Enter the Client ID and Client Secret to test.",
+                    "Enter the Client ID and Client secret to test.",
                     severity="warning",
                 )
                 return

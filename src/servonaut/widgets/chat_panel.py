@@ -206,24 +206,24 @@ def resolve_conversation_start(
     if not voice_enabled:
         return (
             "Voice input is switched off — enable it in "
-            "Settings > Voice Input first."
+            "Settings > Voice input first."
         )
     if not input_available:
         reason = input_reason or "Voice input is unavailable"
-        return f"{reason} — see Settings > Voice Input."
+        return f"{reason} — see Settings > Voice input."
     if not stt_model_ok:
         return (
             "The speech model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
     if not vad_model_ok:
         return (
             "The voice-detection model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
     if tts_enabled and not output_available:
         reason = output_reason or "Speech output is unavailable"
-        return f"{reason} — see Settings > Voice Input."
+        return f"{reason} — see Settings > Voice input."
     return ""
 
 
@@ -2248,7 +2248,7 @@ class ChatPanel(Widget):
             return ""
         return (
             "The speech model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
 
     def _toggle_recording(self) -> None:
@@ -2739,7 +2739,7 @@ class ChatPanel(Widget):
 
         An unavailable service (deps not installed, model missing, no
         output device) is a quiet skip rather than a toast: the readiness
-        story lives in Settings > Voice Input, and repeating it on every
+        story lives in Settings > Voice input, and repeating it on every
         reply would nag. Actual synthesis/playback failures do notify.
         """
         generation = self._voice_generation if generation is None else generation
@@ -3117,7 +3117,7 @@ class ChatPanel(Widget):
         if voice_config is not None and not voice_config.enabled:
             self.app.notify(
                 "Voice input is switched off — enable it in "
-                "Settings > Voice Input first.",
+                "Settings > Voice input first.",
                 severity="warning",
                 markup=False,
             )

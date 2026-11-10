@@ -108,7 +108,7 @@ class CustomServersPanel(SettingsPanel):
 
     def persist(self) -> None:
         """Nothing to persist — all changes happen in CustomServersScreen."""
-        self._finish_save("Custom server changes are saved from the Custom Servers screen.")
+        self._finish_save("Custom server changes are saved from the Custom servers screen.")
 
     def is_dirty(self) -> bool:
         """Always clean — this panel owns no editable fields."""

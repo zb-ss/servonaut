@@ -704,7 +704,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         else:
             self.app.notify(
                 "Nothing to sync — local memory cache is empty. Probe a "
-                "server first from the Fleet Memory screen.",
+                "server first from the Fleet memory screen.",
                 severity="information",
             )
 

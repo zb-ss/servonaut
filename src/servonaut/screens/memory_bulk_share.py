@@ -466,7 +466,7 @@ class BulkShareScreen(WorkspaceScreen):
             return "Nothing was shared"
         return (
             f"Sharing ended early after {self._changed} of {len(self._targets)} servers "
-            "were changed (open Fleet Memory to see what is shared)"
+            "were changed (open Fleet memory to see what is shared)"
         )
 
     def _set_sending(self, sending: bool) -> None:
