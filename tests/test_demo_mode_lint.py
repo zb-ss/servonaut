@@ -799,11 +799,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes 'Scan completed: N results found' (count integer) or "
                    "hard-coded failure/empty strings — no raw content."),
 
-    # secrets.py — _render_state writes hard-coded card-placeholder markup;
+    # secrets.py — _render_cards writes hard-coded card-placeholder markup;
     # _render_unauthenticated / _render_free_tier / _render_bitwarden /
     # _render_local write hard-coded configuration-state labels (no secret values,
     # only provider/plan indicators).
-    AllowlistEntry("screens/secrets.py", "_render_state", "update",
+    AllowlistEntry("screens/secrets.py", "_render_cards", "update",
                    "Writes hard-coded card-placeholder markup for the secrets "
                    "provider state — no secret values, only status labels."),
     AllowlistEntry("screens/secrets.py", "_render_unauthenticated", "update",
