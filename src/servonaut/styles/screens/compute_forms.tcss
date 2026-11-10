@@ -6,17 +6,6 @@ OVHCloudCreateScreen #cloud_create_container {
     padding: 1 2 2 2;
 }
 
-AWSCreateScreen #aws_create_title,
-HetznerCreateScreen #hetzner_create_title,
-OVHCloudCreateScreen #cloud_create_title {
-    height: auto;
-    text-align: left;
-    text-style: bold;
-    color: $text-accent;
-    padding: 0;
-    margin: 0;
-}
-
 .compute-workflow .compute-workflow-heading {
     height: auto;
     margin-bottom: 1;

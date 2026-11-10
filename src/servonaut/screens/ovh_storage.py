@@ -168,8 +168,9 @@ class OVHStorageScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static(
-                            "[bold $text-accent]OVH Block Storage[/bold $text-accent]",
+                            "OVH Block Storage",
                             id="storage_title",
+                            classes="screen-title",
                         ),
                         Static(
                             "Public Cloud volumes: select a volume to attach, detach "

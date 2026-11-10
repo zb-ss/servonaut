@@ -5,16 +5,6 @@ KeyManagementScreen #keys_container {
     padding: 0 2 1 2;
     background: transparent;
 }
-KeyManagementScreen #keys_header {
-    height: auto;
-    color: $text;
-    text-style: bold;
-}
-KeyManagementScreen #keys_intro {
-    height: auto;
-    margin-bottom: 1;
-    color: $text-muted;
-}
 KeyManagementScreen #keys_sections {
     width: 100%;
     height: auto;

@@ -82,11 +82,12 @@ class SecretsSetupScreen(WorkspaceScreen):
             with Container(id="secrets_setup_container", classes="workspace-content"):
                 yield BusyIndicator(id="read_loading", classes="read-loading")
                 with Vertical(classes="secrets_setup_heading"):
-                    yield Static("Connect Bitwarden", id="secrets_setup_title")
+                    yield Static("Connect Bitwarden", id="secrets_setup_title", classes="screen-title")
                     yield Static(
                         "Choose a project, verify access, then save your personal store. "
                         "Your access token stays in your environment.",
                         id="secrets_setup_subtitle",
+                        classes="screen-description",
                     )
                 with VerticalScroll(id="secrets_setup_body"):
                     with Horizontal(id="secrets_setup_workspace"):

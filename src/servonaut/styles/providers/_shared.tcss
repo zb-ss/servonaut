@@ -248,20 +248,6 @@ TeamManagementScreen.-content-narrow #member_actions_row Button {
     min-width: 12;
 }
 
-#hetzner_mgr_header,
-#hetzner_ssh_keys_header,
-#ovh_mgr_header,
-#aws_mgr_header,
-#bw_vault_mgr_header,
-#s3_title,
-#aws_create_title {
-    text-align: center;
-    padding: 1;
-    margin-bottom: 1;
-    color: $accent;
-    text-style: bold;
-}
-
 /* S3 account picker — shown only when the provider has several accounts */
 #s3_account {
     margin: 0 1 1 1;

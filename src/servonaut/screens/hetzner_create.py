@@ -115,8 +115,9 @@ class HetznerCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "[bold $text-accent]Create Hetzner Cloud Server[/bold $text-accent]",
+                        "Create Hetzner Cloud Server",
                         id="hetzner_create_title",
+                        classes="screen-title",
                     ),
                     Static(
                         "Hetzner Cloud: match the image architecture to your server type.",

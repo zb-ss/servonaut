@@ -9,21 +9,6 @@ ObjectStorageScreen #s3_container {
     padding: 1 2 2 2;
 }
 
-OVHDNSScreen #dns_title,
-OVHFirewallScreen #firewall_title,
-OVHIPManagementScreen #ip_mgmt_title,
-OVHSnapshotsScreen #snapshots_title,
-OVHStorageScreen #storage_title,
-OVHBillingScreen #billing_title,
-ObjectStorageScreen #s3_title {
-    height: auto;
-    text-align: left;
-    text-style: bold;
-    color: $text-accent;
-    padding: 0;
-    margin: 0;
-}
-
 .resource-workspace-content .resource-context {
     height: auto;
     color: $text-muted;

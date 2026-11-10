@@ -13,18 +13,6 @@ TeamManagementScreen #team_document {
     padding-bottom: 3;
 }
 
-TeamManagementScreen #team_mgmt_header {
-    height: auto;
-    color: $text;
-    text-style: bold;
-}
-
-TeamManagementScreen #team_workspace_summary {
-    height: auto;
-    margin-bottom: 1;
-    color: $text-muted;
-}
-
 TeamManagementScreen #no_auth_notice {
     height: auto;
     padding: 1;
@@ -36,9 +24,9 @@ TeamManagementScreen #no_auth_notice {
 TeamManagementScreen #team_header {
     height: auto;
     margin-bottom: 1;
-    padding: 1;
-    background: $boost;
-    border-left: thick $accent;
+    padding: 0 1;
+    background: transparent;
+    text-style: bold;
 }
 
 TeamManagementScreen .settings_section {
@@ -189,12 +177,6 @@ CaScreen #ca_content {
     padding: 1 2;
     background: $surface;
     overflow-y: auto;
-}
-
-CaScreen #ca_description {
-    height: auto;
-    color: $text-muted;
-    margin-bottom: 1;
 }
 
 CaScreen #ca_workspace {

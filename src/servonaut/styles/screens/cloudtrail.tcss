@@ -9,22 +9,7 @@
 }
 
 #cloudtrail_heading {
-    height: 2;
-    border-bottom: solid $border-blurred;
-    margin-bottom: 1;
-}
-
-#cloudtrail_title {
-    width: auto;
-    color: $text-accent;
-}
-
-#cloudtrail_context {
-    width: 1fr;
-    text-align: right;
-    color: $text-muted;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
+    height: auto;
 }
 
 #cloudtrail_filters {

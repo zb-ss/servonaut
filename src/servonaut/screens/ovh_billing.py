@@ -125,7 +125,7 @@ class OVHBillingScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 Horizontal(
                     Vertical(
-                        Static("[bold $text-accent]OVH billing dashboard[/bold $text-accent]", id="billing_title"),
+                        Static("OVH billing dashboard", id="billing_title", classes="screen-title"),
                         Static("Account usage, invoice history and billed services.", classes="resource-context"),
                         classes="provider-account-heading",
                     ),

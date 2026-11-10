@@ -221,10 +221,11 @@ class CaScreen(WorkspaceScreen):
             with Horizontal(id="ca_layout", classes="workspace-content"):
                 with Vertical(id="ca_content"):
                     with Vertical(id="ca_overview"):
-                        yield Static("SSH Certificate Authority", id="ca_title")
+                        yield Static("SSH Certificate Authority", id="ca_title", classes="screen-title")
                         yield Static(
                             "Review a team's certificate authorities, then choose the server and recovery key for an operation.",
                             id="ca_description",
+                            classes="screen-description",
                         )
                     with Horizontal(id="ca_workspace"):
                         with Vertical(id="ca_setup", classes="access_section"):

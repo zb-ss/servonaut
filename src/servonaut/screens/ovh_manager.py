@@ -208,7 +208,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             yield ScrollableContainer(
                 Vertical(
                     Horizontal(
-                        Static("OVHcloud servers", id="ovh_mgr_header"),
+                        Static("OVHcloud servers", id="ovh_mgr_header", classes="screen-title"),
                         Static(
                             "Inventory", id="ovh_mgr_overview",
                             classes="provider-manager-overview", markup=False,

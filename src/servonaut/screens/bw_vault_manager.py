@@ -93,12 +93,13 @@ class BwVaultManagerScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with ScrollableContainer(id="bw_vault_mgr_container", classes="workspace-content"):
                 with Vertical(classes="bw_vault_mgr_overview"):
-                    yield Static("Bitwarden SSH vault", id="bw_vault_mgr_header")
+                    yield Static("Bitwarden SSH vault", id="bw_vault_mgr_header", classes="screen-title")
                     yield Static(
                         "SSH-key items in your Servonaut vault folder, joined with the "
                         "servers that reference them. Local-only — your vault never leaves this "
                         "machine. [o] Open in Bitwarden · [e] Manage ref for the selected key.",
                         id="bw_vault_mgr_hint",
+                        classes="screen-description",
                     )
                 yield Static("", id="bw_vault_mgr_status")
                 with Horizontal(id="bw_vault_mgr_workspace"):

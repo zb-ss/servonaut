@@ -15,18 +15,6 @@ OVHManagerScreen #ovh_mgr_container {
     align: left top;
 }
 
-AWSManagerScreen #aws_mgr_header,
-HetznerManagerScreen #hetzner_mgr_header,
-OVHManagerScreen #ovh_mgr_header {
-    width: 1fr;
-    height: auto;
-    text-align: left;
-    text-style: bold;
-    color: $text;
-    padding: 0;
-    margin: 0;
-}
-
 .provider-manager-content .provider-manager-overview {
     width: auto;
     max-width: 50%;

@@ -97,6 +97,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                         Static(
                             "[bold $text-accent]Hetzner SSH Keys[/bold $text-accent]",
                             id="hetzner_ssh_keys_header",
+                            classes="screen-title",
                         ),
                         AccountPicker.for_provider(
                             registry_for(self.app, "hetzner"), "hetzner",
