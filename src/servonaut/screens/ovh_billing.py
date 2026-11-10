@@ -6,6 +6,7 @@ chooses whose usage, invoices and services are shown.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, List
 
@@ -24,6 +25,8 @@ from servonaut.screens._provider_accounts import (
     registry_for,
     show_account_labels,
 )
+from servonaut.services.ovh_billing_service import usage_total
+from servonaut.utils.markup import literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -39,26 +42,24 @@ def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
     if not usage:
         return "  [dim]No data available.[/dim]"
 
-    lines: List[str] = []
-    current = usage.get("current_spend", {})
-    forecast = usage.get("forecast", {})
-
-    def _extract_value(blob: dict) -> str:
+    def _figure(blob: object, failed: bool) -> str:
+        if failed:
+            return "unavailable"
         if not blob:
             return "n/a"
         if redact:
             return "Hidden in demo mode"
-        total = blob.get("total") or {}
-        if isinstance(total, dict):
-            value = total.get("value")
-            currency = total.get("currencyCode", "")
-            if value is not None:
-                return f"{float(value):.2f} {currency}".strip()
-        return "n/a"
+        total = usage_total(blob)
+        if total is None:
+            return "n/a"
+        return f"{total[0]:.2f} {total[1]}".strip()
 
-    lines.append(f"  Current spend : [$text-accent]{_extract_value(current)}[/$text-accent]")
-    lines.append(f"  Forecast      : [$text-warning]{_extract_value(forecast)}[/$text-warning]")
-    return "\n".join(lines)
+    current = _figure(usage.get("current_spend"), bool(usage.get("current_failed")))
+    forecast = _figure(usage.get("forecast"), bool(usage.get("forecast_failed")))
+    return (
+        f"  Current spend : [$text-accent]{current}[/$text-accent]\n"
+        f"  Forecast      : [$text-warning]{forecast}[/$text-warning]"
+    )
 
 
 def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
@@ -87,6 +88,9 @@ def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
 
 
 _PAGE_SIZE = 15
+
+# Longest a summary card may stay on "Loading..." before it reports a failure.
+_CARD_TIMEOUT_SECONDS = 45
 
 # Every worker that loads billing data, so an account switch can cancel
 # the loads still running for the previous account.
@@ -288,6 +292,11 @@ class OVHBillingScreen(Screen):
     # Workers
     # ------------------------------------------------------------------
 
+    def _show_card_error(self, widget: Static, what: str) -> None:
+        """End a card's loading state with a short, actionable line."""
+        message = f"Could not load {what}. Reopen this screen to retry; details are in the log."
+        widget.update(literal(f"  {message}", "$text-error"))
+
     async def _load_current_usage(self) -> None:
         svc = self._billing_service()
         widget = self.query_one("#current_usage", Static)
@@ -295,11 +304,12 @@ class OVHBillingScreen(Screen):
             widget.update("[$text-error]OVH billing service not available.[/$text-error]")
             return
         try:
-            usage = await svc.get_current_usage()
+            async with asyncio.timeout(_CARD_TIMEOUT_SECONDS):
+                usage = await svc.get_current_usage()
             widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
-            logger.error("Failed to load OVH current usage: %s", exc)
-            widget.update(f"[$text-error]Error: {self._display_error(exc)}[/$text-error]")
+            logger.exception("Failed to load OVH current usage: %s", exc)
+            self._show_card_error(widget, "the current month")
 
     async def _load_spend_history(self) -> None:
         svc = self._billing_service()
@@ -308,11 +318,12 @@ class OVHBillingScreen(Screen):
             widget.update("[$text-error]OVH billing service not available.[/$text-error]")
             return
         try:
-            history = await svc.get_monthly_spend_history(months=6)
+            async with asyncio.timeout(_CARD_TIMEOUT_SECONDS):
+                history = await svc.get_monthly_spend_history(months=6)
             widget.update(_format_spend_history(history, redact=self.app.demo_mode))
         except Exception as exc:
-            logger.error("Failed to load OVH spend history: %s", exc)
-            widget.update(f"[$text-error]Error: {self._display_error(exc)}[/$text-error]")
+            logger.exception("Failed to load OVH spend history: %s", exc)
+            self._show_card_error(widget, "the monthly history")
 
     async def _load_invoices(self) -> None:
         svc = self._billing_service()
