@@ -5,12 +5,42 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.ovh_service import OVHService
 
 logger = logging.getLogger(__name__)
+
+# Bill details are fetched one request per invoice; a small pool keeps a long
+# history from taking minutes without flooding the API.
+_BILL_FETCH_CONCURRENCY = 5
+
+
+def usage_total(payload: object) -> Optional[Tuple[float, str]]:
+    """Reduce a consumption payload to ``(amount, currency)``.
+
+    The consumption endpoints return either one record or a list of records,
+    and a record carries its amount under ``price`` or ``total``. Lists are
+    summed. Returns ``None`` when no amount can be read.
+    """
+    records = payload if isinstance(payload, list) else [payload]
+    amount = 0.0
+    currency = ""
+    found = False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        price = record.get("price") or record.get("total")
+        if not isinstance(price, dict) or price.get("value") is None:
+            continue
+        try:
+            amount += float(price["value"])
+        except (TypeError, ValueError):
+            continue
+        currency = currency or str(price.get("currencyCode") or "")
+        found = True
+    return (round(amount, 2), currency) if found else None
 
 
 class OVHBillingService:
@@ -37,7 +67,7 @@ class OVHBillingService:
             )
         except Exception as e:
             logger.error("Error fetching OVH current usage: %s", e)
-            usage = {}
+            usage = None
 
         try:
             forecast = await asyncio.to_thread(
@@ -45,12 +75,14 @@ class OVHBillingService:
             )
         except Exception as e:
             logger.error("Error fetching OVH usage forecast: %s", e)
-            forecast = {}
+            forecast = None
 
         return {
             'provider': 'ovh',
-            'current_spend': usage,
-            'forecast': forecast,
+            'current_spend': usage if usage is not None else {},
+            'forecast': forecast if forecast is not None else {},
+            'current_failed': usage is None,
+            'forecast_failed': forecast is None,
         }
 
     async def get_cloud_usage(self, project_id: str) -> dict:
@@ -110,13 +142,18 @@ class OVHBillingService:
         if limit > 0:
             bill_ids = bill_ids[:limit]
 
-        invoices = []
-        for bill_id in bill_ids:
-            try:
-                bill = await asyncio.to_thread(client.get, f"/me/bill/{bill_id}")
-                invoices.append(bill)
-            except Exception as e:
-                logger.error("Error fetching OVH bill %s: %s", bill_id, e)
+        gate = asyncio.Semaphore(_BILL_FETCH_CONCURRENCY)
+
+        async def fetch(bill_id: str) -> Optional[dict]:
+            async with gate:
+                try:
+                    return await asyncio.to_thread(client.get, f"/me/bill/{bill_id}")
+                except Exception as e:
+                    logger.error("Error fetching OVH bill %s: %s", bill_id, e)
+                    return None
+
+        fetched = await asyncio.gather(*(fetch(b) for b in bill_ids))
+        invoices = [bill for bill in fetched if isinstance(bill, dict)]
 
         # Sort by date descending for consistent ordering
         def _sort_key(inv: dict) -> str:

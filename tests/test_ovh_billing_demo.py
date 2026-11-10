@@ -79,9 +79,11 @@ def test_provider_errors_do_not_disclose_unknown_billing_details(
     ):
         asyncio.run(getattr(screen, method)())
     message = (notify.call_args or widget.update.call_args).args[0]
-    plain = Content.from_markup(message).plain
-    assert ("private-bill-123" not in plain) is is_demo
-    assert ("123.45" not in plain) is is_demo
+    plain = message.plain if isinstance(message, Content) else Content.from_markup(message).plain
+    # The summary cards never repeat provider text; notifications do outside demo.
+    hides = is_demo or method in ("_load_current_usage", "_load_spend_history")
+    assert ("private-bill-123" not in plain) is hides
+    assert ("123.45" not in plain) is hides
 
 
 def test_credential_error_is_safe_without_a_redaction_service() -> None:
@@ -111,3 +113,72 @@ def test_demo_toggle_clears_visible_data_before_reloading() -> None:
     widget.clear.assert_called_once_with()
     assert len(queued) == 1
     queued[0].close()
+
+
+def _card_screen(service):
+    app = SimpleNamespace(demo_mode=False, ovh_billing_service=service)
+    screen = OVHBillingScreen()
+    widgets = {"#current_usage": MagicMock(), "#spend_history": MagicMock()}
+    return screen, app, widgets
+
+
+def _run(screen, app, widgets, method):
+    with (
+        patch.object(OVHBillingScreen, "app", new_callable=PropertyMock, return_value=app),
+        patch.object(screen, "query_one", side_effect=lambda sel, *_: widgets[sel]),
+    ):
+        asyncio.run(getattr(screen, method)())
+
+
+@pytest.mark.parametrize("current", [
+    {"price": {"value": 12.5, "currencyCode": "EUR"}},
+    [{"price": {"value": 10.0, "currencyCode": "EUR"}}, {"price": {"value": 2.5, "currencyCode": "EUR"}}],
+])
+def test_current_month_card_shows_figure_for_list_and_dict(current) -> None:
+    service = SimpleNamespace(get_current_usage=AsyncMock(return_value={
+        "current_spend": current, "forecast": [],
+    }))
+    screen, app, widgets = _card_screen(service)
+    _run(screen, app, widgets, "_load_current_usage")
+    assert "12.50 EUR" in widgets["#current_usage"].update.call_args.args[0]
+
+
+def test_failed_forecast_does_not_hide_current_figure() -> None:
+    usage = {"current_spend": {"price": {"value": 5, "currencyCode": "EUR"}},
+             "forecast": {}, "forecast_failed": True}
+    text = _format_current_usage(usage)
+    assert "5.00 EUR" in text
+    assert "unavailable" in text
+
+
+def test_history_card_always_ends_when_the_call_fails() -> None:
+    service = SimpleNamespace(
+        get_current_usage=AsyncMock(return_value={"current_spend": {}, "forecast": {}}),
+        get_monthly_spend_history=AsyncMock(side_effect=RuntimeError("[bold]x[/] secret")),
+    )
+    screen, app, widgets = _card_screen(service)
+    _run(screen, app, widgets, "_load_spend_history")
+    shown = widgets["#spend_history"].update.call_args.args[0]
+    assert "Loading" not in shown.plain
+    assert "secret" not in shown.plain
+    assert "Could not load" in shown.plain
+
+
+def test_history_card_ends_on_timeout(monkeypatch) -> None:
+    import servonaut.screens.ovh_billing as module
+
+    async def never(**_):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(module, "_CARD_TIMEOUT_SECONDS", 0.05)
+    service = SimpleNamespace(get_monthly_spend_history=never)
+    screen, app, widgets = _card_screen(service)
+    _run(screen, app, widgets, "_load_spend_history")
+    assert "Could not load" in widgets["#spend_history"].update.call_args.args[0].plain
+
+
+def test_empty_history_shows_an_empty_state() -> None:
+    service = SimpleNamespace(get_monthly_spend_history=AsyncMock(return_value=[]))
+    screen, app, widgets = _card_screen(service)
+    _run(screen, app, widgets, "_load_spend_history")
+    assert "No history" in widgets["#spend_history"].update.call_args.args[0]

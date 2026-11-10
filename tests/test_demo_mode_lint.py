@@ -701,10 +701,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # _display_error. Invoice rendering has its own directly detectable guard.
     AllowlistEntry("screens/ovh_billing.py", "_load_current_usage", "update",
                    "Passes demo_mode to _format_current_usage, which hides totals; "
-                   "provider errors go through _display_error."),
+                   "provider errors are shown as a fixed message."),
     AllowlistEntry("screens/ovh_billing.py", "_load_spend_history", "update",
                    "Passes demo_mode to _format_spend_history, which hides totals "
-                   "and bars; provider errors go through _display_error."),
+                   "and bars; provider errors are shown as a fixed message."),
+    AllowlistEntry("screens/ovh_billing.py", "_show_card_error", "update",
+                   "Writes a fixed message built from a literal label; the "
+                   "provider's error text is only logged."),
     AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
                    "Only writes the literal Loading placeholder while clearing "
                    "old billing values before guarded reloads."),
