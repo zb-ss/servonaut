@@ -841,7 +841,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
         Binding("u", "use_vault_key", "Vault Key", show=False),
-        Binding("9", "back", "Back", show=True),
+        Binding("9", "back", "Back", show=False),
         Binding("escape", "back", "Back", show=False),
     ]
 
@@ -972,16 +972,19 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             with Vertical(id="sa-body", classes="workspace-content"):
                 heading, identity, connection = self._server_info_sections()
                 self._server_info_text = Content("\n\n").join((heading, identity, connection))
-                # Full-width compact context banner
-                yield VerticalScroll(Static(heading, id="server_context"), id="sa-context")
+                # One row of context: name, state, provider and facts, route
+                yield VerticalScroll(
+                    Static(heading, id="server_context", classes="screen-title"),
+                    id="sa-context",
+                )
                 # Toolbar: the primary actions, always one row
                 yield ActionRow(
-                    ActionButton("← Fleet", "9", short="← Fleet", id="btn_back"),
+                    ActionButton("← Fleet", "esc", short="← Fleet", id="btn_back"),
                     Static("", classes="sa-toolbar-spacer"),
                     ActionButton("Browse files", "1", short="Browse", id="btn_browse"),
                     ActionButton("SCP transfer", "4", short="SCP", id="btn_scp"),
                     ActionButton("Run command", "2", short="Command", id="btn_command"),
-                    ActionButton("SSH connect", "3", short="SSH", id="btn_ssh", role="primary"),
+                    ActionButton("SSH connect", "3", id="btn_ssh", role="primary"),
                     id="action_buttons",
                 )
                 # Main detail workspace
@@ -1011,7 +1014,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             ),
                             _card(
                                 "card_memory",
-                                Static("[bold]Server Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
+                                Static("[bold]Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
                                 ActionButton("Server memory", "m", short="Memory", id="btn_memory"),
                                 ActionButton("Monitoring", "f", id="btn_findings"),
                                 ActionButton("Scan DB", "d", id="btn_db_creds"),
@@ -1120,6 +1123,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             ])
 
         path = Content.styled("Direct connection", "dim")
+        path_is_bastion = False
         target = public_ip
         if not any(self._instance.get(key) for key in ("is_shared", "is_custom", "is_ovh")):
             profile = self.app.connection_service.resolve_profile(connection_instance(self.app, self._instance))
@@ -1127,7 +1131,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 bastion = str(profile.bastion_host)
                 if self.app.demo_mode and self.app.redaction_service:
                     bastion = self.app.redaction_service.redact_host(bastion)
-                path = Content.assemble(Content.styled("via Bastion:", "dim"), " ", literal(bastion))
+                path = Content.assemble(Content.styled("via", "dim"), " ", literal(bastion))
+                path_is_bastion = True
                 target = field("private_ip", "N/A")
         network.extend([
             Content(""), path, line("Target", target),
@@ -1137,19 +1142,20 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         if shared_with.plain:
             identity.append(shared_with)
 
+        route = Content.assemble(
+            Content.styled(" · ", "dim"), path,
+        ) if path_is_bastion else Content("")
         heading = [Content.assemble(
-            literal(name, "bold $text-accent"), "  ", Content.styled("● ", "dim"), state,
-            "  ", literal(" · ".join([provider, *facts]), "dim"),
+            literal(name, "bold"), "  ", Content.styled("● ", "dim"), state,
+            Content.styled(" · ", "dim"), literal(" · ".join([provider, *facts]), "dim"),
+            route,
         )]
-        heading.append(Content.assemble(
-            path, Content.styled(" · ", "dim"), self._credential_source_line(),
-        ))
         if self._instance.get("account_qualified"):
             heading.append(line("Account", field("account", "-")))
         return (
             Content("\n").join(heading),
             Content.assemble(Content.styled("Identity", "bold"), "\n\n", Content("\n").join(identity)),
-            Content.assemble(Content.styled("Network / Connection", "bold"), "\n\n", Content("\n").join(network)),
+            Content.assemble(Content.styled("Network · SSH", "bold"), "\n\n", Content("\n").join(network)),
         )
 
     def _shared_with_line(self) -> Content:
@@ -1353,14 +1359,14 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
-            panel.update("[bold]Server Memory[/bold]\n\n[dim]Server memory is unavailable.[/dim]")
+            panel.update("[bold]Memory[/bold]\n\n[dim]Server memory is unavailable.[/dim]")
             return
 
         instance_id = str(self._instance.get("id") or "")
         instance_name = self._instance.get("name") or ""
         try:
             if memory_service.is_memory_disabled(instance_id, instance_name):
-                panel.update("[bold]Server Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press m to review its settings.[/dim]")
+                panel.update("[bold]Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press m to review its settings.[/dim]")
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -1369,10 +1375,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             modules = memory_service.get_all_modules(instance_id, self._provider_for_memory())
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
-            panel.update("[bold]Server Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press m to open Server Memory and try again.[/dim]")
+            panel.update("[bold]Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press m to open memory and try again.[/dim]")
             return
 
-        text = render_memory_panel(modules)
+        text = render_memory_panel(modules, title="Memory")
         # Demo mode: the snapshot can embed paths / hostnames / versions from
         # the probed server — scrub before rendering, same posture as the
         # Memory screen and log viewer.

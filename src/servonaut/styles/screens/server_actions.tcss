@@ -9,23 +9,23 @@
     layout: vertical;
 }
 
-/* Full-width compact context banner leading the screen */
+/* One row of context: the shared screen header look, with no bar and no
+   bottom border. */
 #sa-context {
     width: 100%;
     height: auto;
+    /* A very long name or account scrolls here instead of starving the cards. */
     max-height: 4;
-    padding: 0 1;
+    padding: 0 2;
     background: transparent;
-    border-left: thick $accent;
-    border-bottom: solid $surface-lighten-1;
-    scrollbar-gutter: stable;
+}
+
+ServerActionsScreen.-short #sa-context {
+    padding: 0 1;
 }
 
 #server_context {
-    text-align: left;
-    content-align: left middle;
     height: auto;
-    padding: 0;
 }
 
 /* Primary actions: one row, Back at the left and the rest at the right.
@@ -34,8 +34,13 @@
     width: 100%;
     height: auto;
     layout: horizontal;
-    padding: 0 1;
+    padding: 0 2;
     background: $surface;
+    border-bottom: solid $border-blurred;
+}
+
+ServerActionsScreen.-short #action_buttons {
+    padding: 0 1;
 }
 
 #action_buttons.-wrap {
