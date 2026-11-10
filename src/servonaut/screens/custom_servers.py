@@ -6,6 +6,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
@@ -39,7 +40,7 @@ class CustomServersScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         """Keep the saved inventory and connection editor visually distinct."""
         yield SafeHeader()
-        yield WorkspaceControls("Custom Servers")
+        yield WorkspaceControls("Custom servers")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="custom_servers_workspace", classes="workspace-content"):
@@ -52,10 +53,12 @@ class CustomServersScreen(WorkspaceScreen):
                     with Container(id="custom_servers_records"):
                         with Horizontal(id="custom_servers_toolbar"):
                             yield Static("Saved hosts", classes="custom-section-title")
-                            with Horizontal(classes="add_row"):
-                                yield Button("Add Server", id="btn_add_server", variant="primary")
-                                yield Button("Remove Selected", id="btn_remove_server", variant="error")
-                                yield Button("Back", id="btn_back", variant="default")
+                            with ActionRow(classes="add_row"):
+                                yield ActionButton("Add server", "n", role="primary", id="btn_add_server")
+                                yield ActionButton(
+                                    "Remove selected", "d", short="Remove", role="error", id="btn_remove_server"
+                                )
+                                yield ActionButton("Back", "esc", id="btn_back")
                         yield DataTable(id="custom_servers_table")
                         yield Static(
                             "Use the arrow keys to choose a host. Scroll sideways for all connection fields.",
@@ -95,9 +98,9 @@ class CustomServersScreen(WorkspaceScreen):
                             "Passed to ssh -o. Example: HostKeyAlgorithms=+ssh-rsa for legacy hosts.",
                             classes="note",
                         )
-                with Horizontal(id="add_form_actions"):
-                    yield Button("Save", id="btn_save_server", variant="primary")
-                    yield Button("Cancel", id="btn_cancel_form", variant="default")
+                with ActionRow(id="add_form_actions"):
+                    yield ActionButton("Save", role="primary", id="btn_save_server")
+                    yield ActionButton("Cancel", id="btn_cancel_form")
         yield Footer()
 
     def on_mount(self) -> None:

@@ -578,3 +578,30 @@ async def test_native_key_add_form_dock_and_unsaved_fields_survive_reflow() -> N
         await _click(pilot, "#btn_hetzner_ssh_cancel")
         await pilot.pause()
         assert form.has_class("hidden")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [c for c in CASES if c.name in {"hetzner-keys"}], ids=lambda c: c.name)
+async def test_action_hints_are_bindings_and_the_key_matches_the_click(case: ReflowCase) -> None:
+    from tests._hint_conformance import assert_hints_match_bindings, record_actions
+
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        calls: list[str] = []
+        record_actions(screen, calls)
+        assert await assert_hints_match_bindings(pilot, screen, calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_manager_state_cells_follow_a_theme_switch_and_keep_the_cursor() -> None:
+    case = next(c for c in CASES if c.name == "aws-manager")
+    app = case.app_factory(False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        table = screen.query_one("#aws_mgr_table")
+        table.move_cursor(row=1)
+        before = [str(table.get_row_at(i)[4].style) for i in range(table.row_count)]
+        app.theme = "servonaut-light" if app.theme != "servonaut-light" else "servonaut"
+        await wait_until(lambda: [str(table.get_row_at(i)[4].style) for i in range(table.row_count)] != before)
+        assert table.cursor_row == 1

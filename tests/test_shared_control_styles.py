@@ -102,7 +102,7 @@ class _LinkApp(App):
     def compose(self) -> ComposeResult:
         yield Button("Plain", id="spacer_button")
         yield LinkButton("Refresh (r)", id="link_idle")
-        yield LinkButton("Copy row (y)", id="link_disabled", disabled=True)
+        yield LinkButton("Copy row", id="link_disabled", disabled=True)
         yield LinkButton("Update to v1.2.3", id="link_with_classes", classes="extra")
         yield WorkspaceControls("Fleet")
 

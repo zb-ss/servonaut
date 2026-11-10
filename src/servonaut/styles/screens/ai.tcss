@@ -411,7 +411,6 @@ ChatPanel #chat-input:ansi .text-area--selection {
     color: $text;
 }
 
-
 AITopUpModal #btn_topup_billing {
     width: 100%;
     margin-top: 1;
@@ -456,20 +455,6 @@ AIConversationsScreen.-content-narrow #convs_table {
 AIConversationsScreen.-content-narrow #local_actions,
 AIConversationsScreen.-content-narrow #convs_actions {
     margin-top: 0;
-}
-
-/* Cloud history has six actions; keep every label inside narrow content. */
-AIConversationsScreen.-content-narrow #convs_actions {
-    layout: grid;
-    grid-size: 3;
-    grid-columns: 1fr 1fr 1fr;
-    grid-rows: 3;
-    grid-gutter: 0 1;
-}
-
-AIConversationsScreen.-content-narrow #convs_actions Button {
-    width: 1fr;
-    margin: 0;
 }
 
 /* Retain a header, data row and horizontal scrollbar inside the card border. */

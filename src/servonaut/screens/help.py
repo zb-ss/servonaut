@@ -129,8 +129,11 @@ Keys are case-sensitive: `D` is Shift+d.
 The footer lists as many of these as fit the terminal's width. When the table
 is wider than the window, `Left` / `Right` scroll it sideways.
 
-The **detail panel** at the bottom shows the selected instance's metadata.
-You can highlight text in the detail panel with the mouse to copy it.
+The selected instance's full values show in the inspector beside the table, or
+on a short line under the table when the inspector is hidden. Click a value to
+copy it, or press `Y`, pick one with the arrow keys (`Left` / `Right` on the
+line) and press `Enter`; `Esc` goes back to the table. `y` copies the whole
+row. Highlighting part of a value with the mouse copies just that part.
 
 ## Server Actions
 

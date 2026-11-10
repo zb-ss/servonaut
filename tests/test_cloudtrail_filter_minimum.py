@@ -82,7 +82,7 @@ async def test_requested_filter_width_keeps_native_actions_and_selections(
             await tab_to(pilot, button)
             await pilot.wait_for_scheduled_animations()
             assert app.focused is button
-            assert button.label.plain == caption
+            assert button.words == caption
             assert_button_label_painted(app, button)
             hit = app.get_widget_at(*button.region.center)[0]
             assert hit is button or button in hit.ancestors

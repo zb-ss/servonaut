@@ -10,10 +10,13 @@ from typing import List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import (
@@ -37,6 +40,21 @@ from servonaut.screens._provider_accounts import (
 
 class AmbiguousAddress(ValueError):
     """A shown stand-in address that stands for more than one real address."""
+
+
+class BannedTable(DataTable):
+    """The banned addresses; Enter uses the selected one.
+
+    The table consumes Enter for its own select binding, so the screen's
+    ``enter`` binding never fires while it has focus. A mouse click only moves
+    the cursor and must not overwrite an address being typed, so the key
+    binding runs the screen action instead of reacting to the selected event.
+    """
+
+    BINDINGS = [Binding("enter", "use_selected_ip", "Use IP", show=False)]
+
+    def action_use_selected_ip(self) -> None:
+        self.screen.action_use_selected_ip()
 
 
 class IPBanScreen(WorkspaceScreen):
@@ -92,7 +110,7 @@ class IPBanScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("IP Ban Manager")
+        yield WorkspaceControls("IP ban manager")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="ip_ban_container", classes="workspace-content"):
@@ -136,18 +154,22 @@ class IPBanScreen(WorkspaceScreen):
                                 "Enter uses the selected IP; y copies it.",
                                 classes="ip-ban-help",
                             )
-                            yield DataTable(id="banned_table")
-                            with Horizontal(id="ip_ban_selection_actions"):
-                                yield Button("Use selected IP", id="ip_ban_use_selected")
-                                yield Button("Copy selected IP", id="ip_ban_copy_selected")
+                            yield BannedTable(id="banned_table")
+                            with ActionRow(id="ip_ban_selection_actions"):
+                                yield ActionButton(
+                                    "Use selected IP", "enter", short="Use IP", id="ip_ban_use_selected"
+                                )
+                                yield ActionButton(
+                                    "Copy selected IP", "y", short="Copy IP", id="ip_ban_copy_selected"
+                                )
                     with Vertical(id="ip_ban_audit_col"):
                         yield Static("Recent audit log", classes="ip-ban-section-title")
                         yield RichLog(id="audit_log", highlight=True, markup=True)
-                with Horizontal(id="ip_ban_actions"):
-                    yield Button("Ban IP", id="btn_ban", variant="error")
-                    yield Button("Unban IP", id="btn_unban", variant="warning")
-                    yield Button("Refresh List", id="btn_refresh")
-                    yield Button("Back", id="btn_back", variant="default")
+                with ActionRow(id="ip_ban_actions"):
+                    yield ActionButton("Ban IP", role="error", id="btn_ban")
+                    yield ActionButton("Unban IP", role="warning", id="btn_unban")
+                    yield ActionButton("Refresh list", "r", short="Refresh", id="btn_refresh")
+                    yield ActionButton("Back", "esc", id="btn_back")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -272,13 +294,17 @@ class IPBanScreen(WorkspaceScreen):
                     ip = self.app.redaction_service.redact_ip(ip)
                     msg = self.app.redaction_service.scrub_stream(msg)
                     config = self._demo_config_name(config)
-                color = "green" if success else "red"
-                audit_log.write(
-                    f"[{color}]{ts} {action}[/{color}] "
-                    f"[cyan]{ip}[/cyan] via [yellow]{config}[/yellow] — {msg}"
-                )
+                audit_log.write(Content.assemble(
+                    literal(f"{ts} {action}", "$text-success" if success else "$text-error"),
+                    " ",
+                    literal(ip, "$text-accent"),
+                    " via ",
+                    literal(config, "$text-warning"),
+                    " — ",
+                    literal(msg),
+                ))
         except Exception as e:
-            audit_log.write(f"[red]Error loading audit log: {e}[/red]")
+            audit_log.write(literal(f"Error loading audit log: {e}", "$text-error"))
 
     def _get_selected_config(self) -> Optional[str]:
         selector = self.query_one("#ban_config_selector", Select)

@@ -59,22 +59,8 @@ MemoryScreen #memory-manage-panel {
 }
 
 MemoryScreen #memory-actions {
-    layout: grid;
-    grid-size: 5;
-    grid-columns: 1fr 1fr 1fr 1fr 1fr;
-    grid-gutter: 0 1;
+    width: 100%;
     height: auto;
-}
-
-MemoryScreen #memory-actions Button,
-MemoryScreen .memory-row-buttons Button,
-MemoryScreen #memory-cloud-banner Button {
-    width: 1fr;
-    height: auto;
-    min-height: 3;
-    min-width: 0;
-    margin: 0;
-    padding: 0;
 }
 
 MemoryScreen #memory-workbench {
@@ -156,16 +142,8 @@ MemoryScreen #memory-cloud-banner-text {
 }
 
 MemoryScreen .memory-row-buttons {
-    layout: vertical;
-    width: 1fr;
+    width: 100%;
     height: auto;
-}
-
-MemoryScreen #memory-summary-row .memory-row-buttons {
-    layout: grid;
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-    grid-gutter: 0 1;
 }
 
 MemoryScreen #memory-empty-state {
@@ -197,11 +175,6 @@ MemoryScreen #memory-hosted-status {
     border: none;
     text-align: left;
     content-align: left middle;
-}
-
-MemoryScreen.-content-narrow #memory-actions {
-    grid-size: 3;
-    grid-columns: 1fr 1fr 1fr;
 }
 
 MemoryScreen.-content-narrow #memory-workbench {

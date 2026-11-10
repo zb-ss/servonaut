@@ -19,7 +19,7 @@ from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from tests._async_bounds import wait_until
 from tests.test_fleet_workspace_layout import (
-    _LayoutHost, _assert_strip_painted, _open_chat,
+    _LayoutHost, _assert_values_painted, _open_chat,
 )
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -141,7 +141,7 @@ async def test_short_chat_real_banners_keep_reply_visible_after_native_restore(
         assert transcript.scrollable_content_region.height >= 4
         assert last in _painted(app, transcript)
         _assert_actions(app, panel)
-        _assert_strip_painted(app, app.screen.query_one("#instance_detail", TextArea))
+        _assert_values_painted(app)
 
         await _tab_to(pilot, transcript)
         await pilot.press("home", "home")
@@ -175,5 +175,5 @@ async def test_short_chat_real_banners_keep_reply_visible_after_native_restore(
         assert last in _painted(app, transcript)
         assert banner.display and quota.display
         _assert_actions(app, panel)
-        _assert_strip_painted(app, app.screen.query_one("#instance_detail", TextArea))
+        _assert_values_painted(app)
         assert app._exception is None

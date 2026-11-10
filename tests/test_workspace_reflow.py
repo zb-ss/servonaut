@@ -17,6 +17,7 @@ from servonaut.widgets.chat_panel import (
     ChatPanel, _CONVO_IDLE, _CONVO_STATE_GLYPHS, _MIC_IDLE, _MIC_RECORDING,
     _SPINNER_FRAMES,
 )
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
@@ -293,34 +294,34 @@ async def test_fleet_full_value_copy_affordance_stays_visible_with_chat(
     app.theme = theme
     async with app.run_test(size=size) as pilot:
         await _open_chat(app, pilot)
-        toolbar = app.screen.query_one("#fleet-detail-toolbar")
-        painted = _painted(app, toolbar)
-        assert "Selected server" in painted and "highlight text to copy" in painted
-        assert "Copy row (y)" in painted
+        bar = app.screen.query_one("#fleet_value_bar")
+        painted = _painted(app, bar)
+        assert "Copy row" in painted and "192.0.2.10" in painted
         clipboard.calls.clear()
-        await _click(pilot, "#fleet_copy_row")
+        await _click(pilot, "#fleet_copy_row_line")
         await wait_until(lambda: bool(clipboard.calls))
         assert "web-1" in clipboard.calls[-1]
         assert "192.0.2.10" in clipboard.calls[-1]
         app.screen.query_one("#search_input", Input).value = "missing-fixture"
         await wait_until(lambda: app.screen.query_one(InstanceTable).row_count == 0)
-        assert app.screen.query_one("#fleet_copy_row", Button).disabled
+        assert app.screen.query_one("#fleet_copy_row_line", Button).disabled
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
-async def test_copy_row_mouse_affordance_keeps_table_to_detail_tab_route(
+async def test_copy_row_and_values_stay_out_of_the_tab_route(
     size: tuple[int, int], clipboard: _Clipboard,
 ) -> None:
     app = _LayoutHost()
     async with app.run_test(size=size) as pilot:
         table = app.screen.query_one(InstanceTable)
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        assert app.screen.query_one("#fleet_copy_row", Button) not in app.screen.focus_chain
+        for button in ("#fleet_copy_row", "#fleet_copy_row_line"):
+            assert app.screen.query_one(button, Button) not in app.screen.focus_chain
         table.focus()
         await wait_until(lambda: app.focused is table)
         await pilot.press("tab")
-        await wait_until(lambda: app.focused is detail)
+        await pilot.pause()
+        assert not isinstance(app.focused, ValueRow)
         table.focus()
         clipboard.calls.clear()
         await pilot.press("y")

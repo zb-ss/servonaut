@@ -170,7 +170,7 @@ class TestFindingsScreenStates:
             await pilot.pause(0.05)
             text = _rendered_text(app)
             assert "Sign in required" in text
-            assert "Open Login" in text
+            assert "Open login" in text
 
     @pytest.mark.asyncio
     async def test_free_tier_shows_upgrade_card(self):
@@ -184,7 +184,7 @@ class TestFindingsScreenStates:
             await pilot.pause(0.05)
             text = _rendered_text(app)
             assert "Upgrade required" in text
-            assert "Open Pricing" in text
+            assert "Open pricing" in text
 
     @pytest.mark.asyncio
     async def test_server_402_shows_upgrade_card(self):

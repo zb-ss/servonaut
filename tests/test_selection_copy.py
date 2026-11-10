@@ -21,6 +21,7 @@ from servonaut.config.schema import AppConfig
 from servonaut.screens.ai_analysis import AIAnalysisScreen
 from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.utils import platform_utils
+from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.instance_table import InstanceTable
 from tests._async_bounds import wait_until
@@ -276,21 +277,38 @@ class _FleetCopyApp(_CopyApp):
         return None
 
 
+def _name_value(app: ServonautApp, size: tuple[int, int], *, chat_open: bool = False) -> ValueRow:
+    """The selected server's name value, in the form this size (and the chat) shows."""
+    narrow = size[0] < 130 or chat_open
+    host = "#fleet_value_line" if narrow else "#fleet_values"
+    return app.screen.query_one(host).query_one(
+        f"#fleet_value_{'line' if narrow else 'list'}_name", ValueRow,
+    )
+
+
+# Few enough characters to stay on the first painted line of any value cell.
+_HIGHLIGHTED = 8
+
+
+async def _drag_value(pilot: Pilot, row: ValueRow) -> str:
+    """Highlight the start of a value with the mouse; returns the highlighted text."""
+    await _drag(pilot, row.value_widget, (0, 0), (_HIGHLIGHTED - 1, 0))
+    return row.value[:_HIGHLIGHTED]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-async def test_fleet_detail_drag_copies_full_name_from_underlying_record(
+async def test_fleet_value_drag_copies_only_the_highlighted_part(
     clipboard: _Clipboard, size: tuple[int, int],
 ) -> None:
     app = _FleetCopyApp()
     async with app.run_test(size=size) as pilot:
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        await wait_until(lambda: bool(detail.text))
+        row = _name_value(app, size)
+        await wait_until(lambda: bool(row.value))
         assert isinstance(app.focused, InstanceTable)
-        expected = "Name: " + str(app.instances[0]["name"])
-        assert detail.text.startswith(expected)
-        assert str(app.instances[0]["key_name"]) in detail.text
-        await _drag(pilot, detail, (0, 0), (len(expected), 0))
-        assert detail.selected_text == expected
+        assert row.value == str(app.instances[0]["name"])
+        expected = await _drag_value(pilot, row)
+        assert app.screen.get_selected_text() == expected
         assert clipboard.calls == [expected]
 
 
@@ -302,20 +320,25 @@ async def test_fleet_and_chat_copy_the_fresh_selection_in_either_direction(
 ) -> None:
     app = _FleetCopyApp()
     async with app.run_test(size=size) as pilot:
-        detail = app.screen.query_one("#instance_detail", TextArea)
-        await wait_until(lambda: bool(detail.text))
+        await wait_until(lambda: bool(_name_value(app, size).value))
         await pilot.press("f2")
         await wait_until(lambda: bool(app.screen.query(ChatPanel)))
+        detail = _name_value(app, size, chat_open=True)
+        await wait_until(lambda: detail.display and detail.region.width > 0)
         chat = app.screen.query_one("#chat-input", TextArea)
         await wait_until(lambda: app.focused is chat)
         chat.load_text("fresh chat Ω")
-        sources = {"detail": (detail, "Name: café"), "chat": (chat, "fresh chat Ω")}
+        sources = {"detail": (detail, detail.value[:_HIGHLIGHTED]), "chat": (chat, "fresh chat Ω")}
         second_source = "chat" if first_source == "detail" else "detail"
         for source in (first_source, second_source):
             editor, expected = sources[source]
             clipboard.calls.clear()
-            await _drag(pilot, editor, (0, 0), (len(expected), 0))
-            assert editor.selected_text == expected
+            if source == "detail":
+                await _drag_value(pilot, editor)
+                assert app.screen.get_selected_text() == expected
+            else:
+                await _drag(pilot, editor, (0, 0), (len(expected), 0))
+                assert editor.selected_text == expected
             assert clipboard.calls == [expected]
 
 
@@ -344,13 +367,16 @@ async def test_collapsing_chat_retires_only_its_native_screen_copy_target(
             target = Static(expected, markup=False, classes="chat-message-assistant")
             await panel.query_one("#chat-messages").mount(target)
         else:
-            expected = "Selected server"
-            target = screen.query_one("#fleet-detail-heading", Static)
+            target = _name_value(app, size, chat_open=True)
+            expected = target.value[:_HIGHLIGHTED]
         await pilot.pause()
         target.scroll_visible(animate=False, immediate=True)
         await pilot.pause()
         # Native Static selection includes the glyph at the release coordinate.
-        await _drag(pilot, target, (0, 0), (len(expected) - 1, 0))
+        await _drag(
+            pilot, target.value_widget if isinstance(target, ValueRow) else target,
+            (0, 0), (len(expected) - 1, 0),
+        )
         assert screen.get_selected_text() == expected
         assert clipboard.calls[-1] == expected
         assert editor.document is document and editor.text == draft

@@ -540,7 +540,7 @@ async def test_security_selected_record_copy_survives_native_reflow(
         if kind == "watch":
             assert clipboard.calls == [MESSAGE]
         else:
-            assert 'Raw Event:\n' + TRAIL["raw_event"] in clipboard.calls[0]
+            assert 'Raw event:\n' + TRAIL["raw_event"] in clipboard.calls[0]
             assert "ReadResource" in clipboard.calls[0]
         if not writer_succeeds:
             assert app.clipboard == clipboard.calls[0]

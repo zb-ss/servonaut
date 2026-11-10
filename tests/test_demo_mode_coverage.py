@@ -37,6 +37,7 @@ def _make_mock_app(demo: bool = True) -> MagicMock:
     app = MagicMock()
     app.demo_mode = demo
     app.redaction_service = RedactionService() if demo else None
+    app.get_css_variables.return_value = {"text-error": "#d17e92", "text-accent": "#ffc473"}
     return app
 
 
@@ -86,7 +87,7 @@ class TestCommandOutputDemoMode:
                 assert "1.2.3.4" in written
 
     def test_append_error_scrubs_before_markup(self) -> None:
-        """Error text must be scrubbed BEFORE embedding in [bold red]...[/bold red]."""
+        """Error text must be scrubbed BEFORE styling it as an error."""
         from servonaut.widgets.command_output import CommandOutput
 
         mock_app = _make_mock_app(demo=True)
@@ -97,9 +98,9 @@ class TestCommandOutputDemoMode:
                 CommandOutput.append_error(widget, "error from 9.9.9.9")
                 mock_write.assert_called_once()
                 written = mock_write.call_args[0][0]
-                assert "9.9.9.9" not in written
-                # Must still be wrapped in bold red markup
-                assert "[bold red]" in written
+                assert "9.9.9.9" not in written.plain
+                # Must still be shown bold in the theme's error colour
+                assert written.style.lower() == "bold #d17e92"
 
     def test_append_error_scrubs_aws_key(self) -> None:
         from servonaut.widgets.command_output import CommandOutput
@@ -111,8 +112,8 @@ class TestCommandOutputDemoMode:
             with patch.object(type(widget), "app", new_callable=lambda: property(lambda self: mock_app)):
                 CommandOutput.append_error(widget, "AKIAIOSFODNN7EXAMPLE from 1.2.3.4")
                 written = mock_write.call_args[0][0]
-                assert "AKIAIOSFODNN7EXAMPLE" not in written
-                assert "1.2.3.4" not in written
+                assert "AKIAIOSFODNN7EXAMPLE" not in written.plain
+                assert "1.2.3.4" not in written.plain
 
 
 # ---------------------------------------------------------------------------
@@ -3247,7 +3248,7 @@ class TestHetznerCreateWizardDemoMode:
         )
         cells = " ".join(str(c) for c in rows[0])
         assert "ops@example.org" not in cells
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_raw_without_demo(self) -> None:
         mock_app = _make_mock_app(demo=False)
@@ -3656,7 +3657,7 @@ class TestSshKeyLabelsDemoMode:
         key = {"name": "client-laptop-key", "id": "k1", "fingerprint": "aa:bb",
                "public_key": "ssh-ed25519 AAAA"}
         mock_app, rows = self._run_load(OVHSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("client-laptop-key")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("client-laptop-key")
 
     def test_hetzner_key_label(self) -> None:
         from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
@@ -3666,7 +3667,7 @@ class TestSshKeyLabelsDemoMode:
 
         key = {"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb"}
         mock_app, rows = self._run_load(HetznerSSHKeysScreen, _wire, key)
-        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+        assert str(rows[0][0]) == mock_app.redaction_service.redact_key_name("ops@example.org")
 
     def test_wizard_confirm_label(self) -> None:
         from servonaut.screens.hetzner_create import HetznerCreateScreen

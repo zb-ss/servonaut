@@ -352,7 +352,6 @@ VaultScreen.-content-narrow #vault_actions {
     margin-top: 1;
 }
 
-
 VaultScreen.-content-narrow #vault_identity_panel {
     margin-bottom: 0;
 }
@@ -623,16 +622,6 @@ VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
     margin-top: 1;
 }
 
-#auto_bind_actions #auto_bind_apply,
-#auto_bind_actions #auto_bind_fetch_keys,
-#auto_bind_actions #auto_bind_all,
-#auto_bind_actions #auto_bind_none,
-#auto_bind_actions #auto_bind_back {
-    width: 100%;
-    min-width: 0;
-    margin: 0;
-}
-
 VaultAutoBindScreen.-content-narrow #auto_bind_content {
     padding: 0 1;
 }
@@ -900,7 +889,6 @@ VaultSecretPromptModal #vault_secret_input_field > .secret-reveal {
     min-width: 10;
 }
 
-
 /* Auto-bind keeps vault scope, server matches and host-key review distinct. */
 VaultAutoBindScreen #auto_bind_content {
     overflow-y: auto;
@@ -1016,10 +1004,4 @@ VaultAutoBindScreen.-short #auto_bind_detail_scroll {
 
 VaultAutoBindScreen.-short #auto_bind_detail {
     max-height: initial;
-}
-
-VaultAutoBindScreen.-short #auto_bind_actions Button {
-    height: 1;
-    border: none;
-    padding: 0 1;
 }

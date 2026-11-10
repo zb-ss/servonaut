@@ -10,13 +10,15 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from rich.markup import escape
 from rich.text import Text
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
+from servonaut.utils.markup import literal
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.dialogs import (
@@ -202,12 +204,12 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls("CloudTrail Events")
+        yield WorkspaceControls("CloudTrail events")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="cloudtrail_container", classes="workspace-content"):
                 yield Horizontal(
-                    Label("[bold]CloudTrail Events[/bold]", id="cloudtrail_title", classes="screen-title"),
+                    Label("[bold]CloudTrail events[/bold]", id="cloudtrail_title", classes="screen-title"),
                     Static("No events loaded", id="cloudtrail_context", classes="screen-status"),
                     id="cloudtrail_heading",
                 )
@@ -226,7 +228,7 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                         id="ct_filter_region",
                     ),
                     Vertical(
-                        Label("Time Range"),
+                        Label("Time range"),
                         Select(
                             _TIME_RANGE_OPTIONS,
                             value=1440,
@@ -256,7 +258,7 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                         id="ct_filter_username",
                     ),
                     Vertical(
-                        Label("Resource Type"),
+                        Label("Resource type"),
                         Select(
                             [],
                             prompt="All types",
@@ -265,17 +267,20 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                         ),
                         id="ct_filter_resource_type",
                     ),
-                    Button("Fetch", id="ct_btn_fetch", variant="primary"),
-                    Button("Back", id="ct_btn_back", variant="default"),
+                    ActionRow(
+                        ActionButton("Fetch", "f5", role="primary", id="ct_btn_fetch"),
+                        ActionButton("Back", "esc", id="ct_btn_back"),
+                        id="ct_filter_actions",
+                    ),
                     id="cloudtrail_filters",
                 )
                 with Horizontal(id="cloudtrail_workspace"):
                     yield Vertical(
                         DataTable(id="cloudtrail_table"),
                         Horizontal(
-                            Button("◀ Prev", id="ct_btn_prev", variant="default"),
+                            ActionButton("Previous", "p", short="Prev", compact=True, id="ct_btn_prev"),
                             Static("", id="ct_page_info"),
-                            Button("Next ▶", id="ct_btn_next", variant="default"),
+                            ActionButton("Next", "n", compact=True, id="ct_btn_next"),
                             id="cloudtrail_pager",
                         ),
                         id="cloudtrail_results",
@@ -665,17 +670,23 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
             return x
 
         raw_event = event.get("raw_event", "")
-        self.query_one("#event_detail_text", Static).update(
-            f"[bold]Event:[/bold] {escape(str(event.get('event_name', '')))}\n"
-            f"[bold]Time:[/bold] {escape(str(event_time))}\n"
-            f"[bold]User:[/bold] {escape(str(self._user_detail(event.get('username', ''))))}\n"
-            f"[bold]Source IP:[/bold] {escape(str(_s(event.get('source_ip', ''))))}\n"
-            f"[bold]Resource Type:[/bold] {escape(str(_s(event.get('resource_type', ''))))}\n"
-            f"[bold]Resource Name:[/bold] {escape(str(_s(event.get('resource_name', ''))))}\n"
-            f"[bold]Region:[/bold] {escape(str(event.get('region', '')))}\n"
-            f"[bold]Error:[/bold] {escape(str(event.get('error_code', '') or '(none)'))}\n\n"
-            f"[bold]Raw Event:[/bold]\n{escape(str(_s(raw_event)))}"
+        fields = (
+            ("Event", event.get("event_name", "")),
+            ("Time", event_time),
+            ("User", self._user_detail(event.get("username", ""))),
+            ("Source IP", _s(event.get("source_ip", ""))),
+            ("Resource type", _s(event.get("resource_type", ""))),
+            ("Resource name", _s(event.get("resource_name", ""))),
+            ("Region", event.get("region", "")),
+            ("Error", event.get("error_code", "") or "(none)"),
         )
+        lines = [
+            Content.assemble(literal(f"{name}:", "bold"), " ", literal(str(value)), "\n")
+            for name, value in fields
+        ]
+        self.query_one("#event_detail_text", Static).update(Content.assemble(
+            *lines, "\n", literal("Raw event:", "bold"), "\n", literal(str(_s(raw_event))),
+        ))
 
     # ------------------------------------------------------------------
     # Copy
@@ -699,15 +710,15 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                 f"Time:           {event_time}",
                 f"User:           {self._u(event.get('username', ''))}",
                 f"Source IP:      {_s(event.get('source_ip', ''))}",
-                f"Resource Type:  {_s(event.get('resource_type', ''))}",
-                f"Resource Name:  {_s(event.get('resource_name', ''))}",
+                f"Resource type:  {_s(event.get('resource_type', ''))}",
+                f"Resource name:  {_s(event.get('resource_name', ''))}",
                 f"Region:         {event.get('region', '')}",
                 f"Error:          {event.get('error_code', '') or '(none)'}",
             ]
             raw = event.get("raw_event", "")
             if raw:
                 lines.append("")
-                lines.append("Raw Event:")
+                lines.append("Raw event:")
                 lines.append(_s(str(raw)))
             text = "\n".join(lines)
         else:

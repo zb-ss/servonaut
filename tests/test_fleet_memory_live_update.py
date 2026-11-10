@@ -260,7 +260,7 @@ class TestUpdateRowForInstanceCellUpdate:
         assert 4 in col_indices, "Status cell (col 4) must be updated"
         # Find what was set for col 4
         status_value = values[col_indices.index(4)]
-        assert status_value == _STATUS_CELL[STATUS_FRESH]
+        assert status_value.plain == _STATUS_CELL[STATUS_FRESH][0]
 
     def test_row_dict_status_updated_in_place(self) -> None:
         """After _update_row_for_instance the _rows entry must reflect new status."""

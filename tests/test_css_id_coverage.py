@@ -83,9 +83,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # link_button.tcss: Button.link-button (LinkButton)
         "fleet_copy_row",
         "fleet_refresh",
-        # memory.tcss: MemoryDriftScreen #drift-actions Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn-drift-diff",
-        # memory_screen.tcss: MemoryScreen .memory-row-buttons Button
+        # components/action_button.tcss: ActionButton (shared action style)
         "btn_enhance_ai",
         "btn_view_summary",
         # main_menu.tcss: MainMenuScreen #dashboard-content .action-card
@@ -369,6 +369,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_banner_scan",      # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
         "btn_empty_scan",       # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
+        "auto_bind_all",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_apply",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_back",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_fetch_keys",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_none",       # Reason: ActionButton; styled by components/action_button.tcss
         "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_copy_summary",     # Reason: server-actions ActionButton; styled by components/action_button.tcss
