@@ -167,3 +167,36 @@ async def test_drift_table_and_diff_heading_hide_the_instance_id_in_demo_mode() 
         await pilot.pause(0.3)
         heading = _plain(app.screen.query_one("#drift-diff-title", Static))
         assert real not in heading
+
+
+@pytest.mark.asyncio
+async def test_findings_and_drift_tables_restyle_on_a_theme_switch() -> None:
+    from servonaut.screens.memory_drift import MemoryDriftScreen
+    from textual.widgets import DataTable
+
+    event = SimpleNamespace(
+        instance_id="web-1", module="services", severity="high",
+        detected_at="2026-07-02T09:30:00Z", acknowledged_at=None,
+    )
+    app = _SecurityHost(True)
+    app.auth_service.has_feature = lambda feature: True
+    app.findings_service.list_findings.return_value = {
+        "findings": [_finding(), _finding(id="fnd_2", severity="low")],
+        "total": 2, "limit": 50, "offset": 0,
+    }
+    app.drift_service = SimpleNamespace(list_drift=AsyncMock(return_value=[event, event]))
+    async with app.run_test(size=(160, 50)) as pilot:
+        for screen, table_id in ((FindingsScreen(), "#findings_table"),
+                                 (MemoryDriftScreen(), "#drift-table")):
+            await app.push_screen(screen)
+            await pilot.pause(0.5)
+            table = screen.query_one(table_id, DataTable)
+            table.move_cursor(row=1)
+            col = 0 if table_id == "#findings_table" else 3
+            before = str(table.get_row_at(0)[col].style)
+            app.theme = "servonaut-light" if app.theme != "servonaut-light" else "servonaut"
+            await pilot.pause(0.5)
+            assert str(table.get_row_at(0)[col].style) != before
+            assert table.cursor_row == 1
+            await app.pop_screen()
+            await pilot.pause()
