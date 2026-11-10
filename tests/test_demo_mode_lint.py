@@ -627,7 +627,7 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/ovh_billing.py", "_load_current_usage", "update",
                    "Passes demo_mode to _format_current_usage, which hides totals; "
                    "provider errors are shown as a fixed message."),
-    AllowlistEntry("screens/ovh_billing.py", "_load_spend_history", "update",
+    AllowlistEntry("screens/ovh_billing.py", "_load_invoices", "update",
                    "Passes demo_mode to _format_spend_history, which hides totals "
                    "and bars; provider errors are shown as a fixed message."),
     AllowlistEntry("screens/ovh_billing.py", "_show_card_error", "update",

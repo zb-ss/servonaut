@@ -930,8 +930,40 @@ class TestOVHBilling:
         tools = make_tools(ovh_billing_service=billing_svc)
         result = run(tools.ovh_billing())
         assert "Billing Summary" in result
-        assert "Current Spend" in result
+        assert "Current spend" in result
         assert "Forecast" in result
+
+    def test_list_payload_prints_summed_figures(self):
+        price = lambda v: {"price": {"value": v, "currencyCode": "EUR"}}  # noqa: E731
+        billing_svc = MagicMock()
+        billing_svc.get_current_usage = AsyncMock(return_value={
+            "provider": "ovh",
+            "current_spend": [price(10.0), price(2.5)],
+            "forecast": [price(20.0)],
+        })
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_billing())
+        assert "Current spend: 12.50 EUR" in result
+        assert "Forecast: 20.00 EUR" in result
+
+    def test_empty_lists_mean_zero(self):
+        billing_svc = MagicMock()
+        billing_svc.get_current_usage = AsyncMock(return_value={
+            "provider": "ovh", "current_spend": [], "forecast": [],
+        })
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_billing())
+        assert "Current spend: 0.00" in result
+        assert "no data" not in result
+
+    def test_failed_call_is_reported(self):
+        billing_svc = MagicMock()
+        billing_svc.get_current_usage = AsyncMock(return_value={
+            "provider": "ovh", "current_spend": {}, "forecast": [],
+            "current_failed": True, "forecast_failed": False,
+        })
+        tools = make_tools(ovh_billing_service=billing_svc)
+        assert "Current spend: unavailable" in run(tools.ovh_billing())
 
     def test_handles_empty_data_gracefully(self):
         billing_svc = MagicMock()
