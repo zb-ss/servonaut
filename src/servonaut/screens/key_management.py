@@ -8,6 +8,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from textual.content import Content
+from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.utils.markup import literal
 from servonaut.widgets.action_button import ActionButton
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -34,6 +37,9 @@ class KeyManagementScreen(WorkspaceScreen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # Delete acts on the overrides table only, so it never fires from elsewhere.
+        if action == "remove_mapping" and getattr(self.focused, "id", None) != "instance_keys_table":
+            return None
         if self.navigation_focused:
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
@@ -72,10 +78,10 @@ class KeyManagementScreen(WorkspaceScreen):
                                     yield Label("Key path")
                                     yield Input(placeholder="~/.ssh/server_key", id="input_mapping_key")
                                 yield Button("Add mapping", id="btn_add_mapping", variant="primary")
-                            yield DataTable(id="instance_keys_table")
+                            yield DataTable(id="instance_keys_table", cursor_type="row")
                             yield ActionButton(
                                 "Remove override", "Del", role="error",
-                                id="btn_remove_mapping"
+                                id="btn_remove_mapping", disabled=True,
                             )
                             yield Static("Select a mapping row, then remove its override.", classes="key-section-note")
                     with Vertical(id="key_local_column"):
@@ -161,6 +167,7 @@ class KeyManagementScreen(WorkspaceScreen):
         # Add mappings. Rows may show demo-mode fakes; removal needs the
         # real id, so remember it per row.
         self._mapping_ids = {}
+        self.query_one("#btn_remove_mapping", ActionButton).disabled = not config.instance_keys
         if config.instance_keys:
             for instance_id, key_path in config.instance_keys.items():
                 row_key = table.add_row(_i(instance_id), _k(key_path))
@@ -305,39 +312,42 @@ class KeyManagementScreen(WorkspaceScreen):
         except Exception as e:
             self.notify(f"Error adding key mapping: {e}", severity="error", markup=False)
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Selecting a mapping row removes its override."""
-        if event.data_table.id == "instance_keys_table":
-            self._remove_mapping(event.row_key)
-
     def action_remove_mapping(self) -> None:
-        """Remove the override of the highlighted mapping row."""
+        """Ask before removing the override of the highlighted mapping row."""
         table = self.query_one("#instance_keys_table", DataTable)
         if table.row_count == 0:
             return
         row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        if row_key not in getattr(self, "_mapping_ids", {}):
-            self.notify("No key override to remove", severity="warning")
-            return
-        self._remove_mapping(row_key)
-
-    def _remove_mapping(self, row_key) -> None:
-        table = self.query_one("#instance_keys_table", DataTable)
-        row_data = table.get_row(row_key)
-        if not row_data or len(row_data) < 2:
-            return
-
-        shown_id = str(row_data[0])
-        instance_id = getattr(self, "_mapping_ids", {}).get(row_key)
+        instance_id = self._mapping_ids.get(row_key)
         if instance_id is None:
             return  # Empty state row
+        shown_id = str(table.get_row(row_key)[0])
+        self.app.push_screen(
+            ConfirmActionScreen(
+                title="Remove key override",
+                description=Content.assemble(
+                    "Use the default key for ", literal(shown_id, "bold"), " again?",
+                ),
+                consequences=["Delete this per-server key override"],
+                confirm_text="remove",
+                action_label="Remove override",
+            ),
+            lambda confirmed: self._remove_confirmed(confirmed, row_key, shown_id),
+        )
 
+    def _remove_confirmed(self, confirmed: Optional[bool], row_key, shown_id: str) -> None:
+        instance_id = self._mapping_ids.get(row_key)
+        if not confirmed or instance_id is None:
+            return
         config = self.app.config_manager.get()
         if instance_id in config.instance_keys:
             del config.instance_keys[instance_id]
             self.app.config_manager.save(config)
             self._load_instance_mappings()
-            self.notify(f"Removed key mapping for {shown_id}", severity="information")
+            self.notify(
+                f"Removed key mapping for {literal(shown_id).plain}",
+                severity="information", markup=False,
+            )
 
     def _add_key_to_agent(self) -> None:
         """Add a key to SSH agent (in worker thread)."""

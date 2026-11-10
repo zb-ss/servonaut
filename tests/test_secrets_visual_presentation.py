@@ -40,6 +40,8 @@ async def test_provider_action_controls_dispatch_existing_actions(
     app = _SecretsHost(navigation_visible=True)
     async with app.run_test(size=size) as pilot:
         screen = await _opener("secrets")(app, pilot)
+        await pilot.pause()
+        await pilot.pause()
         buttons = list(screen.query(ActionButton))
         assert buttons
         for button in buttons:
@@ -82,3 +84,17 @@ async def test_every_action_key_triggers_its_action(monkeypatch: pytest.MonkeyPa
             await pilot.press(key)
             await pilot.pause()
             assert calls == ["hit"], key
+
+
+@pytest.mark.asyncio
+async def test_refreshing_keeps_every_action_inside_the_screen() -> None:
+    app = _SecretsHost(navigation_visible=False)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _opener("secrets")(app, pilot)
+        for _ in range(4):
+            screen._render_state()
+            await pilot.pause()
+            await pilot.pause()
+            for button in screen.query(ActionButton):
+                assert button.region.right <= app.screen.region.right, button.id
+                assert button.tooltip
