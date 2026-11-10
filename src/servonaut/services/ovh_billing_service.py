@@ -117,6 +117,7 @@ class OVHBillingService:
             ovh_service: An initialized OVHService instance whose client will be reused.
         """
         self._ovh_service = ovh_service
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._bill_gate: Optional[asyncio.Semaphore] = None
         self._invoice_fetches: dict[int, asyncio.Task] = {}
 
@@ -201,12 +202,26 @@ class OVHBillingService:
             Exception: When the bill list cannot be fetched, or every bill
                 request fails.
         """
+        self._bind_to_running_loop()
         task = self._invoice_fetches.get(limit)
         if task is None or task.done():
             task = asyncio.ensure_future(self._fetch_invoices(limit))
             task.add_done_callback(lambda t, key=limit: self._finish_fetch(key, t))
             self._invoice_fetches[limit] = task
         return list(await asyncio.shield(task))
+
+    def _bind_to_running_loop(self) -> None:
+        """Drop loop-bound state left by another event loop.
+
+        A semaphore or task belongs to the loop that created it; reusing the
+        service from a new loop would otherwise fail once the limit is hit.
+        """
+        loop = asyncio.get_running_loop()
+        if self._loop is loop:
+            return
+        self._loop = loop
+        self._bill_gate = None
+        self._invoice_fetches = {}
 
     def _finish_fetch(self, limit: int, task: asyncio.Task) -> None:
         if self._invoice_fetches.get(limit) is task:

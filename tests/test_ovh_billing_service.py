@@ -711,11 +711,11 @@ class TestInvoiceFetching:
 
     def test_bills_are_fetched_concurrently_and_sorted(self, billing_service, mock_ovh_client):
         import threading
-        import time
 
         active = []
         peak = [0]
         lock = threading.Lock()
+        full = threading.Event()
 
         def get(path):
             if path == "/me/bill":
@@ -723,7 +723,9 @@ class TestInvoiceFetching:
             with lock:
                 active.append(1)
                 peak[0] = max(peak[0], len(active))
-            time.sleep(0.05)
+                if len(active) >= 5:
+                    full.set()
+            full.wait(5)
             with lock:
                 active.pop()
             return {"billId": path.rsplit("/", 1)[1], "date": f"2026-01-{int(path[-1]) + 10}"}
@@ -731,7 +733,7 @@ class TestInvoiceFetching:
         mock_ovh_client.get.side_effect = get
         invoices = asyncio.run(billing_service.get_invoices())
         assert len(invoices) == 10
-        assert 1 < peak[0] <= 5
+        assert peak[0] == 5
         assert invoices[0]["date"] > invoices[-1]["date"]
 
     def test_one_failed_bill_does_not_drop_the_rest(self, billing_service, mock_ovh_client):
@@ -777,25 +779,40 @@ class TestSharedBillFetch:
             asyncio.run(billing_service.get_invoices())
 
     def test_fetch_survives_a_cancelled_caller(self, billing_service, mock_ovh_client):
-        import time
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
 
         def get(path):
             if path == "/me/bill":
                 return ["A"]
-            time.sleep(0.2)
+            started.set()
+            release.wait(5)
             return {"billId": "A", "date": "2026-01-01"}
 
         mock_ovh_client.get.side_effect = get
 
         async def run():
             first = asyncio.ensure_future(billing_service.get_invoices())
-            await asyncio.sleep(0.05)
+            assert await asyncio.to_thread(started.wait, 5)
             first.cancel()
+            release.set()
             return await billing_service.get_invoices()
 
         assert asyncio.run(run())[0]["billId"] == "A"
         bill_calls = [c for c in mock_ovh_client.get.call_args_list if c.args[0] != "/me/bill"]
         assert len(bill_calls) == 1
+
+    def test_service_can_be_reused_from_another_event_loop(self, billing_service, mock_ovh_client):
+        def get(path):
+            if path == "/me/bill":
+                return [f"B{i}" for i in range(8)]
+            return {"billId": path.rsplit("/", 1)[1], "date": "2026-01-01"}
+
+        mock_ovh_client.get.side_effect = get
+        assert len(asyncio.run(billing_service.get_invoices())) == 8
+        assert len(asyncio.run(billing_service.get_invoices())) == 8
 
 
 class TestUsageFigures:
