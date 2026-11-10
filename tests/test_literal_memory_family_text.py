@@ -120,3 +120,50 @@ async def test_hostile_values_in_a_drift_diff_show_verbatim(value: str) -> None:
     assert f"Drift diff: {value} / {value}" == title.splitlines()[0]
     assert "Diff fetch failed" not in text
     assert value in text
+
+
+@pytest.mark.asyncio
+async def test_findings_table_columns_are_wider_than_their_headers() -> None:
+    app = _SecurityHost(True)
+    app.findings_service.list_findings.return_value = {
+        "findings": [_finding(title="Root login over SSH is permitted", status="acknowledged")],
+        "total": 1, "limit": 50, "offset": 0,
+    }
+    async with app.run_test(size=(160, 50)) as pilot:
+        await app.push_screen(FindingsScreen())
+        await pilot.pause(0.5)
+        table = app.screen.query_one("#findings_table")
+        widths = {str(c.label): c.get_render_width(table) for c in table.columns.values()}
+        assert widths["Title"] >= len("Root login over SSH is permitted")
+        assert widths["Status"] >= len("acknowledged")
+
+
+@pytest.mark.asyncio
+async def test_drift_table_and_diff_heading_hide_the_instance_id_in_demo_mode() -> None:
+    from servonaut.services.redaction_service import RedactionService
+    from servonaut.screens.memory_drift import MemoryDriftScreen
+    from textual.widgets import DataTable
+
+    real = "i-0abc123def456"
+    event = SimpleNamespace(
+        instance_id=real, module="services", severity="high", detected_at="2026-07-02T09:30:00Z",
+        acknowledged_at=None, old_hash="", new_hash="", old_envelope_id="e1", new_envelope_id="e2",
+    )
+    app = _SecurityHost(True)
+    app.demo_mode = True
+    app.auth_service.has_feature = lambda feature: True
+    app.redaction_service = RedactionService()
+    app.drift_service = SimpleNamespace(list_drift=AsyncMock(return_value=[event]))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await app.push_screen(MemoryDriftScreen())
+        await pilot.pause(0.5)
+        table = app.screen.query_one("#drift-table", DataTable)
+        cells = [str(c) for c in table.get_row_at(0)]
+        assert real not in " ".join(cells)
+        assert table.columns[next(iter(table.columns))].get_render_width(table) >= 10
+        await app.push_screen(DriftDiffScreen(event, SimpleNamespace(
+            get_snapshot=AsyncMock(return_value=_envelope({})),
+        )))
+        await pilot.pause(0.3)
+        heading = _plain(app.screen.query_one("#drift-diff-title", Static))
+        assert real not in heading

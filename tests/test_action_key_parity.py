@@ -110,3 +110,28 @@ async def test_ip_ban_row_click_keeps_typed_text_and_y_still_copies(clipboard) -
         await pilot.pause()
         assert field.value == "203"
         assert clipboard.calls == ["8.8.8.8/32"]
+
+
+@pytest.mark.asyncio
+async def test_ip_ban_enter_still_works_after_row_clicks_and_arrow_keys() -> None:
+    app = _SecurityHost(True)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _opener("ban")(app, pilot)
+        field = screen.query_one("#ip_input", Input)
+        assert await pilot.click("#banned_table", offset=(2, 2))
+        await pilot.pause()
+        assert field.value == ""
+        await pilot.press("enter")
+        await pilot.pause()
+        assert field.value == "8.8.8.8"
+
+        field.value = ""
+        screen.query_one("#banned_table", DataTable).focus()
+        await pilot.press("up", "enter")
+        await pilot.pause()
+        assert field.value == "1.1.1.1"
+        field.value = ""
+        screen.query_one("#banned_table", DataTable).focus()
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert field.value == "8.8.8.8"
