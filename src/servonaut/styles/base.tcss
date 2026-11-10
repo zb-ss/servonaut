@@ -65,7 +65,7 @@ Switch:ansi.-on:hover .switch--slider {
 
 /* A visible native frame keeps the slider's left/right position readable. */
 Switch:ansi:enabled:blur {
-    border: tall $foreground;
+    border: round $foreground;
 }
 
 /* Global default: every ModalScreen centres its dialog. Individual modals
@@ -281,6 +281,68 @@ Input.-invalid {
     border: round $error;
 }
 
+/* A Select draws the same rounded frame as every other control: its closed
+   box, its focused box and the open option list. Textual's own rules use a
+   half-block border, whose corners stand out next to the rounded ones. The
+   fill stays transparent so nothing square shows outside the curve. */
+SelectCurrent {
+    border: round $border-blurred;
+    background: transparent;
+}
+
+Select:focus > SelectCurrent {
+    border: round $accent;
+    background: transparent;
+    background-tint: transparent;
+}
+
+Select > SelectOverlay {
+    border: round $border-blurred;
+    background: $surface;
+}
+
+Select > SelectOverlay:focus {
+    border: round $accent;
+    background-tint: transparent;
+}
+
+Select.-textual-compact > SelectCurrent {
+    border: none;
+}
+
+SelectCurrent:ansi {
+    border: round $border-blurred;
+    background: transparent;
+}
+
+Select:ansi:focus > SelectCurrent {
+    border: round $border;
+}
+
+/* The other framed controls follow the same rounded frame: Textual draws
+   them with half-block borders, which would sit oddly beside the Input. */
+TextArea,
+Checkbox,
+RadioSet,
+Switch,
+OptionList {
+    border: round $border-blurred;
+}
+
+TextArea:focus,
+Checkbox:focus,
+RadioSet:focus,
+Switch:focus,
+OptionList:focus {
+    border: round $accent;
+}
+
+Checkbox,
+RadioSet,
+Switch {
+    background: transparent;
+}
+
 /* Keep the selected label readable on the theme's native cursor fill. */
 SelectOverlay:focus > .option-list--option-highlighted {
     color: auto 100%;
@@ -301,7 +363,7 @@ CopyModeScreen #copy-mode-text:ansi:enabled:blur,
 TextEditorModal #text-editor-area:ansi:enabled:blur,
 CustomServersScreen #input_extra_ssh_options:ansi:enabled:blur,
 BugReportScreen #description:ansi:enabled:blur {
-    border: tall $foreground;
+    border: round $foreground;
 }
 
 /* ===================================================================
