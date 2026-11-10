@@ -871,6 +871,11 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         Binding("escape", "back", "Back", show=False),
     ]
 
+    # Defaults the layout hooks read before (or without) ``__init__``.
+    _short_cards = False
+    _sampling = False
+    _findings_count = 0
+
     AUTO_FOCUS = "#btn_browse"
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 56
