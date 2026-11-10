@@ -69,7 +69,7 @@ class MainMenuScreen(WorkspaceScreen):
         
         # Update UI safely
         try:
-            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal Servers")
+            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal servers")
             self.query_one("#stat-running", Static).update(f"[bold $text-success]{running}[/bold $text-success]\nRunning")
             self.query_one("#stat-stopped", Static).update(f"[bold $text-warning]{stopped}[/bold $text-warning]\nStopped")
         except Exception:

@@ -608,7 +608,7 @@ class IpBanPanel(SettingsPanel):
         elif method == "security_group":
             if not self.query_one("#ipban_input_sg_id", Input).value.strip():
                 self.app.notify(
-                    "Security Group ID is required",
+                    "Security group ID is required",
                     severity="error",
                     markup=False,
                 )
