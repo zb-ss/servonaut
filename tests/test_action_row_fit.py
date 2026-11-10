@@ -8,6 +8,7 @@ from textual.containers import Vertical
 
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.action_button import ActionButton, ActionRow
+from tests._async_bounds import wait_until
 
 LABELS = (
     ("Switch on SSH certificates", "s"),
@@ -170,10 +171,12 @@ class _BorderedApp(App):
 async def test_bordered_buttons_drop_hints_before_wrapping_into_a_second_line() -> None:
     app = _BorderedApp()
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.pause()
-        buttons = list(app.query(ActionButton))
         row = app.query_one(ActionRow)
+        buttons = list(app.query(ActionButton))
+        await wait_until(
+            lambda: row.size.width > 0
+            and all(b.region.width > 0 for b in buttons)
+        )
         # Hinted short words need 59 cells; the bare short words fit in 52.
         assert not row.has_class("-wrap")
         assert len({b.region.y for b in buttons}) == 1
