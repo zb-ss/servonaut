@@ -1014,6 +1014,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                     ActionButton("Run command", "2", short="Command", id="btn_command", tooltip=_tip("btn_command")),
                     ActionButton("SSH connect", "3", id="btn_ssh", role="primary", tooltip=_tip("btn_ssh")),
                     id="action_buttons",
+                    prefer_one_line=True,
                 )
                 # Main detail workspace
                 yield Vertical(

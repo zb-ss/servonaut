@@ -54,6 +54,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ovh_mgr_identity",
         # components/screen_header.tcss: .screen-title / .screen-description / .screen-status
         "aws_create_title",
+        "btn_live_refresh",
         "aws_mgr_header",
         "bw_vault_mgr_header",
         "bw_vault_mgr_hint",

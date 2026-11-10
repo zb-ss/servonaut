@@ -1,0 +1,187 @@
+"""Server actions parity: header, cards, monitoring, findings count, footer.
+
+Hosted in the real app so the shipped stylesheet decides the geometry. These
+tests run with the real navigation rule: below 110 columns it starts hidden.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from textual.widgets import Static
+
+from servonaut.screens.server_actions import ServerActionsScreen
+from servonaut.services.live_stats_service import LiveStatsError
+from servonaut.widgets.action_button import ActionButton
+from servonaut.widgets.chat_panel import ChatPanel
+from tests._async_bounds import wait_until
+from tests.test_fleet_workspace_layout import _LayoutHost
+from tests.test_server_actions_overview import _open_actions
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _no_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ChatPanel, "on_mount", lambda self: None)
+
+
+def _button(screen, button_id: str) -> ActionButton:
+    return screen.query_one(f"#{button_id}", ActionButton)
+
+
+async def test_the_header_is_one_row_of_context_without_a_bar_or_credential_line() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        context = screen.query_one("#server_context", Static)
+        assert context.has_class("screen-title")
+        assert context.region.height == 1
+        plain = context.content.plain
+        assert app.instances[0]["name"] in plain and "·" in plain
+        assert "SSH credential" not in plain
+        outer = screen.query_one("#sa-context")
+        assert all(edge[0] in ("", "none") for edge in outer.styles.border)
+        assert screen.query_one("#action_buttons").styles.border.bottom[0] == "solid"
+
+
+async def test_back_shows_esc_and_ssh_connect_keeps_its_words() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert _button(screen, "btn_back").label.plain.endswith("esc")
+        assert "SSH connect" in _button(screen, "btn_ssh").words
+        assert _button(screen, "btn_ssh").label.plain.startswith("SSH connect")
+
+
+async def test_cards_keep_two_columns_at_100_columns_with_the_navigation_hidden() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: screen.query_one("#card_network").region.width > 0)
+        assert not screen.has_class("-stack-cards")
+        identity, network = screen.query_one("#card_identity"), screen.query_one("#card_network")
+        assert identity.region.y == network.region.y
+        assert identity.region.right <= network.region.x
+
+
+async def test_cards_stack_when_the_content_is_narrower_than_96_columns() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await pilot.resize_terminal(90, 30)
+        await wait_until(lambda: screen.has_class("-stack-cards"))
+        await pilot.pause()
+        identity, network = screen.query_one("#card_identity"), screen.query_one("#card_network")
+        assert network.region.y >= identity.region.bottom
+
+
+async def test_a_short_terminal_drops_the_blank_row_after_a_card_title() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: screen._short_cards)
+        identity = screen.query_one("#server_identity", Static).content.plain.splitlines()
+        assert identity[0] == "Identity" and identity[1].strip()
+        assert len(identity) == 3  # title and the two most useful facts
+
+
+async def test_diagnostics_and_memory_cards_hold_the_agreed_actions() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        diagnostics = [b.id for b in screen.query("#sa-diagnostics ActionButton")]
+        assert diagnostics == ["btn_logs", "btn_ai_analysis", "btn_scan", "btn_ban_ip"]
+        ban = _button(screen, "btn_ban_ip")
+        assert ban.has_class("-error") and ban.words == "Ban IP…"
+        assert _button(screen, "btn_scan").words == "Keyword scan"
+        memory = [b.id for b in screen.query("#card_memory ActionButton")]
+        assert memory == ["btn_memory", "btn_findings", "btn_db_creds"]
+        assert not screen.query("#btn_host_key_policy")
+
+
+async def test_findings_shows_the_open_count_and_opens_the_inbox() -> None:
+    app = _LayoutHost()
+    app.findings_service = SimpleNamespace(list_findings=AsyncMock(return_value={"findings": [
+        {"status": "detected"}, {"status": "acked"}, {"status": "resolved"},
+    ]}))
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: "(2)" in _button(screen, "btn_findings").label.plain)
+        pushed: list[object] = []
+        with patch.object(app, "push_screen", lambda s, *a, **k: pushed.append(s)):
+            await pilot.press("f")
+        assert [type(item).__name__ for item in pushed] == ["FindingsScreen"]
+
+
+async def test_refresh_takes_one_sample_without_starting_the_poll() -> None:
+    app = _LayoutHost()
+    calls = {"collect": 0, "watch": 0}
+
+    class _Service:
+        async def collect(self, instance):
+            calls["collect"] += 1
+            return SimpleNamespace()
+
+        def watch(self, instance):
+            calls["watch"] += 1
+            raise AssertionError("Refresh must not start the poll")
+
+    app.live_stats_service = _Service()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        with patch("servonaut.screens.server_actions.format_live_stats", lambda stats: "one sample"):
+            _button(screen, "btn_live_refresh").press()
+            await wait_until(lambda: "one sample" in str(screen.query_one("#live_stats", Static).content))
+        assert calls == {"collect": 1, "watch": 0}
+        assert not screen._live_on
+        assert _button(screen, "btn_live").label.plain.startswith("Start monitoring")
+        assert not _button(screen, "btn_live_refresh").disabled
+
+
+async def test_a_failed_refresh_shows_the_error_briefly_then_the_idle_text() -> None:
+    app = _LayoutHost()
+
+    class _Service:
+        async def collect(self, instance):
+            raise LiveStatsError("no route")
+
+    app.live_stats_service = _Service()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        with patch("servonaut.screens.server_actions._SAMPLE_ERROR_SECONDS", 0.2):
+            _button(screen, "btn_live_refresh").press()
+            await wait_until(lambda: "no route" in str(screen.query_one("#live_stats", Static).content))
+            await wait_until(lambda: "no route" not in str(screen.query_one("#live_stats", Static).content))
+        assert not _button(screen, "btn_live_refresh").disabled
+
+
+async def test_there_is_no_click_to_run_help_line() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        assert not screen.query("#action_help")
+        assert "filesystem" in str(_button(screen, "btn_browse").tooltip)
+
+
+def _footer_keys(screen) -> set[str]:
+    return {key for key, active in screen.active_bindings.items() if active.binding.show}
+
+
+async def test_the_footer_shows_four_keys_and_help_when_narrow() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: "6" not in _footer_keys(screen))
+        keys = _footer_keys(screen) & {"1", "2", "3", "4", "5", "6", "7", "8", "m", "d", "f", "l", "r", "v", "question_mark"}
+        assert keys == {"1", "2", "3", "4", "question_mark"}
+
+
+async def test_the_footer_adds_logs_and_ban_ip_when_wide() -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_actions(app, pilot)
+        await wait_until(lambda: "6" in _footer_keys(screen))
+        assert {"6", "8"} <= _footer_keys(screen)
