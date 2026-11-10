@@ -292,7 +292,7 @@ class InstanceListScreen(WorkspaceScreen):
             return
         if table.inspector_beside != beside:
             table.inspector_beside = beside
-        table.replan()
+            table.replan()
 
     def _sync_fresh_layout(self) -> None:
         """Put the freshness on the chip row only when it fits there, whole.
@@ -372,7 +372,7 @@ class InstanceListScreen(WorkspaceScreen):
                 # short terminal every row it takes is a row of servers less.
                 banner = Static(
                     "[bold]🧠 New:[/bold] press [b]m[/b] on a row, or open "
-                    "[b]Fleet Memory[/b] in the sidebar, to cache each server's "
+                    "[b]Fleet memory[/b] in the sidebar, to cache each server's "
                     "facts for the chat panel and MCP clients.",
                     id="memory_discover_banner",
                     classes="hidden",

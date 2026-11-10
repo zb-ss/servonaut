@@ -154,6 +154,11 @@ class InstanceTable(DataTable):
         self._given_way: frozenset = frozenset()
         self._name_cap: Optional[int] = None
         self.inspector_beside = False
+        # The widths the whole fleet needs, until its rows or marks change; the
+        # room the plan was last made for; and a redraw already queued.
+        self._widths_cache: Optional[tuple[tuple, Dict[str, int]]] = None
+        self._planned_for: Optional[tuple[int, bool]] = None
+        self._redraw_queued = False
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
     def _setup_columns(self, columns: Sequence[_Column]) -> None:
@@ -168,9 +173,22 @@ class InstanceTable(DataTable):
         self.replan()
 
     def replan(self) -> None:
-        """Fit the columns to the room there is now; redraw only when the plan changes."""
-        if self._plan_columns() != (self._given_way, self._name_cap):
-            self.call_after_refresh(self.redraw)
+        """Fit the columns to the room there is now; redraw only when the plan changes.
+
+        Cheap to call on every resize: nothing is measured while the room and
+        the inspector's place are the ones the plan was made for.
+        """
+        room = (self.scrollable_content_region.width, self.inspector_beside)
+        if room == self._planned_for:
+            return
+        self._planned_for = room
+        if self._plan_columns() != (self._given_way, self._name_cap) and not self._redraw_queued:
+            self._redraw_queued = True
+            self.call_after_refresh(self._run_queued_redraw)
+
+    def _run_queued_redraw(self) -> None:
+        self._redraw_queued = False
+        self.redraw()
 
     def _wanted_columns(self) -> List[_Column]:
         """The columns this fleet shows when there is room for all of them."""
@@ -181,16 +199,27 @@ class InstanceTable(DataTable):
         ]
 
     def _natural_widths(self, columns: Sequence[_Column]) -> Dict[str, int]:
-        """The width each column takes for its longest value, padding included."""
+        """The width each column takes for its longest value over the whole fleet, padding included.
+
+        The columns keep the widths of every row, filtered out or not, so the
+        plan must measure every row too. The result is kept until the rows or
+        the marks change.
+        """
+        stamp = (id(self._all_instances), len(self._all_instances), len(self._marks),
+                 self.cell_padding, tuple(column.key for column in columns))
+        if self._widths_cache is not None and self._widths_cache[0] == stamp:
+            return self._widths_cache[1]
         padding = 2 * self.cell_padding
         widths = {column.key: cell_len(column.label) for column in columns}
-        for index, instance in enumerate(self._filtered_instances):
+        for index, instance in enumerate(self._all_instances):
             cells = self._row_cells(index, instance, name_cap=None)
             for column in columns:
                 cell = cells[column.key]
                 text = Text.from_markup(cell) if isinstance(cell, str) else cell
                 widths[column.key] = max(widths[column.key], text.cell_len)
-        return {key: width + padding for key, width in widths.items()}
+        measured = {key: width + padding for key, width in widths.items()}
+        self._widths_cache = (stamp, measured)
+        return measured
 
     def _plan_columns(self) -> tuple[frozenset, Optional[int]]:
         """Which columns give way, and the Name cap, so the table needs no sideways scroll."""
@@ -260,6 +289,7 @@ class InstanceTable(DataTable):
         """
         previous = self._cursor_anchor()
         self._all_instances, self._shared_by = fold_shared(instances)
+        self._widths_cache = None
         self._apply_filters()
         self._refresh_table()
         self._restore_cursor(previous)
@@ -327,6 +357,7 @@ class InstanceTable(DataTable):
         if marks == self._marks:
             return
         self._marks = dict(marks)
+        self._widths_cache = None
         if redraw:
             self.redraw()
 
@@ -403,6 +434,7 @@ class InstanceTable(DataTable):
         # Judged on the whole fleet, not the filtered rows, so a search does
         # not make an optional column come and go.
         self._given_way, self._name_cap = self._plan_columns()
+        self._planned_for = (self.scrollable_content_region.width, self.inspector_beside)
         columns = [c for c in self._wanted_columns() if c.key not in self._given_way]
         if columns == self._shown_columns:
             self.clear()

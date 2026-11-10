@@ -212,3 +212,105 @@ def test_columns_give_way_in_order_and_come_back_in_reverse() -> None:
         assert back[-1] == ()
 
     _run(scenario)
+
+
+async def _no_scroll_while_filtered(pilot: Any, narrow: Callable[[Any], Awaitable[None]]) -> None:
+    screen = pilot.app.screen
+    # The rows that stay listed are short; the ones filtered out are long, so
+    # the columns are as wide as the long rows need.
+    fleet = _long_fleet()
+    for row in fleet[-2:]:
+        row["name"], row["public_ip"] = f"short-{row['name'][-2:]}", "1.2.3.4"
+        row["state"] = "running"
+    for row in fleet[:-2]:
+        row["state"] = "stopped"
+    screen._instances = fleet
+    screen._update_table()
+    # Wide room first (navigation hidden), then the filter, then the navigation
+    # comes back and takes the room.
+    await pilot.resize_terminal(140, 44)
+    await pilot.click("#workspace_navigation")
+    await pilot.pause()
+    await narrow(pilot)
+    await pilot.click("#workspace_navigation")
+    await pilot.pause()
+    table = screen.query_one(InstanceTable)
+    assert 0 < table.row_count < len(fleet)
+    for width in range(118, 200, 4):
+        await pilot.resize_terminal(width, 44)
+        await pilot.pause()
+        await pilot.pause()
+        assert table.virtual_size.width <= table.scrollable_content_region.width, (width, table.row_count)
+
+
+def test_a_search_keeps_the_columns_inside_the_room() -> None:
+    async def narrow(pilot: Any) -> None:
+        from textual.widgets import Input
+
+        pilot.app.screen.query_one("#search_input", Input).value = "short"
+        await pilot.pause(0.5)
+
+    async def scenario(pilot: Any) -> None:
+        await _no_scroll_while_filtered(pilot, narrow)
+
+    _run(scenario)
+
+
+def test_a_chip_filter_keeps_the_columns_inside_the_room() -> None:
+    async def narrow(pilot: Any) -> None:
+        pilot.app.screen.query_one("#chip_state_running").press()
+        await pilot.pause(0.5)
+
+    async def scenario(pilot: Any) -> None:
+        await _no_scroll_while_filtered(pilot, narrow)
+
+    _run(scenario)
+
+
+def test_planning_is_cheap_at_an_unchanged_room() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        table = screen.query_one(InstanceTable)
+        await pilot.pause()
+        counts = {"plan": 0, "redraw": 0}
+        plan, redraw = table._plan_columns, table.redraw
+        table._plan_columns = lambda: (counts.__setitem__("plan", counts["plan"] + 1), plan())[1]
+        table.redraw = lambda: (counts.__setitem__("redraw", counts["redraw"] + 1), redraw())[1]
+        table._planned_for = None
+        for _ in range(10):
+            table.replan()
+            screen._sync_table_room()
+        await pilot.pause()
+        assert counts["plan"] <= 1 and counts["redraw"] <= 1, counts
+
+    _run(scenario)
+
+
+def test_a_drag_over_a_large_fleet_measures_the_rows_once() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        screen._instances = [
+            {**_harness.AWS_ROWS[0], "id": f"i-{n:017d}", "name": f"web-{n}"} for n in range(500)
+        ]
+        screen._update_table()
+        table = screen.query_one(InstanceTable)
+        await pilot.pause()
+        await pilot.pause()
+        counts = {"cells": 0, "plan": 0}
+        cells, plan = table._row_cells, table._plan_columns
+        table._row_cells = lambda *a, **k: (counts.__setitem__("cells", counts["cells"] + 1), cells(*a, **k))[1]
+        table._plan_columns = lambda: (counts.__setitem__("plan", counts["plan"] + 1), plan())[1]
+        redraws = {"n": 0}
+        redraw = table.redraw
+        table.redraw = lambda: (redraws.__setitem__("n", redraws["n"] + 1), redraw())[1]
+        steps = 0
+        for width in range(120, 152):
+            await pilot.resize_terminal(width, 44)
+            await pilot.pause()
+            steps += 1
+        # One plan per distinct room at most, and no row is measured again once
+        # measured: the redraws account for the rest of the cell building.
+        assert counts["plan"] <= 2 * steps, counts
+        assert counts["cells"] <= 500 * (redraws["n"] + 1) * 2, (counts, redraws)
+
+    _run(scenario)
