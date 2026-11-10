@@ -1,4 +1,4 @@
-"""OVH Billing Dashboard screen for Servonaut.
+"""OVH billing dashboard screen for Servonaut.
 
 Billing is per OVH account: with several accounts configured, a picker
 chooses whose usage, invoices and services are shown.
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
@@ -97,7 +98,7 @@ _LOAD_GROUP = "ovh_billing_load"
 
 
 class OVHBillingScreen(WorkspaceScreen):
-    """OVH Billing Dashboard — shows usage, history, invoices, and services."""
+    """OVH billing dashboard — shows usage, history, invoices, and services."""
 
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 64
@@ -133,7 +134,7 @@ class OVHBillingScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 Horizontal(
                     Vertical(
-                        Static("[bold $text-accent]OVH Billing Dashboard[/bold $text-accent]", id="billing_title"),
+                        Static("[bold $text-accent]OVH billing dashboard[/bold $text-accent]", id="billing_title"),
                         Static("Account usage, invoice history and billed services.", classes="resource-context"),
                         classes="provider-account-heading",
                     ),
@@ -144,12 +145,12 @@ class OVHBillingScreen(WorkspaceScreen):
                 ),
                 Horizontal(
                     Vertical(
-                        Static("[bold]Current Month[/bold]", classes="section_header"),
+                        Static("[bold]Current month[/bold]", classes="section_header"),
                         Static("[dim]Loading...[/dim]", id="current_usage"),
                         classes="resource-panel provider-billing-current",
                     ),
                     Vertical(
-                        Static("[bold]Monthly History[/bold]", classes="section_header"),
+                        Static("[bold]Monthly history[/bold]", classes="section_header"),
                         Static("[dim]Loading...[/dim]", id="spend_history"),
                         classes="resource-panel provider-billing-history",
                     ),
@@ -422,13 +423,13 @@ class OVHBillingScreen(WorkspaceScreen):
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
                 status_display = {
-                    "ok": "[green]ok[/green]",
-                    "expired": "[red]expired[/red]",
-                    "unpaid": "[red]unpaid[/red]",
-                    "pending": "[cyan]pending[/cyan]",
-                }.get(status, status)
+                    "ok": Content.styled("ok", "$text-success"),
+                    "expired": Content.styled("expired", "$text-error"),
+                    "unpaid": Content.styled("unpaid", "$text-error"),
+                    "pending": Content.styled("pending", "$text-accent"),
+                }.get(status) or literal(status)
                 expiry = str(service.get("expiration", ""))[:10]
-                auto_renew = "[green]yes[/green]" if service.get("auto_renew") else "[dim]no[/dim]"
+                auto_renew = Content.styled("yes", "$text-success") if service.get("auto_renew") else Content.styled("no", "$text-muted")
                 tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
