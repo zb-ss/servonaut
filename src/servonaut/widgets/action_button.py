@@ -46,7 +46,14 @@ _CAP_FILL = "$foreground 15%"
 _CAP_KEY = f"$text on {_CAP_FILL}"
 
 
-def keycap_parts(key: str, *, ansi: bool = False, disabled: bool = False) -> list:
+# On a filled button the cap is the theme's own background, so it stands out from the fill.
+_CAP_FILLED = "$background"
+_CAP_FILLED_KEY = "$text on $background"
+
+
+def keycap_parts(
+    key: str, *, ansi: bool = False, disabled: bool = False, filled: bool = False,
+) -> list:
     """The pieces ``(text, style)`` of a key cap for *key*; the key is literal text.
 
     Whatever the style, the cap adds two cells around the key. A disabled
@@ -58,12 +65,14 @@ def keycap_parts(key: str, *, ansi: bool = False, disabled: bool = False) -> lis
         return [(" ", quiet), (key, quiet), (" ", quiet)]
     if ansi:
         return [(" ", "reverse"), (key, "reverse"), (" ", "reverse")]
+    if filled:
+        return [("\u2590", _CAP_FILLED), (key, _CAP_FILLED_KEY), ("\u258c", _CAP_FILLED)]
     return [("\u2590", _CAP_FILL), (key, _CAP_KEY), ("\u258c", _CAP_FILL)]
 
 
 def action_label(
     text: str, key: str | None = None, gap: str = _KEY_GAP, *,
-    ansi: bool = False, disabled: bool = False,
+    ansi: bool = False, disabled: bool = False, filled: bool = False,
 ) -> Content:
     """The label shown on an action: *text*, then *key* as a small key cap.
 
@@ -72,7 +81,7 @@ def action_label(
     """
     if not key:
         return Content(text)
-    return Content.assemble(text, gap, *keycap_parts(key, ansi=ansi, disabled=disabled))
+    return Content.assemble(text, gap, *keycap_parts(key, ansi=ansi, disabled=disabled, filled=filled))
 
 
 class ActionButton(Button):
@@ -113,12 +122,14 @@ class ActionButton(Button):
 
     def _label(
         self, compact: bool, hint: bool, use_short: bool | None = None, *,
-        ansi: bool = False, disabled: bool = False,
+        ansi: bool = False, disabled: bool = False, filled: bool = False,
     ) -> Content:
         shorter = self._use_short if use_short is None else use_short
         words = self._short if (compact or shorter) and self._short else self._text
         gap = _COMPACT_KEY_GAP if compact else _KEY_GAP
-        return action_label(words, self._key if hint else None, gap, ansi=ansi, disabled=disabled)
+        return action_label(
+            words, self._key if hint else None, gap, ansi=ansi, disabled=disabled, filled=filled,
+        )
 
     def _refresh_label(self) -> None:
         self.label = self._label(self.compact, self._hint)
@@ -139,6 +150,7 @@ class ActionButton(Button):
         """The label, with its key cap drawn for the theme and the button's state."""
         return self._label(
             self.compact, self._hint, ansi=self.app.current_theme.ansi, disabled=self.disabled,
+            filled=self.compact and self.variant == "primary",
         )
 
     def watch_compact(self, compact: bool) -> None:
