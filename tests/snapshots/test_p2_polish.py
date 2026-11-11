@@ -54,3 +54,29 @@ def test_fleet_details_strip_shows_every_value_whole_at_100x30(name: str) -> Non
         assert _strip_problems(pilot) == []
 
     _geometry.run(_select(name), "100x30", check, name=f"fleet-strip-{name}")
+
+
+async def _secrets_hub_unscrolled(pilot: Any) -> None:
+    from tests.test_secrets_screen import _mock_auth, _mock_guard
+
+    from . import _harness
+    from .test_screens import _navigate
+
+    pilot.app.auth_service = _mock_auth(plan="solo")
+    pilot.app.entitlement_guard = _mock_guard(allow_secrets=True)
+    screen = await _navigate(pilot, "nav_secrets", "SecretsScreen")
+    await _harness.wait_until(
+        pilot, lambda: bool(screen.query("ActionButton")), "the secrets actions",
+    )
+
+
+def test_secrets_hub_fits_its_cards_without_scrolling_at_100x30() -> None:
+    def check(pilot: Any) -> None:
+        body = pilot.app.screen.query_one("#secrets_body")
+        cards = list(body.query(".secrets_card"))
+        assert cards
+        assert body.max_scroll_y == 0, "the cards need scrolling"
+        for card in cards:
+            assert body.region.contains_region(card.region), "a card is cut"
+
+    _geometry.run(_secrets_hub_unscrolled, "100x30", check, name="secrets-hub")

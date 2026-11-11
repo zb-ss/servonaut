@@ -69,6 +69,8 @@ class SecretsScreen(WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 60
     # Below this width the key/value rows stack and the action row wraps.
     CONTENT_NARROW_WIDTH = 96
+    # Short terminals get tighter cards, so the hub fits without scrolling.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     # Compact words for a row that is too narrow for the full ones, by label.
     _ACTION_SHORT = {
