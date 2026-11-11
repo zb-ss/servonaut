@@ -4,7 +4,7 @@ Holds the provider-wide settings of :class:`~servonaut.config.schema.HetznerConf
 whether Hetzner is listed (``enabled``), whether creating a server requires
 SSH keys, the cache, the audit log path and the cost alert. Everything that
 belongs to one project — API token, SSH defaults, server-creation defaults and
-Object Storage keys — is edited in that project's form,
+Object storage keys — is edited in that project's form,
 ``HetznerSetupScreen``, so each setting has one place. "Setup Hetzner" opens
 the primary project's form; the Projects section lists every project and
 opens the same form to add or edit one.
@@ -80,7 +80,7 @@ class HetznerPanel(SettingsPanel):
                 classes="setting_row",
             )
             yield Static(
-                "API token, SSH and server defaults and Object Storage keys are in "
+                "API token, SSH and server defaults and Object storage keys are in "
                 "each project's form: Setup Hetzner for the primary project, "
                 "Projects below for the others.",
                 classes="help-note",

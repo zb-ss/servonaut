@@ -122,7 +122,7 @@ class IPBanScreen(WorkspaceScreen):
                 )
                 yield Static(
                     "No IP ban method is set up yet. Add a WAF IP set, security "
-                    "group or network ACL in Settings → IP Ban, then choose it here.",
+                    "group or network ACL in Settings → IP ban, then choose it here.",
                     id="ip_ban_empty_hint",
                 )
                 with VerticalScroll(id="ip_ban_workflow"):
@@ -226,7 +226,7 @@ class IPBanScreen(WorkspaceScreen):
             return (
                 f"'{self._demo_config_name(config_name)}' belongs to AWS account "
                 f"'{shown_label(self.app, account)}', which is not configured. "
-                "Choose its account in Settings → IP Ban."
+                "Choose its account in Settings → IP ban."
             )
         return None
 

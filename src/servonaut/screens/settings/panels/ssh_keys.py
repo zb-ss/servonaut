@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _INFO_TEXT = (
     "Per-instance SSH key overrides let you map a specific server ID to a "
-    "key file, bypassing the default key. Manage them in the Key Management screen."
+    "key file, bypassing the default key. Manage them in the SSH keys screen."
 )
 
 

@@ -729,7 +729,7 @@ class OvhAccountsSection(AccountsSection):
     PROVIDER = "ovh"
     HELP = (
         "Each account has its own API credentials, projects, SSH defaults and "
-        "Object Storage keys; Add account or Edit opens its form."
+        "Object storage keys; Add account or Edit opens its form."
     )
     COLUMNS = ("Label", "Endpoint", "Auth", "Projects")
 

@@ -122,3 +122,20 @@ def test_appearance_footer_ends_on_whole_labels_at_100x30() -> None:
             assert key.region.right <= key.parent.region.right, f"{key.description!r} is cut"
 
     _geometry.run(scenario, "100x30", check, name="appearance-footer")
+
+
+def test_ip_ban_banner_names_the_settings_category_in_sentence_case() -> None:
+    from textual.widgets import Static
+
+    def check(pilot: Any) -> None:
+        hint = pilot.app.screen.query_one("#ip_ban_empty_hint", Static)
+        assert "Settings → IP ban" in hint.visual.plain
+
+    _geometry.run(test_screens._ip_ban, "100x30", check, name="ip-ban-banner")
+
+
+def test_settings_help_text_has_no_title_case_leftovers() -> None:
+    from servonaut.screens.settings.panels import ssh_keys
+
+    assert "SSH keys screen" in ssh_keys._INFO_TEXT
+    assert "Key Management" not in ssh_keys._INFO_TEXT
