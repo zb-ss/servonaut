@@ -15,6 +15,7 @@ from tests.test_vault_screen import _StyledVaultHost
 from tests.test_vault_workspace_views import _Service
 
 from . import _harness
+from ._geometry import settle
 
 
 def _ready(screen: VaultScreen) -> bool:
@@ -32,8 +33,7 @@ def run_vault(view: str, size: str, check: Callable[[Any], None], name: str) -> 
             if loader is not None:
                 loader()
                 await wait_until(lambda: screen._table_mode == view and not screen._busy_work)
-            await pilot.pause()
-            await pilot.pause(0.3)
+            await settle(pilot, app)
             target = os.environ.get("GEOMETRY_SVG_DIR")
             if target:
                 Path(target).mkdir(parents=True, exist_ok=True)

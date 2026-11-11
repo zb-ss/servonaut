@@ -25,9 +25,22 @@ Check = Callable[[Any], None]
 _SVG_DIR_VARIABLE = "GEOMETRY_SVG_DIR"
 
 
+async def settle(pilot: Any, app: Any, *, attempts: int = 30) -> None:
+    """Wait until two exports of the screen, a frame apart, are identical."""
+    previous = None
+    for _ in range(attempts):
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause(0.1)
+        current = app.export_screenshot(simplify=True)
+        if current == previous:
+            return
+        previous = current
+    raise AssertionError("the screen was still changing after the scenario")
+
+
 def run(
     scenario: Scenario,
-    size: str,
+    size: Any,
     check: Check,
     *,
     name: str = "",
@@ -39,18 +52,16 @@ def run(
 
     async def main() -> None:
         shown_app = app if app is not None else _harness.SnapshotApp(demo=demo)
-        async with shown_app.run_test(size=_harness.SIZES[size]) as pilot:
+        async with shown_app.run_test(size=_harness.SIZES[size] if isinstance(size, str) else size) as pilot:
             if wait_for_fleet:
                 await _harness.wait_for_fleet(pilot)
             await scenario(pilot)
-            await pilot.pause()
-            await pilot.wait_for_scheduled_animations()
-            await pilot.pause(0.3)
+            await settle(pilot, shown_app)
             _harness.freeze_cursors(shown_app)
             target = os.environ.get(_SVG_DIR_VARIABLE)
             if target and name:
                 Path(target).mkdir(parents=True, exist_ok=True)
-                (Path(target) / f"{name}-{size}.svg").write_text(
+                (Path(target) / f"{name}-{size if isinstance(size, str) else 'x'.join(map(str, size))}.svg").write_text(
                     shown_app.export_screenshot(simplify=True), encoding="utf-8"
                 )
             check(pilot)

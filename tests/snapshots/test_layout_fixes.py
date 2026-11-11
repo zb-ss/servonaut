@@ -26,15 +26,19 @@ def test_help_topics_show_whole_labels_without_sideways_scroll(size: str) -> Non
 
 
 def _strip_problems(pilot: Any) -> list:
-    """Values the one-line details strip cuts, and a scrollbar it should not need."""
+    """Values the one-line details strip cuts, loses off its edge, or scrolls to."""
     from servonaut.widgets.fleet_values import FleetValueLine, ValueRow
 
     strip = pilot.app.screen.query_one(FleetValueLine)
     problems = []
-    if strip.max_scroll_y:
+    if strip.max_scroll_y or strip.max_scroll_x:
         problems.append("the strip scrolls")
     for row in strip.query(ValueRow):
-        if row.display and len(row.value) > row.value_widget.content_size.width:
+        if not row.display:
+            continue
+        if not strip.region.contains_region(row.region):
+            problems.append(f"{row.field} is beyond the strip")
+        elif row.value_widget.content_size.width < len(row.value) and not strip.has_class("-flexible"):
             problems.append(f"{row.field} is cut")
     return problems
 
@@ -139,3 +143,41 @@ def test_settings_help_text_has_no_title_case_leftovers() -> None:
 
     assert "SSH keys screen" in ssh_keys._INFO_TEXT
     assert "Key Management" not in ssh_keys._INFO_TEXT
+
+
+_LONG_SERVER = {
+    "id": "i-0123456789abcdef0", "name": "a-rather-long-server-name-for-the-fleet-1",
+    "type": "m7i-flex.metal-48xl", "state": "running", "public_ip": "9.9.9.9",
+    "private_ip": "10.0.1.21", "region": "ap-southeast-2",
+    "key_name": "a-long-key-pair-name-for-deploys", "provider": "AWS",
+}
+
+
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_fleet_details_strip_keeps_long_values_on_screen(size: tuple) -> None:
+    from servonaut.widgets.fleet_values import FleetValueLine
+
+    async def scenario(pilot: Any) -> None:
+        strip = pilot.app.screen.query_one(FleetValueLine)
+        strip.set_instance(dict(_LONG_SERVER))
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        assert _strip_problems(pilot) == []
+
+    _geometry.run(scenario, size, check, name="fleet-strip-long")
+
+
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_fleet_details_strip_keeps_ordinary_values_on_screen(size: tuple) -> None:
+    from servonaut.widgets.fleet_values import FleetValueLine
+
+    async def scenario(pilot: Any) -> None:
+        pilot.app.screen.query_one(FleetValueLine).set_instance(dict(_LONG_SERVER, name="app-1", key_name="deploy-key", type="t3.micro", region="us-east-1"))
+        await pilot.pause()
+
+    _geometry.run(scenario, size, lambda pilot: _assert_empty(_strip_problems(pilot)), name="fleet-strip-plain")
+
+
+def _assert_empty(problems: list) -> None:
+    assert problems == []
