@@ -190,15 +190,16 @@ InstanceListScreen.-chat-open #fleet_value_bar {
 #fleet_value_line {
     width: 1fr;
     height: auto;
-    max-height: 2;
+    max-height: 3;
     grid-size: 4;
-    grid-columns: 1fr;
+    grid-columns: auto;
     grid-rows: 1;
     grid-gutter: 0 1;
     overflow-y: auto;
 }
 
 #fleet_value_line .value-row {
+    width: auto;
     height: 1;
 }
 
@@ -208,6 +209,7 @@ InstanceListScreen.-chat-open #fleet_value_bar {
 }
 
 #fleet_value_line .value-text {
+    width: auto;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }

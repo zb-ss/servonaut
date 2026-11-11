@@ -46,13 +46,13 @@ def run(
             await pilot.wait_for_scheduled_animations()
             await pilot.pause(0.3)
             _harness.freeze_cursors(app)
-            check(pilot)
             target = os.environ.get(_SVG_DIR_VARIABLE)
             if target and name:
                 Path(target).mkdir(parents=True, exist_ok=True)
                 (Path(target) / f"{name}-{size}.svg").write_text(
                     app.export_screenshot(simplify=True), encoding="utf-8"
                 )
+            check(pilot)
 
     asyncio.run(main())
 
