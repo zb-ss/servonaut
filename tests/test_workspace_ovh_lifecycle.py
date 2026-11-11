@@ -303,7 +303,10 @@ async def _assert_whole_toolbar(app: ServonautApp, pilot: Pilot, screen: Workspa
         # Disabled buttons stay disabled; only geometry, hit and paint matter.
         hit = app.get_widget_at(*button.region.center)[0]
         assert hit is button or button in hit.ancestors, selector
-        assert button.label.plain in _painted(app, button), selector
+        shown = button.label.plain
+        if button.disabled:
+            shown = shown.replace("\u2590", " ").replace("\u258c", " ")  # a quiet key has no edges
+        assert shown in _painted(app, button), selector
     assert (body.scroll_x, body.scroll_y, row.scroll_x) == offset
     assert app.focused is focused
 

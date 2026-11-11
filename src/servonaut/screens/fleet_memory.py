@@ -440,6 +440,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         table = self.query_one("#fleet-memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Name", key="name")
+        table.add_column("ID", key="id", width=20)
         table.add_column("Provider", key="provider", width=10)
         table.add_column("Source", key="source", width=8)
         table.add_column("Memory", key="status", width=16)
@@ -1139,6 +1140,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         """The table cells of *row*, in column order."""
         return (
             self._name_cell(row),
+            escape(str(row["id"])),
             escape(str(row["provider"])),
             self._styled_cell(_SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"])),
             self._styled_cell(_STATUS_CELL.get(row["status"], ("—", "dim"))),
