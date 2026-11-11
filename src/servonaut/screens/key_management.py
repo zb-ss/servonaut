@@ -1,4 +1,4 @@
-"""SSH Key Management screen for Servonaut v2.0."""
+"""SSH keys screen for Servonaut v2.0."""
 
 from __future__ import annotations
 import subprocess

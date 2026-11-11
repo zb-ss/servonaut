@@ -181,3 +181,61 @@ def test_fleet_details_strip_keeps_ordinary_values_on_screen(size: tuple) -> Non
 
 def _assert_empty(problems: list) -> None:
     assert problems == []
+
+
+@pytest.mark.parametrize("nav_id,screen_name,table_id,title_id,rows", [
+    ("nav_aws_manage", "AWSManagerScreen", "aws_mgr_table", "aws_mgr_header", 3),
+    ("nav_ovh_manage", "OVHManagerScreen", "ovh_mgr_table", "ovh_mgr_header", 2),
+    ("nav_hetzner_manage", "HetznerManagerScreen", "hetzner_mgr_table", "hetzner_mgr_header", 1),
+])
+def test_provider_managers_keep_title_and_table_in_view_at_100x30(
+    nav_id: str, screen_name: str, table_id: str, title_id: str, rows: int,
+) -> None:
+    from .test_screens import _manager_of
+
+    async def scenario(pilot: Any) -> None:
+        await _manager_of(nav_id, screen_name, table_id, rows, 0)(pilot)
+        pilot.app.screen.query_one(f"#{table_id}").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        assert screen.region.contains_region(screen.query_one(f"#{title_id}").region), "title out of view"
+        container = screen.query_one(f"#{title_id.replace('header', 'container')}")
+        assert container.region.contains_region(screen.query_one(f"#{table_id}").region)
+
+    _geometry.run(scenario, "100x30", check, name=f"manager-{screen_name}")
+
+
+@pytest.mark.parametrize("size", [(130, 40), (140, 40)])
+def test_help_lists_its_topics_beside_the_manual_from_100_content_cells(size: tuple) -> None:
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        topics = screen.query_one("#help_topics")
+        content = screen.query_one("#help_content")
+        assert topics.region.height > 15, "the topic list is squeezed above the manual"
+        assert topics.region.right <= content.region.x + 1
+        assert screen.query_one("#help_topics Tree", Tree).max_scroll_x == 0
+
+    _geometry.run(test_screens._help, size, check, name="help-wide")
+
+
+def test_a_footer_shortcut_dropped_to_fit_still_works() -> None:
+    from . import test_settings_appearance as appearance
+
+    appearance._write_user_themes()
+
+    async def scenario(pilot: Any) -> None:
+        await appearance._open_appearance(pilot)
+        pilot.app.screen.query_one("#theme_card_paper").focus()
+        await pilot.pause()
+        pilot.app.screen.refresh_bindings()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        bindings = pilot.app.screen.active_bindings
+        hidden = [a for a in bindings.values() if not a.binding.show and a.binding.action == "open_folder"]
+        assert hidden, "the open-folder key is no longer bound"
+        assert any(a.binding.key == "o" for a in hidden)
+
+    _geometry.run(scenario, "100x30", check, name="footer-dropped-key")

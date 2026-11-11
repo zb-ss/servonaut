@@ -294,7 +294,7 @@ class FindingsScreen(WorkspaceScreen):
             table.add_column("Instance", key="instance", width=22)
         table.add_column("Detector", key="detector", width=18)
         table.add_column("Title", key="title")
-        table.add_column("Detected", key="detected", width=20)
+        table.add_column("Detected", key="detected", width=16)
         self._render_gate()
 
     # ------------------------------------------------------------------
@@ -550,7 +550,9 @@ class FindingsScreen(WorkspaceScreen):
             title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = themed_text(self.app, str(finding.get("detected_at") or ""))
+            detected = themed_text(
+                self.app, str(finding.get("detected_at") or "")[:16].replace("T", " "),
+            )
             row = [
                 themed_text(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
                 themed_text(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),

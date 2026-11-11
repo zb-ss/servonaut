@@ -237,9 +237,10 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     def on_mount(self) -> None:
         follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
-        # Keep state and addressing visible when a cloud composite ID is long.
+        # The selected server's full ID is in the resource panel, so the table
+        # keeps state and addressing visible instead of a long composite ID.
         for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
-                             ("State", 10), ("Public IP", 15), ("Region", 9), ("ID", 70)):
+                             ("State", 10), ("Public IP", 15), ("Region", 9)):
             table.add_column(label, width=width)
         self.sync_compact_actions()
         self._refresh()
@@ -357,7 +358,6 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                     self._colorize_state(str(inst.get("state", ""))),
                     Text(inert_text(str(inst.get("public_ip", "") or "—"))),
                     Text(inert_text(str(inst.get("region", "")))),
-                    Text(inert_text(str(inst.get("id", "")))),
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()

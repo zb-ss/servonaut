@@ -58,7 +58,7 @@ class BannedTable(DataTable):
 
 
 class IPBanScreen(WorkspaceScreen):
-    """IP Ban Manager: ban/unban IPs via WAF, Security Groups, or NACLs."""
+    """IP Ban Manager: ban/unban IPs via WAF, security groups or NACLs."""
 
     DEFAULT_CSS = """
     IPBanScreen .workspace-content > BusyIndicator.read-loading {

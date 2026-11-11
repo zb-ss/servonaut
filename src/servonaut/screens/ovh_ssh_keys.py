@@ -196,7 +196,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         sync_compact_buttons(self)
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Name", "Fingerprint", "Public key (first 40 chars)")
+        table.add_columns("Name", "Fingerprint", "Public key")
         picker = self.query_one("#ovh_ssh_keys_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
@@ -312,7 +312,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         for key in self._keys:
             public_key = key.get("public_key", "") or ""
             truncated = (
-                public_key[:40] + "…" if len(public_key) > 40 else public_key
+                public_key[:24] + "…" if len(public_key) > 24 else public_key
             )
             table.add_row(
                 Text(inert_text(_s(str(key.get("name", ""))))),

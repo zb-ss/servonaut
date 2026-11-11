@@ -405,7 +405,7 @@ class HelpScreen(WorkspaceScreen):
 
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 40
-    CONTENT_NARROW_WIDTH = 120
+    CONTENT_NARROW_WIDTH = 100
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),

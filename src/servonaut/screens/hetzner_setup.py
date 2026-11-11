@@ -15,7 +15,7 @@ populates without a relaunch.
 
 Besides the primary project (the ``hetzner`` block itself) the wizard adds
 and edits EXTRA projects (``hetzner.accounts``): a label, the project's own
-token and SSH defaults, and its own Object Storage keys. An extra project's
+token and SSH defaults, and its own object storage keys. An extra project's
 token is tested before it is saved.
 """
 
