@@ -7,13 +7,12 @@ from typing import Any
 from textual.content import Content
 from textual.widgets import Button
 
-from servonaut.widgets.action_button import _KEY_GAP, action_label, hint_style
+from servonaut.widgets.action_button import _KEY_GAP, action_label, keycap_parts
 
 
-def action_label_underlined(words: str, key: str, style: str) -> Content:
-    """*words* underlined, then *key* as the usual quiet hint, in *style*."""
-    hint = action_label("", key).plain
-    return Content.assemble((words, "underline"), (hint, style))
+def action_label_underlined(words: str, key: str, *, ansi: bool = False, disabled: bool = False) -> Content:
+    """*words* underlined, then *key* as the usual key cap, which is not underlined."""
+    return Content.assemble((words, "underline"), _KEY_GAP, *keycap_parts(key, ansi=ansi, disabled=disabled))
 
 
 class LinkButton(Button):
@@ -42,7 +41,12 @@ class LinkButton(Button):
 
     def render(self) -> Content:
         plain = self.label.plain
-        suffix = f"{_KEY_GAP}{self._key}" if self._key else ""
+        suffix = ""
+        if self._key:
+            suffix = _KEY_GAP + "".join(text for text, _ in keycap_parts(self._key))
         if suffix and plain.endswith(suffix):
-            return action_label_underlined(plain[: -len(suffix)], self._key, hint_style(self))
+            return action_label_underlined(
+                plain[: -len(suffix)], self._key,
+                ansi=self.app.current_theme.ansi, disabled=self.disabled,
+            )
         return Content.styled(plain, "underline")

@@ -6,6 +6,12 @@ import pytest
 from textual.app import App, ComposeResult
 
 from servonaut.widgets.action_button import HINT_STYLE
+
+
+def cap(key: str) -> str:
+    """A key hint as drawn: the key between two half-block edges."""
+    return f"\u2590{key}\u258c"
+
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.action_button import ActionButton, ActionRow, action_label
 
@@ -24,8 +30,10 @@ class _Host(App[None]):
 
 def test_label_is_words_then_a_muted_key_hint() -> None:
     label = action_label("Browse files", "1")
-    assert label.plain == "Browse files  1"
-    assert [(span.start, span.end, str(span.style)) for span in label.spans] == [(14, 15, HINT_STYLE)]
+    assert label.plain == f"Browse files  {cap('1')}"
+    # The edges and the key are three spans; the key is the muted one on the raised fill.
+    assert [label.plain[s.start:s.end] for s in label.spans] == ["\u2590", "1", "\u258c"]
+    assert HINT_STYLE in str(label.spans[1].style)
 
 
 def test_label_without_a_key_has_no_hint() -> None:
@@ -35,8 +43,8 @@ def test_label_without_a_key_has_no_hint() -> None:
 
 def test_hostile_text_stays_literal() -> None:
     label = action_label("[b]x[/b] [@click=app.bell]y", "[k]")
-    assert label.plain == "[b]x[/b] [@click=app.bell]y  [k]"
-    assert [str(span.style) for span in label.spans] == [HINT_STYLE]
+    assert label.plain == f"[b]x[/b] [@click=app.bell]y  {cap('[k]')}"
+    assert [label.plain[s.start:s.end] for s in label.spans] == ["\u2590", "[k]", "\u258c"]
 
 
 @pytest.mark.asyncio
@@ -58,7 +66,7 @@ async def test_set_role_and_set_text_update_the_button() -> None:
         button.set_text("Verify host", "v")
         await pilot.pause()
         assert button.has_class("-error")
-        assert button.label.plain == "Verify host  v"
+        assert button.label.plain == f"Verify host  {cap('v')}"
 
 
 @pytest.mark.asyncio
@@ -66,13 +74,13 @@ async def test_compact_is_one_row_borderless_and_uses_the_short_words() -> None:
     async with _Host().run_test(size=(80, 40)) as pilot:
         button = pilot.app.query_one("#plain", ActionButton)
         await pilot.pause()
-        assert button.region.height == 3 and button.label.plain == "Browse files  1"
+        assert button.region.height == 3 and button.label.plain == f"Browse files  {cap('1')}"
         button.compact = True
         await pilot.pause()
-        assert button.region.height == 1 and button.label.plain == "Browse   1"
+        assert button.region.height == 1 and button.label.plain == f"Browse   {cap('1')}"
         button.compact = False
         await pilot.pause()
-        assert button.region.height == 3 and button.label.plain == "Browse files  1"
+        assert button.region.height == 3 and button.label.plain == f"Browse files  {cap('1')}"
 
 
 @pytest.mark.asyncio
@@ -100,8 +108,8 @@ class _RowHost(App[None]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("width,labels,wrapped", [
-    (80, ["Use vault key  u", "Verify SSH  v", "Scan results  5"], False),
-    (56, ["Vault key  u", "Verify SSH  v", "Scan  5"], False),
+    (86, [f"Use vault key  {cap('u')}", f"Verify SSH  {cap('v')}", f"Scan results  {cap('5')}"], False),
+    (62, [f"Vault key  {cap('u')}", f"Verify SSH  {cap('v')}", f"Scan  {cap('5')}"], False),
     (46, ["Vault key", "Verify SSH", "Scan"], False),
     (30, ["Vault key", "Verify SSH", "Scan"], True),
 ])
@@ -121,5 +129,5 @@ async def test_row_saves_space_in_order_and_never_clips(width, labels, wrapped) 
 def test_set_text_can_replace_the_short_words_too() -> None:
     button = ActionButton("Scan all servers", "s", short="Scan all")
     button.set_text("Scan all servers (3)", short="Scan all (3)")
-    assert button._label(False, True).plain == "Scan all servers (3)  s"
-    assert button._label(True, True).plain == "Scan all (3)   s"
+    assert button._label(False, True).plain == f"Scan all servers (3)  {cap('s')}"
+    assert button._label(True, True).plain == f"Scan all (3)   {cap('s')}"
