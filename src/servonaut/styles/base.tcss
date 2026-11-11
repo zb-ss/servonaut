@@ -185,6 +185,8 @@ Button:focus {
     text-style: bold underline;
 }
 
+/* Hover brightens the frame and never underlines the words; keyboard focus
+   keeps its underline. A role keeps its own colour and gets a lighter frame. */
 Button.-warning:hover,
 Button.-warning:focus {
     background: transparent;
@@ -199,6 +201,21 @@ Button.-error:focus {
     color: $text-error;
     border: round $error;
     text-style: bold underline;
+}
+
+Button.-warning:hover {
+    border: round $warning-lighten-2;
+    text-style: bold;
+}
+
+Button.-error:hover {
+    border: round $error-lighten-2;
+    text-style: bold;
+}
+
+Button.-success:hover,
+Button.-primary:hover {
+    text-style: bold;
 }
 
 /* A compact button (a chip, a toolbar action) has no frame at all. The hover
@@ -247,7 +264,7 @@ Button.-error:ansi:hover,
     background: $surface;
     color: $foreground;
     border: round $accent;
-    text-style: underline not bold;
+    text-style: bold;
 }
 
 Button:ansi:focus,

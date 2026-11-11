@@ -47,6 +47,10 @@ ActionButton.-error {
     color: $text-error;
 }
 
+ActionButton.-primary:hover {
+    border: round $accent;
+}
+
 ActionButton.-primary:focus,
 ActionButton.-warning:focus,
 ActionButton.-error:focus {
@@ -83,7 +87,7 @@ ActionButton:ansi {
 ActionButton:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: underline not bold;
+    text-style: bold;
 }
 
 ActionButton:ansi:focus {
@@ -104,7 +108,7 @@ ActionButton.-textual-compact.-primary:ansi {
    would look the same focused, hovered and idle. */
 ActionButton.-textual-compact.-primary:ansi:hover {
     background: $surface;
-    text-style: bold underline;
+    text-style: bold;
 }
 
 ActionButton.-textual-compact.-primary:ansi:focus {
@@ -145,7 +149,7 @@ ActionButton#btn_back:ansi {
 ActionButton#btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: underline not bold;
+    text-style: bold;
 }
 
 ActionButton#btn_back:ansi:focus {
