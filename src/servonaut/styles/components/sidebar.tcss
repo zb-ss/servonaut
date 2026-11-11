@@ -55,8 +55,8 @@ Sidebar SidebarSection > Button.section-header {
    underlined (that is the keyboard-focus cue, and a link's look). */
 Sidebar SidebarSection > Button.section-header:hover {
     border: none;
-    background: $panel-lighten-2;
-    color: $text-muted;
+    background: $foreground 10%;
+    color: $text;
     text-style: bold;
 }
 
@@ -88,8 +88,8 @@ Sidebar .nav-button {
 Sidebar .nav-button:hover {
     border: none;
     border-left: blank $background;
-    background: $panel-lighten-2;
-    color: $text-accent;
+    background: $foreground 10%;
+    color: $text;
     text-style: bold;
 }
 

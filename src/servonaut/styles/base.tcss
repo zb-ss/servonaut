@@ -440,14 +440,16 @@ DataTable > .datatable--header {
 /* The cursor row is a muted primary fill with the normal text colour, not a
    reversed white bar. Terminal-colour themes keep the reversed form below,
    as they have no reliable muted fill. */
+/* A tint of the primary colour over the table's own background, light enough
+   that the normal text colour stays readable in every theme. */
 DataTable > .datatable--cursor {
-    background: $primary-muted;
+    background: $primary 25%;
     color: $text;
     text-style: bold;
 }
 
 DataTable:focus > .datatable--cursor {
-    background: $primary 45%;
+    background: $primary 35%;
     color: $text;
 }
 

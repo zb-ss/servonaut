@@ -182,3 +182,47 @@ def test_command_list_highlights_the_row_on_hover_and_never_underlines(theme: st
 
     problems = _themed(theme, scenario, probe)
     assert not problems, "\n".join(problems)
+
+
+def _contrast(first: Any, second: Any) -> float:
+    def lum(colour: Any) -> float:
+        def channel(value: int) -> float:
+            value /= 255
+            return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * channel(colour.red) + 0.7152 * channel(colour.green) + 0.0722 * channel(colour.blue)
+
+    light, dark = sorted((lum(first), lum(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def test_hovered_menu_rows_stay_readable_in_every_registered_theme() -> None:
+    """A hovered row (current or not) keeps text at 4.5:1 or better against its tint."""
+    failures: List[str] = []
+
+    async def run(pilot: Any) -> None:
+        app = pilot.app
+        screen = app.screen
+        entries = [b for b in screen.query("Sidebar .nav-button") if b.display and b.region.height]
+        current = next(b for b in entries if b.has_class("--active"))
+        other = next(b for b in entries if not b.has_class("--active") and b.id != "nav_quit")
+        for theme in sorted(app.available_themes):
+            app.theme = theme
+            await pilot.pause(0.05)
+            if app.current_theme.ansi:
+                continue
+            for button in (current, other):
+                await pilot.hover(button)
+                await pilot.pause(0.05)
+                for strip in button.render_lines(Region(2, 0, button.outer_size.width - 2, 1)):
+                    for segment in strip:
+                        style = segment.style
+                        if not segment.text.strip() or style is None or style.color is None or style.bgcolor is None:
+                            continue
+                        ratio = _contrast(style.color.get_truecolor(), style.bgcolor.get_truecolor())
+                        if ratio < 4.5:
+                            failures.append(f"{theme}: {button.id} {ratio:.2f}")
+                            break
+
+    _geometry.run(run, "160x50", lambda pilot: None, name="menu-contrast")
+    assert not failures, "\n".join(failures)

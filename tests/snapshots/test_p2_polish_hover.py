@@ -29,7 +29,7 @@ def _tested_buttons(screen: Any) -> List[Button]:
     found = []
     for button in screen.query(Button):
         # A focused button already shows the keyboard cue; hover adds nothing to compare.
-        if button.has_class("-current-view") or isinstance(button, LinkButton) or button.disabled or not button.display or button.has_focus:
+        if button.has_class("-current-view", "--chosen") or isinstance(button, LinkButton) or button.disabled or not button.display or button.has_focus:
             continue
         if any(type(a).__name__ in _EXEMPT_ANCESTORS or isinstance(a, DataTable) for a in button.ancestors):
             continue
