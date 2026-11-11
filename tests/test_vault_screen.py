@@ -1026,7 +1026,7 @@ async def test_bound_vault_actions_show_their_key_and_headings_are_sentence_case
         }
         for action, button_id in buttons.items():
             label = screen.query_one(f"#{button_id}", ActionButton).label.plain
-            assert label.endswith(bound[action]), button_id
+            assert label.endswith(f"\u2590{bound[action]}\u258c"), button_id
         for heading in screen.query(".vault_group_heading"):
             text = heading.render().plain
             assert text[0].isupper() and text[1:] == text[1:].lower(), text
