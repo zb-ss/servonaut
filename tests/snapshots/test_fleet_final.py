@@ -17,9 +17,12 @@ from . import _harness
 Scenario = Callable[[Any], Awaitable[None]]
 
 
-def _run(scenario: Scenario, size: tuple[int, int] = (160, 50), *, hide_navigation: bool = False) -> None:
+def _run(
+    scenario: Scenario, size: tuple[int, int] = (160, 50), *, hide_navigation: bool = False,
+    demo: bool = False,
+) -> None:
     async def main() -> None:
-        app = _harness.SnapshotApp()
+        app = _harness.SnapshotApp(demo=demo)
         async with app.run_test(size=size) as pilot:
             await _harness.wait_for_fleet(pilot)
             if hide_navigation:
@@ -314,3 +317,65 @@ def test_a_drag_over_a_large_fleet_measures_the_rows_once() -> None:
         assert counts["cells"] <= 500 * (redraws["n"] + 1) * 2, (counts, redraws)
 
     _run(scenario)
+
+
+async def _fits_from_wide_to_narrow(pilot: Any) -> None:
+    """Wide room first, whatever the trigger did, then narrower rooms: no sideways scroll."""
+    table = pilot.app.screen.query_one(InstanceTable)
+    for width in range(170, 140, -1):
+        await pilot.resize_terminal(width, 44)
+        await pilot.pause()
+        await pilot.pause()
+        assert table.virtual_size.width <= table.scrollable_content_region.width, (
+            width, table.virtual_size.width, table.scrollable_content_region.width,
+        )
+
+
+def test_an_expired_refresh_mark_gives_its_width_back() -> None:
+    from servonaut.utils.instance_resolver import row_identity
+    from servonaut.widgets.instance_table import MARK_NEW
+
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        table = screen.query_one(InstanceTable)
+        await pilot.resize_terminal(170, 44)
+        await pilot.pause()
+        marks = {row_identity(row): MARK_NEW for row in table._all_instances}
+        table.set_marks(marks)
+        await pilot.pause()
+        table.set_marks({})
+        await pilot.pause()
+        await _fits_from_wide_to_narrow(pilot)
+
+    _run(scenario)
+
+
+def test_a_dropped_long_named_server_gives_its_width_back() -> None:
+    async def scenario(pilot: Any) -> None:
+        screen = pilot.app.screen
+        await pilot.resize_terminal(170, 44)
+        rows = [dict(r) for r in _harness.AWS_ROWS]
+        screen._instances = [{**rows[0], "name": "n" * 31, "id": "i-long"}, *rows]
+        screen._update_table()
+        await pilot.pause()
+        screen._instances = rows
+        screen._update_table()
+        await pilot.pause()
+        await _fits_from_wide_to_narrow(pilot)
+
+    _run(scenario)
+
+
+def test_demo_mode_on_then_off_gives_its_widths_back() -> None:
+    async def scenario(pilot: Any) -> None:
+        app = pilot.app
+        screen = app.screen
+        await pilot.resize_terminal(170, 44)
+        await pilot.pause()
+        assert app.demo_mode
+        app.demo_mode = False
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        await _fits_from_wide_to_narrow(pilot)
+
+    _run(scenario, demo=True)

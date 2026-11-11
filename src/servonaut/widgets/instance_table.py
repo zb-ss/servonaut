@@ -389,6 +389,7 @@ class InstanceTable(DataTable):
         background change never yanks the selection to the top. A no-op when
         the table is empty.
         """
+        self._widths_cache = None
         if not self._filtered_instances:
             return
         saved_row = self.cursor_row
@@ -436,11 +437,11 @@ class InstanceTable(DataTable):
         self._given_way, self._name_cap = self._plan_columns()
         self._planned_for = (self.scrollable_content_region.width, self.inspector_beside)
         columns = [c for c in self._wanted_columns() if c.key not in self._given_way]
-        if columns == self._shown_columns:
-            self.clear()
-        else:
-            self.clear(columns=True)
-            self._setup_columns(columns)
+        # The columns are rebuilt every time: a column left in place keeps the
+        # widest width it ever had (a mark that has expired, a long name that
+        # is gone), which would bring the sideways scroll back.
+        self.clear(columns=True)
+        self._setup_columns(columns)
         for idx, instance in enumerate(self._filtered_instances):
             cells = self._row_cells(idx, instance)
             self.add_row(*(cells[column.key] for column in columns))
