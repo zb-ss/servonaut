@@ -52,6 +52,7 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.utils.markup import literal
+from servonaut.utils.text_fit import cut
 from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
@@ -566,7 +567,7 @@ class FindingsScreen(WorkspaceScreen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = themed_text(self.app, str(finding.get("detector") or ""))
+            detector = themed_text(self.app, cut(str(finding.get("detector") or ""), 18))
             title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
@@ -584,7 +585,9 @@ class FindingsScreen(WorkspaceScreen):
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(themed_text(self.app, label))
+                row.append(themed_text(
+                    self.app, cut(label, 16 if getattr(self, "_narrow_columns", False) else 22),
+                ))
             row.extend([title, detected] if getattr(self, "_narrow_columns", False) else [detector, title, detected])
             table.add_row(*row)
         self._update_pill()

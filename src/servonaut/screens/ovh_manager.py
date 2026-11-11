@@ -60,6 +60,7 @@ from servonaut.screens._provider_accounts import (
     row_service,
     with_account,
 )
+from servonaut.screens._ovh_columns import COLUMNS, cut, plan_columns
 from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
@@ -237,11 +238,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     def on_mount(self) -> None:
         follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
-        # The selected server's full ID is in the resource panel, so the table
-        # keeps state and addressing visible instead of a long composite ID.
-        for label, width in (("#", 3), ("Name", 15), ("Type", 12), ("Kind", 5),
-                             ("State", 8), ("Public IP", 14), ("Region", 7)):
-            table.add_column(label, width=width)
+        self._table_width = 0
         self.sync_compact_actions()
         self._refresh()
 
@@ -346,22 +343,49 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
+        self._table_width = table.size.width
+        cells = [
+            (
+                str(idx),
+                display_name(inst),
+                str(inst.get("type", "")),
+                str(inst.get("provider_type", "—")),
+                str(inst.get("state", "")),
+                str(inst.get("public_ip", "") or "—"),
+                str(inst.get("region", "")),
+            )
+            for idx, inst in enumerate(self._instances, start=1)
+        ]
+        # The full ID is in the resource panel, so the table keeps state and
+        # addressing whole instead of a long composite ID.
+        widths = plan_columns(cells, self._table_width)
         # The next action must reach the server the user picked, not row 1.
         with keep_selected_row(table):
-            table.clear()
-            for idx, inst in enumerate(self._instances, start=1):
+            table.clear(columns=True)
+            for label, width in widths.items():
+                table.add_column(label, width=width)
+            for inst, row in zip(self._instances, cells):
+                shown = dict(zip(COLUMNS, row))
                 table.add_row(
-                    str(idx),
-                    Text(inert_text(display_name(inst))),
-                    Text(inert_text(str(inst.get("type", "")))),
-                    Text(inert_text(str(inst.get("provider_type", "—")))),
-                    self._colorize_state(str(inst.get("state", ""))),
-                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
-                    Text(inert_text(str(inst.get("region", "")))),
-                    key=str(inst.get("id", idx)),
+                    *(
+                        self._colorize_state(shown[label])
+                        if label == "State"
+                        else Text(inert_text(cut(shown[label], width)))
+                        for label, width in widths.items()
+                    ),
+                    key=str(inst.get("id", row[0])),
                 )
         self._sync_action_buttons()
         self._update_resource_context()
+
+    def on_resize(self) -> None:
+        # The columns are sized to the room the table has.
+        self.call_after_refresh(self._resize_table)
+
+    def _resize_table(self) -> None:
+        table = self.query_one("#ovh_mgr_table", DataTable)
+        if table.size.width != getattr(self, "_table_width", 0):
+            self._render_table()
 
     def _colorize_state(self, state: str) -> Text:
         s = state.lower()

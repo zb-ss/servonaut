@@ -94,7 +94,7 @@ def _literal(app, widget, literal, palette):
             style = app.screen._compositor.get_style_at(column, y)
             fg, bg = _paint_colours(style, palette)
             glyphs.append({'style': str(style), 'bold': bool(style.bold),
-                           'underline': bool(style.underline),
+                           'underline': bool(style.underline), 'reverse': bool(style.reverse),
                            'foreground': list(fg), 'background': list(bg),
                            'contrast': _contrast(fg, bg)})
         return glyphs, (x, y)
@@ -172,7 +172,7 @@ async def test_vault_focus_dispatch_keeps_native_action(theme, clipboard, record
             if app.current_theme.ansi:
                 if any(g['underline'] for g in rows[-1]['glyphs']):
                     failures.append(['vault-hover-only', 'underlined-on-hover'])
-                reversed_text = any(g.get('reverse') for g in rows[-1]['glyphs'])
+                reversed_text = any(g['reverse'] for g in rows[-1]['glyphs'])
                 if _frame_row(app, button) == idle_frame and not reversed_text:
                     failures.append(['vault-hover-only', 'missing-native-hover-cue'])
             await _tab_to(pilot, button)
@@ -302,3 +302,35 @@ async def test_scp_native_radioset_focus_direction_and_enter_do_not_transfer(
     finally:
         record_property('scoped_native_scp_focus', json.dumps({'rows': rows, 'failures': failures}))
     assert not failures, json.dumps(failures)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('theme', ['ansi-dark', 'ansi-light'])
+async def test_compact_action_hover_is_shown_reversed_in_terminal_themes(theme):
+    """A frameless action has no frame to change: its hover cue is reversed text."""
+    from textual.app import App
+
+    from servonaut.widgets.action_button import ActionButton
+    from tests.test_action_button import CSS_FILES
+
+    class _Host(App):
+        CSS_PATH = CSS_FILES
+
+        def compose(self):
+            yield ActionButton('Browse', 'b', compact=True, id='compact')
+            yield ActionButton('Other', 'o', compact=True, id='other')
+
+    app = _Host()
+    app.theme = theme
+    async with app.run_test(size=(60, 8)) as pilot:
+        palette = app.ansi_theme
+        button = app.query_one('#compact', ActionButton)
+        await pilot.hover(app.query_one('#other'))
+        await pilot.pause()
+        idle, _ = _literal(app, button, 'Browse', palette)
+        assert not any(g['reverse'] for g in idle)
+        await pilot.hover(button)
+        await pilot.pause()
+        hovered, _ = _literal(app, button, 'Browse', palette)
+        assert all(g['reverse'] for g in hovered)
+        assert not any(g['underline'] for g in hovered)
