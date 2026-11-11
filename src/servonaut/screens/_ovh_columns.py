@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Dict, Sequence
 
+from rich.cells import cell_len
+
 from servonaut.utils.text_fit import cut  # noqa: F401  (re-exported for the screen)
 
 COLUMNS = ("#", "Name", "Type", "Kind", "State", "Public IP", "Region")
@@ -34,7 +36,7 @@ def plan_columns(rows: Sequence[Sequence[str]], available: int) -> Dict[str, int
         available: Cells the table has; 0 or less means no limit.
     """
     widths = {
-        label: max([len(label)] + [len(row[index]) for row in rows])
+        label: max([cell_len(label)] + [cell_len(row[index]) for row in rows])
         for index, label in enumerate(COLUMNS)
     }
     widths["Name"] = min(widths["Name"], _NAME_CAP)

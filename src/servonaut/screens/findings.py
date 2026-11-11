@@ -53,6 +53,7 @@ from servonaut.utils.instance_resolver import (
 )
 from servonaut.utils.markup import literal
 from servonaut.utils.text_fit import cut
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
@@ -167,6 +168,10 @@ def _status_markup(status: str) -> Content:
     return _styled(_STATUS_STYLE, status)
 
 
+# Below this many cells the inbox drops its detector column and trims the rest.
+_NARROW_TABLE_WIDTH = 116
+
+
 class FindingsScreen(WorkspaceScreen):
     """Findings inbox — fleet-wide, or scoped to one instance."""
 
@@ -270,7 +275,7 @@ class FindingsScreen(WorkspaceScreen):
                     )
                     yield Container(
                         Static("", id="findings_filter_line"),
-                        DataTable(id="findings_table"),
+                        PlannedTable(id="findings_table"),
                         id="findings_table_card",
                     )
         yield Footer()
@@ -286,11 +291,10 @@ class FindingsScreen(WorkspaceScreen):
         table.add_column("Title", key="title", width=28 if narrow else None)
         table.add_column("Detected", key="detected", width=10 if narrow else 16)
 
-    def on_resize(self) -> None:
-        self.call_after_refresh(self._sync_columns)
-
     def _sync_columns(self) -> None:
-        narrow = self.has_class("-content-narrow")
+        """Choose the columns from the table's own width; rebuild only on a change."""
+        table = self.query_one("#findings_table", DataTable)
+        narrow = 0 < plannable_width(table) < _NARROW_TABLE_WIDTH
         if narrow == getattr(self, "_narrow_columns", False):
             return
         self._narrow_columns = narrow
@@ -316,6 +320,7 @@ class FindingsScreen(WorkspaceScreen):
         table.cursor_type = "row"
         self._narrow_columns = False
         self._add_columns(table, narrow=False)
+        table.set_plan_handler(self._sync_columns)
         self._render_gate()
 
     # ------------------------------------------------------------------

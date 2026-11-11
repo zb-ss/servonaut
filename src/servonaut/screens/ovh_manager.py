@@ -65,6 +65,7 @@ from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -169,7 +170,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             yield self.workspace_sidebar()
             inventory_panel = Vertical(
                 Static("", id="ovh_mgr_status"),
-                DataTable(
+                PlannedTable(
                     id="ovh_mgr_table",
                     zebra_stripes=True,
                     cursor_type="row",
@@ -239,6 +240,8 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
         self._table_width = 0
+        # The columns follow the room the table itself has.
+        table.set_plan_handler(self._render_table)
         self.sync_compact_actions()
         self._refresh()
 
@@ -343,7 +346,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
-        self._table_width = table.size.width
+        self._table_width = plannable_width(table)
         cells = [
             (
                 str(idx),
@@ -377,15 +380,6 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                 )
         self._sync_action_buttons()
         self._update_resource_context()
-
-    def on_resize(self) -> None:
-        # The columns are sized to the room the table has.
-        self.call_after_refresh(self._resize_table)
-
-    def _resize_table(self) -> None:
-        table = self.query_one("#ovh_mgr_table", DataTable)
-        if table.size.width != getattr(self, "_table_width", 0):
-            self._render_table()
 
     def _colorize_state(self, state: str) -> Text:
         s = state.lower()

@@ -54,3 +54,18 @@ def test_the_ovh_key_table_does_not_scroll_sideways(size: str) -> None:
         assert pilot.app.screen.query_one("#ssh_keys_table", DataTable).max_scroll_x == 0
 
     run(_ovh_ssh_keys, size, check, "table-ovh-keys")
+
+
+def test_the_ovh_key_table_fits_beside_the_open_navigation_at_130x40() -> None:
+    from textual.widgets import DataTable as Table
+
+    def check(pilot: Any) -> None:
+        table = pilot.app.screen.query_one("#ssh_keys_table", Table)
+        assert table.max_scroll_x == 0, f"the key table scrolls sideways ({table.max_scroll_x})"
+
+    _geometry.run(
+        _run(_ovh_ssh_keys), (130, 40), check, name="table-ovh-keys-130",
+        wait_for_fleet=False, app=CloudAccountsSnapshotApp(),
+    )
+
+
