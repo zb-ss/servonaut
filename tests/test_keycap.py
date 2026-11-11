@@ -110,6 +110,7 @@ class _CapHost(App):
         yield ActionButton("Browse", "k", id="framed")
         yield ActionButton("Browse", "k", compact=True, id="compact")
         yield ActionButton("Other", "o", id="other")
+        yield ActionButton("Launch", "n", role="primary", compact=True, id="filled")
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,7 @@ async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> No
             await pilot.pause()
             if app.current_theme.ansi:
                 continue
-            for button_id in ("framed", "compact"):
+            for button_id in ("framed", "compact", "filled"):
                 button = app.query_one(f"#{button_id}", ActionButton)
                 for state in ("idle", "hover", "focus"):
                     if state == "idle":
@@ -136,12 +137,14 @@ async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> No
                         await pilot.hover(app.query_one("#other"), offset=(0, 0))
                         button.focus()
                     await pilot.pause()
-                    word = _segment(button, "Browse")
-                    cap = _segment(button, "k")
+                    word = _segment(button, "Launch" if button_id == "filled" else "Browse")
+                    cap = _segment(button, "n" if button_id == "filled" else "k")
                     name = f"{theme}/{button_id}/{state}"
                     if cap.bgcolor.get_truecolor() == word.bgcolor.get_truecolor():
                         problems.append(f"{name}: the cap vanishes into the button")
-                    elif _ratio(cap.bgcolor.get_truecolor(), word.bgcolor.get_truecolor()) < 1.08:
+                    elif _ratio(cap.bgcolor.get_truecolor(), word.bgcolor.get_truecolor()) < (
+                        1.3 if button_id == "filled" else 1.08
+                    ):
                         problems.append(f"{name}: the cap is barely visible")
                     if _ratio(cap.color.get_truecolor(), cap.bgcolor.get_truecolor()) < 4.5:
                         problems.append(f"{name}: the key is hard to read")

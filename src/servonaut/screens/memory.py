@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.utils.text_fit import cut
 from servonaut.utils.markup import literal as literal_text
 from servonaut.utils.theme_text import themed_text
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
@@ -194,6 +195,9 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
 # PinKeyModal
 # ---------------------------------------------------------------------------
 
+
+# Cells of an observed or declared value in the memory table.
+_VALUE_CELL_WIDTH = 48
 
 class PinKeyModal(ModalScreen[Optional[str]]):
     """Modal for pinning a declared value for a memory field.
@@ -860,11 +864,15 @@ class MemoryScreen(WorkspaceScreen):
                     f"Last probed\n{probed_at_str or '—'}\n\n"
                     f"Source\n{'Team-shared memory' if literal else 'This device'}"
                 )
+                # The table shows one line of each value, ended with an ellipsis
+                # when cut; the detail pane below has the whole value.
+                obs_cell = cut(" ".join(obs_str.split()), _VALUE_CELL_WIDTH)
+                decl_cell = cut(" ".join(decl_str.split()), _VALUE_CELL_WIDTH)
                 table.add_row(
                     module_name,
                     Text(str(key)) if literal else key,
-                    Text(obs_str) if literal else obs_str,
-                    Text(decl_str) if literal else decl_str,
+                    Text(obs_cell) if literal else obs_cell,
+                    Text(decl_cell) if literal else decl_cell,
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",

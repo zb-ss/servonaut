@@ -134,7 +134,8 @@ OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_scope {
 }
 
 /* The scope block is six rows at most: the title gives up its empty row. */
-OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_header {
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_header,
+OVHSSHKeysScreen.-short #ovh_ssh_keys_header {
     margin: 0;
 }
 
@@ -220,5 +221,14 @@ OVHResizeScreen #resize_actions Button,
 OVHReinstallScreen #reinstall_actions Button {
     width: 1fr;
     min-width: 0;
+    margin: 0;
+}
+
+/* Short terminals: the panel's heading and status line sit tight, so its top border stays in view. */
+OVHSSHKeysScreen.-short .provider_catalog_heading {
+    margin-bottom: 0;
+}
+
+OVHSSHKeysScreen.-short .provider-key-workspace #ovh_ssh_keys_status {
     margin: 0;
 }

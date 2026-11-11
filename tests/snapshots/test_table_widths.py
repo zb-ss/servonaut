@@ -235,3 +235,70 @@ def test_the_ovh_inventory_fits_beside_the_open_navigation_at_130x40() -> None:
         assert shown == "141.123.123.123"
 
     _geometry.run(scenario, (130, 40), check, name="table-ovh-130x40")
+
+
+def test_the_ovh_inventory_keeps_its_title_and_panel_top_in_view_at_100x30() -> None:
+    async def scenario(pilot: Any) -> None:
+        await _OVH_OPEN(pilot)
+        pilot.app.screen.query_one("#ovh_mgr_table").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        container = screen.query_one("#ovh_mgr_container")
+        assert screen.region.contains_region(screen.query_one("#ovh_mgr_header").region)
+        panel = screen.query_one(".provider-manager-inventory")
+        assert panel.region.y >= container.region.y, "the inventory's top border is scrolled out"
+        assert container.region.contains_region(screen.query_one("#ovh_mgr_table").region)
+
+    _geometry.run(scenario, (100, 30), check, name="panel-ovh-inventory-100x30")
+
+
+def test_the_findings_inbox_keeps_its_title_and_panel_top_in_view_at_100x30() -> None:
+    async def scenario(pilot: Any) -> None:
+        await family._findings(pilot)
+        pilot.app.screen.query_one("#findings_table").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        assert screen.region.contains_region(screen.query_one("#findings_title").region)
+        card = screen.query_one("#findings_table_card")
+        container = screen.query_one("#findings_container")
+        assert card.region.y >= container.region.y, "the inbox's top border is scrolled out"
+        assert screen.region.contains_region(card.region)
+
+    _geometry.run(scenario, (100, 30), check, name="panel-findings-100x30")
+
+
+@sizes
+def test_a_long_memory_value_is_cut_with_an_ellipsis_and_kept_whole_in_the_detail(size: str) -> None:
+    long_value = "['cron.service', 'nginx.service', 'php8.2-fpm.service', 'ssh.service', 'unattended-upgrades.service']"
+
+    async def scenario(pilot: Any) -> None:
+        await screens._memory(pilot)
+        screen = pilot.app.screen
+        service = pilot.app.memory_service
+        original = service.get_all_modules
+
+        def with_long_value(instance_id: str, provider: str) -> dict:
+            modules = original(instance_id, provider)
+            return {
+                name: {**data, "observed": {**data.get("observed", {}), "units": long_value}}
+                for name, data in modules.items()
+            }
+
+        service.get_all_modules = with_long_value
+        screen._render_table()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        table = screen.query_one("#memory-table", DataTable)
+        column = table.get_column_index("observed")
+        keys = [str(table.get_row_at(i)[table.get_column_index("key")]) for i in range(table.row_count)]
+        cell = str(table.get_row_at(keys.index("units"))[column])
+        assert cell.endswith("…") and len(cell) <= 48
+        assert any(long_value in detail for detail in screen._record_details.values())
+
+    _geometry.run(scenario, size, check, name="table-memory-values")
