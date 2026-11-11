@@ -48,6 +48,6 @@ def plannable_width(table: DataTable) -> int:
     differently for the same room). Zero until the table has been laid out.
     """
     width = table.region.width
-    if width <= 0:
+    if not isinstance(width, int) or width <= 0:
         return 0
     return max(width - table.styles.scrollbar_size_vertical, 1)
