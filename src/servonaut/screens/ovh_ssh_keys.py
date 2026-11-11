@@ -32,6 +32,8 @@ from textual.widgets import (
 )
 
 from servonaut.screens._compact_actions import sync_compact_buttons
+from rich.cells import cell_len
+from servonaut.utils.text_fit import cut
 from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
@@ -44,6 +46,8 @@ from servonaut.screens._provider_accounts import (
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.action_button import ActionButton, ActionRow
+from servonaut.screens._table_cursor import keep_selected_row
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -53,7 +57,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class _ProjectKeysTable(DataTable):
+class _ProjectKeysTable(PlannedTable):
     """Keep the selected key visible after the catalog's native rows reflow."""
 
     def on_resize(self) -> None:
@@ -113,8 +117,9 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 VerticalScroll(
                     Static(
-                        "[bold $text-accent]OVH Public Cloud SSH keys[/bold $text-accent]",
+                        "[bold]OVH Public Cloud SSH keys[/bold]",
                         id="ovh_ssh_keys_header",
+                        classes="screen-title",
                     ),
                     AccountPicker.for_provider(
                         registry_for(self.app, "ovh"), "ovh",
@@ -195,7 +200,8 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         sync_compact_buttons(self)
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Name", "Fingerprint", "Public key (first 40 chars)")
+        table.add_columns("Name", "Fingerprint", "Public key")
+        table.set_plan_handler(self._replan_keys)
         picker = self.query_one("#ovh_ssh_keys_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
@@ -296,6 +302,11 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             f"[dim]Project:[/dim] [b]{self._display_project_id()}[/b]"
         )
 
+    def _replan_keys(self) -> None:
+        """Fit the key column again to the table's room, once there are keys to show."""
+        if self._keys:
+            self._render_keys()
+
     def _render_keys(self) -> None:
         """Draw the fetched keys; labels, fingerprints and keys hidden in demo mode."""
         def _s(x: str) -> str:
@@ -307,18 +318,32 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             return x
 
         table = self.query_one("#ssh_keys_table", DataTable)
-        table.clear()
-        for key in self._keys:
-            public_key = key.get("public_key", "") or ""
-            truncated = (
-                public_key[:40] + "…" if len(public_key) > 40 else public_key
+        with keep_selected_row(table):
+            # Columns keep the widest value they ever held: start them again.
+            table.clear(columns=True)
+            table.add_columns("Name", "Fingerprint", "Public key")
+            names = [_s(str(key.get("name", ""))) for key in self._keys]
+            prints = [
+                "Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32]
+                for key in self._keys
+            ]
+            # The key column takes what the name and fingerprint leave of the
+            # table's own room: up to 40 characters, at least 12.
+            width = plannable_width(table)
+            room = width if isinstance(width, int) else 0
+            fixed = (
+                max([cell_len("Name")] + [cell_len(n) for n in names])
+                + max([cell_len("Fingerprint")] + [cell_len(p) for p in prints]) + 6
             )
-            table.add_row(
-                Text(inert_text(_s(str(key.get("name", ""))))),
-                Text(inert_text("Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32])),
-                Text(inert_text("Hidden" if self.app.demo_mode else truncated)),
-                key=str(key.get("id", "")) or str(key.get("name", "")),
-            )
+            budget = 41 if room <= 0 else max(5, min(41, room - fixed - 2))
+            for key, name, fingerprint in zip(self._keys, names, prints):
+                public_key = key.get("public_key", "") or ""
+                table.add_row(
+                    Text(inert_text(name)),
+                    Text(inert_text(fingerprint)),
+                    Text(inert_text("Hidden" if self.app.demo_mode else cut(public_key, budget))),
+                    key=str(key.get("id", "")) or str(key.get("name", "")),
+                )
         n = len(self._keys)
         if n == 0:
             self._set_status(

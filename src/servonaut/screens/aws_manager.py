@@ -125,6 +125,8 @@ class AWSManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 64
     CONTENT_NARROW_WIDTH = 104
+    # Short terminals get a compact action rail, so the title and table fit.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),

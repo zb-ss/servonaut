@@ -76,9 +76,22 @@ CloudWatchBrowserScreen.-content-narrow #cw_filter_actions {
     column-span: 2;
 }
 
+/* The account picker adds a control, so the filters always take two rows. */
 #cloudwatch_filter_bar.-with-account {
-    grid-size: 6 1;
-    grid-columns: 18 3fr 3fr 22 2fr 34;
+    grid-size: 5 2;
+    grid-columns: 16 6fr 8fr 17 17;
+}
+
+#cloudwatch_filter_bar.-with-account #cw_filter_time_range {
+    column-span: 2;
+}
+
+#cloudwatch_filter_bar.-with-account #cw_filter_pattern {
+    column-span: 3;
+}
+
+#cloudwatch_filter_bar.-with-account #cw_filter_actions {
+    column-span: 2;
 }
 
 CloudWatchBrowserScreen.-content-narrow #cloudwatch_filter_bar.-with-account {

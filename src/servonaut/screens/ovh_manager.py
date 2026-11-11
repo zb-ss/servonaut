@@ -60,10 +60,12 @@ from servonaut.screens._provider_accounts import (
     row_service,
     with_account,
 )
+from servonaut.screens._ovh_columns import COLUMNS, cut, plan_columns
 from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
@@ -128,6 +130,8 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 64
     # Keep the full action row only where labels, spacing and scrollbar fit.
     CONTENT_NARROW_WIDTH = 105
+    # Short terminals get a compact action rail, so the title and table fit.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -166,7 +170,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             yield self.workspace_sidebar()
             inventory_panel = Vertical(
                 Static("", id="ovh_mgr_status"),
-                DataTable(
+                PlannedTable(
                     id="ovh_mgr_table",
                     zebra_stripes=True,
                     cursor_type="row",
@@ -235,10 +239,9 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     def on_mount(self) -> None:
         follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
-        # Keep state and addressing visible when a cloud composite ID is long.
-        for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
-                             ("State", 10), ("Public IP", 15), ("Region", 9), ("ID", 70)):
-            table.add_column(label, width=width)
+        self._table_width = 0
+        # The columns follow the room the table itself has.
+        table.set_plan_handler(self._render_table)
         self.sync_compact_actions()
         self._refresh()
 
@@ -343,20 +346,37 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
+        self._table_width = plannable_width(table)
+        cells = [
+            (
+                str(idx),
+                display_name(inst),
+                str(inst.get("type", "")),
+                str(inst.get("provider_type", "—")),
+                str(inst.get("state", "")),
+                str(inst.get("public_ip", "") or "—"),
+                str(inst.get("region", "")),
+            )
+            for idx, inst in enumerate(self._instances, start=1)
+        ]
+        # The full ID is in the resource panel, so the table keeps state and
+        # addressing whole instead of a long composite ID.
+        widths = plan_columns(cells, self._table_width)
         # The next action must reach the server the user picked, not row 1.
         with keep_selected_row(table):
-            table.clear()
-            for idx, inst in enumerate(self._instances, start=1):
+            table.clear(columns=True)
+            for label, width in widths.items():
+                table.add_column(label, width=width)
+            for inst, row in zip(self._instances, cells):
+                shown = dict(zip(COLUMNS, row))
                 table.add_row(
-                    str(idx),
-                    Text(inert_text(display_name(inst))),
-                    Text(inert_text(str(inst.get("type", "")))),
-                    Text(inert_text(str(inst.get("provider_type", "—")))),
-                    self._colorize_state(str(inst.get("state", ""))),
-                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
-                    Text(inert_text(str(inst.get("region", "")))),
-                    Text(inert_text(str(inst.get("id", "")))),
-                    key=str(inst.get("id", idx)),
+                    *(
+                        self._colorize_state(shown[label])
+                        if label == "State"
+                        else Text(inert_text(cut(shown[label], width)))
+                        for label, width in widths.items()
+                    ),
+                    key=str(inst.get("id", row[0])),
                 )
         self._sync_action_buttons()
         self._update_resource_context()

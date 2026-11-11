@@ -1247,7 +1247,7 @@ class VaultScreen(WorkspaceScreen):
             and focused.is_attached and focused.focusable
             and self.query_one("#vault_actions") in focused.ancestors
         ):
-            focused.scroll_visible(animate=False)
+            self.query_one("#vault_action_scroll").scroll_to_widget(focused, animate=False)
         elif self.app.screen is self and (focused is None or isinstance(focused, DataTable)):
             for button in self.query("#vault_actions Button.-next-action"):
                 self._reveal_summary_action(button)
@@ -1310,7 +1310,7 @@ class VaultScreen(WorkspaceScreen):
             with contextlib.suppress(NoMatches):
                 button = self.query_one(f"#{button_id}", Button)
                 if button.focusable:
-                    button.focus()
+                    button.focus(scroll_visible=False)
                     self.call_after_refresh(self._reveal_focused_action)
                     return
         if self.focused is None and widget is not None and widget.is_attached and widget.focusable:
@@ -1498,7 +1498,7 @@ class VaultScreen(WorkspaceScreen):
         shelf = self.query_one("#vault_action_scroll")
         group = next((a for a in button.ancestors if a.has_class("vault_action_group")), None)
         if group is None or not group.region.height:
-            button.scroll_visible(animate=False)
+            shelf.scroll_to_widget(button, animate=False)
             return
         # The narrow layout pins the selection on the first row of the shelf.
         pinned = 1 if self.has_class("-content-narrow") else 0
@@ -2727,7 +2727,7 @@ class VaultScreen(WorkspaceScreen):
             # Select the waiting device and bring Approve device into view.
             self.query_one("#vault_table", DataTable).move_cursor(row=pending)
             approve = self.query_one("#vault_approve", Button)
-            approve.focus()
+            approve.focus(scroll_visible=False)
             self.call_after_refresh(self._reveal_summary_action, approve)
 
     def action_approve(self) -> None:

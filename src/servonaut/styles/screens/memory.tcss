@@ -28,14 +28,6 @@ ShareInstanceScreen #share-context {
     padding: 0 1;
 }
 
-MemoryDriftScreen #drift-title,
-MemoryExportScreen #export-title,
-ShareInstanceScreen #share-title {
-    height: auto;
-    margin: 0;
-    text-style: bold;
-}
-
 /* Drift: compact review controls above the change ledger. */
 MemoryDriftScreen #drift-container {
     width: 1fr;

@@ -51,7 +51,15 @@ Sidebar SidebarSection > Button.section-header {
     text-overflow: ellipsis;
 }
 
-Sidebar SidebarSection > Button.section-header:hover,
+/* A hovered menu row is highlighted across its width; the words are never
+   underlined (that is the keyboard-focus cue, and a link's look). */
+Sidebar SidebarSection > Button.section-header:hover {
+    border: none;
+    background: $foreground 10%;
+    color: $text;
+    text-style: bold;
+}
+
 Sidebar SidebarSection > Button.section-header:focus,
 WorkspaceScreen Sidebar.--navigation-mode Button.section-header:focus {
     border: none;
@@ -77,7 +85,33 @@ Sidebar .nav-button {
     text-overflow: ellipsis;
 }
 
-Sidebar .nav-button:hover,
+Sidebar .nav-button:hover {
+    border: none;
+    border-left: blank $background;
+    background: $foreground 10%;
+    color: $text;
+    text-style: bold;
+}
+
+Sidebar .nav-button.--active:hover {
+    border-left: thick $accent;
+    background: $primary 25%;
+    color: $text;
+    text-style: bold;
+}
+
+Sidebar .nav-button:ansi:hover {
+    background: $background;
+    color: $text-accent;
+    text-style: bold;
+}
+
+Sidebar .nav-button.--active:ansi:hover {
+    background: $background;
+    color: $text;
+    text-style: bold reverse;
+}
+
 Sidebar .nav-button:focus,
 WorkspaceScreen Sidebar.--navigation-mode .nav-button:focus {
     border: none;

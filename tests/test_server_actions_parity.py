@@ -51,7 +51,7 @@ async def test_back_shows_esc_and_ssh_connect_keeps_its_words() -> None:
     app = _LayoutHost()
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await _open_actions(app, pilot)
-        assert _button(screen, "btn_back").label.plain.endswith("esc")
+        assert _button(screen, "btn_back").label.plain.endswith("\u2590esc\u258c")
         assert "SSH connect" in _button(screen, "btn_ssh").words
         assert _button(screen, "btn_ssh").label.plain.startswith("SSH connect")
 
@@ -311,7 +311,7 @@ async def test_findings_count_has_no_brackets_and_never_caps_silently(open_findi
         screen = await _open_actions(app, pilot)
         await wait_until(lambda: _button(screen, "btn_findings").label.plain.startswith(shown))
         assert "(" not in _button(screen, "btn_findings").label.plain
-        assert _button(screen, "btn_findings").label.plain.rstrip().endswith("f")
+        assert _button(screen, "btn_findings").label.plain.rstrip().endswith("\u2590f\u258c")
 
 
 async def test_the_findings_count_is_read_again_when_the_screen_resumes() -> None:

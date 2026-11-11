@@ -159,10 +159,11 @@ class BulkShareScreen(WorkspaceScreen):
                 with Container(id="bulk-container"):
                     yield Static(
                         Content.from_markup(
-                            "[bold $text-accent]Share memory: $servers[/bold $text-accent]",
+                            "[bold]Share memory: $servers[/bold]",
                             servers=servers,
                         ),
                         id="bulk-title",
+                        classes="screen-title",
                     )
                     with VerticalScroll(id="bulk-state"):
                         yield Static("", id="bulk-status")

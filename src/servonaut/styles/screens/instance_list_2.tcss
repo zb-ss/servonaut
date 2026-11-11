@@ -190,15 +190,26 @@ InstanceListScreen.-chat-open #fleet_value_bar {
 #fleet_value_line {
     width: 1fr;
     height: auto;
-    max-height: 2;
+    max-height: 3;
     grid-size: 4;
-    grid-columns: 1fr;
+    grid-columns: auto;
     grid-rows: 1;
     grid-gutter: 0 1;
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
+/* The widget picks how many columns the values fit in (see fit_columns). */
+#fleet_value_line.-columns-3 { grid-size: 3; }
+#fleet_value_line.-columns-2 { grid-size: 2; }
+
+/* Even two do not fit: equal columns, long values cut with an ellipsis. */
+#fleet_value_line.-flexible { grid-columns: 1fr; }
+#fleet_value_line.-flexible .value-row,
+#fleet_value_line.-flexible .value-text { width: 1fr; }
+
 #fleet_value_line .value-row {
+    width: auto;
     height: 1;
 }
 
@@ -208,6 +219,7 @@ InstanceListScreen.-chat-open #fleet_value_bar {
 }
 
 #fleet_value_line .value-text {
+    width: auto;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }

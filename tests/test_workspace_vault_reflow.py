@@ -564,7 +564,10 @@ def _assert_auto_bind_action_labels(app: _VaultHost, screen: VaultAutoBindScreen
         assert row.region.contains_region(button.region)
         assert button.region.height == 3
         assert app.get_widget_at(*button.region.center)[0] is button
-        assert button.label.plain in _painted(app, button)
+        shown = button.label.plain
+        if button.disabled:
+            shown = shown.replace("\u2590", " ").replace("\u258c", " ")  # a quiet key has no edges
+        assert shown in _painted(app, button)
 
 
 @pytest.mark.asyncio

@@ -185,7 +185,8 @@ Button:focus {
     text-style: bold underline;
 }
 
-Button.-warning:hover,
+/* Hover brightens the frame and never underlines the words; keyboard focus
+   keeps its underline. A role keeps its own colour and gets a lighter frame. */
 Button.-warning:focus {
     background: transparent;
     color: $text-warning;
@@ -193,12 +194,26 @@ Button.-warning:focus {
     text-style: bold underline;
 }
 
-Button.-error:hover,
 Button.-error:focus {
     background: transparent;
     color: $text-error;
     border: round $error;
     text-style: bold underline;
+}
+
+Button.-warning:hover {
+    border: round $warning-lighten-2;
+    text-style: bold;
+}
+
+Button.-error:hover {
+    border: round $error-lighten-2;
+    text-style: bold;
+}
+
+Button.-success:hover,
+Button.-primary:hover {
+    text-style: bold;
 }
 
 /* A compact button (a chip, a toolbar action) has no frame at all. The hover
@@ -208,6 +223,21 @@ Button.-error:focus {
 Button.-textual-compact {
     height: 1;
     border: none !important;
+}
+
+/* A frameless button shows hover by its fill (reversed in terminal themes). */
+Button.-textual-compact:hover {
+    background: $foreground 8%;
+}
+
+Button.-textual-compact:ansi:hover,
+Button.-textual-compact.-primary:ansi:hover,
+Button.-textual-compact.-success:ansi:hover,
+Button.-textual-compact.-warning:ansi:hover,
+Button.-textual-compact.-error:ansi:hover {
+    background: transparent;
+    border: none;
+    text-style: reverse;
 }
 
 #btn_back {
@@ -246,8 +276,8 @@ Button.-error:ansi:hover,
 #btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    border: round $accent;
-    text-style: underline not bold;
+    border: heavy $accent;
+    text-style: none;
 }
 
 Button:ansi:focus,
@@ -423,14 +453,16 @@ DataTable > .datatable--header {
 /* The cursor row is a muted primary fill with the normal text colour, not a
    reversed white bar. Terminal-colour themes keep the reversed form below,
    as they have no reliable muted fill. */
+/* A tint of the primary colour over the table's own background, light enough
+   that the normal text colour stays readable in every theme. */
 DataTable > .datatable--cursor {
-    background: $primary-muted;
+    background: $primary 25%;
     color: $text;
     text-style: bold;
 }
 
 DataTable:focus > .datatable--cursor {
-    background: $primary 45%;
+    background: $primary 35%;
     color: $text;
 }
 

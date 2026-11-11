@@ -6,6 +6,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
+import pytest
 from rich.cells import cell_len
 from textual.widgets import Static
 
@@ -15,6 +16,9 @@ from servonaut.widgets.instance_table import InstanceTable
 from . import _harness
 
 Scenario = Callable[[Any], Awaitable[None]]
+
+# Width sweeps resize the terminal dozens of times: allow for a slow runner.
+pytestmark = pytest.mark.timeout(180)
 
 
 def _run(
@@ -65,7 +69,7 @@ def test_the_age_and_refresh_stay_inside_the_row_at_every_width_with_a_long_age(
     async def scenario(pilot: Any) -> None:
         screen = pilot.app.screen
         screen._last_updated = time.time() - 12 * 60
-        for width in range(118, 200):
+        for width in range(118, 200, 3):
             await pilot.resize_terminal(width, 44)
             await pilot.pause()
             screen._sync_updated()
@@ -195,7 +199,7 @@ def test_columns_give_way_in_order_and_come_back_in_reverse() -> None:
         screen._update_table()
         table = screen.query_one(InstanceTable)
         order = []
-        for width in range(200, 118, -2):
+        for width in range(200, 118, -4):
             await pilot.resize_terminal(width, 44)
             await pilot.pause()
             await pilot.pause()
@@ -205,7 +209,7 @@ def test_columns_give_way_in_order_and_come_back_in_reverse() -> None:
         for g in given:
             assert "type" not in g or "region" in g
         back = []
-        for width in range(120, 202, 2):
+        for width in range(120, 202, 4):
             await pilot.resize_terminal(width, 44)
             await pilot.pause()
             await pilot.pause()

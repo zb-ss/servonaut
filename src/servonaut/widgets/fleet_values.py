@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
+from math import ceil
+
+from rich.cells import cell_len
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, VerticalScroll
@@ -253,10 +256,43 @@ class FleetValues(_ValueWalker, VerticalScroll):
     ]
 
 
+# The one-line form shows its values in this many columns when they fit,
+# most columns first, and in as many lines as it may grow to.
+_LINE_COLUMN_CHOICES = (4, 3, 2)
+_LINE_MAX_LINES = 3
+
+
 class FleetValueLine(_ValueWalker, Grid):
     """The values as a short block under the table (left and right)."""
 
     compact = True
+
+    def set_instance(self, instance: Optional[dict]) -> None:
+        super().set_instance(instance)
+        self.fit_columns()
+
+    def on_resize(self) -> None:
+        self.fit_columns()
+
+    def fit_columns(self) -> None:
+        """Use the most columns whose widest values fit the strip.
+
+        When even two do not fit, the columns share the strip equally and cut
+        long values with an ellipsis, so no value is ever beyond the edge.
+        """
+        rows = self._visible_rows()
+        width = self.content_size.width
+        if not rows or width <= 0:
+            return
+        needed = [cell_len(row.label) + 1 + cell_len(row.value) for row in rows]
+        chosen = "-flexible"
+        for count in _LINE_COLUMN_CHOICES:
+            columns = [max(needed[start::count]) for start in range(min(count, len(needed)))]
+            if sum(columns) + len(columns) - 1 <= width and ceil(len(rows) / count) <= _LINE_MAX_LINES:
+                chosen = f"-columns-{count}"
+                break
+        for name in ("-columns-4", "-columns-3", "-columns-2", "-flexible"):
+            self.set_class(name == chosen, name)
 
     BINDINGS = [
         Binding("left", "step(-1)", "Previous value", show=False),

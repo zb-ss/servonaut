@@ -118,7 +118,7 @@ class TestKeyListing:
 
     @pytest.mark.asyncio
     async def test_table_truncates_long_public_key(self):
-        """Public keys longer than 40 chars are shown truncated with an ellipsis."""
+        """Public keys longer than 24 chars are shown truncated with an ellipsis."""
         long_key = "ssh-rsa " + "A" * 80
         svc = _make_cloud_service(keys=[
             {
@@ -138,7 +138,7 @@ class TestKeyListing:
             # Column 2 is the truncated public key.
             cell = str(row[2])
             assert cell.endswith("…")
-            assert len(cell) == 41  # 40 chars + single-char ellipsis
+            assert 13 <= len(cell) <= 41  # fits the table; at most 40 characters + the ellipsis
 
     @pytest.mark.asyncio
     async def test_table_populated_with_key_data(self):

@@ -47,6 +47,10 @@ ActionButton.-error {
     color: $text-error;
 }
 
+ActionButton.-primary:hover {
+    border: round $accent;
+}
+
 ActionButton.-primary:focus,
 ActionButton.-warning:focus,
 ActionButton.-error:focus {
@@ -60,9 +64,15 @@ ActionButton.-textual-compact {
     margin: 0 1 0 0;
 }
 
+/* A key cap's right edge is half a cell wide, so the button needs no right padding. */
+ActionButton.-keycap,
+ActionButton.-keycap.-textual-compact {
+    padding: 0 0 0 1;
+}
+
 ActionButton.-textual-compact:hover,
 ActionButton.-textual-compact:focus {
-    background: $panel-lighten-2;
+    background: $foreground 8%;
 }
 
 ActionButton.-textual-compact.-primary {
@@ -83,7 +93,13 @@ ActionButton:ansi {
 ActionButton:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: underline not bold;
+    border: heavy $accent;
+    text-style: none;
+}
+
+/* A compact action has no frame; in a terminal-colour theme its hover is shown reversed. */
+ActionButton.-textual-compact:ansi:hover {
+    text-style: reverse;
 }
 
 ActionButton:ansi:focus {
@@ -104,7 +120,7 @@ ActionButton.-textual-compact.-primary:ansi {
    would look the same focused, hovered and idle. */
 ActionButton.-textual-compact.-primary:ansi:hover {
     background: $surface;
-    text-style: bold underline;
+    text-style: reverse;
 }
 
 ActionButton.-textual-compact.-primary:ansi:focus {
@@ -145,7 +161,8 @@ ActionButton#btn_back:ansi {
 ActionButton#btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: underline not bold;
+    border: heavy $accent;
+    text-style: none;
 }
 
 ActionButton#btn_back:ansi:focus {
@@ -161,7 +178,7 @@ ActionButton#btn_back.-textual-compact {
 
 ActionButton#btn_back.-textual-compact:hover,
 ActionButton#btn_back.-textual-compact:focus {
-    background: $panel-lighten-2;
+    background: $foreground 8%;
 }
 
 /* No room: the actions wrap onto further lines instead of being cut off. The

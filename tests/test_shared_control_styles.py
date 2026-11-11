@@ -307,9 +307,9 @@ async def test_link_key_hint_is_quiet_and_not_underlined() -> None:
                 elif segment.text.strip():
                     hint_styles.append((segment.text.strip(), segment.style))
         assert underlined == "Copy row"
-        assert [text for text, _ in hint_styles] == ["y"]
-        assert hint_styles[0][1].color not in word_colours  # dimmer than the words
-        assert link.label.plain == "Copy row  y"
+        assert [text for text, _ in hint_styles] == ["\u2590", "y", "\u258c"]
+        assert hint_styles[1][1].color not in word_colours  # dimmer than the words
+        assert link.label.plain == "Copy row \u2590y\u258c"
 
 
 class _HintColourApp(App):
@@ -335,36 +335,62 @@ def _hex_of(widget, text: str) -> str:
     raise AssertionError(f"{text!r} is not painted")
 
 
+def _key_colours(widget, text: str) -> tuple:
+    """(text colour, fill colour) of the key *text* as painted, as 0-255 triples."""
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if text == segment.text.strip() and segment.style is not None:
+                return (
+                    segment.style.color.get_truecolor(), segment.style.bgcolor.get_truecolor(),
+                )
+    raise AssertionError(f"{text!r} is not painted")
+
+
+def _lum(colour) -> float:
+    def channel(value: int) -> float:
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(colour.red) + 0.7152 * channel(colour.green) + 0.0722 * channel(colour.blue)
+
+
+def _key_ratio(first, second) -> float:
+    light, dark = sorted((_lum(first), _lum(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("theme", ["servonaut", "servonaut-light"])
-async def test_key_hints_are_painted_in_the_muted_text_colour(theme: str) -> None:
+async def test_key_caps_are_a_quiet_key_on_a_raised_fill(theme: str) -> None:
     app = _HintColourApp()
     app.theme = theme
     async with app.run_test(size=(60, 10)) as pilot:
         app.set_focus(None)
         await pilot.pause()
-        muted = _hex_of(app.query_one("#muted"), "muted words")
-        assert _hex_of(app.query_one("#action"), "r") == muted
-        assert _hex_of(app.query_one("#link"), "y") == muted
-        assert _hex_of(app.query_one("#action"), "Refresh") != muted
+        words = _hex_of(app.query_one("#action"), "Refresh")
+        for selector, key in (("#action", "r"), ("#link", "y")):
+            colour, fill = _key_colours(app.query_one(selector), key)
+            # Readable on its fill, and quieter than the words beside it.
+            assert _key_ratio(colour, fill) >= 3.0, selector
+            assert colour.hex.lower() != words, selector
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
-async def test_key_hints_are_dimmed_in_the_terminal_colour_themes(theme: str) -> None:
+async def test_key_caps_are_reversed_in_the_terminal_colour_themes(theme: str) -> None:
     app = _HintColourApp()
     app.theme = theme
     async with app.run_test(size=(60, 10)) as pilot:
         app.set_focus(None)
         await pilot.pause()
-        for selector, hint, words in (("#action", "r", "Refresh"), ("#link", "y", "Copy row")):
+        for selector, key, words in (("#action", "r", "Refresh"), ("#link", "y", "Copy row")):
             widget = app.query_one(selector)
             styles = {}
             for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
                 for segment in strip:
-                    if segment.text.strip() in (hint, words) and segment.style is not None:
+                    if segment.text.strip() in (key, words) and segment.style is not None:
                         styles[segment.text.strip()] = segment.style
-            assert styles[hint].dim and not styles[words].dim, selector
+            assert styles[key].reverse and not styles[words].reverse, selector
 
 
 class _DisabledApp(App):

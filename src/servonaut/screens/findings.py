@@ -52,6 +52,8 @@ from servonaut.utils.instance_resolver import (
     resolve_unique,
 )
 from servonaut.utils.markup import literal
+from servonaut.utils.text_fit import cut
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
@@ -166,6 +168,10 @@ def _status_markup(status: str) -> Content:
     return _styled(_STATUS_STYLE, status)
 
 
+# Below this many cells the inbox drops its detector column and trims the rest.
+_NARROW_TABLE_WIDTH = 116
+
+
 class FindingsScreen(WorkspaceScreen):
     """Findings inbox — fleet-wide, or scoped to one instance."""
 
@@ -243,6 +249,7 @@ class FindingsScreen(WorkspaceScreen):
                     Static(
                         Content.assemble(literal("Monitoring findings", "bold"), scope),
                         id="findings_title",
+                        classes="screen-title",
                     ),
                     Static("", id="findings_status_pill"),
                     id="findings_heading",
@@ -268,10 +275,34 @@ class FindingsScreen(WorkspaceScreen):
                     )
                     yield Container(
                         Static("", id="findings_filter_line"),
-                        DataTable(id="findings_table"),
+                        PlannedTable(id="findings_table"),
                         id="findings_table_card",
                     )
         yield Footer()
+
+    def _add_columns(self, table: DataTable, *, narrow: bool) -> None:
+        """The inbox columns; a narrow content area drops the detector and trims the rest."""
+        table.add_column("Severity", key="severity", width=9 if narrow else 10)
+        table.add_column("Status", key="status", width=10 if narrow else 12)
+        if self._instance is None:
+            table.add_column("Instance", key="instance", width=16 if narrow else 22)
+        if not narrow:
+            table.add_column("Detector", key="detector", width=18)
+        table.add_column("Title", key="title", width=28 if narrow else None)
+        table.add_column("Detected", key="detected", width=10 if narrow else 16)
+
+    def _sync_columns(self) -> None:
+        """Choose the columns from the table's own width; rebuild only on a change."""
+        table = self.query_one("#findings_table", DataTable)
+        narrow = 0 < plannable_width(table) < _NARROW_TABLE_WIDTH
+        if narrow == getattr(self, "_narrow_columns", False):
+            return
+        self._narrow_columns = narrow
+        table = self.query_one("#findings_table", DataTable)
+        table.clear(columns=True)
+        self._add_columns(table, narrow=narrow)
+        if self._rows:
+            self._populate_table()
 
     def _restyle_rows(self, _theme: Any = None) -> None:
         """Cells carry theme colours fixed at add time: rebuild on a theme change."""
@@ -287,13 +318,9 @@ class FindingsScreen(WorkspaceScreen):
         self.query_one("#findings_table_card").border_title = "Findings inbox"
         table = self.query_one("#findings_table", DataTable)
         table.cursor_type = "row"
-        table.add_column("Severity", key="severity", width=10)
-        table.add_column("Status", key="status", width=12)
-        if self._instance is None:
-            table.add_column("Instance", key="instance", width=22)
-        table.add_column("Detector", key="detector", width=18)
-        table.add_column("Title", key="title")
-        table.add_column("Detected", key="detected", width=20)
+        self._narrow_columns = False
+        self._add_columns(table, narrow=False)
+        table.set_plan_handler(self._sync_columns)
         self._render_gate()
 
     # ------------------------------------------------------------------
@@ -545,11 +572,15 @@ class FindingsScreen(WorkspaceScreen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = themed_text(self.app, str(finding.get("detector") or ""))
+            detector = themed_text(self.app, cut(str(finding.get("detector") or ""), 18))
             title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = themed_text(self.app, str(finding.get("detected_at") or ""))
+            narrow = getattr(self, "_narrow_columns", False)
+            stamp = str(finding.get("detected_at") or "")
+            detected = themed_text(self.app, stamp[:10] if narrow else stamp[:16].replace("T", " "))
+            if narrow and len(title.plain) > 28:
+                title = themed_text(self.app, title.plain[:27] + "…")
             row = [
                 themed_text(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
                 themed_text(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
@@ -559,8 +590,10 @@ class FindingsScreen(WorkspaceScreen):
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(themed_text(self.app, label))
-            row.extend([detector, title, detected])
+                row.append(themed_text(
+                    self.app, cut(label, 16 if getattr(self, "_narrow_columns", False) else 22),
+                ))
+            row.extend([title, detected] if getattr(self, "_narrow_columns", False) else [detector, title, detected])
             table.add_row(*row)
         self._update_pill()
         self._update_filter_line()
@@ -1280,13 +1313,13 @@ class FindingDetailScreen(WorkspaceScreen):
             if not methods and account:
                 return None, (
                     f"No IP-ban configuration acts in AWS account "
-                    f"{account!r} — add one for it under Settings ▸ IP Ban "
+                    f"{account!r} — add one for it under Settings ▸ IP ban "
                     "before blocking an address."
                 )
             if not methods:
                 return None, (
                     "No IP-ban configuration found — add one under "
-                    "Settings ▸ IP Ban before blocking an address."
+                    "Settings ▸ IP ban before blocking an address."
                 )
             return methods[0], None
 

@@ -54,7 +54,7 @@ async def test_actions_are_hinted_buttons_at_natural_width(size: tuple[int, int]
         await pilot.pause()
         for button_id, key in ACTION_KEYS.items():
             button = app.screen.query_one(f"#{button_id}", ActionButton)
-            assert button.label.plain.endswith(key)
+            assert button.label.plain.endswith(f"\u2590{key}\u258c")
             if button.display:
                 assert button.region.width <= button.natural_width(short=False, hint=True)
                 # Natural width: never stretched across the report beside it.

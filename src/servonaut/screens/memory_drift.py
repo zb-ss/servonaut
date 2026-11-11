@@ -237,8 +237,9 @@ class MemoryDriftScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Container(
                     Static(
-                        "[bold $text-accent]Memory drift events[/bold $text-accent]",
+                        "[bold]Memory drift events[/bold]",
                         id="drift-title",
+                        classes="screen-title",
                     ),
                     Static("", id="drift-filter-label"),
                     id="drift-context",

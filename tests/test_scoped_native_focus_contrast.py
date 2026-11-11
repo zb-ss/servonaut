@@ -94,11 +94,18 @@ def _literal(app, widget, literal, palette):
             style = app.screen._compositor.get_style_at(column, y)
             fg, bg = _paint_colours(style, palette)
             glyphs.append({'style': str(style), 'bold': bool(style.bold),
-                           'underline': bool(style.underline),
+                           'underline': bool(style.underline), 'reverse': bool(style.reverse),
                            'foreground': list(fg), 'background': list(bg),
                            'contrast': _contrast(fg, bg)})
         return glyphs, (x, y)
     pytest.fail(f'Complete native label {literal!r} is not painted')
+
+
+def _frame_row(app, widget):
+    """The top edge of the widget as painted: its frame characters."""
+    strips = app.screen._compositor.render_strips()
+    region = widget.region
+    return strips[region.y].crop(region.x, region.right).text
 
 
 def _paint(app, widget, literal, palette, name, rows, failures):
@@ -154,12 +161,20 @@ async def test_vault_focus_dispatch_keeps_native_action(theme, clipboard, record
             assert not any(isinstance(m, Button.Pressed) and m.button is other
                            for m in messages.values())
             await _tab_to(pilot, other)
+            await pilot.hover(offset=(0, 0))
+            await pilot.pause()
+            idle_frame = _frame_row(app, button)
             await pilot.hover(button)
             await pilot.pause()
             assert app.focused is other and button.mouse_hover and not button.has_focus
             _paint(app, button, 'Use vault key', palette, 'vault-hover-only', rows, failures)
-            if app.current_theme.ansi and not all(g['underline'] for g in rows[-1]['glyphs']):
-                failures.append(['vault-hover-only', 'missing-native-hover-cue'])
+            # Hover is shown by the frame changing (or reversed text), never by an underline.
+            if app.current_theme.ansi:
+                if any(g['underline'] for g in rows[-1]['glyphs']):
+                    failures.append(['vault-hover-only', 'underlined-on-hover'])
+                reversed_text = any(g['reverse'] for g in rows[-1]['glyphs'])
+                if _frame_row(app, button) == idle_frame and not reversed_text:
+                    failures.append(['vault-hover-only', 'missing-native-hover-cue'])
             await _tab_to(pilot, button)
             await pilot.pause()
             assert app.focused is button and button.mouse_hover
@@ -287,3 +302,35 @@ async def test_scp_native_radioset_focus_direction_and_enter_do_not_transfer(
     finally:
         record_property('scoped_native_scp_focus', json.dumps({'rows': rows, 'failures': failures}))
     assert not failures, json.dumps(failures)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('theme', ['ansi-dark', 'ansi-light'])
+async def test_compact_action_hover_is_shown_reversed_in_terminal_themes(theme):
+    """A frameless action has no frame to change: its hover cue is reversed text."""
+    from textual.app import App
+
+    from servonaut.widgets.action_button import ActionButton
+    from tests.test_action_button import CSS_FILES
+
+    class _Host(App):
+        CSS_PATH = CSS_FILES
+
+        def compose(self):
+            yield ActionButton('Browse', 'b', compact=True, id='compact')
+            yield ActionButton('Other', 'o', compact=True, id='other')
+
+    app = _Host()
+    app.theme = theme
+    async with app.run_test(size=(60, 8)) as pilot:
+        palette = app.ansi_theme
+        button = app.query_one('#compact', ActionButton)
+        await pilot.hover(app.query_one('#other'))
+        await pilot.pause()
+        idle, _ = _literal(app, button, 'Browse', palette)
+        assert not any(g['reverse'] for g in idle)
+        await pilot.hover(button)
+        await pilot.pause()
+        hovered, _ = _literal(app, button, 'Browse', palette)
+        assert all(g['reverse'] for g in hovered)
+        assert not any(g['underline'] for g in hovered)

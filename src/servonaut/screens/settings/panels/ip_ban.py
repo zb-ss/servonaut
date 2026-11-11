@@ -139,7 +139,7 @@ class IpBanPanel(SettingsPanel):
         with Vertical(classes="settings-form-section settings-operations-section"):
             yield Static("Configured targets", classes="settings-group-title", markup=False)
             yield Static(
-                "Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
+                "Configure WAF IP sets, security groups or NACLs for IP banning. "
                 "WAF IP sets are the recommended method.",
                 classes="note",
             )

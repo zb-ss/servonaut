@@ -22,8 +22,8 @@ from textual.widgets import Button
 
 ActionRole = Literal["default", "primary", "warning", "error"]
 
-_KEY_GAP = "  "
-_COMPACT_KEY_GAP = "   "
+_KEY_GAP = " "
+_COMPACT_KEY_GAP = "  "
 # Cells a button adds around its label: padding and line pad, plus the border
 # when it is not compact; every button also keeps a one-cell margin.
 _COMPACT_CHROME = 4
@@ -38,52 +38,41 @@ _MAX_HINTED_LINES = 2
 # exactly the colour muted text has elsewhere.
 HINT_STYLE = "$text-muted 60%"
 
+# A key hint is drawn as a small key cap built from characters, in the one text
+# row of the button: the key between two half-block edges (``▐s▌``) on a raised
+# fill. The fill is a tint of the text colour laid over whatever is behind the
+# button, so it shows in every theme and in every state of the button.
+_CAP_FILL = "$foreground 15%"
+_CAP_KEY = f"$text on {_CAP_FILL}"
 
-def hint_style(widget: Widget) -> str:
-    """The hint style for the theme *widget* is shown in.
 
-    Terminal-colour themes have no muted colour of their own (it resolves to
-    the label's), so the hint is dimmed instead.
+def keycap_parts(key: str, *, ansi: bool = False, disabled: bool = False) -> list:
+    """The pieces ``(text, style)`` of a key cap for *key*; the key is literal text.
+
+    Whatever the style, the cap adds two cells around the key. A disabled
+    button's key is quiet, with no fill. A terminal-colour theme has no tints,
+    so its key cap is drawn reversed instead.
     """
-    return "dim" if widget.app.current_theme.ansi else HINT_STYLE
+    if disabled:
+        quiet = "dim" if ansi else HINT_STYLE
+        return [(" ", quiet), (key, quiet), (" ", quiet)]
+    if ansi:
+        return [(" ", "reverse"), (key, "reverse"), (" ", "reverse")]
+    return [("\u2590", _CAP_FILL), (key, _CAP_KEY), ("\u258c", _CAP_FILL)]
 
 
-def with_theme_hints(widget: Widget, label: Content) -> Content:
-    """*label* with its key-hint span drawn in the style of the current theme."""
-    style = hint_style(widget)
-    if style == HINT_STYLE:
-        return label
-    return Content.assemble(*(
-        (label.plain[span.start:span.end], style) if str(span.style) == HINT_STYLE
-        else label.plain[span.start:span.end]
-        for span in _segments(label)
-    ))
-
-
-def _segments(label: Content) -> list:
-    """Spans covering the whole label, plain stretches included."""
-    from textual.content import Span
-
-    spans, position = [], 0
-    for span in sorted(label.spans, key=lambda item: item.start):
-        if span.start > position:
-            spans.append(Span(position, span.start, ""))
-        spans.append(span)
-        position = span.end
-    if position < len(label.plain):
-        spans.append(Span(position, len(label.plain), ""))
-    return spans
-
-
-def action_label(text: str, key: str | None = None, gap: str = _KEY_GAP) -> Content:
-    """The label shown on an action: *text*, then *key* as a muted hint.
+def action_label(
+    text: str, key: str | None = None, gap: str = _KEY_GAP, *,
+    ansi: bool = False, disabled: bool = False,
+) -> Content:
+    """The label shown on an action: *text*, then *key* as a small key cap.
 
     Both parts are literal: neither is parsed as markup, so a label built from
     server- or user-supplied text cannot restyle or break the button.
     """
     if not key:
         return Content(text)
-    return Content.assemble(text, gap, (key, HINT_STYLE))
+    return Content.assemble(text, gap, *keycap_parts(key, ansi=ansi, disabled=disabled))
 
 
 class ActionButton(Button):
@@ -111,7 +100,7 @@ class ActionButton(Button):
             self._label(compact, True),
             variant=role,
             id=id,
-            classes=classes,
+            classes=f"{classes or ''} -keycap".strip() if key else classes,
             tooltip=tooltip,
             disabled=disabled,
             compact=compact,
@@ -122,14 +111,19 @@ class ActionButton(Button):
         """The full words of the action, without its key hint."""
         return self._text
 
-    def _label(self, compact: bool, hint: bool, use_short: bool | None = None) -> Content:
+    def _label(
+        self, compact: bool, hint: bool, use_short: bool | None = None, *,
+        ansi: bool = False, disabled: bool = False,
+    ) -> Content:
         shorter = self._use_short if use_short is None else use_short
         words = self._short if (compact or shorter) and self._short else self._text
         gap = _COMPACT_KEY_GAP if compact else _KEY_GAP
-        return action_label(words, self._key if hint else None, gap)
+        return action_label(words, self._key if hint else None, gap, ansi=ansi, disabled=disabled)
 
     def _refresh_label(self) -> None:
         self.label = self._label(self.compact, self._hint)
+        # The cap's right edge is half a cell of its own: the button gives that cell back.
+        self.set_class(bool(self._key and self._hint), "-keycap")
         # An auto width is measured from the label; measure it again.
         self.refresh(layout=True)
         if self.parent is not None:
@@ -142,7 +136,10 @@ class ActionButton(Button):
             row.request_fit()
 
     def render(self) -> Content:
-        return with_theme_hints(self, self.label)
+        """The label, with its key cap drawn for the theme and the button's state."""
+        return self._label(
+            self.compact, self._hint, ansi=self.app.current_theme.ansi, disabled=self.disabled,
+        )
 
     def watch_compact(self, compact: bool) -> None:
         """Use the short words when only one row is available."""
@@ -169,6 +166,7 @@ class ActionButton(Button):
     def natural_width(self, *, short: bool, hint: bool) -> int:
         """Cells this button needs, margin included, for the given words and hint."""
         chrome = _COMPACT_CHROME if self.compact else _FULL_CHROME
+        chrome -= 1 if (hint and self._key) else 0
         return self._label(self.compact, hint, short).cell_length + chrome + _MARGIN
 
 

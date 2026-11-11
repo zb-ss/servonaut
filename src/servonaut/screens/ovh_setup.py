@@ -3,7 +3,7 @@
 Sets up the primary OVHcloud account (the ``ovh`` block itself) and adds or
 edits EXTRA accounts (``ovh.accounts``), each with its own endpoint and
 credentials — an application key set or an OAuth2 service account — and
-its own projects, filters, SSH defaults and Object Storage keys. An extra
+its own projects, filters, SSH defaults and object storage keys. An extra
 account's credentials are tested before it is saved.
 """
 

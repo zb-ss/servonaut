@@ -10,12 +10,6 @@ BulkShareScreen #bulk-container {
     height: 1fr;
 }
 
-BulkShareScreen #bulk-title {
-    height: auto;
-    text-style: bold;
-    color: $text-accent;
-}
-
 /* Errors and live progress remain visible without consuming the whole form. */
 BulkShareScreen #bulk-state {
     height: auto;

@@ -85,8 +85,13 @@ def _match_button_label_rows(
             continue
         columns = []
         for fragment, row in zip(expected, painted[start:]):
+            # A disabled button draws its key without the cap's edges.
+            variants = (fragment, fragment.replace("\u2590", " ").replace("\u258c", " "))
             for column in range(len(row) - len(fragment) + 1):
-                if row == " " * column + fragment + " " * (len(row) - column - len(fragment)):
+                if any(
+                    row == " " * column + variant + " " * (len(row) - column - len(variant))
+                    for variant in variants
+                ):
                     columns.append(column)
                     break
             else:

@@ -669,7 +669,7 @@ class HetznerAccountsSection(AccountsSection):
     NOUN = "project"
     HEADING = "Projects"
     HELP = (
-        "Each project has its own API token, SSH defaults and Object Storage "
+        "Each project has its own API token, SSH defaults and object storage "
         "keys; Add project or Edit opens its form."
     )
     COLUMNS = ("Label", "API token")
@@ -729,7 +729,7 @@ class OvhAccountsSection(AccountsSection):
     PROVIDER = "ovh"
     HELP = (
         "Each account has its own API credentials, projects, SSH defaults and "
-        "Object Storage keys; Add account or Edit opens its form."
+        "object storage keys; Add account or Edit opens its form."
     )
     COLUMNS = ("Label", "Endpoint", "Auth", "Projects")
 

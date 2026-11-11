@@ -85,6 +85,8 @@ class TeamManagementScreen(WorkspaceScreen):
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 64
     CONTENT_NARROW_WIDTH = 95
+    # Short terminals get tighter cards, so a card fits above the return lane.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._server_busy:

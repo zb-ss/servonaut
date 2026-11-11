@@ -86,7 +86,7 @@ async def test_five_actions_wrap_into_two_lines_that_keep_their_hints() -> None:
         row = app.query_one(ActionRow)
         buttons = list(row.query(ActionButton))
         assert row.has_class("-wrap")
-        assert all(b.label.plain.endswith(k) for b, (_, k) in zip(buttons, FIVE))
+        assert all(b.label.plain.endswith(f"\u2590{k}\u258c") for b, (_, k) in zip(buttons, FIVE))
         assert len({b.region.y for b in buttons}) == 2
         host = app.query_one("#host")
         assert all(host.region.contains_region(b.region) for b in buttons)
@@ -146,7 +146,7 @@ async def test_wrapped_columns_follow_their_own_content() -> None:
         ), id="box7"))
         await pilot.pause()
         await pilot.pause()
-        buttons = {b.label.plain.split("  ")[0]: b for b in app.query("#box7 ActionButton")}
+        buttons = {b.label.plain.split(" \u2590")[0]: b for b in app.query("#box7 ActionButton")}
         assert len({b.region.y for b in buttons.values()}) <= 2
         assert buttons["Refresh status"].region.width < buttons["Switch on SSH certificates"].region.width
 
@@ -245,7 +245,7 @@ async def test_keep_hints_wins_over_prefer_one_line() -> None:
         await wait_until(lambda: row.size.width > 0 and all(b.region.width > 0 for b in app.query(ActionButton)))
         await pilot.pause()
         assert row.has_class("-wrap")
-        assert all(b.label.plain.rstrip().endswith(str(i)) for i, b in enumerate(app.query(ActionButton)))
+        assert all(b.label.plain.rstrip().endswith(f"{i}\u258c") for i, b in enumerate(app.query(ActionButton)))
 
 
 class _CompactWrapApp(App):
