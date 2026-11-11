@@ -33,3 +33,14 @@ def test_ovh_ssh_keys_title_is_shared(size: str) -> None:
         assert not [s for s in title.visual.spans if "accent" in str(s.style)]
 
     run(_ovh_ssh_keys, size, check, "title-ovh-ssh-keys")
+
+
+def test_hetzner_manager_keeps_its_title_in_view_at_100x30() -> None:
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        title = screen.query_one("#hetzner_mgr_header")
+        assert screen.region.contains_region(title.region), "the title is scrolled out of view"
+        table = screen.query_one("#hetzner_mgr_table")
+        assert screen.query_one("#hetzner_mgr_container").region.contains_region(table.region)
+
+    run(_hetzner_manager, "100x30", check, "hetzner-manager")

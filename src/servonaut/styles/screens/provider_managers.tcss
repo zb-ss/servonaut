@@ -263,3 +263,31 @@ HetznerManagerScreen.-content-narrow .provider-manager-danger .provider-manager-
 OVHManagerScreen.-content-narrow .provider-manager-danger .provider-manager-action-label {
     padding: 0;
 }
+
+/* Short terminals: a compact rail, so the title and the table fit together. */
+AWSManagerScreen.-short #aws_mgr_container,
+HetznerManagerScreen.-short #hetzner_mgr_container,
+OVHManagerScreen.-short #ovh_mgr_container {
+    padding: 0 1;
+}
+
+AWSManagerScreen.-short .provider-manager-selection-label,
+HetznerManagerScreen.-short .provider-manager-selection-label,
+OVHManagerScreen.-short .provider-manager-selection-label,
+AWSManagerScreen.-short .provider-manager-action-label,
+HetznerManagerScreen.-short .provider-manager-action-label,
+OVHManagerScreen.-short .provider-manager-action-label {
+    display: none;
+}
+
+AWSManagerScreen.-short .provider-manager-danger,
+HetznerManagerScreen.-short .provider-manager-danger,
+OVHManagerScreen.-short .provider-manager-danger {
+    border-top: solid $error;
+}
+
+AWSManagerScreen.-short .provider-manager-inventory,
+HetznerManagerScreen.-short .provider-manager-inventory,
+OVHManagerScreen.-short .provider-manager-inventory {
+    padding: 0 1;
+}

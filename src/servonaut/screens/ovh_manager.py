@@ -128,6 +128,8 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 64
     # Keep the full action row only where labels, spacing and scrollbar fit.
     CONTENT_NARROW_WIDTH = 105
+    # Short terminals get a compact action rail, so the title and table fit.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
