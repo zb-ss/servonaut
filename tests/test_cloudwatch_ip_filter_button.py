@@ -22,7 +22,7 @@ async def test_ip_filter_button_and_key_cycle_the_same_filter() -> None:
         screen = await _opener("watch")(app, pilot)
         toggle = screen.query_one("#cw_btn_ip_filter", ActionButton)
         assert toggle.words == "Show all"
-        assert toggle.label.plain.split() == ["Show", "all", "f"]
+        assert toggle.label.plain.split() == ["Show", "all", "\u2590f\u258c"]
         # The button is painted on its own row, inside the panel header.
         header = screen.query_one("#cw_top_ips_header")
         assert toggle.region.height == 1 and header.region.contains_region(toggle.region)

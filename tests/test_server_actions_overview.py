@@ -204,7 +204,8 @@ async def test_key_hints_match_real_bindings() -> None:
         screen = await _open_actions(app, pilot)
         keys = {binding.key.lower() for binding in ServerActionsScreen.BINDINGS}
         for button in screen.query(ActionButton):
-            hint = button.label.plain.rsplit("  ", 1)[-1] if "  " in button.label.plain else None
+            plain = button.label.plain
+            hint = plain.rsplit("\u2590", 1)[-1].rstrip("\u258c") if "\u2590" in plain else None
             if hint is not None:
                 assert {"esc": "escape"}.get(hint.lower(), hint.lower()) in keys, button.id
             else:

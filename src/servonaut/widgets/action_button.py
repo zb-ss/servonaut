@@ -22,8 +22,8 @@ from textual.widgets import Button
 
 ActionRole = Literal["default", "primary", "warning", "error"]
 
-_KEY_GAP = "  "
-_COMPACT_KEY_GAP = "   "
+_KEY_GAP = " "
+_COMPACT_KEY_GAP = "  "
 # Cells a button adds around its label: padding and line pad, plus the border
 # when it is not compact; every button also keeps a one-cell margin.
 _COMPACT_CHROME = 4

@@ -309,7 +309,7 @@ async def test_link_key_hint_is_quiet_and_not_underlined() -> None:
         assert underlined == "Copy row"
         assert [text for text, _ in hint_styles] == ["\u2590", "y", "\u258c"]
         assert hint_styles[1][1].color not in word_colours  # dimmer than the words
-        assert link.label.plain == "Copy row  \u2590y\u258c"
+        assert link.label.plain == "Copy row \u2590y\u258c"
 
 
 class _HintColourApp(App):

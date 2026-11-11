@@ -16,7 +16,7 @@ EDGE_LEFT, EDGE_RIGHT = "▐", "▌"
 def test_a_key_cap_is_the_key_between_two_edges_and_adds_two_cells() -> None:
     parts = keycap_parts("ctrl+r")
     assert [text for text, _ in parts] == [EDGE_LEFT, "ctrl+r", EDGE_RIGHT]
-    assert action_label("Reload", "ctrl+r").cell_length == len("Reload") + 2 + len("ctrl+r") + 2
+    assert action_label("Reload", "ctrl+r").cell_length == len("Reload") + 1 + len("ctrl+r") + 2
 
 
 def test_the_key_is_literal_text() -> None:

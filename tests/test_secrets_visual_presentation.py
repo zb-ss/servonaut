@@ -89,7 +89,7 @@ async def test_actions_are_standard_buttons_with_key_hints() -> None:
         assert buttons[0].variant == "primary"
         for button in buttons:
             key = button.id.removeprefix("secrets_action_")
-            assert str(button.label).endswith(key)
+            assert str(button.label).endswith(f"\u2590{key}\u258c")
             assert key in screen._ACTION_NAMES
 
 

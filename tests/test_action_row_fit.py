@@ -146,7 +146,7 @@ async def test_wrapped_columns_follow_their_own_content() -> None:
         ), id="box7"))
         await pilot.pause()
         await pilot.pause()
-        buttons = {b.label.plain.split("  ")[0]: b for b in app.query("#box7 ActionButton")}
+        buttons = {b.label.plain.split(" \u2590")[0]: b for b in app.query("#box7 ActionButton")}
         assert len({b.region.y for b in buttons.values()}) <= 2
         assert buttons["Refresh status"].region.width < buttons["Switch on SSH certificates"].region.width
 

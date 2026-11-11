@@ -108,7 +108,7 @@ ActionButton.-textual-compact.-primary:ansi {
    would look the same focused, hovered and idle. */
 ActionButton.-textual-compact.-primary:ansi:hover {
     background: $surface;
-    text-style: bold;
+    text-style: bold reverse;
 }
 
 ActionButton.-textual-compact.-primary:ansi:focus {

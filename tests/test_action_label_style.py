@@ -110,8 +110,8 @@ async def test_memory_prompt_buttons_and_keys_share_actions(monkeypatch) -> None
         accept = app.query_one("#memory_prompt_accept", ActionButton)
         dismiss = app.query_one("#memory_prompt_dismiss", ActionButton)
         assert (accept.words, dismiss.words) == ("Build", "Dismiss")
-        assert accept.label.plain.split() == ["Build", "y"]
-        assert dismiss.label.plain.split() == ["Dismiss", "n"]
+        assert accept.label.plain.split() == ["Build", "\u2590y\u258c"]
+        assert dismiss.label.plain.split() == ["Dismiss", "\u2590n\u258c"]
         await pilot.click("#memory_prompt_accept")
         await pilot.pause()
         assert calls == ["build"]
