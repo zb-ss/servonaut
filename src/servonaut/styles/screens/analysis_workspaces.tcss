@@ -154,19 +154,6 @@ AIConversationsScreen #convs_container {
     overflow-y: auto;
 }
 
-AIConversationsScreen #convs_title {
-    height: 2;
-    border-bottom: solid $border-blurred;
-    color: $text-accent;
-    text-style: bold;
-}
-
-AIConversationsScreen #convs_subtitle {
-    height: auto;
-    margin-bottom: 1;
-    color: $text-muted;
-}
-
 AIConversationsScreen #convs_tabs {
     height: 1fr;
     min-height: 16;
@@ -248,13 +235,10 @@ AIConversationsScreen #local_actions {
     margin: 0;
 }
 
-AIConversationsScreen.-content-narrow #convs_title {
-    height: 1;
-    border-bottom: none;
-}
-
-AIConversationsScreen.-content-narrow #convs_subtitle {
-    margin-bottom: 0;
+/* The tabs take what the screen has: fixed minimum heights would push the
+   action buttons below the visible area on a short terminal. */
+AIConversationsScreen.-content-narrow #convs_tabs {
+    min-height: 0;
 }
 
 AIConversationsScreen.-content-narrow TabPane {
@@ -269,14 +253,24 @@ AIConversationsScreen.-content-narrow #local_search {
 AIConversationsScreen.-content-narrow #convs_workspace,
 AIConversationsScreen.-content-narrow #local_workspace {
     layout: vertical;
-    min-height: 14;
+    min-height: 0;
 }
 
 AIConversationsScreen.-content-narrow #convs_listing,
 AIConversationsScreen.-content-narrow #local_listing {
     width: 100%;
     height: 1fr;
-    min-height: 8;
+    min-height: 4;
+}
+
+AIConversationsScreen.-content-narrow #convs_scroll,
+AIConversationsScreen.-content-narrow #local_scroll {
+    min-height: 3;
+}
+
+AIConversationsScreen.-content-narrow #convs_pager,
+AIConversationsScreen.-content-narrow #local_pager {
+    min-height: 1;
 }
 
 AIConversationsScreen.-content-narrow #convs_actions,

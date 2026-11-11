@@ -54,11 +54,16 @@ def manager(tmp_path: Path, folder: Path) -> ConfigManager:
     return config
 
 
+from tests.conftest import _ChoiceInEveryWidthClass
+
+
 class _Host(ServonautApp):
     def __init__(self, manager: ConfigManager, panel_id: str = "appearance") -> None:
         super().__init__()
         self.config_manager = manager
         self.workspace_state.navigation_visible = False
+        # An explicit choice, held in every width class, as the toggle makes it.
+        self.workspace_state.navigation_choice_class = _ChoiceInEveryWidthClass("any")
         self.theme = manager.get().theme
         self.panel_id = panel_id
 

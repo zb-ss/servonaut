@@ -223,7 +223,7 @@ class ShareInstanceScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         name = str(self._instance.get("name") or self._instance.get("id", "?"))
         yield SafeHeader()
-        yield WorkspaceControls("Share Memory")
+        yield WorkspaceControls("Share memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield Container(
@@ -231,7 +231,7 @@ class ShareInstanceScreen(WorkspaceScreen):
                     Container(
                         Static(
                             Content.from_markup(
-                                "[bold $text-accent]Share Memory: $name[/bold $text-accent]", name=name
+                                "[bold $text-accent]Share memory: $name[/bold $text-accent]", name=name
                             ),
                             id="share-title",
                         ),
@@ -252,7 +252,7 @@ class ShareInstanceScreen(WorkspaceScreen):
                                     classes="share-field-row",
                                 ),
                                 Container(
-                                    Label("Required Role"),
+                                    Label("Required role"),
                                     Select(
                                         options=_ROLE_OPTIONS,
                                         value="viewer",

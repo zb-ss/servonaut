@@ -60,7 +60,7 @@ async def test_short_chat_keeps_six_reply_rows_and_all_native_actions(
         assert messages.content_region.height >= 6
         assert messages.scrollable_content_region.height >= 6
         assert "Servonaut AI Assistant" in _painted(app, panel.query_one("#chat-logo"))
-        assert "MCP Server Online" in _painted(app, panel.query_one("#chat-logo"))
+        assert "MCP server online" in _painted(app, panel.query_one("#chat-logo"))
         footer = app.screen.query_one(Footer)
         for name in ("new", "history", "provider", "close", "mic", "convo", "send"):
             button = panel.query_one(f"#btn-chat-{name}", Button)
@@ -94,7 +94,7 @@ async def test_height_state_uses_row_allocation_and_clears_on_collapse(
             assert panel.region.contains_region(header.region)
             assert header.region.contains_region(logo.region)
             assert "Servonaut AI Assistant" in _painted(app, logo)
-            assert "MCP Server Online" in _painted(app, logo)
+            assert "MCP server online" in _painted(app, logo)
             for name in ("new", "history", "provider", "close"):
                 button = panel.query_one(f"#btn-chat-{name}", Button)
                 assert header.region.contains_region(button.region)

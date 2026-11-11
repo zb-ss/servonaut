@@ -2081,7 +2081,7 @@ def test_file_key_storage_setting_applies_without_a_restart() -> None:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), config)
     assert service.store.allow_file_key_store is False
 
-    config.vault.allow_file_key_store = True  # Settings > Team Vault saved in the running app
+    config.vault.allow_file_key_store = True  # Settings > Team vault saved in the running app
     service.unlock_existing_identity()
 
     assert service.store.allow_file_key_store is True

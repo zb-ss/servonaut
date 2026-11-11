@@ -152,14 +152,14 @@ class BulkShareScreen(WorkspaceScreen):
         count = len(self._targets)
         servers = f"{count} server" if count == 1 else f"{count} servers"
         yield SafeHeader()
-        yield WorkspaceControls("Share Memory")
+        yield WorkspaceControls("Share memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="bulk_outer", classes="workspace-content"):
                 with Container(id="bulk-container"):
                     yield Static(
                         Content.from_markup(
-                            "[bold $text-accent]Share Memory: $servers[/bold $text-accent]",
+                            "[bold $text-accent]Share memory: $servers[/bold $text-accent]",
                             servers=servers,
                         ),
                         id="bulk-title",
@@ -466,7 +466,7 @@ class BulkShareScreen(WorkspaceScreen):
             return "Nothing was shared"
         return (
             f"Sharing ended early after {self._changed} of {len(self._targets)} servers "
-            "were changed (open Fleet Memory to see what is shared)"
+            "were changed (open Fleet memory to see what is shared)"
         )
 
     def _set_sending(self, sending: bool) -> None:

@@ -262,11 +262,11 @@ async def test_scp_native_radioset_focus_direction_and_enter_do_not_transfer(
             await pilot.pause()
             assert radio.has_focus and not upload.can_focus and not download.can_focus
             geometry = radio.region, upload.region, download.region
-            _paint(app, upload, 'Upload (Local → Remote)', palette, 'radio-upload-selected', rows, failures)
+            _paint(app, upload, 'Upload (local → remote)', palette, 'radio-upload-selected', rows, failures)
             await pilot.press('right')
             await pilot.pause()
             assert screen._transfer_direction == 'upload' and download.has_class('-selected')
-            _paint(app, download, 'Download (Remote → Local)', palette, 'radio-download-selected', rows, failures)
+            _paint(app, download, 'Download (remote → local)', palette, 'radio-download-selected', rows, failures)
             await pilot.press('space')
             await wait_until(lambda: screen._transfer_direction == 'download')
             await pilot.press('up', 'enter')

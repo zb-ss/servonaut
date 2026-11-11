@@ -140,7 +140,7 @@ class AWSCreateScreen(WorkspaceScreen):
                 BusyIndicator(id="read_loading", classes="read-loading"),
                 Vertical(
                     Static(
-                        "Launch EC2 Instance",
+                        "Launch EC2 instance",
                         id="aws_create_title",
                         classes="screen-title",
                     ),
@@ -153,7 +153,7 @@ class AWSCreateScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static("Identity and location", classes="compute-section-title"),
-                        Static("[bold]Instance Name[/bold]", classes="section_header"),
+                        Static("[bold]Instance name[/bold]", classes="section_header"),
                         Static(
                             "[dim]Display name for the new instance — stored as the "
                             "[b]Name[/b] tag and visible in the EC2 console and "
@@ -163,10 +163,10 @@ class AWSCreateScreen(WorkspaceScreen):
                         Input(placeholder="e.g. web-prod-01", id="aws_input_name"),
                         AccountPicker(
                             provider_accounts(self.app, "aws"),
-                            label="Select Account",
+                            label="Select account",
                             id="aws_create_account",
                         ),
-                        Static("[bold]Select Region[/bold]", classes="section_header"),
+                        Static("[bold]Select region[/bold]", classes="section_header"),
                         Static(
                             "[dim]Pick a region first — AMI / instance-type / "
                             "key-pair / subnet / SG tables reload automatically "
@@ -190,14 +190,14 @@ class AWSCreateScreen(WorkspaceScreen):
                             Input(placeholder="Filter by name…", id="aws_input_ami_search"),
                             Static("[bold]Select AMI[/bold]", classes="section_header"),
                             DataTable(id="aws_amis_table"),
-                            Static("[bold]Select Instance Type[/bold]",
+                            Static("[bold]Select instance type[/bold]",
                                    classes="section_header"),
                             DataTable(id="aws_types_table"),
                             classes="compute-form-section",
                         ),
                         Vertical(
                             Static("Access and network", classes="compute-section-title"),
-                            Static("[bold]Select Key Pair[/bold]", classes="section_header"),
+                            Static("[bold]Select key pair[/bold]", classes="section_header"),
                             Static(
                                 "[dim]EC2 key pair whose public key will be injected "
                                 "into the instance. The private key must be on your "
@@ -205,7 +205,7 @@ class AWSCreateScreen(WorkspaceScreen):
                                 classes="note",
                             ),
                             DataTable(id="aws_keys_table"),
-                            Static("[bold]Select Subnet[/bold]", classes="section_header"),
+                            Static("[bold]Select subnet[/bold]", classes="section_header"),
                             Static(
                                 "[dim]VPC subnet for network placement. Choose one in "
                                 "the availability zone you want. A public subnet gives "
@@ -214,7 +214,7 @@ class AWSCreateScreen(WorkspaceScreen):
                                 classes="note",
                             ),
                             DataTable(id="aws_subnets_table"),
-                            Static("[bold]Select Security Group[/bold]",
+                            Static("[bold]Select security group[/bold]",
                                    classes="section_header"),
                             Static(
                                 "[dim]The security group controls inbound/outbound "
@@ -237,7 +237,7 @@ class AWSCreateScreen(WorkspaceScreen):
                         classes="compute-review-note",
                     ),
                     Horizontal(
-                        Button("Launch Instance", variant="primary",
+                        Button("Launch instance", variant="primary",
                                id="btn_aws_create_submit"),
                         Button("Back", variant="default",
                                id="btn_aws_create_back"),
@@ -307,7 +307,7 @@ class AWSCreateScreen(WorkspaceScreen):
         types_tbl.cursor_type = "row"
 
         keys_tbl = self.query_one("#aws_keys_table", DataTable)
-        keys_tbl.add_columns("Key Name", "ID", "Fingerprint")
+        keys_tbl.add_columns("Key name", "ID", "Fingerprint")
         keys_tbl.cursor_type = "row"
 
         subnets_tbl = self.query_one("#aws_subnets_table", DataTable)
@@ -780,7 +780,7 @@ class AWSCreateScreen(WorkspaceScreen):
             places.insert(0, shown_label(self.app, self._account))
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Launch EC2 Instance",
+                title="Launch EC2 instance",
                 description=with_bold_values(
                     "Launch {} in " + ", ".join(["{}"] * len(places))
                     + " as {} with AMI {}, key {}, subnet {}, SG {}.",
@@ -792,7 +792,7 @@ class AWSCreateScreen(WorkspaceScreen):
                     "Data on instance-store volumes is lost on stop/terminate",
                 ],
                 confirm_text="launch",
-                action_label="Launch Instance",
+                action_label="Launch instance",
                 severity="warning",
             )
         )

@@ -297,7 +297,7 @@ class VoicePanel(SettingsPanel):
     """
 
     PANEL_ID = "voice"
-    TITLE = "Voice Input"
+    TITLE = "Voice input"
     DESCRIPTION = "Local dictation, spoken replies and hands-free conversation."
 
     DEFAULT_CSS = """

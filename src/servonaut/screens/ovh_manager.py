@@ -672,7 +672,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete OVH Cloud Instance",
+                title="Delete OVH Public Cloud instance",
                 description=with_bold_values(
                     "Delete {} ({}) in project {}?",
                     label, inst.get('type', ''), project_label,

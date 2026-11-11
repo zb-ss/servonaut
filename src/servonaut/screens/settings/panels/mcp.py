@@ -61,7 +61,7 @@ class McpPanel(SettingsPanel):
     """
 
     PANEL_ID = "mcp"
-    TITLE = "MCP Server"
+    TITLE = "MCP server"
     DESCRIPTION = 'Tool permissions, audit output and command policies.'
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.

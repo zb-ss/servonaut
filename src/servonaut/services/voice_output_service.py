@@ -132,7 +132,7 @@ _STREAM_IDLE_CLOSE_SECONDS = 2.0
 
 _INSTALL_HINT = "Spoken replies need: pip install 'servonaut[voice-output]'"
 _NO_DEVICE_HINT = "No audio output device detected"
-_NO_MODEL_HINT = "The speech model is not downloaded yet — see Settings > Voice Input"
+_NO_MODEL_HINT = "The speech model is not downloaded yet — see Settings > Voice input"
 
 
 class VoiceOutputError(Exception):

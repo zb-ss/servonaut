@@ -118,7 +118,7 @@ def _kind(screen: WorkspaceScreen) -> str:
 async def _ready(screen: WorkspaceScreen) -> None:
     ids = IDS[_kind(screen)]
     await wait_until(lambda: screen.query_one(ids.token, Input).value != "")
-    assert screen.query_one(ids.test, Button).label.plain == "Test Connection"
+    assert screen.query_one(ids.test, Button).label.plain == "Test connection"
 
 
 def _seed(screen: WorkspaceScreen) -> None:

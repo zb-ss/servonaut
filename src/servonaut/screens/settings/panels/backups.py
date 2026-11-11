@@ -80,22 +80,22 @@ class BackupsPanel(SettingsPanel):
     def form_rows(self) -> ComposeResult:
         """Yield the snapshot and local-backup launcher rows."""
         with Vertical(classes="settings-form-section settings-operations-section"):
-            yield Static("Config Sync", classes="backups-section-label settings-group-title")
+            yield Static("Config sync", classes="backups-section-label settings-group-title")
             yield Static(_SNAPSHOT_INFO, classes="backups-note")
             yield Horizontal(
                 Button(
-                    "Manage Snapshots",
+                    "Manage snapshots",
                     id="backups_open_snapshots",
                     variant="primary",
                 ),
                 classes="setting_row",
             )
         with Vertical(classes="settings-form-section settings-operations-section"):
-            yield Static("Local Backups", classes="backups-section-label settings-group-title")
+            yield Static("Local backups", classes="backups-section-label settings-group-title")
             yield Static(_BACKUP_INFO, classes="backups-note")
             yield Horizontal(
                 Button(
-                    "Restore Local Backup",
+                    "Restore local backup",
                     id="backups_open_restore",
                     variant="default",
                 ),

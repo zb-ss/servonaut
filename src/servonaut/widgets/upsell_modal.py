@@ -93,7 +93,7 @@ class UpsellModal(ModalScreen[None]):
             body=DialogBody(Static(description, id="upsell-body")),
             actions=DialogActions(
                 Button("Close", variant="default", id="upsell-btn-close"),
-                Button("View Plans", variant="warning", id="upsell-btn-upgrade"),
+                Button("View plans", variant="warning", id="upsell-btn-upgrade"),
                 id="upsell-btn-row",
             ),
             id="upsell-container",
@@ -124,7 +124,7 @@ class BetaWaitlistModal(ModalScreen[None]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]You're on the Waitlist[/bold $text-accent]",
+                "[bold $text-accent]You're on the waitlist[/bold $text-accent]",
                 id="waitlist-title",
             ),
             body=DialogBody(
@@ -163,7 +163,7 @@ class BackendMaintenanceModal(ModalScreen[None]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-error]Memory Sync Unavailable[/bold $text-error]",
+                "[bold $text-error]Memory Sync unavailable[/bold $text-error]",
                 id="maintenance-title",
             ),
             body=DialogBody(

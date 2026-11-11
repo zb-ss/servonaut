@@ -4,11 +4,6 @@ HelpScreen #help_workspace {
     height: 100%;
     padding: 0 2 1 2;
 }
-HelpScreen #help_navigation_hint {
-    height: auto;
-    margin: 0 0 1 0;
-    color: $text-muted;
-}
 HelpScreen #help_container {
     width: 100%;
     height: 1fr;

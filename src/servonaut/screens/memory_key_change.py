@@ -102,7 +102,7 @@ class MemberKeyChangeScreen(WorkspaceScreen):
             else "Tick the keys that match. The others keep waiting."
         )
         yield SafeHeader()
-        yield WorkspaceControls("Confirm Memory Keys")
+        yield WorkspaceControls("Confirm memory keys")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Container(id="keychange-outer", classes="workspace-content"):

@@ -48,7 +48,7 @@ class BwSshPanel(SettingsPanel):
     """
 
     PANEL_ID = "bw_ssh"
-    TITLE = "Bitwarden SSH Vault"
+    TITLE = "Bitwarden SSH vault"
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -108,7 +108,7 @@ class BwSshPanel(SettingsPanel):
                 classes="bw-actions-row",
             )
         yield Container(
-            Static("[bold]Edit Vault Wiring[/bold]", classes="section_header"),
+            Static("[bold]Edit vault wiring[/bold]", classes="section_header"),
             setting_row(
                 "Vault URL",
                 Input(

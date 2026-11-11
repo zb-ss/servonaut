@@ -370,6 +370,16 @@ Switch {
     background: transparent;
 }
 
+/* A compact control has no frame at all, focused or not: the frames above must
+   not give it two more rows. */
+TextArea.-textual-compact,
+Checkbox.-textual-compact,
+RadioSet.-textual-compact,
+Switch.-textual-compact,
+OptionList.-textual-compact {
+    border: none !important;
+}
+
 /* Keep the selected label readable on the theme's native cursor fill. */
 SelectOverlay:focus > .option-list--option-highlighted {
     color: auto 100%;

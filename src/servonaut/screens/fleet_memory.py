@@ -97,13 +97,13 @@ _SOURCE_CELL: Dict[str, tuple[str, str]] = {
 _MAX_PARALLEL_FLEET_PROBES = 4
 
 _EMPTY_TEXT = (
-    "Fleet Memory keeps a cached set of facts about each server (operating "
+    "Fleet memory keeps a cached set of facts about each server (operating "
     "system, services, containers, web stack and log paths), so the chat "
     "panel and MCP clients can answer without a live SSH round-trip."
 )
-_NO_SERVERS_TEXT = "Add a server first; Fleet Memory then scans it from here."
+_NO_SERVERS_TEXT = "Add a server first; Fleet memory then scans it from here."
 _BANNER_TEXT = (
-    "No server memory cached yet. Fleet Memory keeps facts about each server "
+    "No server memory cached yet. Fleet memory keeps facts about each server "
     "so the chat panel and MCP clients can answer without a live SSH round-trip."
 )
 _BANNER_SHORT_TEXT = "No memory cached yet"

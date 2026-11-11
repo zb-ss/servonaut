@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # Minimal AI Logo (Matches Website)
 SERVONAUT_LOGO = (
     "[bold $text-accent]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
-    "   [bold $text-success]●[/] MCP Server Online"
+    "   [bold $text-success]●[/] MCP server online"
 )
 
 # Inline bot marker for assistant messages
@@ -206,24 +206,24 @@ def resolve_conversation_start(
     if not voice_enabled:
         return (
             "Voice input is switched off — enable it in "
-            "Settings > Voice Input first."
+            "Settings > Voice input first."
         )
     if not input_available:
         reason = input_reason or "Voice input is unavailable"
-        return f"{reason} — see Settings > Voice Input."
+        return f"{reason} — see Settings > Voice input."
     if not stt_model_ok:
         return (
             "The speech model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
     if not vad_model_ok:
         return (
             "The voice-detection model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
     if tts_enabled and not output_available:
         reason = output_reason or "Speech output is unavailable"
-        return f"{reason} — see Settings > Voice Input."
+        return f"{reason} — see Settings > Voice input."
     return ""
 
 
@@ -554,7 +554,7 @@ class ChatPanel(Widget):
             with Vertical(id="chat-header"):
                 yield Static(SERVONAUT_LOGO, id="chat-logo")
                 with Horizontal(id="chat-controls"):
-                    yield Button("New Chat", id="btn-chat-new", classes="chat-btn")
+                    yield Button("New chat", id="btn-chat-new", classes="chat-btn")
                     yield Button("History", id="btn-chat-history", classes="chat-btn")
                     # Per-session provider indicator (S/O/A/G/L). Click
                     # to open the picker and override for this session
@@ -2093,7 +2093,7 @@ class ChatPanel(Widget):
         self._session = chat_service.create_session()
         # Drop the previous server-side conversation pointer so the next
         # turn creates a fresh /account/ai/conversations row instead of
-        # appending to the prior thread. Without this, "New Chat" looks
+        # appending to the prior thread. Without this, "New chat" looks
         # local-only but the server keeps writing to the old thread.
         self._remote_conversation_id = None
         self._total_tokens = 0
@@ -2248,7 +2248,7 @@ class ChatPanel(Widget):
             return ""
         return (
             "The speech model is not downloaded yet — "
-            "download it in Settings > Voice Input."
+            "download it in Settings > Voice input."
         )
 
     def _toggle_recording(self) -> None:
@@ -2739,7 +2739,7 @@ class ChatPanel(Widget):
 
         An unavailable service (deps not installed, model missing, no
         output device) is a quiet skip rather than a toast: the readiness
-        story lives in Settings > Voice Input, and repeating it on every
+        story lives in Settings > Voice input, and repeating it on every
         reply would nag. Actual synthesis/playback failures do notify.
         """
         generation = self._voice_generation if generation is None else generation
@@ -3117,7 +3117,7 @@ class ChatPanel(Widget):
         if voice_config is not None and not voice_config.enabled:
             self.app.notify(
                 "Voice input is switched off — enable it in "
-                "Settings > Voice Input first.",
+                "Settings > Voice input first.",
                 severity="warning",
                 markup=False,
             )
@@ -4241,7 +4241,7 @@ class ChatPanel(Widget):
         accumulated: str,
     ) -> None:
         """Append the final assistant message + persist + refresh display."""
-        from servonaut.services.chat_service import ChatMessage
+        from servonaut.services.chat_service import ChatMessage, is_unnamed_title
 
         stripped = accumulated.strip()
         if stripped:
@@ -4276,7 +4276,7 @@ class ChatPanel(Widget):
 
         # Auto-title from first user message (mirrors chat_service).
         if (
-            self._session.title == "New Chat"  # type: ignore[union-attr]
+            is_unnamed_title(self._session.title)  # type: ignore[union-attr]
             and len(self._session.messages) >= 2  # type: ignore[union-attr]
         ):
             first_msg = self._session.messages[0].content  # type: ignore[union-attr]

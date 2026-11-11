@@ -52,7 +52,7 @@ class CommandPickerModal(ModalScreen[str]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Vertical(
-                Static("[bold $text-accent]Command Picker[/bold $text-accent]", id="picker_header"),
+                Static("[bold $text-accent]Command picker[/bold $text-accent]", id="picker_header"),
                 Static(
                     "Type to filter, Enter to select, Escape to cancel",
                     id="picker_hint",
@@ -115,7 +115,7 @@ class CommandPickerModal(ModalScreen[str]):
 
         # Saved commands section
         if filtered_saved:
-            all_options.append(Option("── Saved Commands ──", disabled=True))
+            all_options.append(Option("── Saved commands ──", disabled=True))
             for entry in filtered_saved:
                 option_id = f"saved:{entry['name']}"
                 self._option_map[option_id] = entry['command']
@@ -132,7 +132,7 @@ class CommandPickerModal(ModalScreen[str]):
 
         # Recent commands section
         if filtered_recent:
-            all_options.append(Option("── Recent Commands ──", disabled=True))
+            all_options.append(Option("── Recent commands ──", disabled=True))
             for i, cmd in enumerate(filtered_recent):
                 option_id = f"recent:{i}"
                 self._option_map[option_id] = cmd
@@ -198,7 +198,7 @@ class SaveCommandModal(ModalScreen[str]):
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Save Command[/bold $text-accent]",
+                "[bold $text-accent]Save command[/bold $text-accent]",
                 id="save_header",
             ),
             body=DialogBody(

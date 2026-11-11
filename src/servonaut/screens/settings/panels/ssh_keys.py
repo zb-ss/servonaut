@@ -40,7 +40,7 @@ class SshKeysPanel(SettingsPanel):
     """
 
     PANEL_ID = "ssh_keys"
-    TITLE = "SSH Keys"
+    TITLE = "SSH keys"
 
     DEFAULT_CSS = """
     SshKeysPanel .ssh-keys-info {
@@ -65,7 +65,7 @@ class SshKeysPanel(SettingsPanel):
             yield Static("", id="ssh_keys_count", classes="ssh-keys-count")
             yield Horizontal(
                 Button(
-                    "Open Key Management",
+                    "Open key management",
                     id="ssh_keys_open",
                     variant="primary",
                 ),

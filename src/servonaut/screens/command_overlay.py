@@ -63,7 +63,7 @@ class CommandOverlay(ModalScreen):
         Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy all output to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
-                tooltip="Copy Mode: the output in a text area you can select from"),
+                tooltip="Copy mode: the output in a text area you can select from"),
     ]
 
     def __init__(self, instance: dict) -> None:
@@ -584,7 +584,7 @@ class CommandOverlay(ModalScreen):
         from servonaut.screens.copy_mode import CopyModeScreen
 
         text = "\n".join(self._output_lines)
-        self.app.push_screen(CopyModeScreen(text, title="Command Output — Copy Mode"))
+        self.app.push_screen(CopyModeScreen(text, title="Command output — copy mode"))
 
     def action_close_overlay(self) -> None:
         """Close the command overlay modal, terminating any running process."""

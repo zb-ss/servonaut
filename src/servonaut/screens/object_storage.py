@@ -342,7 +342,7 @@ class ObjectStorageScreen(WorkspaceScreen):
     def _setup_table(self) -> None:
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last modified")
+        table.add_columns("Type", "Name / key", "Size", "Last modified")
 
     def _hide_all_forms(self) -> None:
         for form_id in (
@@ -607,7 +607,7 @@ class ObjectStorageScreen(WorkspaceScreen):
         """Populate the DataTable with folder and object rows."""
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last modified")
+        table.add_columns("Type", "Name / key", "Size", "Last modified")
 
         for folder in self._folders:
             # Strip the current prefix so only the segment is shown.

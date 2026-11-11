@@ -49,7 +49,7 @@ class AwsHost:
 
 @dataclass(frozen=True)
 class CustomHost:
-    """A non-cloud server added through the Custom Servers screen."""
+    """A non-cloud server added through the Custom servers screen."""
 
     name: str
     host: str

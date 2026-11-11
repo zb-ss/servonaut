@@ -29,13 +29,13 @@ class MainMenuScreen(WorkspaceScreen):
     CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
-        Binding("1", "option_1", "List Instances", show=False),
-        Binding("2", "option_2", "SSH Keys", show=False),
-        Binding("3", "option_3", "Scan Servers", show=False),
+        Binding("1", "option_1", "List instances", show=False),
+        Binding("2", "option_2", "SSH keys", show=False),
+        Binding("3", "option_3", "Scan servers", show=False),
         Binding("4", "option_4", "Settings", show=False),
-        Binding("5", "option_5", "Custom Servers", show=False),
+        Binding("5", "option_5", "Custom servers", show=False),
         Binding("6", "option_6", "CloudTrail", show=False),
-        Binding("7", "option_7", "IP Ban Manager", show=False),
+        Binding("7", "option_7", "IP ban manager", show=False),
         Binding("8", "option_8", "CloudWatch", show=False),
         Binding("0", "quit", "Quit", show=False),
         Binding("q", "quit", "Quit", show=True),
@@ -69,7 +69,7 @@ class MainMenuScreen(WorkspaceScreen):
         
         # Update UI safely
         try:
-            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal Servers")
+            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal servers")
             self.query_one("#stat-running", Static).update(f"[bold $text-success]{running}[/bold $text-success]\nRunning")
             self.query_one("#stat-stopped", Static).update(f"[bold $text-warning]{stopped}[/bold $text-warning]\nStopped")
         except Exception:
@@ -90,30 +90,30 @@ class MainMenuScreen(WorkspaceScreen):
                         yield Static("Server access", classes="dashboard-section-title")
                         with Vertical(id="dashboard-primary-actions"):
                             yield Button(
-                                "Instances Explorer\nConnect to a server, browse files, or run commands",
+                                "Instances explorer\nConnect to a server, browse files, or run commands",
                                 id="card_list", classes="action-card dashboard-primary",
                             )
                             with Horizontal(id="dashboard-secondary-actions"):
-                                yield Button("Custom Servers", id="card_custom_servers", classes="action-card")
-                                yield Button("SSH Keys", id="card_keys", classes="action-card")
+                                yield Button("Custom servers", id="card_custom_servers", classes="action-card")
+                                yield Button("SSH keys", id="card_keys", classes="action-card")
                                 yield Button("Settings", id="card_settings", classes="action-card")
                     with Vertical(id="dashboard-inventory"):
                         yield Static("Loaded inventory", classes="dashboard-section-title")
                         with Horizontal(id="stats-row"):
-                            yield Static("...\nTotal Servers", id="stat-total", classes="stat-card")
+                            yield Static("...\nTotal servers", id="stat-total", classes="stat-card")
                             yield Static("...\nRunning", id="stat-running", classes="stat-card")
                             yield Static("...\nStopped", id="stat-stopped", classes="stat-card")
                         yield Static(
-                            "Refresh the live server list in Instances Explorer.",
+                            "Refresh the live server list in Instances explorer.",
                             id="dashboard-inventory-note",
                         )
                 with Vertical(id="dashboard-tools"):
                     yield Static("Inspect & protect", classes="dashboard-section-title")
                     with Grid(id="actions-grid"):
-                        yield Button("CloudWatch Logs\nSearch log streams", id="card_cloudwatch", classes="action-card")
-                        yield Button("IP Ban Manager\nReview traffic blocking", id="card_ip_ban", classes="action-card")
-                        yield Button("CloudTrail Events\nInspect AWS API activity", id="card_cloudtrail", classes="action-card")
-                        yield Button("Scan Servers\nFind configured keywords", id="card_scan", classes="action-card")
+                        yield Button("CloudWatch logs\nSearch log streams", id="card_cloudwatch", classes="action-card")
+                        yield Button("IP ban manager\nReview traffic blocking", id="card_ip_ban", classes="action-card")
+                        yield Button("CloudTrail events\nInspect AWS API activity", id="card_cloudtrail", classes="action-card")
+                        yield Button("Scan servers\nFind configured keywords", id="card_scan", classes="action-card")
                 yield ProgressIndicator()
         yield Footer()
 

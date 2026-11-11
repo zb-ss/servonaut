@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 class OVHSetupScreen(WorkspaceScreen):
     """Guided setup wizard for OVHcloud API credentials.
 
-    Supports both classic 3-key auth (Application Key + Secret + Consumer Key)
+    Supports both classic 3-key auth (Application key + Secret + Consumer key)
     and OAuth2 service account auth (Client ID + Client Secret) for extra
     accounts. Opened with no arguments it sets up the primary account;
     ``add_extra`` adds another account and ``extra`` edits extra account
@@ -187,7 +187,7 @@ class OVHSetupScreen(WorkspaceScreen):
             placeholder = "e.g. client-a (servers are shown as client-a/<name>)"
         else:
             rows = [
-                Static("[bold $text-accent]OVHcloud Setup[/bold $text-accent]", id="ovh_setup_header"),
+                Static("[bold $text-accent]OVHcloud setup[/bold $text-accent]", id="ovh_setup_header"),
                 Static(
                     "[dim]Configure OVHcloud API credentials to manage dedicated servers, "
                     "VPS, and Public Cloud instances.[/dim]",
@@ -198,7 +198,7 @@ class OVHSetupScreen(WorkspaceScreen):
         if self._label_shown:
             rows.append(
                 Horizontal(
-                    Static("Account Label:", classes="label"),
+                    Static("Account label:", classes="label"),
                     Input(placeholder=placeholder, id="ovh_input_label"),
                     classes="setting_row",
                     id="ovh_label_row",
@@ -209,7 +209,7 @@ class OVHSetupScreen(WorkspaceScreen):
     def _credential_rows(self) -> List[Widget]:
         rows: List[Widget] = [
             # Step 1: Endpoint
-            Static("[bold]Step 1: API Endpoint[/bold]", classes="section_header"),
+            Static("[bold]Step 1: API endpoint[/bold]", classes="section_header"),
             Static(
                 "[dim]Choose your OVH region. Most users should use ovh-eu.[/dim]",
                 classes="note",
@@ -225,10 +225,10 @@ class OVHSetupScreen(WorkspaceScreen):
             ),
 
             # Step 2: Credentials
-            Static("[bold]Step 2: API Credentials[/bold]", classes="section_header"),
+            Static("[bold]Step 2: API credentials[/bold]", classes="section_header"),
             Static(
                 "[dim]Visit https://www.ovh.com/auth/api/createApp to create an application "
-                "and obtain your Application Key and Secret.\n"
+                "and obtain your Application key and Secret.\n"
                 "For other regions: ovh-ca → ca.api.ovh.com/createApp/ | "
                 "ovh-us → api.us.ovhcloud.com/createApp/[/dim]",
                 classes="note",
@@ -258,7 +258,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="setting_row ovh-oauth-auth",
             ),
             Horizontal(
-                Static("Client Secret:", classes="label"),
+                Static("Client secret:", classes="label"),
                 SecretInput(
                     placeholder="Client secret, $ENV_VAR or file:/path",
                     id="ovh_input_client_secret",
@@ -268,48 +268,48 @@ class OVHSetupScreen(WorkspaceScreen):
         ])
         rows.extend([
             Horizontal(
-                Static("Application Key:", classes="label"),
+                Static("Application key:", classes="label"),
                 Input(
-                    placeholder="Your OVH Application Key",
+                    placeholder="Your OVH application key",
                     id="ovh_input_app_key",
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
             Horizontal(
-                Static("Application Secret:", classes="label"),
+                Static("Application secret:", classes="label"),
                 SecretInput(
-                    placeholder="Your OVH Application Secret or $ENV_VAR",
+                    placeholder="Your OVH application secret or $ENV_VAR",
                     id="ovh_input_app_secret",
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
 
-            # Step 3: Consumer Key
+            # Step 3: Consumer key
             Static(
-                "[bold]Step 3: Consumer Key[/bold]",
+                "[bold]Step 3: Consumer key[/bold]",
                 classes="section_header ovh-classic-auth",
             ),
             Static(
-                "[dim]If you already have a Consumer Key, enter it below. "
-                "Otherwise, click 'Request Consumer Key' to generate one.[/dim]",
+                "[dim]If you already have a Consumer key, enter it below. "
+                "Otherwise, click 'Request Consumer key' to generate one.[/dim]",
                 classes="note ovh-classic-auth",
             ),
             Horizontal(
-                Static("Consumer Key:", classes="label"),
+                Static("Consumer key:", classes="label"),
                 SecretInput(
-                    placeholder="Your OVH Consumer Key or $ENV_VAR",
+                    placeholder="Your OVH consumer key or $ENV_VAR",
                     id="ovh_input_consumer_key",
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
             Button(
-                "Request Consumer Key",
+                "Request consumer key",
                 id="btn_ovh_request_ck",
                 variant="default",
                 classes="ovh-classic-auth",
             ),
             Static(
-                "[dim]After adding new features, click 'Request Consumer Key' again "
+                "[dim]After adding new features, click 'Request Consumer key' again "
                 "to grant permissions for all OVH operations.[/dim]",
                 classes="note ovh-classic-auth",
             ),
@@ -320,7 +320,7 @@ class OVHSetupScreen(WorkspaceScreen):
     def _option_rows(self) -> List[Widget]:
         return [
             # Step 4: SSH Defaults
-            Static("[bold]Step 4: SSH Defaults[/bold]", classes="section_header"),
+            Static("[bold]Step 4: SSH defaults[/bold]", classes="section_header"),
             Static(
                 "[dim]OVH doesn't provide SSH keys via the API. Set the local private "
                 "key to use for connecting to OVH instances. You can also map "
@@ -328,7 +328,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("Default SSH Key:", classes="label"),
+                Static("Default SSH key:", classes="label"),
                 Input(
                     placeholder="~/.ssh/id_rsa or ~/.ssh/ovh_key",
                     id="ovh_input_default_ssh_key",
@@ -336,7 +336,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Username:", classes="label"),
+                Static("Default username:", classes="label"),
                 Input(
                     placeholder="auto (ubuntu for VPS, debian for dedicated)",
                     id="ovh_input_default_username",
@@ -345,7 +345,7 @@ class OVHSetupScreen(WorkspaceScreen):
             ),
 
             # Step 5: Cloud Project IDs
-            Static("[bold]Step 5: Public Cloud Projects (optional)[/bold]", classes="section_header"),
+            Static("[bold]Step 5: Public Cloud projects (optional)[/bold]", classes="section_header"),
             Static(
                 "[dim]Enter comma-separated OVH Public Cloud project IDs to include. "
                 "Leave blank to skip cloud instances.[/dim]",
@@ -361,13 +361,13 @@ class OVHSetupScreen(WorkspaceScreen):
             ),
 
             # Step 6: Filters
-            Static("[bold]Step 6: Instance Filters[/bold]", classes="section_header"),
+            Static("[bold]Step 6: Instance filters[/bold]", classes="section_header"),
             Static(
                 "[dim]Choose which OVH resource types to include.[/dim]",
                 classes="note",
             ),
             Horizontal(
-                Static("Include Dedicated Servers:", classes="label"),
+                Static("Include dedicated servers:", classes="label"),
                 Input(
                     placeholder="true",
                     id="ovh_input_include_dedicated",
@@ -385,7 +385,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Include Cloud:", classes="label"),
+                Static("Include cloud:", classes="label"),
                 Input(
                     placeholder="true",
                     id="ovh_input_include_cloud",
@@ -396,7 +396,7 @@ class OVHSetupScreen(WorkspaceScreen):
 
             # Step 7: Object Storage (S3-compatible)
             Static(
-                "[bold]Step 7: Object Storage (S3-compatible)[/bold]",
+                "[bold]Step 7: Object storage (S3-compatible)[/bold]",
                 classes="section_header",
             ),
             Static(
@@ -409,7 +409,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="note",
             ),
             Horizontal(
-                Static("Access Key:", classes="label"),
+                Static("Access key:", classes="label"),
                 SecretInput(
                     placeholder="your-key or $OVH_S3_ACCESS_KEY or file:/path",
                     id="ovh_input_s3_access_key",
@@ -417,7 +417,7 @@ class OVHSetupScreen(WorkspaceScreen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Secret Key:", classes="label"),
+                Static("Secret key:", classes="label"),
                 SecretInput(
                     placeholder="your-secret or $OVH_S3_SECRET_KEY or file:/path",
                     id="ovh_input_s3_secret_key",
@@ -447,18 +447,18 @@ class OVHSetupScreen(WorkspaceScreen):
         ]
 
     def _action_buttons(self) -> List[Widget]:
-        test = Button("Test Connection", id="btn_ovh_test", variant="default")
+        test = Button("Test connection", id="btn_ovh_test", variant="default")
         back = Button("Back", id="btn_ovh_back")
         if self._account_mode:
-            return [test, Button("Test & Save", id="btn_ovh_save", variant="primary"), back]
-        save = Button("Save & Enable", id="btn_ovh_save", variant="primary")
+            return [test, Button("Test & save", id="btn_ovh_save", variant="primary"), back]
+        save = Button("Save & enable", id="btn_ovh_save", variant="primary")
         keep_off = Button("Save", id="btn_ovh_disable")
         self._label_save_buttons(save, keep_off, self.app.config_manager.get().ovh.enabled)
         return [
             test,
             save,
             keep_off,
-            Button("Add Another Account", id="btn_ovh_add_account"),
+            Button("Add another account", id="btn_ovh_add_account"),
             back,
         ]
 
@@ -470,7 +470,7 @@ class OVHSetupScreen(WorkspaceScreen):
         "Disable OVH" while it is on, a plain "Save" while it is off (an
         Object-Storage-only setup saves its keys without listing servers).
         """
-        save.label = "Save" if enabled else "Save & Enable"
+        save.label = "Save" if enabled else "Save & enable"
         keep_off.label = "Disable OVH" if enabled else "Save"
         keep_off.variant = "error" if enabled else "default"
 
@@ -673,12 +673,12 @@ class OVHSetupScreen(WorkspaceScreen):
         values = self._collect_form_values()
         if not values['application_key'] or not values['application_secret']:
             self.app.notify(
-                "Application Key and Secret are required to request a Consumer Key.",
+                "Application key and Secret are required to request a Consumer key.",
                 severity="error",
             )
             return
 
-        self.app.notify("Requesting Consumer Key from OVH...", severity="information")
+        self.app.notify("Requesting Consumer key from OVH...", severity="information")
         self.run_worker(
             self._do_request_consumer_key(values),
             name="ovh_request_ck",
@@ -759,26 +759,26 @@ class OVHSetupScreen(WorkspaceScreen):
             if ck:
                 self.query_one("#ovh_input_consumer_key", Input).value = ck
                 self.query_one("#ovh_validation_url", Static).update(
-                    f"[bold $text-success]Consumer Key received![/bold $text-success]\n"
+                    f"[bold $text-success]Consumer key received![/bold $text-success]\n"
                     f"[dim]Validation URL (open in browser to activate):[/dim]\n"
                     f"[$text-accent]{url}[/$text-accent]\n"
-                    f"[dim]After granting access, click 'Test Connection'.[/dim]"
+                    f"[dim]After granting access, click 'Test connection'.[/dim]"
                 )
                 self.app.notify(
-                    "Consumer Key received! Open the validation URL to activate it.",
+                    "Consumer key received! Open the validation URL to activate it.",
                     severity="information",
                     timeout=10,
                 )
             else:
                 self.query_one("#ovh_validation_url", Static).update(
-                    "[$text-error]Failed to obtain Consumer Key[/$text-error]"
+                    "[$text-error]Failed to obtain Consumer key[/$text-error]"
                 )
         except Exception as e:
             logger.error("Consumer key request failed: %s", e)
             self.query_one("#ovh_validation_url", Static).update(
-                "[$text-error]Failed to request Consumer Key. Check credentials and try again.[/$text-error]"
+                "[$text-error]Failed to request Consumer key. Check credentials and try again.[/$text-error]"
             )
-            self.app.notify("Consumer Key request failed. Check credentials.", severity="error")
+            self.app.notify("Consumer key request failed. Check credentials.", severity="error")
 
     def _test_connection(self, save: bool = False) -> None:
         """Test OVH connection with current form values.
@@ -796,7 +796,7 @@ class OVHSetupScreen(WorkspaceScreen):
         if values.get('auth') == self._AUTH_OAUTH:
             if not (values['client_id'] and values['client_secret']):
                 self.app.notify(
-                    "Enter the Client ID and Client Secret to test.",
+                    "Enter the Client ID and Client secret to test.",
                     severity="warning",
                 )
                 return
@@ -806,14 +806,14 @@ class OVHSetupScreen(WorkspaceScreen):
             # An extra account never borrows the primary's keys, so all
             # three must be its own.
             self.app.notify(
-                "Enter the Application Key, Application Secret and Consumer Key "
+                "Enter the Application key, Application secret and Consumer key "
                 "(or request one) to save this account.",
                 severity="warning",
             )
             return
         elif not values['application_key']:
             self.app.notify(
-                "Enter at least Application Key and Consumer Key to test.",
+                "Enter at least Application key and Consumer key to test.",
                 severity="warning",
             )
             return

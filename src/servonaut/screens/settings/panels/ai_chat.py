@@ -52,7 +52,7 @@ class AiChatPanel(SettingsPanel):
     """
 
     PANEL_ID = "ai_chat"
-    TITLE = "AI Chat"
+    TITLE = "AI chat"
     DESCRIPTION = "Prompts, tool limits and context shared with your AI sessions."
 
     DEFAULT_CSS = """
@@ -86,7 +86,7 @@ class AiChatPanel(SettingsPanel):
     def form_rows(self) -> ComposeResult:
         """Yield all AI chat form rows."""
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Log Analysis", classes="ai-chat-section-header")
+            yield Static("Log analysis", classes="ai-chat-section-header")
             yield setting_row(
                 "Log chunk size (chars)",
                 Input(placeholder="100000", id="ai_chat_chunk_size"),
@@ -97,7 +97,7 @@ class AiChatPanel(SettingsPanel):
             )
             yield TextArea(id="ai_chat_system_prompt", language=None)
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Chat Behaviour", classes="ai-chat-section-header")
+            yield Static("Chat behaviour", classes="ai-chat-section-header")
             yield setting_row(
                 "Max history messages",
                 Input(placeholder="20", id="ai_chat_max_history_messages"),
@@ -108,7 +108,7 @@ class AiChatPanel(SettingsPanel):
             )
             yield TextArea(id="ai_chat_chat_system_prompt", language=None)
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Agentic Loop Limits", classes="ai-chat-section-header")
+            yield Static("Agentic loop limits", classes="ai-chat-section-header")
             yield setting_row(
                 "Max tool iterations (local AI)",
                 Input(placeholder="10", id="ai_chat_max_tool_iterations"),
@@ -118,7 +118,7 @@ class AiChatPanel(SettingsPanel):
                 Input(placeholder="", id="ai_chat_max_tool_rounds"),
             )
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Tool Guard Level", classes="ai-chat-section-header")
+            yield Static("Tool guard level", classes="ai-chat-section-header")
             yield setting_row(
                 "Chat tool guard level",
                 Select(
@@ -130,7 +130,7 @@ class AiChatPanel(SettingsPanel):
             )
             yield Static("", id="ai_chat_guard_warning", classes="ai-chat-warning")
         with Vertical(classes="settings-form-section settings-analysis-section"):
-            yield Static("Context & History", classes="ai-chat-section-header")
+            yield Static("Context & history", classes="ai-chat-section-header")
             yield setting_row(
                 "Keep tool results in chat history",
                 Switch(value=True, id="ai_chat_keep_tool_results"),

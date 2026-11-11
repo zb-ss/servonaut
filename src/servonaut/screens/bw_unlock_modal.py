@@ -60,7 +60,7 @@ class BwUnlockModal(ModalScreen[bool]):
         actions.display = False
         yield DialogFrame(
             heading=Static(
-                "[bold $text-accent]Unlock Bitwarden Vault[/bold $text-accent]",
+                "[bold $text-accent]Unlock Bitwarden vault[/bold $text-accent]",
                 id="bw_unlock_title",
             ),
             body=DialogBody(

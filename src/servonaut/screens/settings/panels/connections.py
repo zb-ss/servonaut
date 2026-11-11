@@ -113,7 +113,7 @@ class ConnectionsPanel(SettingsPanel):
         """Yield the connection profiles section and connection rules section."""
         with VerticalGroup(classes="settings-access-section"):
             with VerticalGroup(classes="settings-access-context"):
-                yield Static("Connection Profiles", classes="conn-section-header")
+                yield Static("Connection profiles", classes="conn-section-header")
                 yield Static(
                     "Define SSH bastion/proxy configurations that can be applied to instances.",
                     classes="conn-note",
@@ -173,7 +173,7 @@ class ConnectionsPanel(SettingsPanel):
 
         with VerticalGroup(classes="settings-access-section"):
             with VerticalGroup(classes="settings-access-context"):
-                yield Static("Connection Rules", classes="conn-section-header")
+                yield Static("Connection rules", classes="conn-section-header")
                 yield Static(
                     "Rules map instance match conditions to a connection profile. "
                     "The first matching rule wins.",
@@ -228,13 +228,13 @@ class ConnectionsPanel(SettingsPanel):
         profiles_table.clear(columns=True)
         profiles_table.cursor_type = "row"
         profiles_table.add_columns(
-            "Profile Name", "Bastion Host", "Bastion User", "SSH Port"
+            "Profile name", "Bastion host", "Bastion user", "SSH port"
         )
 
         rules_table = self.query_one("#conn_rules_table", DataTable)
         rules_table.clear(columns=True)
         rules_table.cursor_type = "row"
-        rules_table.add_columns("Rule Name", "Match Conditions", "Profile")
+        rules_table.add_columns("Rule name", "Match conditions", "Profile")
 
     def load(self) -> None:
         """Populate the DataTables from config and hide the edit forms."""
@@ -310,7 +310,7 @@ class ConnectionsPanel(SettingsPanel):
     def _refresh_profiles_table(self) -> None:
         table = self.query_one("#conn_profiles_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Profile Name", "Bastion Host", "Bastion User", "SSH Port")
+        table.add_columns("Profile name", "Bastion host", "Bastion user", "SSH port")
         redaction = (
             getattr(self.app, "redaction_service", None)
             if getattr(self.app, "demo_mode", False) else None
@@ -333,7 +333,7 @@ class ConnectionsPanel(SettingsPanel):
     def _refresh_rules_table(self) -> None:
         table = self.query_one("#conn_rules_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Rule Name", "Match Conditions", "Profile")
+        table.add_columns("Rule name", "Match conditions", "Profile")
         redaction = (
             getattr(self.app, "redaction_service", None)
             if getattr(self.app, "demo_mode", False) else None

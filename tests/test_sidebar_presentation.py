@@ -223,7 +223,7 @@ async def test_active_route_keeps_full_row_band_and_bar_through_focus_changes(
                 assert all(style.underline for style in text_styles)
             elif state == "alternate":
                 assert all(style.underline for style in _painted_text_styles(
-                    alternate, "Custom Servers",
+                    alternate, "Custom servers",
                 ))
 
 

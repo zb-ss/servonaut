@@ -176,6 +176,8 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # fleet_values.py — the selected server's values come from the fleet
     # table's own rows, which are already redacted in demo mode; the same
     # strings are what gets copied.
+    AllowlistEntry("screens/instance_list.py", "_draw", "update",
+                   "Draws the filter summary: counts and fixed words, never server text."),
     AllowlistEntry("widgets/fleet_values.py", "_show_copied", "update",
                    "Draws a fixed confirmation word in place of the value."),
     AllowlistEntry("widgets/fleet_values.py", "_paint", "update",

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 CARD_MIN_WIDTH = 34
 MAX_CARD_COLUMNS = 3
 # At this panel width the preview sits beside the cards instead of below them.
-SIDE_DETAILS_MIN_WIDTH = 110
+SIDE_DETAILS_MIN_WIDTH = 104
 # Below this panel width the three action buttons drop their borders to fit one row.
 COMPACT_ACTIONS_MAX_WIDTH = 64
 DETAILS_WIDTH = 36
@@ -335,8 +335,8 @@ class AppearancePanel(SettingsPanel):
     def form_rows(self) -> ComposeResult:
         with Horizontal(id="appearance_header", classes="-wide"):
             with Vertical(id="appearance_heading"):
-                yield Static(escape(self.TITLE), classes="panel-title")
-                yield Static(self._hint(), id="appearance_description", classes="panel-description", markup=False)
+                yield Static(escape(self.TITLE), classes="panel-title screen-title")
+                yield Static(self._hint(), id="appearance_description", classes="panel-description screen-description", markup=False)
             with Horizontal(id="appearance_actions"):
                 for button_id, (label, _short) in _ACTION_LABELS.items():
                     yield Button(

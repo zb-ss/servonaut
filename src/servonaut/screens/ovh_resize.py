@@ -99,7 +99,7 @@ class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                         ),
                         Horizontal(
                             Button(
-                                "Upgrade Selected",
+                                "Upgrade selected",
                                 variant="warning",
                                 id="btn_upgrade",
                             ),
@@ -203,7 +203,7 @@ class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     "Downgrades are not possible after this operation",
                 ],
                 confirm_text=instance_name,
-                action_label="Upgrade Now",
+                action_label="Upgrade now",
                 severity="warning",
             )
         )

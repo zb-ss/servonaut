@@ -641,7 +641,7 @@ async def test_team_auto_bind_login_fallbacks_and_no_login() -> None:
     assert by_id["srv-a"].login == "admin" and by_id["srv-a"].status == READY
     assert by_id["srv-b"].login == "ubuntu" and by_id["srv-b"].status == READY
     assert by_id["srv-c"].status == NO_LOGIN
-    assert "set the login on the shared server (Teams → Shared Servers)" in by_id["srv-c"].status_text
+    assert "set the login on the shared server (Teams → Shared servers)" in by_id["srv-c"].status_text
 
 
 @pytest.mark.asyncio

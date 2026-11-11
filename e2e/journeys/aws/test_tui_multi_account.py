@@ -135,7 +135,7 @@ async def test_manager_stops_a_server_in_its_own_account(tui, seed, moto):
         assert table.cursor_row == _column(t, "#aws_mgr_table", 1).index(target)
         await t.press("d")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Terminate EC2 Instance", target, screen_only=True)
+        await t.wait_for_text("Terminate EC2 instance", target, screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("AWSManagerScreen")
 
@@ -314,7 +314,7 @@ async def test_terminating_updates_the_server_list(tui, seed, moto):
         await click_row(t, table, _column(t, "#aws_mgr_table", 1).index(target))
         await t.press("d")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Terminate EC2 Instance", target, screen_only=True)
+        await t.wait_for_text("Terminate EC2 instance", target, screen_only=True)
         await t.fill("#confirm_input", "terminate")
         await t.wait_until(lambda: not t.on_screen("#btn_confirm").disabled, desc="confirm enabled")
         await t.click("#btn_confirm")

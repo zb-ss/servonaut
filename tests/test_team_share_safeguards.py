@@ -148,10 +148,10 @@ class TestShareAllConfirmation:
             button = modal.query_one("#share_confirm_share", Button)
             await _until(pilot, lambda: str(button.label) == "Share 2 servers", "the count to follow")
             button.press()
-            await _until(pilot, lambda: any("Share All:" in msg for _, msg in notes), "the summary")
+            await _until(pilot, lambda: any("Share all:" in msg for _, msg in notes), "the summary")
 
             assert [c.args[1]["name"] for c in team_svc.push_server.call_args_list] == ["web-1", "lab-1"]
-            assert any(msg == "Share All: Shared 2, left out 1." for _, msg in notes), notes
+            assert any(msg == "Share all: Shared 2, left out 1." for _, msg in notes), notes
 
     async def test_select_none_disables_share_and_select_all_restores_it(self):
         app = _WrapperApp(auth_service=_make_auth_service(), team_service=_make_team_service(),

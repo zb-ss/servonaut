@@ -77,6 +77,29 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
+class FleetSummaryLine(Static):
+    """The summary under the table: the key reminder goes first when the line is too narrow."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._texts = ("", "")
+
+    def set_texts(self, full: str, short: str) -> None:
+        """Set the full wording and the shorter one used when the line is too narrow."""
+        self._texts = (full, short)
+        self._draw()
+
+    def on_resize(self) -> None:
+        """Choose the wording again for the new width."""
+        self._draw()
+
+    def _draw(self) -> None:
+        """Show the full wording when it fits, the short one otherwise."""
+        full, short = self._texts
+        width = self.size.width
+        self.update(full if width == 0 or cell_len(full) <= width else short)
+
+
 class FleetChip(Button):
     """A quick-filter chip: one state or provider choice, with its live count."""
 
@@ -253,8 +276,23 @@ class InstanceListScreen(WorkspaceScreen):
         # the outlined pill is the non-compact one.
         for chip in self.query(FleetChip):
             chip.compact = not roomy
+        self._sync_table_room()
         self.call_after_refresh(self._sync_fresh_layout)
         self.call_after_refresh(self._sync_memory_note)
+
+    def _sync_table_room(self) -> None:
+        """Tell the table whether the inspector sits beside it (its Details then cover Region and Type)."""
+        beside = not (
+            self.has_class("-narrow") or self.has_class("-content-narrow")
+            or self.has_class("-chat-open")
+        )
+        try:
+            table = self.query_one(InstanceTable)
+        except NoMatches:
+            return
+        if table.inspector_beside != beside:
+            table.inspector_beside = beside
+            table.replan()
 
     def _sync_fresh_layout(self) -> None:
         """Put the freshness on the chip row only when it fits there, whole.
@@ -265,7 +303,8 @@ class InstanceListScreen(WorkspaceScreen):
         """
         try:
             filters = self.query_one("#fleet_filters")
-            chips = self.query_one("#fleet_chip_row").outer_size.width
+            # The last chip's one-cell margin sits outside the row's own width.
+            chips = self.query_one("#fleet_chip_row").outer_size.width + 1
             refresh = self.query_one("#fleet_refresh").outer_size.width
         except NoMatches:
             return
@@ -273,7 +312,8 @@ class InstanceListScreen(WorkspaceScreen):
             self.has_class("-narrow") or self.has_class("-content-narrow")
             or self.has_class("-chat-open")
         )
-        age = cell_len(self._inline_age(self._updated_text()))
+        inline_age = self._inline_age(self._updated_text())
+        age = cell_len(f"{inline_age} ·") if inline_age else 0
         inline = not stacked and 0 < chips and chips + age + refresh <= filters.size.width
         if filters.has_class("-fresh-inline") != inline:
             filters.set_class(inline, "-fresh-inline")
@@ -332,7 +372,7 @@ class InstanceListScreen(WorkspaceScreen):
                 # short terminal every row it takes is a row of servers less.
                 banner = Static(
                     "[bold]🧠 New:[/bold] press [b]m[/b] on a row, or open "
-                    "[b]Fleet Memory[/b] in the sidebar, to cache each server's "
+                    "[b]Fleet memory[/b] in the sidebar, to cache each server's "
                     "facts for the chat panel and MCP clients.",
                     id="memory_discover_banner",
                     classes="hidden",
@@ -349,7 +389,7 @@ class InstanceListScreen(WorkspaceScreen):
                     with Vertical(id="fleet_table_column"):
                         yield InstanceTable()
                         yield FleetSkeleton(id="fleet_skeleton")
-                        yield Static("", id="fleet_summary", markup=False)
+                        yield FleetSummaryLine("", id="fleet_summary", markup=False)
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
                         yield Static(
                             "[bold]Selected server[/bold]\n[dim]No server selected[/dim]",
@@ -374,7 +414,7 @@ class InstanceListScreen(WorkspaceScreen):
                         yield Static(
                             "Click a value to copy it", id="fleet_values_hint", markup=False,
                         )
-                yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
+                yield Label("[bold]Keyword matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
         with Vertical(id="fleet-bottom"):
             with Horizontal(id="fleet_value_bar"):
@@ -1051,7 +1091,12 @@ class InstanceListScreen(WorkspaceScreen):
                 number = counts.providers[chip.value]
                 active = self._filter.provider == chip.value
                 shown = chip.value in present or active
-            chip.label = self._chip_label(chip, number)
+            label = self._chip_label(chip, number)
+            if label != chip.label:
+                chip.label = label
+                # The chip is as wide as its words: measure them again.
+                chip.refresh(layout=True)
+                self.call_after_refresh(self._sync_fresh_layout)
             chip.set_class(active, "--chosen")
             chip.display = shown
 
@@ -1067,8 +1112,9 @@ class InstanceListScreen(WorkspaceScreen):
 
     def _sync_summary(self, shown: int, total: int) -> None:
         query = self.query_one("#search_input", Input).value.strip()
-        self.query_one("#fleet_summary", Static).update(
-            summary(shown, total, self._filter, query)
+        self.query_one("#fleet_summary", FleetSummaryLine).set_texts(
+            summary(shown, total, self._filter, query),
+            summary(shown, total, self._filter, query, hint=False),
         )
 
     def _sync_updated(self) -> None:

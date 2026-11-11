@@ -1510,7 +1510,7 @@ class TestTeamManagementShareServer:
             notes = _capture_notifications(screen)
             screen._action_share_all_servers()
             await _confirm_share_all(app, pilot)
-            await _until(pilot, lambda: any("Share All:" in msg for _, msg in notes), "the summary")
+            await _until(pilot, lambda: any("Share all:" in msg for _, msg in notes), "the summary")
             assert team_svc.push_server.call_count == 3
             summary_notes = [msg for sev, msg in notes if sev == "warning" and "Shared 2" in msg]
             assert summary_notes, notes
@@ -1540,7 +1540,7 @@ class TestTeamManagementShareServer:
 
 
 # ---------------------------------------------------------------------------
-# Share Server / Share All: which address a server is shared under
+# Share Server / Share all: which address a server is shared under
 # ---------------------------------------------------------------------------
 
 
@@ -1652,11 +1652,11 @@ class TestShareAddress:
             assert "bastion" in str(modal.query_one("#share_confirm_intro", Static).render())
             await _confirm_share_all(app, pilot)
             await _until(pilot, lambda: team_svc.push_server.call_count == 2, "two shares")
-            await _until(pilot, lambda: any(n.startswith("Share All:") for n in notices), "the summary")
+            await _until(pilot, lambda: any(n.startswith("Share all:") for n in notices), "the summary")
 
         hosts = {call.args[1]["name"]: call.args[1]["hostname"] for call in team_svc.push_server.call_args_list}
         assert hosts == {"app-1": "10.0.1.5", "web-1": "8.8.8.8"}
-        summary = next(n for n in notices if n.startswith("Share All:"))
+        summary = next(n for n in notices if n.startswith("Share all:"))
         assert "1 under its private address" in summary
 
 

@@ -165,7 +165,7 @@ async def _ready(screen: WorkspaceScreen) -> None:
         await wait_until(lambda: not screen._loading and screen.query_one("#convs_table", DataTable).row_count == 1)
         await wait_until(lambda: screen.query_one("#local_table", DataTable).row_count == 1)
     elif isinstance(screen, MainMenuScreen):
-        await wait_until(lambda: screen.query_one("#stat-total", Static).render().plain == "2\nTotal Servers")
+        await wait_until(lambda: screen.query_one("#stat-total", Static).render().plain == "2\nTotal servers")
 
 
 def _seed(screen: WorkspaceScreen) -> None:

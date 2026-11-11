@@ -458,7 +458,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
             return
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete SSH Key",
+                title="Delete SSH key",
                 description=with_bold_values(
                     "Remove {} from your Hetzner Cloud project.",
                     key.get('name', identifier),

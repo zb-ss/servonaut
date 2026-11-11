@@ -10,6 +10,8 @@ from textual.widgets import Static
 class StatusBar(Static):
     """Status bar showing the cache age and the demo badge."""
 
+    _note = ""
+
     def __init__(self) -> None:
         """Initialize status bar."""
         super().__init__("")

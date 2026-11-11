@@ -55,7 +55,7 @@ class MemoryExportScreen(WorkspaceScreen):
                 Container(
                     Container(
                         Static(
-                            "[bold $text-accent]Compliance Memory Export[/bold $text-accent]",
+                            "[bold $text-accent]Compliance memory export[/bold $text-accent]",
                             id="export-title",
                         ),
                         Static(
@@ -89,7 +89,7 @@ class MemoryExportScreen(WorkspaceScreen):
                                 id="export-date-fields",
                             ),
                             Horizontal(
-                                Button("ctrl+s. Start Export", variant="primary", id="btn-export-start"),
+                                Button("Start export", variant="primary", id="btn-export-start"),
                                 Button("Back", variant="default", id="btn-export-back"),
                                 id="export-btn-row",
                             ),

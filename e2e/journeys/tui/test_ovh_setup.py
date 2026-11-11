@@ -50,7 +50,7 @@ async def test_setup_wizard_tests_and_enables_ovh(tui, seed, providers):
 
         await press(t, "#btn_ovh_test")
         await t.wait_for_toast(
-            "Enter at least Application Key and Consumer Key", severity="warning"
+            "Enter at least Application key and Consumer key", severity="warning"
         )
         assert not providers.requests("ovh")
 

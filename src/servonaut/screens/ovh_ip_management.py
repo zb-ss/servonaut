@@ -92,7 +92,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
                 Horizontal(
                     Vertical(
                         Static(
-                            "OVH IP Management",
+                            "OVH IP management",
                             id="ip_mgmt_title",
                             classes="screen-title",
                         ),
@@ -126,14 +126,14 @@ class OVHIPManagementScreen(WorkspaceScreen):
                         Horizontal(
                             Button("Move IP", variant="default", id="btn_move"),
                             Button(
-                                "Set Reverse DNS", variant="default", id="btn_rdns"
+                                "Set reverse DNS", variant="default", id="btn_rdns"
                             ),
                             Button("Back", variant="default", id="btn_back"),
                             id="ip_actions",
                         ),
                         Container(
                             Static(
-                                "[bold]Move Failover IP[/bold]",
+                                "[bold]Move failover IP[/bold]",
                                 id="move_form_title",
                             ),
                             Input(
@@ -141,7 +141,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
                                 id="input_move_target",
                             ),
                             Button(
-                                "Confirm Move",
+                                "Confirm move",
                                 variant="warning",
                                 id="btn_move_confirm",
                             ),
@@ -182,7 +182,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
 
     def on_mount(self) -> None:
         table = self.query_one("#ip_table", DataTable)
-        table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
+        table.add_columns("IP", "Type", "Routed to", "Reverse DNS")
         table.cursor_type = "row"
         picker = self.query_one("#ip_mgmt_account", AccountPicker)
         self._account = picker.account
@@ -381,7 +381,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Move Failover IP",
+                title="Move failover IP",
                 description=with_bold_values("Move {} to {}.", ip_addr, target),
                 consequences=[
                     "The IP will be detached from its current service",
@@ -498,7 +498,7 @@ class OVHIPManagementScreen(WorkspaceScreen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Reverse DNS",
+                title="Delete reverse DNS",
                 description=with_bold_values("Remove the reverse DNS record for {}.", ip),
                 consequences=[
                     "The existing PTR record will be deleted",

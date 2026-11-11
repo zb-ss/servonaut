@@ -26,8 +26,8 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 _CHOOSE_TEAM_STATUS = "Choose a team to inspect its CA status."
-_NO_TEAMS_HINT = "You are not in a team yet: create or join one from Team Management."
-_NO_SERVERS_HINT = "No shared servers in this team yet: share one from Team Management."
+_NO_TEAMS_HINT = "You are not in a team yet: create or join one from Team management."
+_NO_SERVERS_HINT = "No shared servers in this team yet: share one from Team management."
 _EVERY_ENROLLED_SERVER_LABEL = "All enrolled servers (KRL delivery and scan only)"
 _NO_BREAK_GLASS = "No break-glass key"
 
@@ -215,13 +215,13 @@ class CaScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls('SSH Certificate Authority')
+        yield WorkspaceControls('SSH certificate authority')
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with Horizontal(id="ca_layout", classes="workspace-content"):
                 with Vertical(id="ca_content"):
                     with Vertical(id="ca_overview"):
-                        yield Static("SSH Certificate Authority", id="ca_title", classes="screen-title")
+                        yield Static("SSH certificate authority", id="ca_title", classes="screen-title")
                         yield Static(
                             "Review a team's certificate authorities, then choose the server and recovery key for an operation.",
                             id="ca_description",

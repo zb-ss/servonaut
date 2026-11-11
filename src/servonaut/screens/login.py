@@ -69,7 +69,7 @@ class PassphraseModal(ModalScreen[Optional[str]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
-    def __init__(self, confirm: bool = False, title: str = "Enter Sync Passphrase") -> None:
+    def __init__(self, confirm: bool = False, title: str = "Enter sync passphrase") -> None:
         super().__init__(classes="dialog-screen")
         self._confirm = confirm
         self._title = title
@@ -174,13 +174,13 @@ class LoginScreen(WorkspaceScreen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield WorkspaceControls('Servonaut Account')
+        yield WorkspaceControls('Servonaut account')
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             yield ScrollableContainer(
                 Container(
                     Horizontal(
-                        Static("[bold]Servonaut Account[/bold]", id="login_title"),
+                        Static("[bold]Servonaut account[/bold]", id="login_title"),
                         Static("Checking sign-in status…", id="account_state_summary"),
                         id="account_heading",
                     ),

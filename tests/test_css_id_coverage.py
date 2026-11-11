@@ -589,6 +589,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "convs_table",
         "convs_tabs",
         "convs_title",
+        "help_navigation_hint",  # Reason: Static; styled by the shared .screen-description class
         # ---- Copy-mode overlay ----
         "copy-mode-container",  # Reason: Container; styled by parent screen
         "copy-mode-hint",       # Reason: Static hint; inherits global Static

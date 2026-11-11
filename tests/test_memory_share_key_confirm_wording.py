@@ -127,7 +127,7 @@ async def test_the_title_shows_the_server_name_literally(name):
     async with app.run_test(size=(120, 50)) as pilot:
         screen = await _open(app, pilot)
         title = _text(screen, "#share-title")
-    assert title == f"Share Memory: {name}"
+    assert title == f"Share memory: {name}"
 
 
 @pytest.mark.parametrize("name", NAMES)

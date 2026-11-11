@@ -141,18 +141,22 @@ def next_choice(
     return ALL
 
 
-def summary(shown: int, total: int, active: FleetFilter, query: Optional[str] = None) -> str:
+def summary(
+    shown: int, total: int, active: FleetFilter, query: Optional[str] = None, *, hint: bool = True,
+) -> str:
     """"Showing 9 of 12 · filters: Running · AWS · f cycle state filter · p cycle provider".
 
     Fixed words and counts, never server text. *query* only says that a search
     is narrowing the list; its text is already visible in the search box.
+    Without *hint* the key reminder is left off, for a line with no room for it.
     """
     filters = active.describe()
     if query:
         filters = [*filters, "search"]
-    return " · ".join([
+    parts = [
         f"Showing {shown} of {total}",
         "filters: " + (", ".join(filters) if filters else "none"),
-        "f cycle state filter",
-        "p cycle provider",
-    ])
+    ]
+    if hint:
+        parts += ["f cycle state filter", "p cycle provider"]
+    return " · ".join(parts)

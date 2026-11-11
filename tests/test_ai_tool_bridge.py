@@ -1348,10 +1348,10 @@ def test_scroll_to_bottom_rearms_follow_tail():
 
 
 def test_new_chat_clears_remote_conversation_id():
-    """Hitting "New Chat" must drop the previous server-side
+    """Hitting "New chat" must drop the previous server-side
     conversation pointer so the next turn opens a fresh
     /account/ai/conversations row instead of appending to the prior
-    thread (which makes "New Chat" look local-only)."""
+    thread (which makes "New chat" look local-only)."""
     from unittest.mock import MagicMock
     from servonaut.widgets.chat_panel import ChatPanel
 
