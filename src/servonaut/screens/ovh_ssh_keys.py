@@ -113,8 +113,9 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             yield ScrollableContainer(
                 VerticalScroll(
                     Static(
-                        "[bold $text-accent]OVH Public Cloud SSH keys[/bold $text-accent]",
+                        "[bold]OVH Public Cloud SSH keys[/bold]",
                         id="ovh_ssh_keys_header",
+                        classes="screen-title",
                     ),
                     AccountPicker.for_provider(
                         registry_for(self.app, "ovh"), "ovh",

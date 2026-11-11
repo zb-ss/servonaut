@@ -55,8 +55,9 @@ class MemoryExportScreen(WorkspaceScreen):
                 Container(
                     Container(
                         Static(
-                            "[bold $text-accent]Compliance memory export[/bold $text-accent]",
+                            "[bold]Compliance memory export[/bold]",
                             id="export-title",
+                            classes="screen-title",
                         ),
                         Static(
                             "[dim]Export a signed archive of all memory envelopes for audit "

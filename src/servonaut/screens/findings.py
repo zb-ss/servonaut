@@ -243,6 +243,7 @@ class FindingsScreen(WorkspaceScreen):
                     Static(
                         Content.assemble(literal("Monitoring findings", "bold"), scope),
                         id="findings_title",
+                        classes="screen-title",
                     ),
                     Static("", id="findings_status_pill"),
                     id="findings_heading",

@@ -16,11 +16,6 @@ MemberKeyChangeScreen #keychange-context {
     padding: 0 1;
 }
 
-MemberKeyChangeScreen #keychange-title {
-    height: auto;
-    margin: 0;
-}
-
 MemberKeyChangeScreen #keychange-scroll {
     height: 1fr;
 }

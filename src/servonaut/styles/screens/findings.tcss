@@ -17,13 +17,6 @@
     margin-bottom: 1;
 }
 
-#findings_title {
-    width: 1fr;
-    height: auto;
-    text-align: left;
-    color: $text-accent;
-}
-
 #findings_subtitle {
     height: auto;
     text-align: left;

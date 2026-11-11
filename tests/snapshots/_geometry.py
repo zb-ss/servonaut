@@ -33,24 +33,25 @@ def run(
     name: str = "",
     demo: bool = False,
     wait_for_fleet: bool = True,
+    app: Any = None,
 ) -> None:
     """Open the fleet (unless the scenario does), run *scenario*, let the screen settle and call *check*."""
 
     async def main() -> None:
-        app = _harness.SnapshotApp(demo=demo)
-        async with app.run_test(size=_harness.SIZES[size]) as pilot:
+        shown_app = app if app is not None else _harness.SnapshotApp(demo=demo)
+        async with shown_app.run_test(size=_harness.SIZES[size]) as pilot:
             if wait_for_fleet:
                 await _harness.wait_for_fleet(pilot)
             await scenario(pilot)
             await pilot.pause()
             await pilot.wait_for_scheduled_animations()
             await pilot.pause(0.3)
-            _harness.freeze_cursors(app)
+            _harness.freeze_cursors(shown_app)
             target = os.environ.get(_SVG_DIR_VARIABLE)
             if target and name:
                 Path(target).mkdir(parents=True, exist_ok=True)
                 (Path(target) / f"{name}-{size}.svg").write_text(
-                    app.export_screenshot(simplify=True), encoding="utf-8"
+                    shown_app.export_screenshot(simplify=True), encoding="utf-8"
                 )
             check(pilot)
 

@@ -109,10 +109,11 @@ class MemberKeyChangeScreen(WorkspaceScreen):
                 with Container(id="keychange-container"):
                     with Container(id="keychange-context"):
                         yield Static(
-                            "[bold $text-accent]Confirm changed memory keys[/bold $text-accent]"
+                            "[bold]Confirm changed memory keys[/bold]"
                             if many
-                            else "[bold $text-accent]Confirm changed memory key[/bold $text-accent]",
+                            else "[bold]Confirm changed memory key[/bold]",
                             id="keychange-title",
+                            classes="screen-title",
                         )
                     with VerticalScroll(id="keychange-scroll"):
                         with Horizontal(id="keychange-review"):

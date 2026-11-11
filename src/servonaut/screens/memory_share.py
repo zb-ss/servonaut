@@ -231,9 +231,10 @@ class ShareInstanceScreen(WorkspaceScreen):
                     Container(
                         Static(
                             Content.from_markup(
-                                "[bold $text-accent]Share memory: $name[/bold $text-accent]", name=name
+                                "[bold]Share memory: $name[/bold]", name=name
                             ),
                             id="share-title",
+                            classes="screen-title",
                         ),
                         Static("", id="share-status"),
                         id="share-context",
