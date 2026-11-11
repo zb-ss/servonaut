@@ -100,3 +100,21 @@ async def test_overlong_ovh_scope_retains_keyboard_scroll_and_full_value(monkeyp
         assert scope.scroll_y == scope.max_scroll_y
         assert "last-part" in _painted(app, scope)
         assert str(project.content) == full_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi", [False, True])
+async def test_the_keys_panel_and_help_text_are_in_view_from_the_top_at_100x30(monkeypatch, multi: bool) -> None:
+    from tests.snapshots._geometry import ovh_keys_panel_problems
+
+    monkeypatch.setattr(ChatPanel, "on_mount", lambda self: None)
+    app = _ResourceApp(True, multi=multi)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = OVHSSHKeysScreen()
+        await app.push_screen(screen)
+        table = screen.query_one("#ssh_keys_table", DataTable)
+        await wait_until(lambda: table.row_count >= 1)
+        table.focus()
+        await pilot.pause()
+        await pilot.pause()
+        assert ovh_keys_panel_problems(screen) == []

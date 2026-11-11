@@ -89,3 +89,25 @@ def clipped_labels(widgets: Iterable[Widget]) -> List[str]:
         if text and widget.content_size.width < len(text):
             clipped.append(text)
     return clipped
+
+
+def ovh_keys_panel_problems(screen: Any) -> list:
+    """What of the OVH keys screen is out of view: title, scope, panel border and heading, help text."""
+    document = screen.query_one("#ovh_ssh_keys_document")
+    visible = document.region
+    problems = []
+    for name, widget_id in (("title", "#ovh_ssh_keys_header"), ("scope", "#ovh_ssh_keys_scope")):
+        if not screen.region.contains_region(screen.query_one(widget_id).region):
+            problems.append(f"the {name} is out of view")
+    catalog = screen.query_one(".provider_key_catalog")
+    if catalog.region.y < visible.y:
+        problems.append("the panel's top border is scrolled out")
+    heading = screen.query_one(".provider_catalog_heading")
+    if not visible.contains_region(heading.region):
+        problems.append("the panel heading is out of view")
+    help_text = screen.query_one(".provider-key-context .note")
+    if help_text.region.y < visible.y:
+        problems.append("the first line of the help text is cut")
+    return problems
+
+

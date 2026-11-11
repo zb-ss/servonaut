@@ -69,3 +69,11 @@ def test_the_ovh_key_table_fits_beside_the_open_navigation_at_130x40() -> None:
     )
 
 
+
+
+@sizes
+def test_the_ovh_keys_panel_is_in_view_from_its_top(size: str) -> None:
+    def check(pilot: Any) -> None:
+        assert _geometry.ovh_keys_panel_problems(pilot.app.screen) == []
+
+    run(_ovh_ssh_keys, size, check, "ovh-keys-panel")

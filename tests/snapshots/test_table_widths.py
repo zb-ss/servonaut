@@ -235,3 +235,37 @@ def test_the_ovh_inventory_fits_beside_the_open_navigation_at_130x40() -> None:
         assert shown == "141.123.123.123"
 
     _geometry.run(scenario, (130, 40), check, name="table-ovh-130x40")
+
+
+def test_the_ovh_inventory_keeps_its_title_and_panel_top_in_view_at_100x30() -> None:
+    async def scenario(pilot: Any) -> None:
+        await _OVH_OPEN(pilot)
+        pilot.app.screen.query_one("#ovh_mgr_table").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        container = screen.query_one("#ovh_mgr_container")
+        assert screen.region.contains_region(screen.query_one("#ovh_mgr_header").region)
+        panel = screen.query_one(".provider-manager-inventory")
+        assert panel.region.y >= container.region.y, "the inventory's top border is scrolled out"
+        assert container.region.contains_region(screen.query_one("#ovh_mgr_table").region)
+
+    _geometry.run(scenario, (100, 30), check, name="panel-ovh-inventory-100x30")
+
+
+def test_the_findings_inbox_keeps_its_title_and_panel_top_in_view_at_100x30() -> None:
+    async def scenario(pilot: Any) -> None:
+        await family._findings(pilot)
+        pilot.app.screen.query_one("#findings_table").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        assert screen.region.contains_region(screen.query_one("#findings_title").region)
+        card = screen.query_one("#findings_table_card")
+        container = screen.query_one("#findings_container")
+        assert card.region.y >= container.region.y, "the inbox's top border is scrolled out"
+        assert screen.region.contains_region(card.region)
+
+    _geometry.run(scenario, (100, 30), check, name="panel-findings-100x30")

@@ -82,6 +82,8 @@ class OVHSSHKeysScreen(WorkspaceScreen):
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 64
     CONTENT_NARROW_WIDTH = 96
+    # Short terminals: the title gives up its empty row so the keys panel fits.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
