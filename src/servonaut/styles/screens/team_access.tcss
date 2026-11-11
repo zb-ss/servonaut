@@ -234,3 +234,19 @@ CaScreen.-content-narrow #ca_report {
     width: 100%;
     margin-right: 0;
 }
+
+/* Short terminals: tighter cards, so a card fits above the return lane. */
+TeamManagementScreen.-short .settings_section {
+    padding: 0 1;
+}
+
+TeamManagementScreen.-short #configs_table {
+    height: 4;
+    margin-bottom: 0;
+}
+
+TeamManagementScreen.-short #members_table,
+TeamManagementScreen.-short #servers_table {
+    height: 5;
+    margin-bottom: 0;
+}

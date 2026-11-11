@@ -80,3 +80,21 @@ def test_secrets_hub_fits_its_cards_without_scrolling_at_100x30() -> None:
             assert body.region.contains_region(card.region), "a card is cut"
 
     _geometry.run(_secrets_hub_unscrolled, "100x30", check, name="secrets-hub")
+
+
+@pytest.mark.parametrize("rules", ["in_force", "fallback"])
+def test_team_cards_end_above_the_return_lane_at_100x30(rules: str) -> None:
+    from . import test_teams
+
+    scenario = test_teams._agent_rules_card(
+        test_teams._RULES if rules == "in_force" else None, signed=rules == "in_force",
+    )
+
+    def check(pilot: Any) -> None:
+        screen = pilot.app.screen
+        lane = screen.query_one("#team_return_actions")
+        for card_id in ("configs_section", "agent_rules_section"):
+            card = screen.query_one(f"#{card_id}")
+            assert card.region.bottom <= lane.region.y, f"{card_id} runs under the Back lane"
+
+    _geometry.run(scenario, "100x30", check, name=f"teams-{rules}")
