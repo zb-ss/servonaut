@@ -133,6 +133,11 @@ OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_scope {
     background: $surface;
 }
 
+/* The scope block is six rows at most: the title gives up its empty row. */
+OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_header {
+    margin: 0;
+}
+
 OVHSSHKeysScreen.-content-narrow #ovh_ssh_keys_project_label {
     height: auto;
     margin: 0;

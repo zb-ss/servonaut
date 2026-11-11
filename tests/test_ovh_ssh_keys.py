@@ -138,7 +138,7 @@ class TestKeyListing:
             # Column 2 is the truncated public key.
             cell = str(row[2])
             assert cell.endswith("…")
-            assert len(cell) == 25  # 24 chars + single-char ellipsis
+            assert len(cell) in (25, 41)  # 24 (narrow) or 40 (wide) chars + the ellipsis
 
     @pytest.mark.asyncio
     async def test_table_populated_with_key_data(self):

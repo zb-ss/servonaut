@@ -311,9 +311,10 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         table.clear()
         for key in self._keys:
             public_key = key.get("public_key", "") or ""
-            truncated = (
-                public_key[:24] + "…" if len(public_key) > 24 else public_key
-            )
+            # Wide terminals show 40 characters of the key; narrow ones 24.
+            size = getattr(self.app, "size", None)
+            shown = 24 if size is not None and size.width < 110 else 40
+            truncated = public_key[:shown] + "…" if len(public_key) > shown else public_key
             table.add_row(
                 Text(inert_text(_s(str(key.get("name", ""))))),
                 Text(inert_text("Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32])),
