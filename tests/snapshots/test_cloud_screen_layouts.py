@@ -44,3 +44,13 @@ def test_hetzner_manager_keeps_its_title_in_view_at_100x30() -> None:
         assert screen.query_one("#hetzner_mgr_container").region.contains_region(table.region)
 
     run(_hetzner_manager, "100x30", check, "hetzner-manager")
+
+
+@sizes
+def test_the_ovh_key_table_does_not_scroll_sideways(size: str) -> None:
+    from textual.widgets import DataTable
+
+    def check(pilot: Any) -> None:
+        assert pilot.app.screen.query_one("#ssh_keys_table", DataTable).max_scroll_x == 0
+
+    run(_ovh_ssh_keys, size, check, "table-ovh-keys")

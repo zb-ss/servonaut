@@ -23,6 +23,8 @@ from . import test_memory_share as share
 from . import test_teams as teams
 
 _EXEMPT_ANCESTORS = ("Sidebar", "WorkspaceControls", "SafeHeader")
+# Menus: their rows are checked by the menu hover tests.
+_EXEMPT_IDS = ("settings-nav-list",)
 
 
 def _tested_buttons(screen: Any) -> List[Button]:
@@ -31,7 +33,10 @@ def _tested_buttons(screen: Any) -> List[Button]:
         # A focused button already shows the keyboard cue; hover adds nothing to compare.
         if button.has_class("-current-view") or button.has_class("--chosen") or isinstance(button, LinkButton) or button.disabled or not button.display or button.has_focus:
             continue
-        if any(type(a).__name__ in _EXEMPT_ANCESTORS or isinstance(a, DataTable) for a in button.ancestors):
+        if any(
+            type(a).__name__ in _EXEMPT_ANCESTORS or isinstance(a, DataTable) or a.id in _EXEMPT_IDS
+            for a in button.ancestors
+        ):
             continue
         region = button.region
         if region.height == 0 or not screen.region.contains_region(region):
@@ -46,7 +51,11 @@ def _tested_buttons(screen: Any) -> List[Button]:
 
 def _look(button: Button) -> tuple:
     styles = button.styles
-    return (styles.border_top[1], styles.background, styles.color, bool(styles.text_style.underline))
+    # (frame colour, background, text colour, underlined, reversed, frame style)
+    return (
+        styles.border_top[1], styles.background, styles.color,
+        bool(styles.text_style.underline), bool(styles.text_style.reverse), styles.border_top[0],
+    )
 
 
 async def hover_problems(pilot: Any) -> List[str]:
@@ -67,10 +76,14 @@ async def hover_problems(pilot: Any) -> List[str]:
         if now[3]:
             problems.append(f"{name} underlines its words on hover")
         before = idle[id(button)]
-        compact = button.has_class("-textual-compact")
+        # A button with no frame (compact, or a bare text control) shows hover by its fill.
+        compact = button.has_class("-textual-compact") or before[5] in ("", "none", "blank", "hidden")
         if compact and before[1].a > 0.9:
             continue  # a chosen chip or tab is already filled
-        changed = (now[1] != before[1]) if compact else (now[0] != before[0])
+        changed = (
+            (now[1] != before[1] or now[4] != before[4]) if compact
+            else (now[0] != before[0] or now[5] != before[5] or now[4] != before[4])
+        )
         if not changed:
             problems.append(
                 f"{name} shows no hover cue ({'background' if compact else 'frame'}): {before} -> {now}"
@@ -155,4 +168,33 @@ def test_vault_action_rail_hovers_without_underline() -> None:
             result.extend(await hover_problems(pilot))
 
     asyncio.run(main())
+    assert not result, "\n".join(r.split(": (")[0] for r in result)
+
+
+def _settings_panel_ids() -> list:
+    from servonaut.screens.settings.registry import PANELS
+
+    return [panel.id for panel in PANELS]
+
+
+@pytest.mark.parametrize("size", ["160x50", "100x30"])
+@pytest.mark.parametrize("panel_id", _settings_panel_ids())
+def test_settings_panels_hover_cleanly_in_dark_light_and_terminal_themes(panel_id: str, size: str) -> None:
+    result: List[str] = []
+
+    async def scenario(pilot: Any) -> None:
+        pilot.app.open_settings_screen(panel_id)
+        screen = await screens._harness.wait_for_screen(pilot, "SettingsScreen")
+        await screens._harness.wait_until(
+            pilot,
+            lambda: screen._current_panel() is not None and screen._current_panel()._loaded
+            and not screen._current_panel()._settling,
+            f"the {panel_id} panel to settle",
+        )
+        for theme in ("servonaut", "servonaut-light", "ansi-dark"):
+            pilot.app.theme = theme
+            await pilot.pause(0.2)
+            result.extend(f"{theme}: {problem}" for problem in await hover_problems(pilot))
+
+    _geometry.run(scenario, size, lambda pilot: None, name=f"hover-settings-{panel_id}")
     assert not result, "\n".join(r.split(": (")[0] for r in result)

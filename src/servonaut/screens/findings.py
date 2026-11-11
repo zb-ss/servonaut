@@ -274,6 +274,31 @@ class FindingsScreen(WorkspaceScreen):
                     )
         yield Footer()
 
+    def _add_columns(self, table: DataTable, *, narrow: bool) -> None:
+        """The inbox columns; a narrow content area drops the detector and trims the rest."""
+        table.add_column("Severity", key="severity", width=9 if narrow else 10)
+        table.add_column("Status", key="status", width=10 if narrow else 12)
+        if self._instance is None:
+            table.add_column("Instance", key="instance", width=16 if narrow else 22)
+        if not narrow:
+            table.add_column("Detector", key="detector", width=18)
+        table.add_column("Title", key="title", width=28 if narrow else None)
+        table.add_column("Detected", key="detected", width=10 if narrow else 16)
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._sync_columns)
+
+    def _sync_columns(self) -> None:
+        narrow = self.has_class("-content-narrow")
+        if narrow == getattr(self, "_narrow_columns", False):
+            return
+        self._narrow_columns = narrow
+        table = self.query_one("#findings_table", DataTable)
+        table.clear(columns=True)
+        self._add_columns(table, narrow=narrow)
+        if self._rows:
+            self._populate_table()
+
     def _restyle_rows(self, _theme: Any = None) -> None:
         """Cells carry theme colours fixed at add time: rebuild on a theme change."""
         if self._rows:
@@ -288,13 +313,8 @@ class FindingsScreen(WorkspaceScreen):
         self.query_one("#findings_table_card").border_title = "Findings inbox"
         table = self.query_one("#findings_table", DataTable)
         table.cursor_type = "row"
-        table.add_column("Severity", key="severity", width=10)
-        table.add_column("Status", key="status", width=12)
-        if self._instance is None:
-            table.add_column("Instance", key="instance", width=22)
-        table.add_column("Detector", key="detector", width=18)
-        table.add_column("Title", key="title")
-        table.add_column("Detected", key="detected", width=16)
+        self._narrow_columns = False
+        self._add_columns(table, narrow=False)
         self._render_gate()
 
     # ------------------------------------------------------------------
@@ -550,9 +570,11 @@ class FindingsScreen(WorkspaceScreen):
             title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = themed_text(
-                self.app, str(finding.get("detected_at") or "")[:16].replace("T", " "),
-            )
+            narrow = getattr(self, "_narrow_columns", False)
+            stamp = str(finding.get("detected_at") or "")
+            detected = themed_text(self.app, stamp[:10] if narrow else stamp[:16].replace("T", " "))
+            if narrow and len(title.plain) > 28:
+                title = themed_text(self.app, title.plain[:27] + "…")
             row = [
                 themed_text(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
                 themed_text(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
@@ -563,7 +585,7 @@ class FindingsScreen(WorkspaceScreen):
                     self.app, self._instance_label(instance_id),
                 )
                 row.append(themed_text(self.app, label))
-            row.extend([detector, title, detected])
+            row.extend([title, detected] if getattr(self, "_narrow_columns", False) else [detector, title, detected])
             table.add_row(*row)
         self._update_pill()
         self._update_filter_line()

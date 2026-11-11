@@ -46,8 +46,20 @@
 }
 
 #settings-back:hover,
+#settings-search-clear:hover {
+    background: $foreground 10%;
+    color: $text;
+    text-style: bold;
+}
+
+#settings-back:ansi:hover,
+#settings-search-clear:ansi:hover {
+    background: $background;
+    color: $text-accent;
+    text-style: bold;
+}
+
 #settings-back:focus,
-#settings-search-clear:hover,
 #settings-search-clear:focus {
     background: $boost;
     color: $text-accent;
@@ -77,6 +89,7 @@
 }
 
 #settings-nav-list .settings-nav-btn {
+    text-style: none;
     width: 100%;
     min-width: 0;
     height: 1;
@@ -111,6 +124,7 @@
 
 #settings-nav-list .settings-nav-btn:ansi:hover {
     background: $background;
+    color: $text-accent;
     text-style: bold;
 }
 
@@ -504,8 +518,19 @@ SettingsScreen .panel-save-dock Button {
     color: $text;
 }
 
-SettingsScreen .panel-save-dock Button:focus,
 SettingsScreen .panel-save-dock Button:hover {
+    border: round $accent-lighten-2;
+    background: $foreground 10%;
+    text-style: bold;
+}
+
+SettingsScreen .panel-save-dock Button:ansi:hover {
+    border: heavy $accent;
+    background: transparent;
+    text-style: none;
+}
+
+SettingsScreen .panel-save-dock Button:focus {
     border: round $accent;
     background: transparent;
     text-style: bold underline;

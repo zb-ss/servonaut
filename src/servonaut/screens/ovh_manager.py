@@ -239,8 +239,8 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         table = self.query_one("#ovh_mgr_table", DataTable)
         # The selected server's full ID is in the resource panel, so the table
         # keeps state and addressing visible instead of a long composite ID.
-        for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
-                             ("State", 10), ("Public IP", 15), ("Region", 9)):
+        for label, width in (("#", 3), ("Name", 15), ("Type", 12), ("Kind", 5),
+                             ("State", 8), ("Public IP", 14), ("Region", 7)):
             table.add_column(label, width=width)
         self.sync_compact_actions()
         self._refresh()

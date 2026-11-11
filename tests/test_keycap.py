@@ -80,3 +80,69 @@ async def test_the_vault_tabs_and_refresh_draw_the_cap() -> None:
         await pilot.pause()
         for button_id, key in (("vault_items", "i"), ("vault_refresh", "r")):
             assert cap(key) in _painted(screen.query_one(f"#{button_id}")), button_id
+
+
+def _lum(colour) -> float:
+    def channel(value: int) -> float:
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(colour.red) + 0.7152 * channel(colour.green) + 0.0722 * channel(colour.blue)
+
+
+def _ratio(first, second) -> float:
+    light, dark = sorted((_lum(first), _lum(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _segment(widget, text: str):
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if segment.text.strip() == text and segment.style is not None:
+                return segment.style
+    raise AssertionError(f"{text!r} is not painted")
+
+
+class _CapHost(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Browse", "k", id="framed")
+        yield ActionButton("Browse", "k", compact=True, id="compact")
+        yield ActionButton("Other", "o", id="other")
+
+
+@pytest.mark.asyncio
+async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> None:
+    """In every registered theme, idle, hovered and focused, framed and compact."""
+    app = _CapHost()
+    problems = []
+    async with app.run_test(size=(60, 14)) as pilot:
+        for theme in sorted(app.available_themes):
+            app.theme = theme
+            await pilot.pause()
+            if app.current_theme.ansi:
+                continue
+            for button_id in ("framed", "compact"):
+                button = app.query_one(f"#{button_id}", ActionButton)
+                for state in ("idle", "hover", "focus"):
+                    if state == "idle":
+                        app.set_focus(None)
+                        await pilot.hover(app.query_one("#other"), offset=(0, 0))
+                    elif state == "hover":
+                        app.set_focus(None)
+                        await pilot.hover(button)
+                    else:
+                        await pilot.hover(app.query_one("#other"), offset=(0, 0))
+                        button.focus()
+                    await pilot.pause()
+                    word = _segment(button, "Browse")
+                    cap = _segment(button, "k")
+                    name = f"{theme}/{button_id}/{state}"
+                    if cap.bgcolor.get_truecolor() == word.bgcolor.get_truecolor():
+                        problems.append(f"{name}: the cap vanishes into the button")
+                    elif _ratio(cap.bgcolor.get_truecolor(), word.bgcolor.get_truecolor()) < 1.08:
+                        problems.append(f"{name}: the cap is barely visible")
+                    if _ratio(cap.color.get_truecolor(), cap.bgcolor.get_truecolor()) < 4.5:
+                        problems.append(f"{name}: the key is hard to read")
+    assert not problems, "\n".join(problems[:20])

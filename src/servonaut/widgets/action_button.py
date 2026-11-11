@@ -39,13 +39,11 @@ _MAX_HINTED_LINES = 2
 HINT_STYLE = "$text-muted 60%"
 
 # A key hint is drawn as a small key cap built from characters, in the one text
-# row of the button: ``half`` (``▐s▌`` on a raised fill), ``chip`` (`` s ``
-# on a raised fill) or ``bracket`` (``[s]`` in the muted colour). Every style
-# adds two cells around the key.
-KEYCAP = "half"
-# The raised fill of a key cap; ``half`` draws its edges in the same colour.
-_CAP_FILL = "$panel-lighten-2"
-_CAP_ON_FILL = f"{HINT_STYLE} on {_CAP_FILL}"
+# row of the button: the key between two half-block edges (``▐s▌``) on a raised
+# fill. The fill is a tint of the text colour laid over whatever is behind the
+# button, so it shows in every theme and in every state of the button.
+_CAP_FILL = "$foreground 15%"
+_CAP_KEY = f"$text on {_CAP_FILL}"
 
 
 def keycap_parts(key: str, *, ansi: bool = False, disabled: bool = False) -> list:
@@ -60,11 +58,7 @@ def keycap_parts(key: str, *, ansi: bool = False, disabled: bool = False) -> lis
         return [(" ", quiet), (key, quiet), (" ", quiet)]
     if ansi:
         return [(" ", "reverse"), (key, "reverse"), (" ", "reverse")]
-    if KEYCAP == "bracket":
-        return [("[", HINT_STYLE), (key, HINT_STYLE), ("]", HINT_STYLE)]
-    if KEYCAP == "chip":
-        return [(" ", _CAP_ON_FILL), (key, _CAP_ON_FILL), (" ", _CAP_ON_FILL)]
-    return [("\u2590", _CAP_FILL), (key, _CAP_ON_FILL), ("\u258c", _CAP_FILL)]
+    return [("\u2590", _CAP_FILL), (key, _CAP_KEY), ("\u258c", _CAP_FILL)]
 
 
 def action_label(
@@ -106,7 +100,7 @@ class ActionButton(Button):
             self._label(compact, True),
             variant=role,
             id=id,
-            classes=classes,
+            classes=f"{classes or ''} -keycap".strip() if key else classes,
             tooltip=tooltip,
             disabled=disabled,
             compact=compact,
@@ -128,6 +122,8 @@ class ActionButton(Button):
 
     def _refresh_label(self) -> None:
         self.label = self._label(self.compact, self._hint)
+        # The cap's right edge is half a cell of its own: the button gives that cell back.
+        self.set_class(bool(self._key and self._hint), "-keycap")
         # An auto width is measured from the label; measure it again.
         self.refresh(layout=True)
         if self.parent is not None:
@@ -170,6 +166,7 @@ class ActionButton(Button):
     def natural_width(self, *, short: bool, hint: bool) -> int:
         """Cells this button needs, margin included, for the given words and hint."""
         chrome = _COMPACT_CHROME if self.compact else _FULL_CHROME
+        chrome -= 1 if (hint and self._key) else 0
         return self._label(self.compact, hint, short).cell_length + chrome + _MARGIN
 
 

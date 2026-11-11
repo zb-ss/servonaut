@@ -101,6 +101,13 @@ def _literal(app, widget, literal, palette):
     pytest.fail(f'Complete native label {literal!r} is not painted')
 
 
+def _frame_row(app, widget):
+    """The top edge of the widget as painted: its frame characters."""
+    strips = app.screen._compositor.render_strips()
+    region = widget.region
+    return strips[region.y].crop(region.x, region.right).text
+
+
 def _paint(app, widget, literal, palette, name, rows, failures):
     assert app.screen.region.contains_region(widget.region)
     glyphs, point = _literal(app, widget, literal, palette)
@@ -154,12 +161,20 @@ async def test_vault_focus_dispatch_keeps_native_action(theme, clipboard, record
             assert not any(isinstance(m, Button.Pressed) and m.button is other
                            for m in messages.values())
             await _tab_to(pilot, other)
+            await pilot.hover(offset=(0, 0))
+            await pilot.pause()
+            idle_frame = _frame_row(app, button)
             await pilot.hover(button)
             await pilot.pause()
             assert app.focused is other and button.mouse_hover and not button.has_focus
             _paint(app, button, 'Use vault key', palette, 'vault-hover-only', rows, failures)
-            if app.current_theme.ansi and not all(g['underline'] for g in rows[-1]['glyphs']):
-                failures.append(['vault-hover-only', 'missing-native-hover-cue'])
+            # Hover is shown by the frame changing (or reversed text), never by an underline.
+            if app.current_theme.ansi:
+                if any(g['underline'] for g in rows[-1]['glyphs']):
+                    failures.append(['vault-hover-only', 'underlined-on-hover'])
+                reversed_text = any(g.get('reverse') for g in rows[-1]['glyphs'])
+                if _frame_row(app, button) == idle_frame and not reversed_text:
+                    failures.append(['vault-hover-only', 'missing-native-hover-cue'])
             await _tab_to(pilot, button)
             await pilot.pause()
             assert app.focused is button and button.mouse_hover

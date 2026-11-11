@@ -187,7 +187,6 @@ Button:focus {
 
 /* Hover brightens the frame and never underlines the words; keyboard focus
    keeps its underline. A role keeps its own colour and gets a lighter frame. */
-Button.-warning:hover,
 Button.-warning:focus {
     background: transparent;
     color: $text-warning;
@@ -195,7 +194,6 @@ Button.-warning:focus {
     text-style: bold underline;
 }
 
-Button.-error:hover,
 Button.-error:focus {
     background: transparent;
     color: $text-error;
@@ -225,6 +223,21 @@ Button.-primary:hover {
 Button.-textual-compact {
     height: 1;
     border: none !important;
+}
+
+/* A frameless button shows hover by its fill (reversed in terminal themes). */
+Button.-textual-compact:hover {
+    background: $foreground 8%;
+}
+
+Button.-textual-compact:ansi:hover,
+Button.-textual-compact.-primary:ansi:hover,
+Button.-textual-compact.-success:ansi:hover,
+Button.-textual-compact.-warning:ansi:hover,
+Button.-textual-compact.-error:ansi:hover {
+    background: transparent;
+    border: none;
+    text-style: reverse;
 }
 
 #btn_back {
@@ -263,8 +276,8 @@ Button.-error:ansi:hover,
 #btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    border: round $accent;
-    text-style: italic;
+    border: heavy $accent;
+    text-style: none;
 }
 
 Button:ansi:focus,

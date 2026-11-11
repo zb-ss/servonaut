@@ -64,9 +64,15 @@ ActionButton.-textual-compact {
     margin: 0 1 0 0;
 }
 
+/* A key cap's right edge is half a cell wide, so the button needs no right padding. */
+ActionButton.-keycap,
+ActionButton.-keycap.-textual-compact {
+    padding: 0 0 0 1;
+}
+
 ActionButton.-textual-compact:hover,
 ActionButton.-textual-compact:focus {
-    background: $panel-lighten-2;
+    background: $foreground 8%;
 }
 
 ActionButton.-textual-compact.-primary {
@@ -87,7 +93,8 @@ ActionButton:ansi {
 ActionButton:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: italic;
+    border: heavy $accent;
+    text-style: none;
 }
 
 /* A compact action has no frame; in a terminal-colour theme its hover is shown reversed. */
@@ -154,7 +161,8 @@ ActionButton#btn_back:ansi {
 ActionButton#btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: italic;
+    border: heavy $accent;
+    text-style: none;
 }
 
 ActionButton#btn_back:ansi:focus {
@@ -170,7 +178,7 @@ ActionButton#btn_back.-textual-compact {
 
 ActionButton#btn_back.-textual-compact:hover,
 ActionButton#btn_back.-textual-compact:focus {
-    background: $panel-lighten-2;
+    background: $foreground 8%;
 }
 
 /* No room: the actions wrap onto further lines instead of being cut off. The

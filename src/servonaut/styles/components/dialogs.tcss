@@ -149,8 +149,8 @@ DialogFrame > .dialog-footer > DialogActions > Button:ansi:enabled:blur {
 DialogFrame > .dialog-footer > DialogActions > Button:ansi:enabled:hover {
     background: $surface;
     color: $foreground;
-    border: round $accent;
-    text-style: bold underline;
+    border: heavy $accent;
+    text-style: none;
 }
 
 DialogFrame > .dialog-footer > DialogActions > Button:ansi:enabled:focus {
@@ -186,7 +186,8 @@ DialogFrame > .dialog-footer > DialogActions > Button.-error:ansi {
 
 DialogFrame > .dialog-footer > DialogActions > Button.-warning:ansi:enabled:hover,
 DialogFrame > .dialog-footer > DialogActions > Button.-error:ansi:enabled:hover {
-    text-style: bold underline;
+    border: heavy $accent;
+    text-style: none;
 }
 
 DialogFrame > .dialog-footer > DialogActions > Button.-warning:ansi:enabled:focus,

@@ -6,6 +6,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
+import pytest
 from rich.cells import cell_len
 from textual.widgets import Static
 
@@ -15,6 +16,9 @@ from servonaut.widgets.instance_table import InstanceTable
 from . import _harness
 
 Scenario = Callable[[Any], Awaitable[None]]
+
+# Width sweeps resize the terminal dozens of times: allow for a slow runner.
+pytestmark = pytest.mark.timeout(180)
 
 
 def _run(

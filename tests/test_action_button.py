@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 
-from servonaut.widgets.action_button import HINT_STYLE
+from servonaut.widgets.action_button import _CAP_KEY
 
 
 def cap(key: str) -> str:
@@ -33,7 +33,7 @@ def test_label_is_words_then_a_muted_key_hint() -> None:
     assert label.plain == f"Browse files {cap('1')}"
     # The edges and the key are three spans; the key is the muted one on the raised fill.
     assert [label.plain[s.start:s.end] for s in label.spans] == ["\u2590", "1", "\u258c"]
-    assert HINT_STYLE in str(label.spans[1].style)
+    assert str(label.spans[1].style) == _CAP_KEY
 
 
 def test_label_without_a_key_has_no_hint() -> None:
@@ -108,8 +108,8 @@ class _RowHost(App[None]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("width,labels,wrapped", [
-    (84, [f"Use vault key {cap('u')}", f"Verify SSH {cap('v')}", f"Scan results {cap('5')}"], False),
-    (60, [f"Vault key {cap('u')}", f"Verify SSH {cap('v')}", f"Scan {cap('5')}"], False),
+    (80, [f"Use vault key {cap('u')}", f"Verify SSH {cap('v')}", f"Scan results {cap('5')}"], False),
+    (56, [f"Vault key {cap('u')}", f"Verify SSH {cap('v')}", f"Scan {cap('5')}"], False),
     (46, ["Vault key", "Verify SSH", "Scan"], False),
     (30, ["Vault key", "Verify SSH", "Scan"], True),
 ])
