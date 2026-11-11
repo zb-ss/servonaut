@@ -32,6 +32,8 @@ from textual.widgets import (
 )
 
 from servonaut.screens._compact_actions import sync_compact_buttons
+from contextlib import nullcontext
+
 from rich.cells import cell_len
 from servonaut.utils.text_fit import cut
 from servonaut.utils.markup import inert_text, literal, with_bold_values
@@ -320,7 +322,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
             return x
 
         table = self.query_one("#ssh_keys_table", DataTable)
-        with keep_selected_row(table):
+        with keep_selected_row(table) if isinstance(table, DataTable) else nullcontext():
             # Columns keep the widest value they ever held: start them again.
             table.clear(columns=True)
             table.add_columns("Name", "Fingerprint", "Public key")
