@@ -217,3 +217,21 @@ def test_a_wide_character_name_is_cut_by_cells_and_marked() -> None:
     assert widths["Name"] <= 28
     shown = cut(name, widths["Name"])
     assert shown.endswith("…")
+
+
+def test_the_ovh_inventory_fits_beside_the_open_navigation_at_130x40() -> None:
+    async def scenario(pilot: Any) -> None:
+        await _OVH_OPEN_PLAIN(pilot)
+        screen = pilot.app.screen
+        screen._instances = [dict(_harness.OVH_ROWS[0], public_ip="141.123.123.123"), *_harness.OVH_ROWS[1:]]
+        screen._render_table()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        table = pilot.app.screen.query_one("#ovh_mgr_table", DataTable)
+        assert table.max_scroll_x == 0, f"the inventory scrolls sideways ({table.max_scroll_x})"
+        labels = [str(column.label) for column in table.ordered_columns]
+        shown = str(table.get_row_at(0)[labels.index("Public IP")])
+        assert shown == "141.123.123.123"
+
+    _geometry.run(scenario, (130, 40), check, name="table-ovh-130x40")

@@ -335,7 +335,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                 max([cell_len("Name")] + [cell_len(n) for n in names])
                 + max([cell_len("Fingerprint")] + [cell_len(p) for p in prints]) + 6
             )
-            budget = 41 if room <= 0 else max(13, min(41, room - fixed - 2))
+            budget = 41 if room <= 0 else max(5, min(41, room - fixed - 2))
             for key, name, fingerprint in zip(self._keys, names, prints):
                 public_key = key.get("public_key", "") or ""
                 table.add_row(

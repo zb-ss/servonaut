@@ -22,8 +22,10 @@ CELL_PADDING = 2
 IP_WIDTH = 15
 _NAME_CAP = 28
 _TYPE_CAP = 20
+# Name and Type give up cells down to this, then (below) to the hard minimum.
 _MIN_TEXT = 10
-# What goes when the room runs out, first to last.
+_HARD_MIN_TEXT = 4
+# What goes first when the room runs out, in order.
 _DROP_ORDER = ("Kind", "Region")
 
 
@@ -51,8 +53,21 @@ def plan_columns(rows: Sequence[Sequence[str]], available: int) -> Dict[str, int
         for label in _DROP_ORDER:
             if total() > available:
                 shown.remove(label)
-        for label in ("Name", "Type"):
-            overflow = total() - available
-            if overflow > 0:
-                widths[label] = max(_MIN_TEXT, widths[label] - overflow)
+        _shrink(widths, ("Name", "Type"), _MIN_TEXT, total, available)
+        if total() > available:
+            shown.remove("#")
+        _shrink(widths, ("Type", "Name"), _HARD_MIN_TEXT, total, available)
+        if total() > available:
+            shown.remove("Type")
+            _shrink(widths, ("Name",), _HARD_MIN_TEXT, total, available)
     return {label: widths[label] for label in shown}
+
+
+def _shrink(widths: Dict[str, int], labels: Sequence[str], floor: int, total, available: int) -> None:
+    """Take cells from *labels* in turn, never below the floor and never widening a column."""
+    for label in labels:
+        overflow = total() - available
+        if overflow <= 0:
+            return
+        lowest = min(widths[label], floor)
+        widths[label] -= min(overflow, widths[label] - lowest)
