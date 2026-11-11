@@ -195,7 +195,7 @@ class Sidebar(Widget):
                 self._nav("CloudWatch", "nav_cloudwatch",
                           tooltip="Browse CloudWatch log groups and events"),
                 self._nav("IP ban manager", "nav_ip_ban",
-                          tooltip="Ban/unban IPs via WAF, Security Groups, or NACLs"),
+                          tooltip="Ban/unban IPs via WAF, security groups or NACLs"),
                 self._nav("CloudTrail", "nav_cloudtrail",
                           tooltip="Audit AWS API activity and events"),
                 section_id="section_aws",

@@ -82,7 +82,7 @@ class OvhPanel(SettingsPanel):
             # The account form
             yield Static("Account settings", classes="ovh-section-header settings-group-title")
             yield Static(
-                "Credentials, projects, SSH defaults and Object storage keys are "
+                "Credentials, projects, SSH defaults and object storage keys are "
                 "in each account's form: Setup OVHcloud for the primary account, "
                 "Accounts below for the others.",
                 classes="ovh-note",

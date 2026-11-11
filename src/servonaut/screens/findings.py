@@ -1281,13 +1281,13 @@ class FindingDetailScreen(WorkspaceScreen):
             if not methods and account:
                 return None, (
                     f"No IP-ban configuration acts in AWS account "
-                    f"{account!r} — add one for it under Settings ▸ IP Ban "
+                    f"{account!r} — add one for it under Settings ▸ IP ban "
                     "before blocking an address."
                 )
             if not methods:
                 return None, (
                     "No IP-ban configuration found — add one under "
-                    "Settings ▸ IP Ban before blocking an address."
+                    "Settings ▸ IP ban before blocking an address."
                 )
             return methods[0], None
 

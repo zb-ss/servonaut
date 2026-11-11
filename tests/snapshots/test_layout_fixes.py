@@ -92,10 +92,10 @@ def test_team_cards_end_above_the_return_lane_at_100x30(rules: str) -> None:
 
     def check(pilot: Any) -> None:
         screen = pilot.app.screen
-        lane = screen.query_one("#team_return_actions")
+        back_row = screen.query_one("#team_return_actions")
         for card_id in ("configs_section", "agent_rules_section"):
             card = screen.query_one(f"#{card_id}")
-            assert card.region.bottom <= lane.region.y, f"{card_id} runs under the Back lane"
+            assert card.region.bottom <= back_row.region.y, f"{card_id} runs under the Back row"
 
     _geometry.run(scenario, "100x30", check, name=f"teams-{rules}")
 

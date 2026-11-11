@@ -264,7 +264,7 @@ Button.-error:ansi:hover,
     background: $surface;
     color: $foreground;
     border: round $accent;
-    text-style: bold;
+    text-style: italic;
 }
 
 Button:ansi:focus,

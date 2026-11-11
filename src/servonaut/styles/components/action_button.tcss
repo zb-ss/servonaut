@@ -87,7 +87,12 @@ ActionButton:ansi {
 ActionButton:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: bold;
+    text-style: italic;
+}
+
+/* A compact action has no frame; in a terminal-colour theme its hover is shown reversed. */
+ActionButton.-textual-compact:ansi:hover {
+    text-style: reverse;
 }
 
 ActionButton:ansi:focus {
@@ -108,7 +113,7 @@ ActionButton.-textual-compact.-primary:ansi {
    would look the same focused, hovered and idle. */
 ActionButton.-textual-compact.-primary:ansi:hover {
     background: $surface;
-    text-style: bold reverse;
+    text-style: reverse;
 }
 
 ActionButton.-textual-compact.-primary:ansi:focus {
@@ -149,7 +154,7 @@ ActionButton#btn_back:ansi {
 ActionButton#btn_back:ansi:hover {
     background: $surface;
     color: $foreground;
-    text-style: bold;
+    text-style: italic;
 }
 
 ActionButton#btn_back:ansi:focus {

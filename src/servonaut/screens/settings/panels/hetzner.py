@@ -80,7 +80,7 @@ class HetznerPanel(SettingsPanel):
                 classes="setting_row",
             )
             yield Static(
-                "API token, SSH and server defaults and Object storage keys are in "
+                "API token, SSH and server defaults and object storage keys are in "
                 "each project's form: Setup Hetzner for the primary project, "
                 "Projects below for the others.",
                 classes="help-note",
