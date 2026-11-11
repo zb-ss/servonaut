@@ -99,7 +99,21 @@
     text-style: bold;
 }
 
-#settings-nav-list .settings-nav-btn:hover,
+#settings-nav-list .settings-nav-btn:hover {
+    background: $panel-lighten-2;
+    color: $text-accent;
+    text-style: bold;
+}
+
+#settings-nav-list .settings-nav-btn.--active:hover {
+    background: $primary 25%;
+}
+
+#settings-nav-list .settings-nav-btn:ansi:hover {
+    background: $background;
+    text-style: bold;
+}
+
 #settings-nav-list .settings-nav-btn:focus {
     background: $boost;
     color: $text-accent;
@@ -121,6 +135,16 @@
     content-align: left middle;
     color: $text-muted;
     text-style: none;
+}
+
+#settings-nav-list SidebarSection > Button.section-header:hover {
+    background: $panel-lighten-2;
+    text-style: bold;
+}
+
+#settings-nav-list SidebarSection > Button.section-header:ansi:hover {
+    background: $background;
+    text-style: bold;
 }
 
 #settings-nav-list SidebarSection > Button.section-header:focus {

@@ -116,8 +116,19 @@ def test_settings_categories_highlight_the_row_on_hover(theme: str) -> None:
     assert not problems, "\n".join(problems)
 
 
+def _cell_background(widget: Any, x: int, y: int) -> Any:
+    """The background colour painted at (x, y) of *widget*."""
+    strip = widget.render_lines(Region(0, y, widget.outer_size.width, 1))[0]
+    position = 0
+    for segment in strip:
+        position += len(segment.text)
+        if position > x:
+            return segment.style.bgcolor if segment.style is not None else None
+    return None
+
+
 @pytest.mark.parametrize("theme", list(THEMES))
-def test_help_topics_and_command_list_do_not_underline_on_hover(theme: str) -> None:
+def test_help_topics_highlight_the_row_on_hover_and_never_underline(theme: str) -> None:
     async def scenario(pilot: Any) -> None:
         await screens._help(pilot)
 
@@ -125,11 +136,48 @@ def test_help_topics_and_command_list_do_not_underline_on_hover(theme: str) -> N
         screen = pilot.app.screen
         tree = screen.query_one("#help_topics Tree", Tree)
         problems = []
-        for line in range(min(3, tree.last_line + 1)):
-            await pilot.hover(tree, offset=(6, line))
-            await pilot.pause(0.05)
-            if _underlined(tree):
-                problems.append(f"help topic line {line} is underlined while hovered")
+        await pilot.hover(screen, offset=(screen.size.width - 1, screen.size.height - 1))
+        await pilot.pause()
+        idle = _cell_background(tree, 8, 2)
+        await pilot.hover(tree, offset=(8, 2))
+        await pilot.pause(0.1)
+        if _underlined(tree):
+            problems.append("a help topic is underlined while hovered")
+        if theme != "ansi" and _cell_background(tree, 8, 2) == idle:
+            problems.append("a hovered help topic row is not highlighted")
+        return problems
+
+    problems = _themed(theme, scenario, probe)
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("theme", list(THEMES))
+def test_command_list_highlights_the_row_on_hover_and_never_underlines(theme: str) -> None:
+    from textual.command import CommandList
+
+    async def scenario(pilot: Any) -> None:
+        await pilot.press("ctrl+p")
+        await screens._harness.wait_for_screen(pilot, "CommandPalette")
+        await pilot.press(*"se")
+        await pilot.pause(0.5)
+
+    async def probe(pilot: Any) -> List[str]:
+        palette_list = pilot.app.screen.query_one(CommandList)
+        if palette_list.option_count < 2:
+            return ["the command list shows fewer than two rows"]
+        problems = []
+        await pilot.hover(pilot.app.screen, offset=(0, pilot.app.screen.size.height - 1))
+        await pilot.pause(0.1)
+        # The letters that match the query are underlined on purpose; hover adds nothing.
+        matches = _underlined(palette_list)
+        await pilot.hover(palette_list, offset=(6, 1))
+        await pilot.pause(0.1)
+        if _underlined(palette_list) != matches:
+            problems.append("hovering a command underlines more of its text")
+        hovered = _cell_background(palette_list, 6, 1)
+        other = _cell_background(palette_list, 6, 0)
+        if theme != "ansi" and hovered == other:
+            problems.append("a hovered command row is not highlighted")
         return problems
 
     problems = _themed(theme, scenario, probe)

@@ -77,7 +77,7 @@ class SidebarSection(Widget):
         content-align: left middle;
     }
     SidebarSection > Button.section-header:hover {
-        background: $boost;
+        background: $panel-lighten-2;
         text-style: bold;
         border: none;
     }
