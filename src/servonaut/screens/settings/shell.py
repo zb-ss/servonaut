@@ -30,6 +30,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.screens._footer_fit import fit_footer
 from servonaut.screens.settings.base import SettingsPanel
 from servonaut.screens.settings.registry import PANELS, PanelSpec
 from servonaut.widgets.dialogs import (
@@ -117,6 +118,23 @@ class SettingsScreen(WorkspaceScreen):
         Binding("escape", "back", "Back", show=True),
         Binding("ctrl+f", "focus_search", "Search", show=True),
     ]
+
+    # Footer shortcuts, most useful first; the rest go when the row is full.
+    FOOTER_PRIORITY = ("back", "choose", "new_theme", "focus_search")
+
+    @property
+    def active_bindings(self):
+        """Active bindings, with the footer kept to the shortcuts that fit."""
+        return fit_footer(
+            super().active_bindings, self, self.FOOTER_PRIORITY, include_widgets=True,
+        )
+
+    def on_resize(self) -> None:
+        self.refresh_bindings()
+
+    def on_descendant_focus(self) -> None:
+        # The footer is fitted to the focused widget's shortcuts as well.
+        self.call_after_refresh(self.refresh_bindings)
 
     def __init__(self, initial_panel: Optional[str] = None) -> None:
         """Create the screen.

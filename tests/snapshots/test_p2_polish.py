@@ -98,3 +98,27 @@ def test_team_cards_end_above_the_return_lane_at_100x30(rules: str) -> None:
             assert card.region.bottom <= lane.region.y, f"{card_id} runs under the Back lane"
 
     _geometry.run(scenario, "100x30", check, name=f"teams-{rules}")
+
+
+def test_appearance_footer_ends_on_whole_labels_at_100x30() -> None:
+    from textual.widgets import Footer
+
+    from . import test_settings_appearance as appearance
+
+    appearance._write_user_themes()
+
+    async def scenario(pilot: Any) -> None:
+        await appearance._open_appearance(pilot)
+        pilot.app.screen.query_one("#theme_card_paper").focus()
+        await pilot.pause()
+
+    def check(pilot: Any) -> None:
+        from textual.widgets._footer import FooterKey
+
+        footer = pilot.app.screen.query_one(Footer)
+        keys = list(footer.query(FooterKey))
+        assert "Help" in [key.description for key in keys]
+        for key in keys:
+            assert key.region.right <= key.parent.region.right, f"{key.description!r} is cut"
+
+    _geometry.run(scenario, "100x30", check, name="appearance-footer")

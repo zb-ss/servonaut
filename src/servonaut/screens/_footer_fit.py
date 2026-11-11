@@ -25,6 +25,7 @@ import dataclasses
 from typing import Any, Dict, List, Sequence
 
 from rich.cells import cell_len
+from textual.app import App
 from textual.binding import ActiveBinding, Binding
 
 # Cells a footer entry adds around its key and description: one space
@@ -44,6 +45,8 @@ def fit_footer(
     bindings: Dict[str, ActiveBinding],
     screen: Any,
     priority: Sequence[str],
+    *,
+    include_widgets: bool = False,
 ) -> Dict[str, ActiveBinding]:
     """*bindings* with the screen's footer entries cut to what fits.
 
@@ -53,6 +56,9 @@ def fit_footer(
             and its width is the footer's.
         priority: The screen's actions, most useful first. Actions not
             listed come after, in binding order.
+        include_widgets: Also fit the shortcuts of widgets on the screen (a
+            focused card, a panel), not only the screen's own. The app-wide
+            keys stay.
 
     Returns:
         The same mapping, in the same order, with every binding of an
@@ -72,7 +78,7 @@ def fit_footer(
 
     own: List[ActiveBinding] = []
     for entry in shown:
-        if entry.node is screen:
+        if _may_hide(entry, screen, include_widgets):
             own.append(entry)
         else:
             budget -= _entry_cells(app, entry.binding)
@@ -92,11 +98,19 @@ def fit_footer(
     return {
         key: (
             active._replace(binding=dataclasses.replace(active.binding, show=False))
-            if active.node is screen and active.binding.action in hidden_actions
+            if _may_hide(active, screen, include_widgets)
+            and active.binding.action in hidden_actions
             else active
         )
         for key, active in bindings.items()
     }
+
+
+def _may_hide(entry: ActiveBinding, screen: Any, include_widgets: bool) -> bool:
+    """True for the screen's own entries, and for widget entries when asked."""
+    if entry.node is screen:
+        return True
+    return include_widgets and not isinstance(entry.node, App)
 
 
 def _footer_entries(bindings: Dict[str, ActiveBinding]) -> List[ActiveBinding]:
