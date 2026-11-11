@@ -32,13 +32,15 @@ def run(
     *,
     name: str = "",
     demo: bool = False,
+    wait_for_fleet: bool = True,
 ) -> None:
-    """Open the fleet, run *scenario*, let the screen settle and call *check*."""
+    """Open the fleet (unless the scenario does), run *scenario*, let the screen settle and call *check*."""
 
     async def main() -> None:
         app = _harness.SnapshotApp(demo=demo)
         async with app.run_test(size=_harness.SIZES[size]) as pilot:
-            await _harness.wait_for_fleet(pilot)
+            if wait_for_fleet:
+                await _harness.wait_for_fleet(pilot)
             await scenario(pilot)
             await pilot.pause()
             await pilot.wait_for_scheduled_animations()

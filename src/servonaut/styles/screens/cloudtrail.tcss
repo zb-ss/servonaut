@@ -80,10 +80,15 @@ CloudTrailBrowserScreen.-content-narrow #ct_filter_actions {
     column-span: 2;
 }
 
+/* The account picker adds a control, so the filters always take two rows. */
 #cloudtrail_filters.-with-account {
-    grid-size: 7 1;
-    grid-columns: 1fr 17 19 1fr 1fr 1fr 34;
-    min-width: 115;
+    grid-size: 4 2;
+    grid-columns: 1fr 1fr 19 1fr;
+    min-width: 51;
+}
+
+#cloudtrail_filters.-with-account #ct_filter_actions {
+    column-span: 2;
 }
 
 CloudTrailBrowserScreen.-content-narrow #cloudtrail_filters.-with-account {
