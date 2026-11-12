@@ -168,14 +168,9 @@ CloudWatchBrowserScreen.-content-narrow #cloudwatch_inspector {
     color: $text;
 }
 
-/* Too narrow for heading and button side by side: stack them. */
-#cw_top_ips_header.-stacked {
-    layout: vertical;
-    height: 2;
-}
-
-#cw_top_ips_header.-stacked #cw_top_ips_label {
-    width: 100%;
+/* Not room for heading and button on one row: keep the button. */
+#cw_top_ips_header.-no-heading #cw_top_ips_label {
+    display: none;
 }
 
 #cw_btn_ip_filter {

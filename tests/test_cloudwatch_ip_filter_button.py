@@ -58,8 +58,8 @@ async def test_the_filter_button_names_the_current_filter_and_fits_at_100x30() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 30), (130, 40), (160, 50)])
-async def test_the_top_ips_heading_shows_in_full_in_every_filter_state(size) -> None:
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (130, 40), (160, 50)])
+async def test_the_top_ips_header_stays_one_row_and_nothing_moves(size) -> None:
     app = _SecurityHost(True)
     app.cloudwatch_service.get_log_events.return_value = [
         {"timestamp": "2026-01-01 00:00:01", "log_stream": "stream-one", "message": "event"}
@@ -69,13 +69,29 @@ async def test_the_top_ips_heading_shows_in_full_in_every_filter_state(size) -> 
         toggle = screen.query_one("#cw_btn_ip_filter", ActionButton)
         heading = screen.query_one("#cw_top_ips_label")
         header = screen.query_one("#cw_top_ips_header")
-        for words in ("Filter: all", "Filter: allowed", "Filter: blocked"):
-            await wait_until(lambda: toggle.words == words)
-            await pilot.pause()
-            await pilot.pause()
-            assert heading.content_size.width >= len("Top IPs"), (size, words)
-            assert heading.region.height >= 1 and toggle.region.height == 1
-            assert header.region.contains_region(toggle.region), (size, words)
-            assert not heading.region.intersection(toggle.region).area, (size, words)
+        table = screen.query_one("#cloudwatch_ips_table")
+        ban = screen.query_one("#cw_btn_ban_ip")
+        await wait_until(lambda: header.size.width > 0)
+        await pilot.pause()
+        await pilot.pause()
+        anchor = (table.region, ban.region, header.region)
+        for presses in range(5):
+            words = toggle.words
+            assert header.region.height == 1, (size, words)
+            assert toggle.region.height == 1 and header.region.contains_region(toggle.region)
             assert toggle.content_size.width >= toggle.label.cell_length, (size, words)
+            if heading.display:
+                assert heading.content_size.width >= len("Top IPs"), (size, words)
+                assert not heading.region.intersection(toggle.region).area
+            elif size[0] >= 160:
+                raise AssertionError("heading and button both show at 160x50")
+            if size[0] >= 160:
+                assert heading.display, words
+            assert (table.region, ban.region, header.region) == anchor, (size, presses)
+            # The table starts right under the one-row header, so no row is lost.
+            assert table.region.y == header.region.bottom, (size, words)
+            if size == (100, 30):
+                assert table.content_size.height - 1 >= 1, (size, words)
             await pilot.press("f")
+            await pilot.pause()
+            await pilot.pause()
