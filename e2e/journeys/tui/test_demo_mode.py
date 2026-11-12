@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input
+from textual.widgets import Button, DataTable, Input, Static
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import NIC_HANDLE
@@ -227,6 +227,12 @@ def _cell_text(cell: Any) -> str:
     return getattr(cell, "plain", None) or str(cell)
 
 
+def _widget_text(widget: Static) -> str:
+    """The text a Static holds, whether or not it is in the visible rows."""
+    visual = getattr(widget, "visual", None)
+    return str(getattr(visual, "plain", "") or "")
+
+
 def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
     """The drawn screen, every table cell and form field, and every notification."""
     screen = t.app.screen
@@ -240,6 +246,14 @@ def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
         for row_key in table.rows:
             cells.extend(_cell_text(cell) for cell in table.get_row(row_key))
     texts[f"{where} (table cells)"] = "\n".join(cells)
+    # Text a user reaches by scrolling is on the screen too: a panel's preview
+    # or a long form can sit below the visible rows.
+    # The manual is documentation, not data: its examples use common names.
+    if type(screen).__name__ != "HelpScreen":
+        texts[f"{where} (all text)"] = "\n".join(
+            _widget_text(widget) for widget in screen.query(Static)
+            if t.is_reachable(widget) and _widget_text(widget)
+        )
     # A masked field shows dots; its value is not on screen.
     texts[f"{where} (form fields)"] = "\n".join(
         field.value
@@ -424,6 +438,29 @@ async def _tour_server_actions(tour: Tour) -> None:
     assert seen == SERVER_KINDS, seen
 
 
+# Text a panel draws only once its own content is in place: panels that build
+# their view after the category is chosen (Appearance fills its theme cards and
+# the preview a moment later) are read after it appears.
+PANEL_CONTENT = {"appearance": ("#appearance_preview", "Search servers")}
+
+
+async def _wait_panel_painted(t: TuiDriver, panel: str) -> None:
+    """Wait until the chosen panel is loaded, settled and has drawn its own content."""
+    screen = t.app.screen
+
+    def ready() -> bool:
+        current = screen._current_panel()
+        if current is None or not current._loaded or current._settling:
+            return False
+        content = PANEL_CONTENT.get(panel)
+        if content is None:
+            return True
+        selector, text = content
+        return any(text in str(widget.visual.plain) for widget in current.query(selector))
+
+    await t.wait_until(ready, desc=f"the {panel} panel loaded and painted")
+
+
 async def _tour_settings(tour: Tour, only: Iterable[str] = ()) -> None:
     """Open every Settings panel (or just the panels in *only*)."""
     from servonaut.widgets.sidebar_section import SidebarSection
@@ -449,6 +486,7 @@ async def _tour_settings(tour: Tour, only: Iterable[str] = ()) -> None:
         await t.wait_until(
             lambda: t.on_screen(f"#{panel}").has_class("--active"), desc=f"{panel} shown"
         )
+        await _wait_panel_painted(t, panel[len("navbtn_"):])
         await tour.check(f"settings {panel[len('navbtn_'):]}")
 
 
