@@ -16,6 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.css.query import NoMatches
 
 from servonaut.utils.markup import literal
 from servonaut.widgets.action_button import ActionButton, ActionRow
@@ -79,6 +80,8 @@ _EVENT_COLUMNS = ("Time", "Stream", "Message")
 # Widest a column of the events table grows; wider values end in an ellipsis
 # (the full event is shown below the table when a row is selected).
 _STREAM_COLUMN_MAX = 32
+
+_TOP_IPS_HEADING = "Top IPs"
 
 # The Top IPs action column is as wide as its longest label.
 _IP_ACTION_WIDTH = len("BLOCKED")
@@ -235,7 +238,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                     with Vertical(id="cloudwatch_inspector"):
                         yield Vertical(
                             Horizontal(
-                                Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
+                                Label(f"[bold]{_TOP_IPS_HEADING}[/bold]", id="cw_top_ips_label"),
                                 ActionButton("Filter: all", "f", compact=True, id="cw_btn_ip_filter"),
                                 id="cw_top_ips_header",
                             ),
@@ -251,6 +254,25 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                             id="cloudwatch_detail",
                         )
         yield Footer()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._fit_ips_header)
+
+    def _fit_ips_header(self) -> None:
+        """Put the filter button under the heading when the row cannot hold both."""
+        try:
+            header = self.query_one("#cw_top_ips_header")
+            toggle = self.query_one("#cw_btn_ip_filter", ActionButton)
+        except NoMatches:
+            return
+        width = header.parent.content_size.width if header.parent else 0
+        if not width:
+            return
+        # Size for the longest state so cycling the filter never moves the row.
+        widest = max(len(f"Filter: {name.lower()}") for name in self._IP_FILTERS)
+        spare = widest - len(toggle.words)
+        needed = len(_TOP_IPS_HEADING) + toggle.natural_width(short=False, hint=True) + spare
+        header.set_class(needed > width, "-stacked")
 
     def on_mount(self) -> None:
         self.query_one("#cloudwatch_filter_bar").border_title = "Search logs"
@@ -601,6 +623,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         toggle = self.query_one("#cw_btn_ip_filter", ActionButton)
         toggle.set_text(f"Filter: {label.lower()}", "f")
         toggle.set_role("error" if label == "Blocked" else "default")
+        self.call_after_refresh(self._fit_ips_header)
         self._refresh_ips_table()
 
     def _refresh_ips_table(self) -> None:

@@ -52,7 +52,7 @@ _CAP_FILLED_KEY = "$text on $background"
 
 
 # A disabled button keeps its cap, dimmed: a weaker fill and a muted key.
-_CAP_DISABLED_FILL = "$foreground 8%"
+_CAP_DISABLED_FILL = "$foreground 11%"
 _CAP_DISABLED_KEY = f"{HINT_STYLE} on {_CAP_DISABLED_FILL}"
 
 

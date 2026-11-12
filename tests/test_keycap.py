@@ -187,7 +187,7 @@ async def test_the_disabled_cap_is_visible_and_weaker_than_the_enabled_one_in_ev
                 on_cap, off_cap = _segment(on, "r"), _segment(off, "r")
                 name = f"{theme}/{variant}"
                 fill = off_cap.bgcolor.get_truecolor()
-                if _ratio(fill, off_word.bgcolor.get_truecolor()) < 1.03:
+                if _ratio(fill, off_word.bgcolor.get_truecolor()) < 1.08:
                     problems.append(f"{name}: the disabled cap is not visible")
                 if off_cap.bgcolor == on_cap.bgcolor or off_cap.color == on_cap.color:
                     problems.append(f"{name}: the disabled cap looks like the enabled one")

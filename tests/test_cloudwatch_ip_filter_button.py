@@ -55,3 +55,27 @@ async def test_the_filter_button_names_the_current_filter_and_fits_at_100x30() -
             assert toggle.content_size.width >= toggle.label.cell_length, words
             assert header.region.contains_region(toggle.region), words
             await pilot.press("f")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (130, 40), (160, 50)])
+async def test_the_top_ips_heading_shows_in_full_in_every_filter_state(size) -> None:
+    app = _SecurityHost(True)
+    app.cloudwatch_service.get_log_events.return_value = [
+        {"timestamp": "2026-01-01 00:00:01", "log_stream": "stream-one", "message": "event"}
+    ]
+    async with app.run_test(size=size) as pilot:
+        screen = await _opener("watch")(app, pilot)
+        toggle = screen.query_one("#cw_btn_ip_filter", ActionButton)
+        heading = screen.query_one("#cw_top_ips_label")
+        header = screen.query_one("#cw_top_ips_header")
+        for words in ("Filter: all", "Filter: allowed", "Filter: blocked"):
+            await wait_until(lambda: toggle.words == words)
+            await pilot.pause()
+            await pilot.pause()
+            assert heading.content_size.width >= len("Top IPs"), (size, words)
+            assert heading.region.height >= 1 and toggle.region.height == 1
+            assert header.region.contains_region(toggle.region), (size, words)
+            assert not heading.region.intersection(toggle.region).area, (size, words)
+            assert toggle.content_size.width >= toggle.label.cell_length, (size, words)
+            await pilot.press("f")
