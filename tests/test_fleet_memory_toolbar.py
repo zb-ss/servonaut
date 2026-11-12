@@ -400,3 +400,22 @@ async def test_the_banner_is_one_line_in_a_narrow_terminal(tmp_path):
         assert banner.region.height <= 3
         assert "No memory cached yet" in str(screen.query_one("#fleet-banner-text").render())
         assert screen.query_one("#fleet-memory-table", DataTable).size.height >= 8
+
+
+async def test_long_ids_that_share_their_start_stay_tell_apart_and_a_cut_shows(tmp_path):
+    prefix = "0e2e" + "0" * 40
+    ids = [f"{prefix}{suffix}" for suffix in ("0001", "0002", "0003")]
+    rows = [
+        {"id": value, "name": f"batch-{index}", "provider": "custom", "public_ip": "10.0.0.9"}
+        for index, value in enumerate(ids)
+    ]
+    app = _host(tmp_path, rows=rows, probed=())
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready(pilot)
+        table = screen.query_one("#fleet-memory-table", DataTable)
+        shown = [str(table.get_row_at(index)[1]) for index in range(table.row_count)]
+        assert len(set(shown)) == 3, shown
+        assert all("…" in cell for cell in shown), shown
+        assert [cell[-4:] for cell in shown] == ["0001", "0002", "0003"]
+        width = table.columns[next(k for k in table.columns if str(k.value) == "id")].get_render_width(table)
+        assert all(len(cell) <= width for cell in shown), (shown, width)

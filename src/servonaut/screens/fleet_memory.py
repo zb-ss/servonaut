@@ -46,6 +46,7 @@ from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
+from servonaut.utils.text_fit import cut, cut_middle
 from servonaut.utils.theme_text import follow_theme, themed_text
 
 # Status constants and classifier live in the dependency-free service module
@@ -117,6 +118,10 @@ _ROW_BUTTONS = ("btn_open", "btn_share", "btn_clear")
 _MAX_WRAPPED_LINES = 3
 # How often an onboarding card looks for servers listed since it appeared.
 _CARD_RECHECK_SECONDS = 2.0
+# Cell widths whose text is cut with an ellipsis, never silently.
+_ID_CAP = 32
+_SHARED_WIDTH = 14
+_REASON_WIDTH = 20
 
 
 # ---------------------------------------------------------------------------
@@ -440,15 +445,15 @@ class FleetMemoryScreen(WorkspaceScreen):
         table = self.query_one("#fleet-memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Name", key="name")
-        table.add_column("ID", key="id", width=20)
+        table.add_column("ID", key="id")
         table.add_column("Provider", key="provider", width=10)
         table.add_column("Source", key="source", width=8)
         table.add_column("Memory", key="status", width=16)
-        table.add_column("Shared with", key="shared_with", width=14)
+        table.add_column("Shared with", key="shared_with", width=_SHARED_WIDTH)
         table.add_column("Modules", key="modules", width=10)
         table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
-        table.add_column("Last scan", key="reason", width=20)
+        table.add_column("Last scan", key="reason", width=_REASON_WIDTH)
         self._refresh_auto_scan_status()
         self._sync_compact_buttons()
         self.call_after_refresh(self._sync_compact_buttons)
@@ -728,7 +733,7 @@ class FleetMemoryScreen(WorkspaceScreen):
             "",
         )
         text = row_reason_text(code)
-        return themed_text(self.app, text, "$text-error") if text else "—"
+        return themed_text(self.app, cut(text, _REASON_WIDTH), "$text-error") if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -1140,7 +1145,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         """The table cells of *row*, in column order."""
         return (
             self._name_cell(row),
-            escape(str(row["id"])),
+            escape(cut_middle(str(row["id"]), _ID_CAP)),
             escape(str(row["provider"])),
             self._styled_cell(_SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"])),
             self._styled_cell(_STATUS_CELL.get(row["status"], ("—", "dim"))),
@@ -1165,7 +1170,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         if getattr(self.app, "demo_mode", False) and redaction is not None:
             teams = [redaction.redact_name(team) for team in teams]
         more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
-        return themed_text(self.app, f"{teams[0]}{more}", "$text-accent")
+        return themed_text(self.app, cut(f"{teams[0]}{more}", _SHARED_WIDTH), "$text-accent")
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))

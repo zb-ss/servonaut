@@ -60,3 +60,13 @@ def test_the_planner_never_widens_a_short_column() -> None:
     # A 3-cell name stays 4 (the header) however tight the room: it is not widened to the floor.
     widths = plan_columns([_row("web", "9.9.9.9")], 50)
     assert widths["Name"] == 4
+
+
+def test_a_middle_cut_keeps_both_ends_and_marks_the_cut() -> None:
+    from servonaut.utils.text_fit import cut_middle
+
+    shown = cut_middle("0e2e0000000000000000000000000001", 20)
+    assert shown.startswith("0e2e") and shown.endswith("0001") and "…" in shown
+    assert cell_len(shown) <= 20
+    assert cut_middle("short", 20) == "short"
+    assert cut_middle("anything", 0) == ""
