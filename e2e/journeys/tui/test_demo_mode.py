@@ -21,7 +21,10 @@ from typing import Any, Iterable
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Static
+from textual.widgets import (
+    Button, DataTable, Input, OptionList, RichLog, Static, TextArea, Tree,
+)
+from textual.widgets._toggle_button import ToggleButton
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import NIC_HANDLE
@@ -227,10 +230,72 @@ def _cell_text(cell: Any) -> str:
     return getattr(cell, "plain", None) or str(cell)
 
 
-def _widget_text(widget: Static) -> str:
-    """The text a Static holds, whether or not it is in the visible rows."""
+def _hidden_but_reachable(node: Any) -> bool:
+    """A hidden node a user can open: a collapsed section's content or an inactive tab."""
+    name = type(node).__name__
+    return name == "TabPane" or (name == "Contents" and type(node.parent).__name__ == "Collapsible")
+
+
+def _user_can_reach(t: TuiDriver, widget: Any) -> bool:
+    """Displayed, or hidden only behind a collapsed section or an inactive tab."""
+    node: Any = widget
+    while node is not None and node is not t.app:
+        hidden = not node.display or node.styles.visibility == "hidden"
+        if hidden and not _hidden_but_reachable(node):
+            return False
+        node = node.parent
+    return True
+
+
+def _texts_of(widget: Any) -> list[str]:
+    """Every piece of text *widget* can show, drawn or not."""
+    found: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(getattr(value, "plain", value) or "")
+        if text:
+            found.append(text)
+
     visual = getattr(widget, "visual", None)
-    return str(getattr(visual, "plain", "") or "")
+    if isinstance(widget, Static):
+        add(visual)
+    if isinstance(widget, (Button, ToggleButton)):
+        add(widget.label)
+    if isinstance(widget, OptionList):  # SelectionList is one
+        for index in range(widget.option_count):
+            add(widget.get_option_at_index(index).prompt)
+    if isinstance(widget, Tree):
+        stack = [widget.root]
+        while stack:
+            node = stack.pop()
+            add(node.label)
+            stack.extend(node.children)
+    if isinstance(widget, RichLog):
+        for line in widget.lines:
+            add(getattr(line, "text", line))
+    if isinstance(widget, TextArea):
+        add(widget.text)
+    if isinstance(widget, Input):
+        add(widget.placeholder)
+    add(widget.tooltip)
+    add(getattr(widget, "border_title", ""))
+    add(getattr(widget, "border_subtitle", ""))
+    return found
+
+
+def _all_text(t: TuiDriver, screen: Any) -> str:
+    """Text a user reaches by scrolling, a tab or a collapsed section, on this screen.
+
+    The manual (the Help screen's ``#help_content``) is documentation, not
+    data: its examples use common names.
+    """
+    skip = {id(node) for node in screen.query("#help_content, #help_content *")}
+    pieces: list[str] = []
+    for widget in screen.query("*"):
+        if id(widget) in skip or not _user_can_reach(t, widget):
+            continue
+        pieces.extend(_texts_of(widget))
+    return "\n".join(pieces)
 
 
 def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
@@ -246,14 +311,9 @@ def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
         for row_key in table.rows:
             cells.extend(_cell_text(cell) for cell in table.get_row(row_key))
     texts[f"{where} (table cells)"] = "\n".join(cells)
-    # Text a user reaches by scrolling is on the screen too: a panel's preview
-    # or a long form can sit below the visible rows.
-    # The manual is documentation, not data: its examples use common names.
-    if type(screen).__name__ != "HelpScreen":
-        texts[f"{where} (all text)"] = "\n".join(
-            _widget_text(widget) for widget in screen.query(Static)
-            if t.is_reachable(widget) and _widget_text(widget)
-        )
+    # Text a user reaches by scrolling, a tab or a collapsed section is on the
+    # screen too: a panel's preview or a long form can sit below the visible rows.
+    texts[f"{where} (all text)"] = _all_text(t, screen)
     # A masked field shows dots; its value is not on screen.
     texts[f"{where} (form fields)"] = "\n".join(
         field.value

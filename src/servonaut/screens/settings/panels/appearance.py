@@ -366,10 +366,6 @@ class AppearancePanel(SettingsPanel):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def on_mount(self) -> None:
-        self.app.theme_changed_signal.subscribe(self, self._follow_app_theme)
-        super().on_mount()
-
     def load(self) -> None:
         self._previewed = self.app.theme
         self.run_worker(self._rebuild_cards, exclusive=True, group="appearance_cards")
@@ -381,16 +377,34 @@ class AppearancePanel(SettingsPanel):
     def persist(self) -> None:
         """Nothing to save: choosing a theme applies and saves it."""
 
+    def on_mount(self) -> None:
+        self.app.theme_changed_signal.subscribe(self, self._follow_app_theme)
+        super().on_mount()
+        # The size is only known after the first layout; a panel chosen the
+        # moment Settings opens may never get a resize event of its own.
+        self.call_after_refresh(self._apply_layout_to_size)
+
+    def on_show(self) -> None:
+        self.call_after_refresh(self._apply_layout_to_size)
+
     def on_resize(self, event: events.Resize) -> None:
+        self._apply_layout(event.size.width)
+
+    def _apply_layout_to_size(self) -> None:
+        """Lay the panel out for the width it has now (nothing until it has one)."""
+        if self.size.width > 0:
+            self._apply_layout(self.size.width)
+
+    def _apply_layout(self, width: int) -> None:
         """Put the preview beside the cards when there is room, below them otherwise."""
-        wide = event.size.width >= SIDE_DETAILS_MIN_WIDTH
+        wide = width >= SIDE_DETAILS_MIN_WIDTH
         layout = self.query_one("#appearance_layout", Container)
         layout.set_class(wide, "-side")
         layout.set_class(not wide, "-stacked")
-        header_wide = event.size.width >= HEADER_ROW_MIN_WIDTH
-        self._fit_actions(event.size.width < COMPACT_ACTIONS_MAX_WIDTH, one_row=not header_wide)
+        header_wide = width >= HEADER_ROW_MIN_WIDTH
+        self._fit_actions(width < COMPACT_ACTIONS_MAX_WIDTH, one_row=not header_wide)
         self.query_one("#appearance_header", Horizontal).set_class(header_wide, "-wide")
-        cards_width = event.size.width - (DETAILS_WIDTH + 2 if wide else 0)
+        cards_width = width - (DETAILS_WIDTH + 2 if wide else 0)
         columns = max(1, min(MAX_CARD_COLUMNS, cards_width // CARD_MIN_WIDTH))
         grid = self.query_one("#appearance_cards", Grid)
         for count in range(1, MAX_CARD_COLUMNS + 1):
