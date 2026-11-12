@@ -21,7 +21,10 @@ from typing import Any, Iterable
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input
+from textual.widgets import (
+    Button, DataTable, Input, OptionList, RichLog, Static, TextArea, Tree,
+)
+from textual.widgets._toggle_button import ToggleButton
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import NIC_HANDLE
@@ -227,6 +230,74 @@ def _cell_text(cell: Any) -> str:
     return getattr(cell, "plain", None) or str(cell)
 
 
+def _hidden_but_reachable(node: Any) -> bool:
+    """A hidden node a user can open: a collapsed section's content or an inactive tab."""
+    name = type(node).__name__
+    return name == "TabPane" or (name == "Contents" and type(node.parent).__name__ == "Collapsible")
+
+
+def _user_can_reach(t: TuiDriver, widget: Any) -> bool:
+    """Displayed, or hidden only behind a collapsed section or an inactive tab."""
+    node: Any = widget
+    while node is not None and node is not t.app:
+        hidden = not node.display or node.styles.visibility == "hidden"
+        if hidden and not _hidden_but_reachable(node):
+            return False
+        node = node.parent
+    return True
+
+
+def _texts_of(widget: Any) -> list[str]:
+    """Every piece of text *widget* can show, drawn or not."""
+    found: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(getattr(value, "plain", value) or "")
+        if text:
+            found.append(text)
+
+    visual = getattr(widget, "visual", None)
+    if isinstance(widget, Static):
+        add(visual)
+    if isinstance(widget, (Button, ToggleButton)):
+        add(widget.label)
+    if isinstance(widget, OptionList):  # SelectionList is one
+        for index in range(widget.option_count):
+            add(widget.get_option_at_index(index).prompt)
+    if isinstance(widget, Tree):
+        stack = [widget.root]
+        while stack:
+            node = stack.pop()
+            add(node.label)
+            stack.extend(node.children)
+    if isinstance(widget, RichLog):
+        for line in widget.lines:
+            add(getattr(line, "text", line))
+    if isinstance(widget, TextArea):
+        add(widget.text)
+    if isinstance(widget, Input):
+        add(widget.placeholder)
+    add(widget.tooltip)
+    add(getattr(widget, "border_title", ""))
+    add(getattr(widget, "border_subtitle", ""))
+    return found
+
+
+def _all_text(t: TuiDriver, screen: Any) -> str:
+    """Text a user reaches by scrolling, a tab or a collapsed section, on this screen.
+
+    The manual (the Help screen's ``#help_content``) is documentation, not
+    data: its examples use common names.
+    """
+    skip = {id(node) for node in screen.query("#help_content, #help_content *")}
+    pieces: list[str] = []
+    for widget in screen.query("*"):
+        if id(widget) in skip or not _user_can_reach(t, widget):
+            continue
+        pieces.extend(_texts_of(widget))
+    return "\n".join(pieces)
+
+
 def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
     """The drawn screen, every table cell and form field, and every notification."""
     screen = t.app.screen
@@ -240,6 +311,9 @@ def _visible_texts(t: TuiDriver, where: str) -> dict[str, str]:
         for row_key in table.rows:
             cells.extend(_cell_text(cell) for cell in table.get_row(row_key))
     texts[f"{where} (table cells)"] = "\n".join(cells)
+    # Text a user reaches by scrolling, a tab or a collapsed section is on the
+    # screen too: a panel's preview or a long form can sit below the visible rows.
+    texts[f"{where} (all text)"] = _all_text(t, screen)
     # A masked field shows dots; its value is not on screen.
     texts[f"{where} (form fields)"] = "\n".join(
         field.value
@@ -368,6 +442,20 @@ SERVER_KINDS = {
 }
 
 
+def _fleet_rows(t: TuiDriver) -> list[tuple]:
+    """What each fleet row says, in a fixed order.
+
+    Left out: the row-number column and the "new" tag a server carries until
+    the next refresh. The table lists servers in the order the providers
+    answered, which differs from one load to the next, and a state may arrive
+    as markup (``[green]running[/green]``): the markup is dropped.
+    """
+    def said(cell: str) -> str:
+        return re.sub(r"\[/?[a-z ]+\]", "", cell).removesuffix(" new")
+
+    return sorted(tuple(said(cell) for cell in row[1:]) for row in t.table_rows("InstanceTable"))
+
+
 def _kind(instance: dict) -> str:
     if instance.get("is_custom"):
         # A custom server's host is carried in its address fields.
@@ -380,19 +468,26 @@ def _kind(instance: dict) -> str:
     return "aws"
 
 
+# The fleet table lists the servers in the order the providers answered, so
+# "the first of its kind" is not stable. Every server of these kinds is toured
+# (the AWS fixtures differ in what they show); of the others, the first one.
+TOUR_EVERY_SERVER = {"aws"}
+
+
 async def _tour_server_actions(tour: Tour) -> None:
     """Open the actions screen of one server of every kind in the fleet table."""
     t = tour.t
     await t.nav("nav_list")
     await t.wait_for_screen("InstanceListScreen")
     seen: set[str] = set()
+    table = await t.focus_instance_table()
+    await t.wait_until(lambda: table.row_count == FLEET_SIZE, desc="fleet rows")
     for index in range(FLEET_SIZE):
         table = await t.focus_instance_table()
-        await t.wait_until(lambda: table.row_count == FLEET_SIZE, desc="fleet rows")
         while table.cursor_row != index:
             await t.press("down" if table.cursor_row < index else "up")
         kind = _kind(table.get_selected_instance())
-        if kind in seen:
+        if kind in seen and kind not in TOUR_EVERY_SERVER:
             continue
         seen.add(kind)
         await t.press("enter")
@@ -401,6 +496,29 @@ async def _tour_server_actions(tour: Tour) -> None:
         await t.press("escape")
         await t.wait_for_screen("InstanceListScreen")
     assert seen == SERVER_KINDS, seen
+
+
+# Text a panel draws only once its own content is in place: panels that build
+# their view after the category is chosen (Appearance fills its theme cards and
+# the preview a moment later) are read after it appears.
+PANEL_CONTENT = {"appearance": ("#appearance_preview", "Search servers")}
+
+
+async def _wait_panel_painted(t: TuiDriver, panel: str) -> None:
+    """Wait until the chosen panel is loaded, settled and has drawn its own content."""
+    screen = t.app.screen
+
+    def ready() -> bool:
+        current = screen._current_panel()
+        if current is None or not current._loaded or current._settling:
+            return False
+        content = PANEL_CONTENT.get(panel)
+        if content is None:
+            return True
+        selector, text = content
+        return any(text in str(widget.visual.plain) for widget in current.query(selector))
+
+    await t.wait_until(ready, desc=f"the {panel} panel loaded and painted")
 
 
 async def _tour_settings(tour: Tour, only: Iterable[str] = ()) -> None:
@@ -428,6 +546,7 @@ async def _tour_settings(tour: Tour, only: Iterable[str] = ()) -> None:
         await t.wait_until(
             lambda: t.on_screen(f"#{panel}").has_class("--active"), desc=f"{panel} shown"
         )
+        await _wait_panel_painted(t, panel[len("navbtn_"):])
         await tour.check(f"settings {panel[len('navbtn_'):]}")
 
 
@@ -578,14 +697,14 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
 
     async with tui(size=DEMO_SIZE) as t:
         await _wait_for_fleet(t)
-        real_rows = sorted(map(tuple, t.table_rows("InstanceTable")))
+        real_rows = _fleet_rows(t)
         await t.wait_for_text(*REAL_NAMES, fleet.HZ_CACHE_1.public_ip)
 
         # Switched on mid-session: data loaded before the switch is hidden too.
         await t.press("ctrl+shift+d")
         await t.wait_for_toast("Demo mode ON")
         await t.wait_until(
-            lambda: sorted(map(tuple, t.table_rows("InstanceTable"))) != real_rows,
+            lambda: _fleet_rows(t) != real_rows,
             desc="the fleet table redrawn with demo values",
         )
         tour = Tour(t, secrets)
@@ -603,7 +722,7 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
         await t.press("ctrl+shift+d")
         await t.wait_for_toast("Demo mode OFF")
         await t.wait_until(
-            lambda: sorted(map(tuple, t.table_rows("InstanceTable"))) == real_rows,
+            lambda: _fleet_rows(t) == real_rows,
             desc="the real fleet rows back",
         )
         await t.wait_for_text(*REAL_NAMES)

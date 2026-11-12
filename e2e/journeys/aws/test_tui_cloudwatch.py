@@ -79,11 +79,17 @@ async def test_top_ips_split_and_action_filter(tui, seed, moto):
         # The toggle next to "Top IPs" cycles the action filter on click...
         await t.click("#cw_btn_ip_filter")
         await t.wait_until(lambda: _top_ips(t) == ALLOWED_IPS, desc="allowed-only ranking")
-        await t.wait_until(lambda: "[Allowed]" in t.rendered_text(), desc="toggle shows Allowed")
+        await t.wait_until(
+            lambda: t.on_screen("#cw_btn_ip_filter").words == "Show allowed",
+            desc="toggle offers the allowed-only ranking",
+        )
         # ...and so does the f key.
         await t.press("f")
         await t.wait_until(lambda: _top_ips(t) == BLOCKED_IPS, desc="blocked-only ranking")
-        await t.wait_until(lambda: "[Blocked]" in t.rendered_text(), desc="toggle shows Blocked")
+        await t.wait_until(
+            lambda: t.on_screen("#cw_btn_ip_filter").words == "Show blocked",
+            desc="toggle offers the blocked-only ranking",
+        )
         await t.press("f")
         await t.wait_until(lambda: _top_ips(t) == ALL_IPS, desc="full ranking again")
 

@@ -81,7 +81,8 @@ async def test_a_member_finds_the_team_servers_in_the_server_list(tui, seed, fak
         context = str(t.on_screen("#server_context").visual)
         identity = str(t.on_screen("#server_identity").visual)
         info = str(t.on_screen("#server_info").visual)
-        assert "Team server: server-1" in context
+        # The header names the server and says the team shares it.
+        assert "server-1" in context and "shared by the team" in context
         assert "Team: Ops" in identity
         assert "Team login: deploy" in info
 

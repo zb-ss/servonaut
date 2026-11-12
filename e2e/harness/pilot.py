@@ -410,8 +410,13 @@ class TuiDriver:
             desc=f"{widget!r} laid out on screen",
         )
         offset = (max(region.width // 2, 0), max(region.height // 2, 0))
+        # A click on something inside the widget (a card's title or swatches)
+        # is a click on the widget: the click reaches it. Only something else
+        # covering the point makes the click miss.
+        hit = self.app.screen.get_widget_at(region.x + offset[0], region.y + offset[1])[0]
+        inside = hit is widget or widget in hit.ancestors
         landed = await self.pilot.click(widget, offset=offset)
-        if not landed:
+        if not landed and not inside:
             raise AssertionError(f"click on {widget!r} landed on another widget")
 
     async def fill(self, selector: str, text: str) -> None:
@@ -450,10 +455,25 @@ class TuiDriver:
             node = node.parent
         return self.is_reachable(button)
 
+    async def show_navigation(self) -> None:
+        """Open the navigation when the terminal is too narrow to show it, as a user does.
+
+        Below about 110 columns the navigation is hidden; the "Show navigation"
+        control in the header row opens it. A visible navigation is left alone.
+        """
+        from servonaut.widgets.sidebar import Sidebar
+
+        sidebars = list(self.app.screen.query(Sidebar))
+        if not sidebars or sidebars[0].display:
+            return
+        await self.click("#workspace_navigation")
+        await self.wait_until(lambda: sidebars[0].display, desc="the navigation to open")
+
     async def nav(self, nav_id: str) -> None:
         """Press a sidebar button like a user: expand its section, then click it."""
         from servonaut.widgets.sidebar_section import SidebarSection
 
+        await self.show_navigation()
         if not self.nav_reachable(nav_id):
             raise AssertionError(f"sidebar button {nav_id} is not available to the user")
         button = self.nav_button(nav_id)
