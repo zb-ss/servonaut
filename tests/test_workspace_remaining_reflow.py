@@ -211,15 +211,16 @@ _MEASURED_BOUNDARIES = {
             BoundarySample((110, 50), 40, False, True),
             BoundarySample((111, 50), 41, False, True),
         ),
+        # The topic list stacks above the manual below 100 content cells.
         ('content-narrow', False): (
-            BoundarySample((158, 50), 95, False, True),
-            BoundarySample((160, 50), 96, False, False),
-            BoundarySample((161, 50), 97, False, False),
+            BoundarySample((163, 50), 99, False, True),
+            BoundarySample((164, 50), 100, False, False),
+            BoundarySample((165, 50), 101, False, False),
         ),
         ('content-narrow', True): (
-            BoundarySample((184, 50), 95, False, True),
-            BoundarySample((185, 50), 96, False, False),
-            BoundarySample((186, 50), 97, False, False),
+            BoundarySample((188, 50), 99, False, True),
+            BoundarySample((189, 50), 100, False, False),
+            BoundarySample((190, 50), 101, False, False),
         ),
     },
     'analysis': {

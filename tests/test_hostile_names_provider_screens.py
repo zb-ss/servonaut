@@ -19,6 +19,11 @@ HOSTILE = ["a [link=", "a[/]b", "x\\", "[@click=app.quit]z[/]"]
 THEME = {"text-success": "#8AD4A1", "text-warning": "#FFC473", "text-accent": "#FFC473", "text-error": "#D17E92"}
 
 
+# Cells of the hostile row that carry the name (the name, type, kind, address and region
+# columns where they are shown): the table of each manager has this many.
+_CELLS_WITH_THE_NAME = {AWSManagerScreen: 5, HetznerManagerScreen: 6, OVHManagerScreen: 5}
+
+
 def _manager_cells(screen_type: type, table_id: str, name: str) -> tuple:
     screen = screen_type.__new__(screen_type)
     screen._instances = [{"id": name, "name": name, "type": name, "state": "running",
@@ -40,10 +45,17 @@ def _manager_cells(screen_type: type, table_id: str, name: str) -> tuple:
 ])
 def test_manager_table_cells_are_literal_text(screen_type: type, table_id: str, name: str) -> None:
     cells = _manager_cells(screen_type, table_id, name)
-    texts = [cell for cell in cells if isinstance(cell, Text) and name in cell.plain]
-    # Name, type, region, public address and id: none of them is a markup string.
-    assert len(texts) >= 4
-    assert not [cell for cell in cells if isinstance(cell, str) and name in cell]
+    carrying = [cell for cell in cells if name[:3] in str(getattr(cell, "plain", cell))]
+    # Every cell that carries the name is literal text (whole or the start of it);
+    # none is a markup string.
+    assert all(isinstance(cell, Text) for cell in carrying)
+    for cell in carrying:
+        shown = cell.plain.removesuffix("\u2026")
+        # Whole, cut by a column (ending with an ellipsis), or the first 19
+        # characters of a timestamp: always the start of the name, never parsed.
+        assert name.startswith(shown), (cell.plain, name)
+    # The columns that hold the name, exactly: one parsed cell would change this.
+    assert len(carrying) == _CELLS_WITH_THE_NAME[screen_type], [str(cell) for cell in cells]
 
 
 @pytest.mark.asyncio

@@ -303,7 +303,7 @@ async def test_every_guarded_action_is_reachable_by_keyboard_without_running(siz
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30), (80, 24)])
+@pytest.mark.parametrize("size", [(160, 50), (100, 30), (80, 24), (100, 28), (80, 29)])
 async def test_pending_device_native_sidebar_entry_reveals_approve_above_footer(
     size: tuple[int, int],
 ) -> None:
