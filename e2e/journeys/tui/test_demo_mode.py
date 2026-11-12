@@ -368,6 +368,20 @@ SERVER_KINDS = {
 }
 
 
+def _fleet_rows(t: TuiDriver) -> list[tuple]:
+    """What each fleet row says, in a fixed order.
+
+    Left out: the row-number column and the "new" tag a server carries until
+    the next refresh. The table lists servers in the order the providers
+    answered, which differs from one load to the next, and a state may arrive
+    as markup (``[green]running[/green]``): the markup is dropped.
+    """
+    def said(cell: str) -> str:
+        return re.sub(r"\[/?[a-z ]+\]", "", cell).removesuffix(" new")
+
+    return sorted(tuple(said(cell) for cell in row[1:]) for row in t.table_rows("InstanceTable"))
+
+
 def _kind(instance: dict) -> str:
     if instance.get("is_custom"):
         # A custom server's host is carried in its address fields.
@@ -380,19 +394,26 @@ def _kind(instance: dict) -> str:
     return "aws"
 
 
+# The fleet table lists the servers in the order the providers answered, so
+# "the first of its kind" is not stable. Every server of these kinds is toured
+# (the AWS fixtures differ in what they show); of the others, the first one.
+TOUR_EVERY_SERVER = {"aws"}
+
+
 async def _tour_server_actions(tour: Tour) -> None:
     """Open the actions screen of one server of every kind in the fleet table."""
     t = tour.t
     await t.nav("nav_list")
     await t.wait_for_screen("InstanceListScreen")
     seen: set[str] = set()
+    table = await t.focus_instance_table()
+    await t.wait_until(lambda: table.row_count == FLEET_SIZE, desc="fleet rows")
     for index in range(FLEET_SIZE):
         table = await t.focus_instance_table()
-        await t.wait_until(lambda: table.row_count == FLEET_SIZE, desc="fleet rows")
         while table.cursor_row != index:
             await t.press("down" if table.cursor_row < index else "up")
         kind = _kind(table.get_selected_instance())
-        if kind in seen:
+        if kind in seen and kind not in TOUR_EVERY_SERVER:
             continue
         seen.add(kind)
         await t.press("enter")
@@ -578,14 +599,14 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
 
     async with tui(size=DEMO_SIZE) as t:
         await _wait_for_fleet(t)
-        real_rows = sorted(map(tuple, t.table_rows("InstanceTable")))
+        real_rows = _fleet_rows(t)
         await t.wait_for_text(*REAL_NAMES, fleet.HZ_CACHE_1.public_ip)
 
         # Switched on mid-session: data loaded before the switch is hidden too.
         await t.press("ctrl+shift+d")
         await t.wait_for_toast("Demo mode ON")
         await t.wait_until(
-            lambda: sorted(map(tuple, t.table_rows("InstanceTable"))) != real_rows,
+            lambda: _fleet_rows(t) != real_rows,
             desc="the fleet table redrawn with demo values",
         )
         tour = Tour(t, secrets)
@@ -603,7 +624,7 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
         await t.press("ctrl+shift+d")
         await t.wait_for_toast("Demo mode OFF")
         await t.wait_until(
-            lambda: sorted(map(tuple, t.table_rows("InstanceTable"))) == real_rows,
+            lambda: _fleet_rows(t) == real_rows,
             desc="the real fleet rows back",
         )
         await t.wait_for_text(*REAL_NAMES)

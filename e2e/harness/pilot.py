@@ -410,8 +410,13 @@ class TuiDriver:
             desc=f"{widget!r} laid out on screen",
         )
         offset = (max(region.width // 2, 0), max(region.height // 2, 0))
+        # A click on something inside the widget (a card's title or swatches)
+        # is a click on the widget: the click reaches it. Only something else
+        # covering the point makes the click miss.
+        hit = self.app.screen.get_widget_at(region.x + offset[0], region.y + offset[1])[0]
+        inside = hit is widget or widget in hit.ancestors
         landed = await self.pilot.click(widget, offset=offset)
-        if not landed:
+        if not landed and not inside:
             raise AssertionError(f"click on {widget!r} landed on another widget")
 
     async def fill(self, selector: str, text: str) -> None:

@@ -665,8 +665,8 @@ def _preview_content(theme: Theme) -> Content:
         *button_row(("Ban IP…", colours["warning"], False), ("Terminate…", colours["error"], False)),
         Content(""),
         Content.assemble(paint(f" {'Name':<9} {'State':<8} {'Provider':<9}", on_primary, colours["primary"], True)),
-        table_row("app-1", "running", colours["success"], surface),
-        table_row("db-1", "stopped", colours["error"], panel),
+        table_row("sample-1", "running", colours["success"], surface),
+        table_row("sample-2", "stopped", colours["error"], panel),
         Content(""),
         Content.assemble(paint(f" {'Search servers…':<28}", muted, surface)),
     ])

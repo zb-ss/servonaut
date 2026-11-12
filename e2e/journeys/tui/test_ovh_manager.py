@@ -46,7 +46,11 @@ def _fleet_names(t) -> list[str]:
 
 
 def _state(t, name: str) -> str:
-    return _rows(t)[name][4]
+    # The table sizes its columns to the room it has (Kind and Region give way
+    # first), so the State column is found by its heading, not its position.
+    table = t.on_screen(TABLE)
+    labels = [plain(column.label) for column in table.ordered_columns]
+    return _rows(t)[name][labels.index("State")]
 
 
 def _enabled(t) -> dict[str, bool]:
