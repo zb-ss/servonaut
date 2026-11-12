@@ -75,18 +75,27 @@ async def test_the_top_ips_header_stays_one_row_and_nothing_moves(size) -> None:
         await pilot.pause()
         await pilot.pause()
         anchor = (table.region, ban.region, header.region)
+        # Longest label the button can show, measured from the button itself.
+        widest_button = max(
+            toggle.natural_width(short=False, hint=True) + len(f"Filter: {name.lower()}") - len(toggle.words)
+            for name in screen._IP_FILTERS
+        )
+        shown_expected = len("Top IPs") + widest_button <= header.size.width
+        # Measured: the pane is 29 cells wide up to 130x40 (heading 7 + button 24
+        # does not fit) and 41 at 160x50 (it does).
+        assert shown_expected == (size[0] >= 160), (size, header.size.width, widest_button)
         for presses in range(5):
             words = toggle.words
             assert header.region.height == 1, (size, words)
             assert toggle.region.height == 1 and header.region.contains_region(toggle.region)
             assert toggle.content_size.width >= toggle.label.cell_length, (size, words)
+            # Shown exactly when heading + the longest button fit the header.
+            assert heading.display == shown_expected, (size, words, header.size.width, widest_button)
             if heading.display:
+                assert heading.region.width >= len("Top IPs"), (size, words)
                 assert heading.content_size.width >= len("Top IPs"), (size, words)
-                assert not heading.region.intersection(toggle.region).area
-            elif size[0] >= 160:
-                raise AssertionError("heading and button both show at 160x50")
-            if size[0] >= 160:
-                assert heading.display, words
+                assert not heading.region.intersection(toggle.region).area, (size, words)
+                assert heading.region.right <= toggle.region.x, (size, words)
             assert (table.region, ban.region, header.region) == anchor, (size, presses)
             # The table starts right under the one-row header, so no row is lost.
             assert table.region.y == header.region.bottom, (size, words)
