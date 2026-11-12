@@ -1509,16 +1509,14 @@ class VaultScreen(WorkspaceScreen):
             shelf.scroll_to(y=max(0, group.region.y - shelf.content_region.y + shelf.scroll_y - pinned), animate=False)
         self._reveal_in_content(button)
 
-    # Below this many rows the page cannot show its header and an action together.
-    _MIN_ROWS_FOR_HEADER_AND_ACTION = 28
-
     def _reveal_in_content(self, button: Button) -> None:
-        """On a terminal too short for the header and the action, scroll the page to the action.
+        """Scroll the page to *button* only when it cannot show the whole button.
 
-        Taller terminals keep the page where it is, so the header stays in view.
+        Judged after the action shelf has settled, over two frames. Where the
+        shelf already shows the button the page stays put and the header stays
+        in view; a terminal too short for both gets the action.
         """
-        if self.size.height < self._MIN_ROWS_FOR_HEADER_AND_ACTION:
-            self.call_after_refresh(self._scroll_content_to, button)
+        self.call_after_refresh(self.call_after_refresh, self._scroll_content_to, button)
 
     def _scroll_content_to(self, button: Button) -> None:
         if not button.is_attached:
