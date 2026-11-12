@@ -5,6 +5,7 @@ import pytest
 from textual.widgets import Button, Checkbox, DataTable
 
 from servonaut.services.vault import crypto
+from tests._shown_label import shown_label
 from tests._async_bounds import wait_until
 from tests._native_actions import click_action
 from tests._workspace_reflow_conformance import tab_to
@@ -43,7 +44,7 @@ async def test_auto_bind_review_and_actions_stay_painted_without_losing_rows(
             "auto_bind_none", "auto_bind_back",
         ]
         for button in actions.query(Button):
-            assert button.label.plain in _painted(app, button)
+            assert shown_label(button) in _painted(app, button)
             assert app.get_widget_at(*button.content_region.center)[0] is button
         trust = screen.query_one("#auto_bind_trust", Checkbox)
         assert trust.label.plain in _painted(app, trust)

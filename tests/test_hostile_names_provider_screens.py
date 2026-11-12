@@ -40,10 +40,16 @@ def _manager_cells(screen_type: type, table_id: str, name: str) -> tuple:
 ])
 def test_manager_table_cells_are_literal_text(screen_type: type, table_id: str, name: str) -> None:
     cells = _manager_cells(screen_type, table_id, name)
-    texts = [cell for cell in cells if isinstance(cell, Text) and name in cell.plain]
-    # Name, type, region, public address and id: none of them is a markup string.
+    # A column too narrow for the text ends it with an ellipsis; the cell is
+    # still literal text, so it is counted by the start of the name.
+    start = name[:8]
+    texts = [cell for cell in cells if isinstance(cell, Text) and start in cell.plain]
+    # Name, type, kind, public address and region: none of them is a markup string.
     assert len(texts) >= 4
-    assert not [cell for cell in cells if isinstance(cell, str) and name in cell]
+    assert not [cell for cell in cells if isinstance(cell, str) and start in cell]
+    assert all(
+        isinstance(cell, Text) for cell in cells[1:] if start in str(cell)
+    )
 
 
 @pytest.mark.asyncio

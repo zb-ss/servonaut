@@ -1248,6 +1248,7 @@ class VaultScreen(WorkspaceScreen):
             and self.query_one("#vault_actions") in focused.ancestors
         ):
             self.query_one("#vault_action_scroll").scroll_to_widget(focused, animate=False)
+            self._reveal_in_content(focused)
         elif self.app.screen is self and (focused is None or isinstance(focused, DataTable)):
             for button in self.query("#vault_actions Button.-next-action"):
                 self._reveal_summary_action(button)
@@ -1499,13 +1500,32 @@ class VaultScreen(WorkspaceScreen):
         group = next((a for a in button.ancestors if a.has_class("vault_action_group")), None)
         if group is None or not group.region.height:
             shelf.scroll_to_widget(button, animate=False)
+            self._reveal_in_content(button)
             return
         # The narrow layout pins the selection on the first row of the shelf.
         pinned = 1 if self.has_class("-content-narrow") else 0
         top = shelf.content_region.y + pinned
-        if top <= group.region.y and shelf.content_region.contains_region(button.region):
+        if not (top <= group.region.y and shelf.content_region.contains_region(button.region)):
+            shelf.scroll_to(y=max(0, group.region.y - shelf.content_region.y + shelf.scroll_y - pinned), animate=False)
+        self._reveal_in_content(button)
+
+    # Below this many rows the page cannot show its header and an action together.
+    _MIN_ROWS_FOR_HEADER_AND_ACTION = 28
+
+    def _reveal_in_content(self, button: Button) -> None:
+        """On a terminal too short for the header and the action, scroll the page to the action.
+
+        Taller terminals keep the page where it is, so the header stays in view.
+        """
+        if self.size.height < self._MIN_ROWS_FOR_HEADER_AND_ACTION:
+            self.call_after_refresh(self._scroll_content_to, button)
+
+    def _scroll_content_to(self, button: Button) -> None:
+        if not button.is_attached:
             return
-        shelf.scroll_to(y=max(0, group.region.y - shelf.content_region.y + shelf.scroll_y - pinned), animate=False)
+        content = self.query_one("#vault_content")
+        if not content.can_view_entire(button):
+            content.scroll_to_widget(button, animate=False)
 
     @on(DataTable.RowHighlighted, "#vault_table")
     def _row_highlighted(self) -> None:

@@ -22,6 +22,7 @@ from servonaut.services.vault.auto_bind import (
 )
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.styles import CSS_FILES
+from tests._shown_label import shown_label
 from tests._async_bounds import wait_until
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -990,7 +991,7 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
             assert button.words == expected_labels[button.id]
             assert screen.can_view_entire(button)
             assert app.get_widget_at(*button.content_region.center)[0] is button
-            assert str(button.label) in _painted(app, button)
+            assert shown_label(button) in _painted(app, button)
         assert _rows(app) == baseline_rows and set(screen._selected) == baseline_selection
         assert [(button.id, button.disabled) for button in actions.query(Button)] == baseline_disabled
         assert service.binds == [] and service.visits == []
