@@ -29,8 +29,14 @@ def test_disabled_and_terminal_caps_keep_the_same_width() -> None:
     assert widths == {3}
 
 
-def test_a_disabled_cap_has_no_fill() -> None:
-    assert all("on" not in str(style).split() for _, style in keycap_parts("x", disabled=True))
+def test_a_disabled_cap_is_the_same_shape_dimmed() -> None:
+    enabled = keycap_parts("x")
+    disabled = keycap_parts("x", disabled=True)
+    assert [text for text, _ in disabled] == [text for text, _ in enabled]
+    assert [style for _, style in disabled] != [style for _, style in enabled]
+    ansi = keycap_parts("x", ansi=True, disabled=True)
+    assert [text for text, _ in ansi] == [" ", "x", " "]
+    assert all("dim" in str(style) and "reverse" in str(style) for _, style in ansi)
 
 
 class _Host(App):
@@ -59,11 +65,13 @@ async def test_action_buttons_and_links_draw_the_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_disabled_button_draws_its_key_quietly() -> None:
+async def test_a_disabled_button_draws_a_dimmed_cap_of_the_same_width() -> None:
     async with _Host().run_test(size=(60, 12)) as pilot:
         await pilot.pause()
-        painted = _painted(pilot.app.query_one("#locked"))
-        assert EDGE_LEFT not in painted and " l " in painted
+        locked = pilot.app.query_one("#locked")
+        enabled = pilot.app.query_one("#action")
+        assert cap("l") in _painted(locked)
+        assert locked.label.cell_length - len("Locked") == enabled.label.cell_length - len("Browse")
 
 
 @pytest.mark.asyncio
@@ -148,4 +156,43 @@ async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> No
                         problems.append(f"{name}: the cap is barely visible")
                     if _ratio(cap.color.get_truecolor(), cap.bgcolor.get_truecolor()) < 4.5:
                         problems.append(f"{name}: the key is hard to read")
+    assert not problems, "\n".join(problems[:20])
+
+
+class _DisabledCapHost(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        for variant, role in (("framed", "default"), ("filled", "primary")):
+            compact = variant == "filled"
+            yield ActionButton("Run", "r", role=role, compact=compact, id=f"on_{variant}")
+            yield ActionButton("Run", "r", role=role, compact=compact, disabled=True, id=f"off_{variant}")
+        yield ActionButton("Run", "r", compact=True, id="on_compact")
+        yield ActionButton("Run", "r", compact=True, disabled=True, id="off_compact")
+
+
+@pytest.mark.asyncio
+async def test_the_disabled_cap_is_visible_and_weaker_than_the_enabled_one_in_every_theme() -> None:
+    app = _DisabledCapHost()
+    problems = []
+    async with app.run_test(size=(60, 20)) as pilot:
+        for theme in sorted(app.available_themes):
+            app.theme = theme
+            await pilot.pause()
+            if app.current_theme.ansi:
+                continue
+            for variant in ("framed", "filled", "compact"):
+                on, off = app.query_one(f"#on_{variant}"), app.query_one(f"#off_{variant}")
+                on_word, off_word = _segment(on, "Run"), _segment(off, "Run")
+                on_cap, off_cap = _segment(on, "r"), _segment(off, "r")
+                name = f"{theme}/{variant}"
+                fill = off_cap.bgcolor.get_truecolor()
+                if _ratio(fill, off_word.bgcolor.get_truecolor()) < 1.03:
+                    problems.append(f"{name}: the disabled cap is not visible")
+                if off_cap.bgcolor == on_cap.bgcolor or off_cap.color == on_cap.color:
+                    problems.append(f"{name}: the disabled cap looks like the enabled one")
+                if _ratio(fill, off_word.bgcolor.get_truecolor()) >= _ratio(
+                    on_cap.bgcolor.get_truecolor(), on_word.bgcolor.get_truecolor()
+                ):
+                    problems.append(f"{name}: the disabled cap is not weaker than the enabled one")
     assert not problems, "\n".join(problems[:20])
