@@ -57,19 +57,25 @@ async def test_the_opened_server_is_the_highlighted_row(size, name) -> None:
         table.focus()
         await pilot.pause()
         await _check(pilot, table, name)
-        for row in (0, min(2, max(table.row_count - 1, 0))):
+        table.focus()
+        for move in (None, ["down", "down"], ["pagedown"], ["ctrl+end"], ["home"], ["down"]):
+            table.focus()
+            await pilot.pause()
+            for key in move or []:
+                await pilot.press(key)
+                await pilot.pause()
             if not table.row_count:
                 break
-            table.move_cursor(row=row)
-            await pilot.pause()
-            await _check(pilot, table, f"{name}@{row}")
+            where = f"{name}:{move}"
+            await _check(pilot, table, where)
+            row = table.cursor_row
             expected = table.get_selected_instance()
             await pilot.press("enter")
             await pilot.pause()
             await pilot.pause()
             screen = pilot.app.screen
-            assert isinstance(screen, ServerActionsScreen), (name, row, type(screen))
-            assert screen._instance["id"] == expected["id"], (name, row)
-            assert screen._instance["name"] == expected["name"], (name, row)
+            assert isinstance(screen, ServerActionsScreen), (where, row, type(screen))
+            assert screen._instance["id"] == expected["id"], (where, row)
+            assert screen._instance["name"] == expected["name"], (where, row)
             await pilot.press("escape")
             await pilot.pause()

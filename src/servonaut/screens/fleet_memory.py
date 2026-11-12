@@ -119,7 +119,7 @@ _MAX_WRAPPED_LINES = 3
 # How often an onboarding card looks for servers listed since it appeared.
 _CARD_RECHECK_SECONDS = 2.0
 # Cell widths whose text is cut with an ellipsis, never silently.
-_ID_CAP = 32
+_ID_CAP = 20
 _SHARED_WIDTH = 14
 _REASON_WIDTH = 20
 
