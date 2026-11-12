@@ -11,8 +11,8 @@ from tests.test_cloud_screens_multi_account import (  # noqa: F401  (fixtures)
     Host, _wait_for, accounts, config,
 )
 
-# The branch's width rule hides the navigation below 110 columns; the 100x30
-# case keeps its layout expectations by holding the user's choice.
+# Navigation hides itself on narrow terminals; the 100x30 case keeps its
+# layout expectations by holding the user's choice to show it.
 pytestmark = pytest.mark.usefixtures("navigation_open")
 
 
