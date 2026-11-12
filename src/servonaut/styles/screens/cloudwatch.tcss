@@ -164,7 +164,13 @@ CloudWatchBrowserScreen.-content-narrow #cloudwatch_inspector {
 
 #cw_top_ips_label {
     width: 1fr;
+    min-width: 7;
     color: $text;
+}
+
+/* Not room for heading and button on one row: keep the button. */
+#cw_top_ips_header.-no-heading #cw_top_ips_label {
+    display: none;
 }
 
 #cw_btn_ip_filter {

@@ -51,20 +51,28 @@ _CAP_FILLED = "$background"
 _CAP_FILLED_KEY = "$text on $background"
 
 
+# A disabled button keeps its cap, dimmed: a weaker fill and a muted key.
+_CAP_DISABLED_FILL = "$foreground 11%"
+_CAP_DISABLED_KEY = f"{HINT_STYLE} on {_CAP_DISABLED_FILL}"
+
+
 def keycap_parts(
     key: str, *, ansi: bool = False, disabled: bool = False, filled: bool = False,
 ) -> list:
     """The pieces ``(text, style)`` of a key cap for *key*; the key is literal text.
 
     Whatever the style, the cap adds two cells around the key. A disabled
-    button's key is quiet, with no fill. A terminal-colour theme has no tints,
-    so its key cap is drawn reversed instead.
+    button's cap is the same shape, dimmed (a weaker fill, a muted key). A
+    terminal-colour theme has no tints, so its cap is drawn reversed, and a
+    disabled one reversed and dim.
     """
-    if disabled:
-        quiet = "dim" if ansi else HINT_STYLE
-        return [(" ", quiet), (key, quiet), (" ", quiet)]
     if ansi:
-        return [(" ", "reverse"), (key, "reverse"), (" ", "reverse")]
+        style = "dim reverse" if disabled else "reverse"
+        return [(" ", style), (key, style), (" ", style)]
+    if disabled:
+        return [
+            ("\u2590", _CAP_DISABLED_FILL), (key, _CAP_DISABLED_KEY), ("\u258c", _CAP_DISABLED_FILL),
+        ]
     if filled:
         return [("\u2590", _CAP_FILLED), (key, _CAP_FILLED_KEY), ("\u258c", _CAP_FILLED)]
     return [("\u2590", _CAP_FILL), (key, _CAP_KEY), ("\u258c", _CAP_FILL)]

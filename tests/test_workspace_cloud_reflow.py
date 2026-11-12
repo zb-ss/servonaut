@@ -91,12 +91,6 @@ def _factory(
     return create
 
 
-def _shown(button) -> str:
-    """The label as painted: a disabled button draws its key without the cap's edges."""
-    text = button.label.plain
-    return text.replace("\u2590", " ").replace("\u258c", " ") if button.disabled else text
-
-
 async def _screen(app: ServonautApp, pilot: Pilot) -> WorkspaceScreen:
     assert isinstance(app, _CloudApp)
     await wait_until(lambda: isinstance(app.screen, app.screen_type))
@@ -334,7 +328,7 @@ async def _assert_toolbar_exposed(
         assert content(screen).region.contains_region(button.region)
         assert screen.region.contains_region(button.region)
         assert app.get_widget_at(*button.region.center)[0] is button
-        assert _shown(button) in _painted(app, button)
+        assert button.label.plain in _painted(app, button)
 
 
 @pytest.mark.asyncio
@@ -580,7 +574,7 @@ async def test_native_key_add_form_dock_and_unsaved_fields_survive_reflow() -> N
             await pilot.pause()
             assert screen.region.contains_region(button.region)
             assert app.get_widget_at(*button.region.center)[0] is button
-            assert _shown(button) in _painted(app, button)
+            assert button.label.plain in _painted(app, button)
         await _click(pilot, "#btn_hetzner_ssh_cancel")
         await pilot.pause()
         assert form.has_class("hidden")

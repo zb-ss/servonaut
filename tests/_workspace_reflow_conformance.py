@@ -85,7 +85,7 @@ def _match_button_label_rows(
             continue
         columns = []
         for fragment, row in zip(expected, painted[start:]):
-            # A disabled button draws its key without the cap's edges.
+            # Plain-terminal themes paint the cap's edges as reversed spaces.
             variants = (fragment, fragment.replace("\u2590", " ").replace("\u258c", " "))
             for column in range(len(row) - len(fragment) + 1):
                 if any(
