@@ -103,3 +103,18 @@ def test_a_late_colliding_server_redraws_the_row_it_displaced() -> None:
     assert row_a["id"] != stand_in, "the displaced row shows its new stand-in"
     assert app.connection_instance(row_a)["name"] == "acme-a"
     assert app.connection_instance(row_b)["name"] == "acme-b"
+
+
+@pytest.mark.parametrize(
+    "real",
+    ["0e2e0000000000000000000000000f160/batch-0001", "0e2e0000000000000000000000000f160/web-main"],
+)
+def test_both_halves_of_a_composite_id_are_replaced(real: str) -> None:
+    redaction = RedactionService()
+    fake = redaction.redact_instance_id(real)
+    project, instance = real.split("/")
+    fake_project, fake_instance = fake.split("/")
+    assert fake_project != project and fake_instance != instance
+    assert instance not in fake and project not in fake
+    assert redaction.real_instance_id(fake) == real
+    assert redaction.redact_instance_id(fake) == fake

@@ -211,7 +211,7 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
                 "The Bitwarden SSH key picker is available on the Solo and Teams plans."
             ),
             Static(f"[dim]{escape(reason)}[/dim]"),
-            Static("[dim][u] Pricing   ·   [o] Docs[/dim]"),
+            Static("[dim][b]u[/b] Pricing   ·   [b]o[/b] Docs[/dim]"),
             Horizontal(Button("Close", variant="default", id="bw_picker_close")),
         )
 

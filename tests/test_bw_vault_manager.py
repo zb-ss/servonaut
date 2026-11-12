@@ -478,3 +478,33 @@ async def test_selected_metadata_redacts_generic_identities_and_copies_literal_t
         screen.action_refresh()
         await wait_until(lambda: not screen._loading and not screen._rows)
         assert detail.text == "Select an SSH-key item to inspect its complete reference details."
+
+
+@pytest.mark.asyncio
+async def test_the_description_paints_its_key_letters():
+    from textual.app import App
+
+    svc = MagicMock()
+    svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+    svc.ensure_servonaut_folder = AsyncMock(return_value="fld-1")
+    svc.list_items = AsyncMock(return_value=[])
+    bw_cfg = MagicMock()
+    bw_cfg.get_personal_config = AsyncMock(return_value=None)
+    bw_cfg.list_personal_instances = AsyncMock(return_value=[])
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.entitlement_guard = SimpleNamespace(check=lambda f: (True, "OK"))
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
+            self.bw_session_service = svc
+            self.bw_ssh_config_service = bw_cfg
+            self.instances = []
+            self.push_screen(BwVaultManagerScreen(session_service=svc))
+
+    async with _Host().run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        text = pilot.app.screen.query_one("#bw_vault_mgr_hint").render().plain
+        assert "o Open in Bitwarden" in text and "e Manage ref" in text, text

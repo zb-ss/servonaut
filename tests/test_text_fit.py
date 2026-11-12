@@ -60,3 +60,28 @@ def test_the_planner_never_widens_a_short_column() -> None:
     # A 3-cell name stays 4 (the header) however tight the room: it is not widened to the floor.
     widths = plan_columns([_row("web", "9.9.9.9")], 50)
     assert widths["Name"] == 4
+
+
+def test_a_middle_cut_keeps_both_ends_and_marks_the_cut() -> None:
+    from servonaut.utils.text_fit import cut_middle
+
+    shown = cut_middle("0e2e0000000000000000000000000001", 20)
+    assert shown.startswith("0e2e") and shown.endswith("0001") and "…" in shown
+    assert cell_len(shown) <= 20
+    assert cut_middle("short", 20) == "short"
+    assert cut_middle("anything", 0) == ""
+
+
+def test_a_hostname_id_keeps_its_first_label_and_an_opaque_id_its_end() -> None:
+    from servonaut.utils.text_fit import cut_id
+
+    pairs = [
+        ("vps-00000001.example.test", "vps-00000002.example.test"),
+        ("vps-1a2b3c4d.vps.ovh.net", "vps-1a2b3c9f.vps.ovh.net"),
+    ]
+    for first, second in pairs:
+        assert cut_id(first, 20) != cut_id(second, 20)
+        assert cut_id(first, 20).startswith(first.split(".")[0]) and cut_id(first, 20).endswith("…")
+    opaque = ("0e2e" + "0" * 40 + "0001", "0e2e" + "0" * 40 + "0002")
+    assert cut_id(opaque[0], 20) != cut_id(opaque[1], 20)
+    assert cut_id(opaque[0], 20).endswith("0001")

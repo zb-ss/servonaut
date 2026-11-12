@@ -101,7 +101,7 @@ class BwVaultManagerScreen(WorkspaceScreen):
                     yield Static(
                         "SSH-key items in your Servonaut vault folder, joined with the "
                         "servers that reference them. Local-only — your vault never leaves this "
-                        "machine. [o] Open in Bitwarden · [e] Manage ref for the selected key.",
+                        "machine. [b]o[/b] Open in Bitwarden · [b]e[/b] Manage ref for the selected key.",
                         id="bw_vault_mgr_hint",
                         classes="screen-description",
                     )

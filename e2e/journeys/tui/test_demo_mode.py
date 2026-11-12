@@ -162,11 +162,14 @@ def _secrets(moto_ids: dict[str, str]) -> list[Secret]:
             (f"{cloud.name} name", cloud.name),
             (f"{cloud.name} id", cloud.instance_id),
             (f"{cloud.name} id prefix", cloud.instance_id[:13]),
+            # The tail a narrow column keeps when it cuts an id in the middle.
+            (f"{cloud.name} id tail", cloud.instance_id[-8:]),
             (f"{cloud.name} public ip", cloud.public_ip or ""),
             (f"{cloud.name} private ip", cloud.private_ip or ""),
         ]
     values += [
         ("OVH project id", fleet.OVH_PROJECT_ID),
+        ("OVH project id tail", fleet.OVH_PROJECT_ID[-8:]),
         ("OVH account handle", NIC_HANDLE),
         ("default key", DEFAULT_KEY.rsplit("/", 1)[-1]),
         ("per-instance key", APP_1_KEY.rsplit("/", 1)[-1]),

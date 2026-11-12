@@ -727,7 +727,7 @@ class SecretsScreen(WorkspaceScreen):
             stdout, _ = await proc.communicate()
             if proc.returncode == 0:
                 self.notify(
-                    "bws installed. Refresh ([r]) to re-evaluate state.",
+                    "bws installed. Refresh (r) to re-evaluate state.",
                     severity="information",
                 )
             else:
