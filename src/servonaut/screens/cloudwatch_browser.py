@@ -236,7 +236,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
                         yield Vertical(
                             Horizontal(
                                 Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
-                                ActionButton("Show all", "f", compact=True, id="cw_btn_ip_filter"),
+                                ActionButton("Filter: all", "f", compact=True, id="cw_btn_ip_filter"),
                                 id="cw_top_ips_header",
                             ),
                             DataTable(id="cloudwatch_ips_table"),
@@ -599,7 +599,7 @@ class CloudWatchBrowserScreen(WorkspaceScreen):
         self._ip_filter_index = (self._ip_filter_index + 1) % len(self._IP_FILTERS)
         label = self._IP_FILTERS[self._ip_filter_index]
         toggle = self.query_one("#cw_btn_ip_filter", ActionButton)
-        toggle.set_text(f"Show {label.lower()}", "f")
+        toggle.set_text(f"Filter: {label.lower()}", "f")
         toggle.set_role("error" if label == "Blocked" else "default")
         self._refresh_ips_table()
 
