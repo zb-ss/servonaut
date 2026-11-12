@@ -175,7 +175,7 @@ async def test_next_reads_the_rest_of_the_window(tui, seed, cloudtrail):
         await t.wait_for_text(
             f"Time: {rows[target][0]}",
             f"Event: {NAMES[3]}",
-            "Resource Name: sg-0e2e0000000000001",
+            "Resource name: sg-0e2e0000000000001",
         )
 
 

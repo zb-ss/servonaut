@@ -302,11 +302,13 @@ async def test_ssh_verify_results_show_in_the_fleet(tui, seed, fake_cloud):
         def ssh_column():
             return _fleet_column(t, "ssh")
 
+        # A verified server reads "✓" and how long ago it was verified (the
+        # cell is short: "✓ 5s ago"); a failed one says why.
         await t.wait_until(
-            lambda: "verified" in ssh_column().get(fleet.APP_1.name, ""), desc="verify badges"
+            lambda: "✓" in ssh_column().get(fleet.APP_1.name, ""), desc="verify badges"
         )
         badges = ssh_column()
-        assert "✓ verified" in badges[fleet.APP_1.name]
+        assert re.search(r"✓ .*ago", badges[fleet.APP_1.name]), badges
         assert "✗ auth failed" in badges[fleet.DB_1.name]
-        assert "verified" not in badges[fleet.EDGE_1.name]
+        assert "✓" not in badges[fleet.EDGE_1.name]
         assert "failed" not in badges[fleet.EDGE_1.name]
