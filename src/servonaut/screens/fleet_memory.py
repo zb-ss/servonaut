@@ -46,7 +46,7 @@ from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
-from servonaut.utils.text_fit import cut, cut_middle
+from servonaut.utils.text_fit import cut, cut_id
 from servonaut.utils.theme_text import follow_theme, themed_text
 
 # Status constants and classifier live in the dependency-free service module
@@ -1145,7 +1145,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         """The table cells of *row*, in column order."""
         return (
             self._name_cell(row),
-            escape(cut_middle(str(row["id"]), _ID_CAP)),
+            escape(cut_id(str(row["id"]), _ID_CAP)),
             escape(str(row["provider"])),
             self._styled_cell(_SOURCE_CELL.get(row.get("source", "local"), _SOURCE_CELL["local"])),
             self._styled_cell(_STATUS_CELL.get(row["status"], ("—", "dim"))),

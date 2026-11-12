@@ -406,18 +406,26 @@ async def test_the_banner_is_one_line_in_a_narrow_terminal(tmp_path):
 async def test_long_ids_that_share_their_start_stay_tell_apart_and_a_cut_shows(tmp_path, size):
     prefix = "0e2e" + "0" * 40
     ids = [f"{prefix}{suffix}" for suffix in ("0001", "0002", "0003")]
+    # Hostname-style ids, and the composite stand-in demo mode shows.
+    hosts = ["vps-00000001.example.test", "vps-00000002.example.test",
+             "vps-1a2b3c4d.vps.ovh.net", "vps-1a2b3c9f.vps.ovh.net"]
+    composites = [f"{'a1' * 16}/{'b' * 31}{tail}" for tail in "12"]
     rows = [
         {"id": value, "name": f"batch-{index}", "provider": "custom", "public_ip": "10.0.0.9"}
-        for index, value in enumerate(ids)
+        for index, value in enumerate(ids + hosts + composites)
     ]
     app = _host(tmp_path, rows=rows, probed=())
     async with app.run_test(size=size) as pilot:
         screen = await _ready(pilot)
         table = screen.query_one("#fleet-memory-table", DataTable)
         shown = [str(table.get_row_at(index)[1]) for index in range(table.row_count)]
-        assert len(set(shown)) == 3, shown
+        assert len(set(shown)) == len(shown), shown
         assert all("…" in cell for cell in shown), shown
-        assert [cell[-4:] for cell in shown] == ["0001", "0002", "0003"]
+        assert [cell[-4:] for cell in shown[:3]] == ["0001", "0002", "0003"]
+        # A hostname keeps its whole first label; an end cut is still marked.
+        assert [cell.split(".")[0] for cell in shown[3:7]] == [
+            "vps-00000001", "vps-00000002", "vps-1a2b3c4d", "vps-1a2b3c9f",
+        ]
         widths = [column.get_render_width(table) for column in table.columns.values()]
         id_width = widths[1]
         # The ID column is never wider than before, so no column that was in

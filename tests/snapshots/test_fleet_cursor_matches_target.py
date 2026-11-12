@@ -58,7 +58,7 @@ async def test_the_opened_server_is_the_highlighted_row(size, name) -> None:
         await pilot.pause()
         await _check(pilot, table, name)
         table.focus()
-        for move in (None, ["down", "down"], ["pagedown"], ["ctrl+end"], ["home"], ["down"]):
+        for move in (None, ["down", "down"], ["pagedown"], ["ctrl+end"], ["ctrl+home"], ["down"]):
             table.focus()
             await pilot.pause()
             for key in move or []:

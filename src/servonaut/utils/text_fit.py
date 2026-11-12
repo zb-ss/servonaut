@@ -50,3 +50,12 @@ def cut_middle(text: str, width: int) -> str:
             break
         tail = char + tail
     return f"{head}…{tail}"
+
+
+def cut_id(text: str, width: int) -> str:
+    """An identifier within *width* cells: hostnames keep their head, opaque ids their ends.
+
+    A hostname-style id (it holds a dot) differs in its first label, so it is
+    cut at the end; an opaque id differs mostly at its end, so it is cut in the middle.
+    """
+    return cut(text, width) if "." in text else cut_middle(text, width)
