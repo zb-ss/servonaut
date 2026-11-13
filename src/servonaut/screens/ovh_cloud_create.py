@@ -20,7 +20,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Select, Static,
 )
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -383,10 +383,10 @@ class OVHCloudCreateScreen(Screen):
             self._images = list(region_images) + shared_images
             for image in self._images:
                 tbl.add_row(
-                    image.get("name", ""),
-                    image.get("os_type", ""),
-                    str(image.get("min_disk", "")),
-                    image.get("region", "") or "any",
+                    cell(image.get("name", "")),
+                    cell(image.get("os_type", "")),
+                    cell(image.get("min_disk", "")),
+                    cell(image.get("region", "") or "any"),
                 )
             if self._images:
                 tbl.move_cursor(row=0)
@@ -411,8 +411,8 @@ class OVHCloudCreateScreen(Screen):
 
             for index, key in enumerate(self._keys, start=1):
                 tbl.add_row(
-                    _s(key.get("name", "")),
-                    f"key-{index:03d}" if self.app.demo_mode else key.get("id", ""),
+                    cell(_s(key.get("name", ""))),
+                    cell(f"key-{index:03d}" if self.app.demo_mode else key.get("id", "")),
                 )
             if not self._keys:
                 # Zero registered SSH keys — table renders as a 1-row

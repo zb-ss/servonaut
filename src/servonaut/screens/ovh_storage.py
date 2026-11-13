@@ -15,7 +15,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -284,7 +284,9 @@ class OVHStorageScreen(Screen):
                 )
             else:
                 attached_to = "—"
-            table.add_row(self._display_name(name), size, region, status, attached_to)
+            table.add_row(
+                cell(self._display_name(name)), cell(size), cell(region), cell(status), cell(attached_to),
+            )
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -379,7 +381,7 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.create_volume(project_id, name, size_gb, region, volume_type)
-            self.app.notify(f"Volume '{self._display_name(name)}' created", severity="information")
+            self.app.notify(f"Volume '{self._display_name(name)}' created", severity="information", markup=False)
             await self._load_volumes()
         except Exception as exc:
             logger.error("create_volume failed: %s", exc)
@@ -437,7 +439,7 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.delete_volume(project_id, volume_id)
-            self.app.notify(f"Volume '{self._display_name(volume_name)}' deleted", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' deleted", severity="information", markup=False)
             await self._load_volumes()
         except Exception as exc:
             logger.error("delete_volume failed for %s: %s", volume_id, exc)
@@ -514,7 +516,7 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.attach_volume(project_id, volume_id, instance_id)
-            self.app.notify(f"Volume '{self._display_name(volume_name)}' attached", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' attached", severity="information", markup=False)
             await self._load_volumes()
         except Exception as exc:
             logger.error("attach_volume failed for %s: %s", volume_id, exc)
@@ -587,7 +589,7 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.detach_volume(project_id, volume_id, instance_id)
-            self.app.notify(f"Volume '{self._display_name(volume_name)}' detached", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' detached", severity="information", markup=False)
             await self._load_volumes()
         except Exception as exc:
             logger.error("detach_volume failed for %s: %s", volume_id, exc)

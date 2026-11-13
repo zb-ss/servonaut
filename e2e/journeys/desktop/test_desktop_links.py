@@ -19,7 +19,9 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, TypeVar
 
 import pytest
+from textual.content import Content
 from textual.screen import Screen
+from textual.style import Style
 from textual.widgets import Markdown, Static
 
 from e2e.harness import fleet
@@ -50,7 +52,8 @@ CLICK_HOLD_SECONDS = 0.15
 
 class LinksScreen(Screen[None]):
     def compose(self):
-        yield Static(f'[link="{HYPERLINK}"]Read the docs[/link]', id="hyperlink")
+        # A link style on the content, as the app draws one (markup links are dropped).
+        yield Static(Content("Read the docs").stylize(Style(link=HYPERLINK)), id="hyperlink")
         yield Static(f"{PLAIN_PREFIX}{PLAIN}", id="plain", markup=False)
         yield Markdown(
             f"{MARKDOWN_PREFIX}[{CLICKED}]({CLICKED})\n\n"

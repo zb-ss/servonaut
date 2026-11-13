@@ -886,6 +886,9 @@ def _relay_run_foreground() -> None:
                 auth_service=auth_service,
                 servonaut_tools=headless_tools,
                 ip_ban_service=ip_ban_service,
+                readonly_commands=lambda: (
+                    config_manager.get().ai_provider.readonly_command_allowlist
+                ),
             )
             ai_tool_executor = RelayAIToolExecutor(bridge)
             # Separate bridge for proactive-monitoring probes: fixed
@@ -1420,6 +1423,12 @@ def _run_connect(args: argparse.Namespace) -> None:
         _relay_run_foreground()
 
 
+_TEXT_SUBCOMMANDS = frozenset({
+    'ai', 'hetzner', 'secrets', 'vault', 'ca', 'ssh', 'servers', 'team',
+    'db', 'memory', 'login', 'logout', 'connect',
+})
+
+
 def _configure_stdio() -> None:
     """Ensure standard streams use UTF-8 encoding across all platforms.
 
@@ -1450,6 +1459,7 @@ def main() -> None:
     from servonaut.utils.endpoints import EndpointOverrideError
 
     _configure_stdio()
+    streams = (sys.stdout, sys.stderr)
     try:
         _main()
     except KeyboardInterrupt:
@@ -1458,6 +1468,8 @@ def main() -> None:
     except EndpointOverrideError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        sys.stdout, sys.stderr = streams
 
 
 def _main() -> None:
@@ -1664,6 +1676,7 @@ def _main() -> None:
 
     # ---- ai subcommand ----
     from servonaut.cli.ai import add_ai_parser, handle_ai_command
+    from servonaut.utils.terminal_output import protect_cli_output
     add_ai_parser(subparsers)
 
     # ---- hetzner subcommand ----
@@ -1710,6 +1723,11 @@ def _main() -> None:
         os.environ.setdefault('SERVONAUT_AI_PROVIDER', args.ai_provider)
     if getattr(args, 'no_tools', False):
         os.environ.setdefault('SERVONAUT_AI_NO_TOOLS', '1')
+
+    if getattr(args, 'subcommand', None) in _TEXT_SUBCOMMANDS:
+        # These commands only print text. The TUI and the MCP server own
+        # the terminal or a protocol on stdout, so they are left alone.
+        protect_cli_output()
 
     if getattr(args, 'subcommand', None) == 'ai':
         _setup_logging(debug=args.debug)

@@ -195,3 +195,256 @@ def test_standard_commands_are_rebuilt_from_checked_tokens(command, rendered):
 def test_dangerous_commands_run_unchanged():
     command = "tail -n 1 /var/log/syslog; uptime"
     assert _guard(GuardLevel.DANGEROUS).command_for_execution(command) == command
+
+
+_DEFAULTS = MCPConfig().command_allowlist
+
+
+@pytest.mark.parametrize("command", [
+    "ip --batch -",
+    "ip -batch -",
+    "ip --b /etc/hostname",
+    "ip --force --batch -",
+    "ip -force -batch x",
+    "ip -- link set lo down",
+    "date '+netns exec x sh -c id' | ip --batch -",
+    "find /dev/null -printf 'link set dev eth0 down\\n' | ip --batch -",
+    "sudo ip --batch -",
+    "ip -b -",
+])
+def test_ip_batch_in_any_spelling_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "ip -br addr", "ip --netns ns addr list", "ip -s link", "ip -4 addr show",
+    "ip --json addr",
+])
+def test_ip_display_options_are_accepted(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is True
+
+
+@pytest.mark.parametrize("command", [
+    "date 12:30", "date @0", "date '2020-01-01 00:00'", "date 1200",
+    "date -f %s 0", "date -s now", "date --set=now", "sudo date 12:30",
+])
+def test_date_with_a_bare_operand_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "date", "date +%s", "date -u", "date -d '1 day ago' +%F", "date -I",
+    "date -r /etc/hostname",
+])
+def test_date_that_only_prints_is_accepted(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is True
+
+
+@pytest.mark.parametrize("command", ["grep '|' f", "ls \\| sort", "cat 'a' '|' sort"])
+def test_a_quoted_or_escaped_pipe_word_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+def test_find_rm_is_refused():
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command("find / -rm", _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "grep 'a b' f", 'grep "a  b"   f', "grep '' f", "ls '*.log'",
+    "grep 'x;y' f", "grep a\\|b f", "echo_not cat", "ls -la | sort | head -3",
+])
+def test_rebuilt_text_parses_back_to_the_same_words(command):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    allowlist = [*_DEFAULTS, "echo_not"]
+    if not check_standard_command(command, allowlist)[0]:
+        pytest.skip("refused by the matcher")
+    rendered = render_standard_command(command)
+    assert render_standard_command(rendered) == rendered
+    original = [shlex.split(part) for part in command.split(" | ")]
+    rebuilt = [shlex.split(part) for part in rendered.split(" | ")]
+    assert original == rebuilt
+
+
+def test_rebuilt_text_reaches_a_real_shell_as_the_same_argument():
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    text = render_standard_command("cat x 'a b' '$HOME' '' 'x;y' 'a\"b'")
+    rendered = text.replace("cat", "printf '[%s]'", 1)
+    out = subprocess.run(
+        ["sh", "-c", rendered], capture_output=True, text=True, check=True,
+    ).stdout
+    assert out == '[x][a b][$HOME][][x;y][a"b]'
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("find -d*", "find '-d*'"),
+    ("find . -name '*.log'", "find . -name '*.log'"),
+    ("find . -name *.log", "find . -name '*.log'"),
+    ("sudo find -d*", "sudo find '-d*'"),
+    ("sort *.txt", "sort '*.txt'"),
+    ("sort ./*.txt", "sort ./*.txt"),
+    ("find /var/log/*.d -type f", "find /var/log/*.d -type f"),
+    ("find ./su* -type f", "find ./su* -type f"),
+    ("ls *.log", "ls *.log"),
+    ("ls /var/log/*.log", "ls /var/log/*.log"),
+    ("grep --include=*.txt x .", "grep --include=*.txt x ."),
+    ("cat ./*.csv | sort ~/x*", "cat ./*.csv | sort ~/x*"),
+])
+def test_globs_expand_only_where_they_cannot_become_options(command, expected):
+    from servonaut.mcp.guards import render_standard_command
+
+    got = render_standard_command(command)
+    assert got == expected
+    assert render_standard_command(got) == got
+
+
+_PLANTED_HOLES = [
+    ("find -d*", ["-delete"]),
+    ("find notes.txt ?exec sh -c 'touch MARKER' sh {} +", ["-exec"]),
+    ("find notes.txt [-]execdir sh -c 'touch MARKER' sh {} +", ["-execdir"]),
+    ("cat notes.txt | sort ?onew-file", ["-onew-file"]),
+    ("find notes.txt ?fprint written-by-find", ["-fprint"]),
+]
+
+
+@pytest.mark.parametrize("command,planted", _PLANTED_HOLES)
+def test_a_planted_file_name_never_becomes_an_option(command, planted, tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    allowlist = [*_DEFAULTS]
+    if not check_standard_command(command, allowlist)[0]:
+        pytest.skip("refused by the matcher")
+    for name in ["notes.txt", "data.csv", *planted]:
+        (tmp_path / name).write_text("precious\n")
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+    for shell in ("/bin/sh", "/bin/bash"):
+        subprocess.run(
+            [shell, "-c", render_standard_command(command)], cwd=tmp_path,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+        )
+        assert sorted(p.name for p in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("command,stdout", [
+    ("ls *.txt", "a.txt\nb.txt\n"),
+    ("ls ./*.txt", "./a.txt\n./b.txt\n"),
+    ("find . -name '*.txt' -type f", None),
+    ("sort ./*.txt", "x\ny\n"),
+    ("grep --include=*.txt -r x .", None),
+])
+def test_legitimate_globs_still_work(command, stdout, tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    (tmp_path / "a.txt").write_text("x\n")
+    (tmp_path / "b.txt").write_text("y\n")
+    assert check_standard_command(command, _DEFAULTS)[0]
+    out = subprocess.run(
+        ["/bin/sh", "-c", render_standard_command(command)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=20,
+    ).stdout
+    if stdout is not None:
+        assert out == stdout
+    elif command.startswith("find"):
+        assert sorted(out.split()) == ["./a.txt", "./b.txt"]
+    else:
+        assert "a.txt" in out
+
+
+_QUOTED_CASES = [
+    ("grep '[0-9]' notes.txt", "grep '[0-9]' notes.txt"),
+    ("grep 'a*' notes.txt", "grep 'a*' notes.txt"),
+    ("ls '[0-9]'", "ls '[0-9]'"),
+    ("find . -name '~*'", "find . -name '~*'"),
+    ("find . -name \\~\\*", "find . -name '~*'"),
+    ("grep \"x?\" notes.txt", "grep 'x?' notes.txt"),
+]
+
+
+@pytest.mark.parametrize("command,expected", _QUOTED_CASES)
+def test_a_word_the_model_quoted_stays_quoted(command, expected):
+    from servonaut.mcp.guards import render_standard_command
+
+    got = render_standard_command(command)
+    assert got == expected
+    assert render_standard_command(got) == got
+
+
+@pytest.mark.parametrize("planted", [True, False])
+@pytest.mark.parametrize("command", [
+    "grep '[0-9]' notes.txt", "grep 'a*' notes.txt", "ls '[0-9]'",
+])
+def test_a_quoted_pattern_reaches_the_program_as_written(command, planted, tmp_path):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    (tmp_path / "notes.txt").write_text("a1\n")
+    if planted:
+        for name in ("1", "5", "a"):
+            (tmp_path / name).write_text("")
+    rendered = render_standard_command(command)
+    words = subprocess.run(
+        ["/bin/sh", "-c", 'for w in ' + rendered.split(" ", 1)[1] + '; do printf "[%s]" "$w"; done'],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    expected = "".join(f"[{w}]" for w in shlex.split(command)[1:])
+    assert words == expected
+
+
+def test_an_unquoted_glob_in_a_command_without_rules_still_expands(tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    (tmp_path / "a.txt").write_text("x\n")
+    out = subprocess.run(
+        ["/bin/sh", "-c", render_standard_command("ls *.txt")], cwd=tmp_path,
+        capture_output=True, text=True,
+    ).stdout
+    assert out == "a.txt\n"
+
+
+@pytest.mark.parametrize("command", [
+    "grep '~' notes.txt", "grep '~user' notes.txt", "grep '$HOME' notes.txt",
+    "grep \"~\" notes.txt",
+])
+def test_a_quoted_word_without_glob_characters_stays_quoted(command, tmp_path):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    rendered = render_standard_command(command)
+    assert render_standard_command(rendered) == rendered
+    home = tmp_path / "home"
+    home.mkdir()
+    words = subprocess.run(
+        ["/bin/sh", "-c", "for w in " + rendered.split(" ", 1)[1]
+         + '; do printf "[%s]" "$w"; done'],
+        cwd=tmp_path, env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert words == "".join(f"[{w}]" for w in shlex.split(command)[1:])

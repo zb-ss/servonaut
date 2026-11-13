@@ -21,7 +21,9 @@ filesystem dependency.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence
+
+from servonaut.utils.ssh_option_policy import collect_team_options, merge_recorded
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AppConfig
@@ -34,10 +36,16 @@ class AppliedTeamConfig(NamedTuple):
 
     skipped_custom_servers: List[str]
     kept_key_paths: int
+    # Options that arrived with the pull and are refused until allowed.
+    refused_options: int = 0
 
 
 def apply_team_config(
-    local: "AppConfig", remote_payload: dict, *, shared_servers: Sequence[Mapping[str, Any]] = (),
+    local: "AppConfig",
+    remote_payload: dict,
+    *,
+    shared_servers: Sequence[Mapping[str, Any]] = (),
+    team: Optional[Mapping[str, Any]] = None,
 ) -> AppliedTeamConfig:
     """Replace the four shareable sections on ``local`` with ``remote_payload``'s.
 
@@ -57,6 +65,14 @@ def apply_team_config(
     remote (e.g. a future-version field this CLI doesn't yet understand) are
     silently dropped — the rehydration filters to known fields per the
     dataclass signature so we forward-compat gracefully.
+
+    Every option the team's profiles and custom servers carry that ssh would
+    use to run a program or load a library on this computer (see
+    ``utils.ssh_option_policy``) is recorded in ``local.ssh.team_options``,
+    with *team* (its ``id``, ``slug`` and ``name``) as the source, and is
+    refused until the member allows it. What the member allowed before stays
+    allowed for the same text. Only the four sections are read from the
+    payload, so a team cannot allow anything itself.
     """
     from servonaut.config.schema import (
         ConnectionProfile,
@@ -83,7 +99,23 @@ def apply_team_config(
     for server in local.custom_servers:
         if server.name in kept["ssh_key"]:
             server.ssh_key = kept["ssh_key"][server.name]
-    return AppliedTeamConfig(skipped, len(kept["bastion_key"]) + len(kept["ssh_key"]))
+    refused = record_team_options(local, team)
+    return AppliedTeamConfig(skipped, len(kept["bastion_key"]) + len(kept["ssh_key"]), refused)
+
+
+def record_team_options(local: "AppConfig", team: Optional[Mapping[str, Any]]) -> int:
+    """Record the options the applied sections carry; returns how many are not allowed."""
+    from servonaut.services.shared_servers import team_id_text, team_label
+
+    texts = collect_team_options(local.connection_profiles, local.custom_servers)
+    team = team or {}
+    slug = team.get("slug")
+    local.ssh.team_options = merge_recorded(
+        local.ssh.team_options, texts,
+        team_id=team_id_text(team), team_slug=slug if isinstance(slug, str) else "",
+        team_name=team_label(team),
+    )
+    return sum(1 for item in local.ssh.team_options if item.get("allowed") is not True)
 
 
 def team_custom_servers(

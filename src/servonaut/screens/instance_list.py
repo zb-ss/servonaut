@@ -1157,7 +1157,14 @@ class InstanceListScreen(Screen):
                 except Exception:
                     pass
             else:
-                self.app.notify("No terminal emulator detected. Set 'terminal_emulator' in settings.", severity="error")
+                terminal_error = getattr(self.app.terminal_service, "last_error", None)
+                self.app.notify(
+                    terminal_error
+                    if isinstance(terminal_error, str) and terminal_error
+                    else "No terminal emulator detected. Set 'terminal_emulator' in settings.",
+                    severity="error",
+                    markup=False,
+                )
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error", markup=False)
 

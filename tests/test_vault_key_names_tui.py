@@ -189,7 +189,7 @@ def test_item_names_are_the_first_column_and_are_plain_text() -> None:
         async with app.run_test(size=(160, 50)) as pilot:
             screen = await _loaded(app, pilot)
             first = _row(screen, 0)
-            assert first[0] == "prod \\[bold]key\\[/bold]"
+            assert first[0] == "prod [bold]key[/bold]"
             assert first[1] == "ssh_key" and first[3] == "SHA256:one"
             assert _row(screen, 1)[0] == "(name unknown)"
             assert _row(screen, 2)[0] == ""

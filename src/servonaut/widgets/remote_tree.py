@@ -13,6 +13,7 @@ from textual.widgets.tree import TreeNode
 from textual.worker import Worker
 
 from servonaut.utils.markup import inert_text
+from servonaut.utils.remote_shell import shell_path
 from servonaut.utils.ssh_utils import run_ssh
 
 if TYPE_CHECKING:
@@ -240,17 +241,11 @@ class RemoteTree(Tree):
         Raises:
             RuntimeError: If SSH command fails or times out.
         """
-        # Expand ~ to $HOME for remote shell (shlex.quote prevents tilde expansion)
-        if path.startswith('~/'):
-            safe_path = '$HOME/' + path[2:]
-        elif path == '~':
-            safe_path = '$HOME'
-        else:
-            safe_path = path
+        safe_path = shell_path(path)
 
         logger.debug("Fetching directory contents: %s", path)
 
-        stdout, error_msg = self._run_ls(f'ls -la "{safe_path}"')
+        stdout, error_msg = self._run_ls(f'ls -la {safe_path}')
         if error_msg is not None:
             # EFS / NFS shares and other root-owned mounts are commonly
             # unreadable by the login user (ec2-user / ubuntu). Retry once with
@@ -258,7 +253,7 @@ class RemoteTree(Tree):
             # fails fast where passwordless sudo isn't available and we fall
             # back to the original "Permission denied" message.
             if "permission denied" in error_msg.lower():
-                sudo_out, sudo_err = self._run_ls(f'sudo -n ls -la "{safe_path}"')
+                sudo_out, sudo_err = self._run_ls(f'sudo -n ls -la {safe_path}')
                 if sudo_err is None:
                     return self._parse_ls_output(sudo_out, path)
             raise RuntimeError(error_msg)
@@ -275,7 +270,7 @@ class RemoteTree(Tree):
         if not any(e.get('symlink') for e in entries):
             return entries
         stdout, error_msg = self._run_ls(
-            f'cd "{safe_path}" && for f in * .*; do [ -L "$f" ] && [ -f "$f" ] '
+            f'cd {safe_path} && for f in * .*; do [ -L "$f" ] && [ -f "$f" ] '
             '&& printf "%s\\n" "$f"; done; true'
         )
         if error_msg is not None:

@@ -8,6 +8,7 @@ from typing import List, Optional
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import CustomServer
 from servonaut.services.interfaces import CustomServerServiceInterface
+from servonaut.utils.ssh_option_policy import option_entries
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class CustomServerService(CustomServerServiceInterface):
             'port': server.port,
             'username': server.username,
             'is_custom': True,
-            'extra_ssh_options': list(server.extra_ssh_options),
+            'extra_ssh_options': option_entries(server.extra_ssh_options),
         }
 
     def list_as_instances(self) -> List[dict]:

@@ -43,8 +43,8 @@ def test_wizard_key_id_is_display_only(is_demo: bool) -> None:
         patch.object(screen, "query_one", return_value=table),
     ):
         asyncio.run(screen._load_keys())
-    assert table.add_row.call_args.args[1] == ("key-001" if is_demo else key["id"])
-    assert (table.add_row.call_args.args[0] != key["name"]) is is_demo
+    assert str(table.add_row.call_args.args[1]) == ("key-001" if is_demo else key["id"])
+    assert (str(table.add_row.call_args.args[0]) != key["name"]) is is_demo
     assert screen._keys[0]["id"] == key["id"]
 
 

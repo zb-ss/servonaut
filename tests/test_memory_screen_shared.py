@@ -120,7 +120,7 @@ async def test_a_newer_local_snapshot_wins(tmp_path):
         for _ in range(10):
             await pilot.pause()
         rows = [app.screen.query_one("#memory-table", DataTable).get_row_at(0)]
-        assert rows[0][2] == "Local 13"
+        assert str(rows[0][2]) == "Local 13"
         assert app.screen.query_one("#memory-shared-source").has_class("hidden")
 
 

@@ -16,7 +16,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._batch_status import failure_details
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
@@ -1099,9 +1099,9 @@ class TeamManagementScreen(Screen):
             if role == "owner":
                 owned_count += 1
             table.add_row(
-                markup_literal(terminal_safe(_s(team.get("name", "")))),
-                markup_literal(terminal_safe(role)),
-                markup_literal(terminal_safe(team.get("member_count", ""))),
+                cell(terminal_safe(_s(team.get("name", "")))),
+                cell(terminal_safe(role)),
+                cell(terminal_safe(team.get("member_count", ""))),
                 key=slug,
             )
         # Backend caps team creation at one-team-per-Teams-subscription. Hide
@@ -1120,8 +1120,8 @@ class TeamManagementScreen(Screen):
 
         for member in members:
             table.add_row(
-                markup_literal(terminal_safe(_s(self._member_display_email(member)))),
-                markup_literal(terminal_safe(member.get("role", ""))),
+                cell(terminal_safe(_s(self._member_display_email(member)))),
+                cell(terminal_safe(member.get("role", ""))),
                 self._format_status(member),
             )
 
@@ -1148,7 +1148,7 @@ class TeamManagementScreen(Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 pushed_by = self.app.redaction_service.redact_name(pushed_by)
             created = (cfg.get("created_at") or "")[:10]  # YYYY-MM-DD portion
-            table.add_row(str(version), markup_literal(_s(description)), created, markup_literal(pushed_by), key=str(cfg.get("id", "")))
+            table.add_row(str(version), cell(_s(description)), created, cell(pushed_by), key=str(cfg.get("id", "")))
 
     def _config_author(self, config: dict) -> str:
         author = config.get("pushed_by")
@@ -1316,6 +1316,32 @@ class TeamManagementScreen(Screen):
         if config is not None:
             self._render_push_config_preview(config)
 
+    @staticmethod
+    def _refused_options_lines(options: list) -> list[str]:
+        """The pull preview's lines on SSH options that need the member's approval."""
+        if not options:
+            return []
+        lines = [
+            f"This team configuration sets {len(options)} SSH {'option' if len(options) == 1 else 'options'} that run programs on this "
+            "computer. Servonaut will not use them, and connections that need them are refused, "
+            "until you allow each one in Settings > Connections."
+        ]
+        lines.extend(
+            "  • " + markup_literal(terminal_safe(f"{item['where']}: {item['option']}"))
+            for item in options[:5]
+        )
+        if len(options) > 5:
+            lines.append(f"  and {len(options) - 5} more")
+        return lines
+
+    def _team_for_options(self) -> dict:
+        """The team on screen, as ``apply_team_config`` records it."""
+        record = dict(self._teams_by_slug.get(self._current_team_slug) or {})
+        return {
+            "id": record.get("id"), "slug": self._current_team_slug,
+            "name": getattr(self, "_current_team_name", None) or record.get("name"),
+        }
+
     def _show_pull_config_form(self, remote_payload: dict) -> None:
         from servonaut.services.team_config_subset import diff_against_local
         config_manager = getattr(self.app, "config_manager", None)
@@ -1340,6 +1366,7 @@ class TeamManagementScreen(Screen):
             )
         if diff["kept_key_paths"]:
             lines.append(f"  {_kept_key_paths_text(diff['kept_key_paths'])}: a team config never carries key paths.")
+        lines.extend(self._refused_options_lines(diff["refused_options"]))
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
@@ -1363,10 +1390,10 @@ class TeamManagementScreen(Screen):
 
         for server in servers:
             table.add_row(
-                markup_literal(terminal_safe(_name(server.get("name", "")))),
+                cell(terminal_safe(_name(server.get("name", "")))),
                 # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
-                markup_literal(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
-                markup_literal(terminal_safe(server.get("region", "") or "")),
+                cell(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
+                cell(terminal_safe(server.get("region", "") or "")),
             )
 
     # ------------------------------------------------------------------
@@ -1793,7 +1820,10 @@ class TeamManagementScreen(Screen):
         from servonaut.services.team_config_apply import apply_team_config
         payload = self._pending_pull_payload
         try:
-            applied = apply_team_config(config, payload, shared_servers=self._team_shared_servers())
+            applied = apply_team_config(
+                config, payload, shared_servers=self._team_shared_servers(),
+                team=self._team_for_options(),
+            )
             config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
@@ -1801,8 +1831,14 @@ class TeamManagementScreen(Screen):
             return
         self._pending_pull_payload = None
         self._hide_pull_config_form()
-        skipped, kept = applied
+        skipped, kept, refused = applied
         message = "Team config applied" + (f"; {_kept_key_paths_text(kept)}." if kept else ".")
+        if refused:
+            message += (
+                f" {refused} SSH {'option from the team needs' if refused == 1 else 'options from the team need'} "
+                f"your approval before connections that use {'it' if refused == 1 else 'them'} work: "
+                "Settings > Connections."
+            )
         if skipped:
             message += (f" Not added, the team already shares {'it' if len(skipped) == 1 else 'them'} "
                         f"(connect with the team key): {self._names_for_display(skipped)}.")

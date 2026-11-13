@@ -122,7 +122,7 @@ async def test_config_author_uses_member_name_and_redacts_it():
         screen = await _open_team(app, pilot)
         screen._members = [{"user": {"id": 42, "name": "Example Owner", "email": "owner@example.com"}}]
         screen._populate_configs_table([{"id": "c1", "version": 1, "pushed_by": 42}])
-        assert screen.query_one("#configs_table", DataTable).get_row_at(0)[3] == "Example Owner"
+        assert str(screen.query_one("#configs_table", DataTable).get_row_at(0)[3]) == "Example Owner"
         from servonaut.services.redaction_service import RedactionService
         app.demo_mode = True
         app.redaction_service = RedactionService()
@@ -139,11 +139,11 @@ async def test_config_authors_and_shared_server_labels_are_literal_and_terminal_
         screen._members = [{"user": {"id": 42, "name": "[bold]Owner[/bold]\u202e"}}]
         screen._populate_configs_table([{"id": "c1", "version": 1, "pushed_by": 42, "description": "[bold]Setup[/bold]"}])
         row = screen.query_one("#configs_table", DataTable).get_row_at(0)
-        assert Text.from_markup(str(row[1])).plain == "[bold]Setup[/bold]"
-        assert Text.from_markup(str(row[3])).plain == "[bold]Owner[/bold]"
+        assert str(row[1]) == "[bold]Setup[/bold]"
+        assert str(row[3]) == "[bold]Owner[/bold]"
         screen._populate_servers_table([{"name": "[bold]web-1[/bold]", "hostname": "host.example.test", "region": "test-1"}])
         cell = screen.query_one("#servers_table", DataTable).get_row_at(0)[0]
-        assert Text.from_markup(str(cell)).plain == "[bold]web-1[/bold]"
+        assert str(cell) == "[bold]web-1[/bold]"
 
 
 async def test_share_all_prefills_the_connection_rule_login():

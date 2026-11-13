@@ -29,7 +29,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionL
 from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
-from servonaut.utils.markup import literal
+from servonaut.utils.markup import cell, literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
@@ -1141,10 +1141,10 @@ class VaultScreen(Screen):
         for row in self._vaults:
             counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
             table.add_row(
-                markup_literal(self.scrub_for_display(row.get("name") or "Unnamed vault")),
-                markup_literal(self.scrub_for_display(row.get("kind") or "")),
+                cell(self.scrub_for_display(row.get("name") or "Unnamed vault")),
+                cell(self.scrub_for_display(row.get("kind") or "")),
                 str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
-                markup_literal(self.scrub_for_display(row.get("vault_id") or "")),
+                cell(self.scrub_for_display(row.get("vault_id") or "")),
             )
         self._place_vault_cursor(table)
 
@@ -1157,13 +1157,13 @@ class VaultScreen(Screen):
         if row is not None:
             table.move_cursor(row=row)
 
-    def _item_name_cell(self, row: Mapping[str, Any]) -> str:
+    def _item_name_cell(self, row: Mapping[str, Any]) -> Text | str:
         if row.get("type") != "ssh_key":
             return ""
         text = self._key_display_name(str(row.get("item_id") or ""))
         if len(text) > _ITEM_NAME_DISPLAY_MAX:
             text = text[:_ITEM_NAME_DISPLAY_MAX] + "…"
-        return markup_literal(text)
+        return cell(text)
 
     def _key_display_name(self, item_id: str) -> str:
         name = self._key_names.get(item_id)
@@ -1182,10 +1182,10 @@ class VaultScreen(Screen):
         for row in self._items:
             table.add_row(
                 self._item_name_cell(row),
-                markup_literal(self.scrub_for_display(row.get("type") or "unsupported")),
+                cell(self.scrub_for_display(row.get("type") or "unsupported")),
                 str(row.get("revision") or ""),
-                markup_literal(self.scrub_for_display(row.get("public_fingerprint") or "")),
-                markup_literal(self.scrub_for_display(row.get("item_id") or "")),
+                cell(self.scrub_for_display(row.get("public_fingerprint") or "")),
+                cell(self.scrub_for_display(row.get("item_id") or "")),
             )
 
     def _render_exposures(self) -> None:
@@ -1193,26 +1193,26 @@ class VaultScreen(Screen):
         table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
             note = "Key replaced in vault; old key may still be on servers" if row.get("key_replaced") is True else ""
-            table.add_row(markup_literal(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self.scrub_for_display(row.get("reason") or "")), note, markup_literal(self.scrub_for_display(row.get("item_id") or "")), markup_literal(self.scrub_for_display(row.get("exposure_id") or "")))
+            table.add_row(cell(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), cell(self.scrub_for_display(row.get("reason") or "")), note, cell(self.scrub_for_display(row.get("item_id") or "")), cell(self.scrub_for_display(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Server", "Status", "Detail")
         for host in self._rotation_hosts:
-            table.add_row(markup_literal(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), markup_literal(self.scrub_for_display(host.get("status") or "unknown")), markup_literal(self.scrub_for_display(host.get("error") or "")))
+            table.add_row(cell(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), cell(self.scrub_for_display(host.get("status") or "unknown")), cell(self.scrub_for_display(host.get("error") or "")))
 
     def _render_devices(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Platform", "Status", "Device ID")
         for row in self._devices:
-            table.add_row(markup_literal(self.scrub_for_display(row.get("name") or "")), markup_literal(self.scrub_for_display(row.get("platform") or "")), markup_literal(self.scrub_for_display(row.get("status") or "")), markup_literal(self.scrub_for_display(row.get("device_id") or "")))
+            table.add_row(cell(self.scrub_for_display(row.get("name") or "")), cell(self.scrub_for_display(row.get("platform") or "")), cell(self.scrub_for_display(row.get("status") or "")), cell(self.scrub_for_display(row.get("device_id") or "")))
 
     def _render_roster(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Member", "Role", "Status", "Fingerprint")
         for member in self._roster:
             identity = member.get("identity") if isinstance(member.get("identity"), Mapping) else {}
-            table.add_row(markup_literal(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), markup_literal(self.scrub_for_display(member.get("role") or "")), markup_literal(self.scrub_for_display(member.get("status") or "")), markup_literal(self.scrub_for_display(identity.get("fingerprint") or "")))
+            table.add_row(cell(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), cell(self.scrub_for_display(member.get("role") or "")), cell(self.scrub_for_display(member.get("status") or "")), cell(self.scrub_for_display(identity.get("fingerprint") or "")))
 
     def _set_identity_state(self, state: str) -> None:
         """Make only the safe next identity action available for this state."""

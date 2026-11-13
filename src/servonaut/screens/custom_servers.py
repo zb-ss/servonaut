@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import reconcile_team_memory, replace_instances
+from servonaut.utils.markup import cell
 
 
 class CustomServersScreen(Screen):
@@ -139,7 +140,7 @@ class CustomServersScreen(Screen):
             redaction = self.app.redaction_service
 
         for server in self.app.custom_server_service.list_servers():
-            table.add_row(*self._display_row(server, redaction))
+            table.add_row(*(cell(value) for value in self._display_row(server, redaction)))
 
     @staticmethod
     def _display_row(server: CustomServer, redaction) -> tuple:
@@ -248,9 +249,9 @@ class CustomServersScreen(Screen):
         if self.app.custom_server_service.remove_server(name):
             self._populate_table()
             self._refresh_app_instances()
-            self.app.notify(f"Removed server: {shown}", severity="information")
+            self.app.notify(f"Removed server: {shown}", severity="information", markup=False)
         else:
-            self.app.notify(f"Server '{shown}' not found", severity="error")
+            self.app.notify(f"Server '{shown}' not found", severity="error", markup=False)
 
     def _save_server(self) -> None:
         """Validate form and save the server."""

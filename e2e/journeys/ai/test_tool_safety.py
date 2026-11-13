@@ -273,3 +273,42 @@ async def test_an_unanswered_prompt_expires_and_the_tool_never_runs(
         rows = _audit(seed, "tc-late")
         assert [row["reason"] for row in rows] == ["confirm_timeout"]
         assert rows[0]["allowed"] is False and rows[0]["guard_level"] == "dangerous"
+
+
+async def test_read_only_shell_tool_asks_for_a_command_outside_the_read_only_list(
+    tui, seed, fake_cloud, journey
+):
+    _seed(seed, fake_cloud, journey, dangerous_tools=True)
+    fake_cloud.ai.script(
+        _turn(
+            "tc-ro-touch", "ssh_exec_readonly",
+            {"instance_id": WEB_1.name, "command": "touch /tmp/marker"}, "readonly",
+        ),
+        _turn("tc-ro-uptime", "ssh_exec_readonly", UPTIME_ON_WEB_1, "readonly"),
+    )
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Create a marker file")
+        prompt = await t.wait_for_screen("DangerousToolConfirmModal")
+        assert "not on the read-only command list" in plain(
+            prompt.query_one("#dangerous_confirm_note")
+        )
+        assert journey.shims.calls("ssh") == []
+        await t.press("escape")
+        await wait_for_reply(t)
+        declined = await _posted(t, fake_cloud, "tc-ro-touch")
+        assert declined["status"] == "denied"
+        assert journey.shims.calls("ssh") == []
+        rows = _audit(seed, "tc-ro-touch")
+        assert [r["reason"] for r in rows] == [
+            "readonly_command_not_allowlisted", "user_declined",
+        ]
+        assert rows[-1]["readonly_check"] == "needs_approval"
+
+        # A command on the list runs with no prompt at all.
+        await send(t, "How long has web-1 been up?")
+        posted = await _posted(t, fake_cloud, "tc-ro-uptime")
+        assert posted["status"] == "ok" and "up 3 days" in posted["result"]
+        assert len(journey.shims.calls("ssh")) == 1
+        [row] = _audit(seed, "tc-ro-uptime")
+        assert row["reason"] == "ok" and row["readonly_check"] == "allowlisted"

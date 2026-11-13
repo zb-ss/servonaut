@@ -142,7 +142,7 @@ def test_symlink_to_a_file_is_a_file_and_to_a_directory_stays_expandable():
     types = {e["name"]: e["type"] for e in entries}
     assert types == {"current.log": "file", "archive": "directory", "app-01.log": "file"}
     assert len(commands) == 2
-    assert commands[1].startswith('cd "/var/log/app" && ')
+    assert commands[1].startswith('cd /var/log/app && ')
 
 
 def test_symlink_lookup_failure_keeps_links_expandable():

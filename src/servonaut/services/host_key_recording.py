@@ -23,6 +23,8 @@ from servonaut.services.ssh_host_keys import (
 )
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
+from servonaut.utils.ssh_names import SSHRefusal
+
 logger = logging.getLogger(__name__)
 
 # A visit opens up to two connections (a bastion hop, then the server), each
@@ -75,17 +77,20 @@ async def visit_for_host_key(
     if not host:
         return "This server has no address to connect to."
     port = conn.get("port")
-    argv = ssh_service.build_ssh_command(
-        host=host,
-        username=login or conn.get("username") or "root",
-        key_path=conn.get("key_path"),
-        proxy_args=conn.get("proxy_args"),
-        port=port,
-        remote_command="true",
-        # Nobody can answer a prompt here.
-        extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
-        record_to_known_hosts=known_hosts_path,
-    )
+    try:
+        argv = ssh_service.build_ssh_command(
+            host=host,
+            username=login or conn.get("username") or "root",
+            key_path=conn.get("key_path"),
+            proxy_args=conn.get("proxy_args"),
+            port=port,
+            remote_command="true",
+            # Nobody can answer a prompt here.
+            extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
+            record_to_known_hosts=known_hosts_path,
+        )
+    except SSHRefusal as exc:
+        return str(exc)
     try:
         output = await run_ssh_subprocess(argv, timeout=timeout)
     except asyncio.TimeoutError:

@@ -5,7 +5,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from rich.text import Text
 from textual.widgets import Button, DataTable, Input, Select, SelectionList
 
 from servonaut.config.schema import AppConfig
@@ -123,7 +122,7 @@ async def test_server_picker_uses_the_same_demo_name_and_address_as_the_table():
         screen = await _open_team(app, pilot)
         screen._shared_servers = rows
         screen._populate_servers_table(rows)
-        cells = [Text.from_markup(str(cell)).plain for cell in screen.query_one("#servers_table", DataTable).get_row_at(0)]
+        cells = [str(cell) for cell in screen.query_one("#servers_table", DataTable).get_row_at(0)]
         screen._action_remove_shared_servers()
         await pilot.pause()
         label = str(app.screen.query_one("#bulk_action_list", SelectionList).get_option_at_index(0).prompt)
@@ -193,5 +192,5 @@ async def test_team_and_member_labels_are_literal_markup():
         screen = await _open_team(app, pilot)
         screen._populate_teams_table([{"slug": "eng", "name": "[/]", "role": "owner"}])
         screen._populate_members_table([{"user": {"name": "[bold]Member[/bold]"}, "role": "member"}])
-        assert Text.from_markup(str(screen.query_one("#teams_table", DataTable).get_row_at(0)[0])).plain == "[/]"
-        assert Text.from_markup(str(screen.query_one("#members_table", DataTable).get_row_at(0)[0])).plain == "[bold]Member[/bold]"
+        assert str(screen.query_one("#teams_table", DataTable).get_row_at(0)[0]) == "[/]"
+        assert str(screen.query_one("#members_table", DataTable).get_row_at(0)[0]) == "[bold]Member[/bold]"

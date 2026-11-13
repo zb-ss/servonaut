@@ -40,7 +40,10 @@ class TestProbeThroughRunner:
             paths = asyncio.run(_viewer().probe_log_paths(INSTANCE, ssh_service, MagicMock(), runner=runner))
 
         assert paths == ["/var/log/a.log"]
-        assert commands == ["test -r /var/log/a.log && echo /var/log/a.log; test -r /var/log/b.log && echo /var/log/b.log"]
+        assert commands == [
+            "test -r /var/log/a.log && printf '%s\\n' /var/log/a.log; "
+            "test -r /var/log/b.log && printf '%s\\n' /var/log/b.log"
+        ]
         direct.assert_not_called()
         ssh_service.build_ssh_command.assert_not_called()
 

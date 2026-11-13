@@ -13,6 +13,7 @@ from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.plan_labels import FEATURE_LABELS, plan_label
+from servonaut.utils.markup import web_link
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -454,13 +455,9 @@ class LoginScreen(Screen):
         interval = flow.get("interval", 5)
 
         self._device_code = device_code
-        # Rich's [link=…] emits an OSC 8 hyperlink so OSC 8-aware terminals
-        # keep the URL as one clickable region even if it visually wraps.
-        # The URL has to be quoted because Rich's markup parser treats the
-        # ':' after 'https' as a style separator otherwise.
-        self.query_one("#device_url", Static).update(
-            f'[link="{verification_uri}"][$text-accent]{verification_uri}[/$text-accent][/link]'
-        )
+        # A link style on the content (not a markup tag) keeps the URL one
+        # clickable region in OSC 8-aware terminals even if it visually wraps.
+        self.query_one("#device_url", Static).update(web_link(verification_uri, "$text-accent"))
         self.query_one("#device_code", Static).update(f"[bold]Code: {user_code}[/bold]")
         self.query_one("#device_status", Static).update(
             "[dim]Waiting for authorization... (polls every few seconds)[/dim]"

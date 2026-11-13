@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Callable, Union
 
+from rich.text import Text
 from textual.content import Content
+from textual.style import Style as TextualStyle
 
 
 def escape_markup(text: str) -> str:
@@ -49,6 +52,47 @@ def literal(text: str, style: str = "") -> Content:
     """
     text = inert_text(text)
     return Content.styled(text, style) if style else Content(text)
+
+
+# Whitespace and control characters never belong in an address that is opened.
+_URL_UNSAFE = re.compile("[\x00-\x20\x7f-\x9f]")
+WEB_SCHEMES = frozenset({"http", "https"})
+
+
+def is_web_url(url: object) -> bool:
+    """Whether *url* is an absolute ``http``/``https`` address with a host."""
+    if not isinstance(url, str) or not url or _URL_UNSAFE.search(url):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in WEB_SCHEMES and bool(parsed.netloc)
+
+
+def web_link(url: str, style: str = "") -> Content:
+    """*url* as text that opens the address when clicked (only for web addresses).
+
+    The link is a style on the content, never markup, so the address cannot
+    carry anything but the link itself. Anything that is not an ``http`` or
+    ``https`` address is drawn as plain text.
+    """
+    content = literal(url, style)
+    if not is_web_url(url):
+        return content
+    return content.stylize(TextualStyle(link=url))
+
+
+def cell(value: object, style: str = "") -> Text:
+    """*value* as a table cell that is drawn exactly as typed.
+
+    Data tables read a plain string as markup. A name chosen outside the app
+    must not be, so cells that show one are built as ``Text``.
+
+    ``Text`` cells do not order against each other, so a table that sorts a
+    column of them passes ``key=lambda cell: cell.plain``.
+    """
+    return Text(inert_text(str(value)), style=style)
 
 
 def scrub(value: Union[str, Content], scrubber: Callable[[str], str]) -> Union[str, Content]:

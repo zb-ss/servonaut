@@ -9,6 +9,7 @@ from textual.content import Content
 from textual.geometry import Region
 from textual.widgets import Static
 
+from tests._async_bounds import wait_until
 from servonaut.utils.markup import literal, with_bold_values
 
 
@@ -96,8 +97,9 @@ async def test_the_end_of_a_long_argument_can_be_scrolled_to_and_is_drawn(
 
     app = _ModalHost(modal_cls("run_command", _long_args(kind)))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await pilot.pause()
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+        await wait_until(lambda: scroll.max_scroll_y > 0)
         assert scroll.can_focus
         assert scroll.max_scroll_y > 0
         # Before scrolling, the drawn screen does not hold the tail.
@@ -106,7 +108,10 @@ async def test_the_end_of_a_long_argument_can_be_scrolled_to_and_is_drawn(
         assert cue.display and "more lines below" in cue.visual.plain
         scroll.focus()
         await pilot.press("end")
-        await pilot.pause(0.2)
+        # The scroll is animated: wait for it to arrive, then for the redraw.
+        await wait_until(lambda: scroll.scroll_y == scroll.max_scroll_y)
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause()
         assert scroll.scroll_y == scroll.max_scroll_y
         drawn = app.export_screenshot()
         assert "curl" in drawn and "example.invalid" in drawn

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,22 @@ class DBProfile:
     label: str = ""
 
 
+# Commands that only read: the default for the MCP standard tier.
+DEFAULT_READONLY_COMMANDS: Tuple[str, ...] = (
+    "ls", "cat", "grep", "ps", "df", "du", "top", "free",
+    "uptime", "whoami", "hostname", "uname", "date", "w",
+    "netstat", "ss", "ip", "ifconfig", "ping", "dig", "nslookup",
+    "head", "tail", "wc", "sort", "find", "file", "stat",
+)
+
+# The hosted AI's default is shorter: name lookups and pings send a name of
+# the model's choosing to an outside server, so they ask first.
+DEFAULT_CHAT_READONLY_COMMANDS: Tuple[str, ...] = tuple(
+    name for name in DEFAULT_READONLY_COMMANDS
+    if name not in ("dig", "nslookup", "ping")
+)
+
+
 @dataclass
 class AIProviderConfig:
     """AI provider configuration.
@@ -307,6 +323,13 @@ class AIProviderConfig:
     ollama_api_key: str = ""
     stream_silence_timeout_seconds: float = 35.0
     tool_confirm_timeout_seconds: float = 50.0
+    # Commands the hosted AI may run through ``ssh_exec_readonly`` without
+    # asking. A name you add here runs with any arguments. Anything else asks
+    # first, like ``run_command``. A value that is not a list of strings
+    # counts as empty, so every command asks.
+    readonly_command_allowlist: List[str] = field(
+        default_factory=lambda: list(DEFAULT_CHAT_READONLY_COMMANDS)
+    )
 
     def key_for(self, provider_name: str) -> str:
         """Return the configured API key for *provider_name*.
@@ -655,6 +678,15 @@ class SSHConfig:
             key on first connect and refuses a changed one; ``yes`` accepts
             known hosts only; ``off`` skips verification entirely. An
             unrecognised value falls back to ``accept-new`` with a warning.
+        team_options: SSH options that arrived in a team configuration and
+            run a program or load a library on this computer (or are not
+            recognised). One item per option text: ``option`` (lower-cased
+            name, ``=``, value), ``team``, ``team_name`` and ``allowed``.
+            An option listed here is refused until its item is allowed; only
+            the JSON value ``true`` allows. Written when a team configuration
+            is applied; it is never part of what a team receives.
+        team_options_checked: True once the options saved before this list
+            existed have been looked at (see ``baseline_existing_options``).
     """
     server_alive_interval: int = 30
     server_alive_count_max: int = 5
@@ -664,6 +696,8 @@ class SSHConfig:
     live_stats_timeout_seconds: float = 20.0
     live_stats_interval_seconds: float = 3.0
     host_key_checking: str = DEFAULT_HOST_KEY_CHECKING
+    team_options: List[dict] = field(default_factory=list)
+    team_options_checked: bool = False
 
     def __post_init__(self) -> None:
         """Coerce ``host_key_checking`` into a supported mode."""
@@ -885,12 +919,9 @@ class MCPConfig:
         r"\breboot\b", r"\bfdisk\b", r"\bparted\b", r"\bhalt\b",
         r":\(\)\{", r"\bsudo\s+rm\b",
     ])
-    command_allowlist: List[str] = field(default_factory=lambda: [
-        "ls", "cat", "grep", "ps", "df", "du", "top", "free",
-        "uptime", "whoami", "hostname", "uname", "date", "w",
-        "netstat", "ss", "ip", "ifconfig", "ping", "dig", "nslookup",
-        "head", "tail", "wc", "sort", "find", "file", "stat",
-    ])
+    command_allowlist: List[str] = field(
+        default_factory=lambda: list(DEFAULT_READONLY_COMMANDS)
+    )
     audit_path: str = "~/.servonaut/mcp_audit.jsonl"
     max_output_lines: int = 500
     # Opt-in: allow destructive verbs (delete/terminate/destroy/purge) through

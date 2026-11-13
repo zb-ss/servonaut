@@ -45,6 +45,7 @@ from servonaut.services.object_storage_regions import (
     HETZNER_S3_REGIONS,
 )
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.secret_input import SecretInput
@@ -821,12 +822,12 @@ class HetznerSetupScreen(Screen):
         merged: List[Tuple[str, str]] = []
         seen = set()
         if current and not any(opt_value == current for _, opt_value in options):
-            merged.append((f"{current} (saved)", current))
+            merged.append((literal(f"{current} (saved)"), current))
             seen.add(current)
         for label, value in options:
             if value in seen:
                 continue
-            merged.append((label, value))
+            merged.append((literal(label), value))
             seen.add(value)
 
         sel.set_options(merged)

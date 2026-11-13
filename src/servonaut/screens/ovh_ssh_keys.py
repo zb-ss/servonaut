@@ -30,7 +30,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -275,7 +275,7 @@ class OVHSSHKeysScreen(Screen):
                 public_key[:40] + "…" if len(public_key) > 40 else public_key
             )
             table.add_row(
-                _s(str(key.get("name", ""))),
+                cell(_s(str(key.get("name", "")))),
                 "Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32],
                 "Hidden" if self.app.demo_mode else truncated,
                 key=str(key.get("id", "")) or str(key.get("name", "")),
@@ -459,7 +459,7 @@ class OVHSSHKeysScreen(Screen):
         )
         if not confirmed:
             return
-        self._set_status(f"[dim]Deleting key {key_name}…[/dim]")
+        self._set_status(literal(f"Deleting key {key_name}…", "dim"))
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             return
@@ -472,7 +472,7 @@ class OVHSSHKeysScreen(Screen):
                 key_id, exc,
             )
             self._set_status(
-                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
+                literal(f"Delete failed: {self._short_err(exc)}", "$text-error")
             )
             self.notify(f"Delete failed: {self._short_err(exc)}", severity="error",
                         markup=False)
