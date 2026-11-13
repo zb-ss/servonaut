@@ -28,6 +28,16 @@ from servonaut.app import ServonautApp
 from servonaut.config.schema import AppConfig, MemoryConfig
 
 
+@pytest.fixture(autouse=True)
+def _restore_screen_app():
+    """Put FleetMemoryScreen.app back: the status-text tests replace it on the class."""
+    from servonaut.screens.fleet_memory import FleetMemoryScreen
+
+    original = FleetMemoryScreen.__dict__["app"]
+    yield
+    FleetMemoryScreen.app = original
+
+
 # ---------------------------------------------------------------------------
 # Helpers — minimal stub
 # ---------------------------------------------------------------------------
