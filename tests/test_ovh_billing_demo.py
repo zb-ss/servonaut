@@ -50,8 +50,8 @@ def test_invoice_pagination_preserves_raw_data_but_shows_safe_ids(is_demo: bool)
     ):
         screen._render_invoice_page()
     row = widgets["#invoices_table"].add_row.call_args.args
-    assert row[1] == ("invoice-016" if is_demo else "private-bill-15")
-    assert row[2] == ("Hidden" if is_demo else "123.45")
+    assert row[1].plain == ("invoice-016" if is_demo else "private-bill-15")
+    assert row[2].plain == ("Hidden" if is_demo else "123.45")
     assert screen._all_invoices[15]["billId"] == "private-bill-15"
     assert widgets["#btn_next_page"].disabled is True
     assert widgets["#btn_prev_page"].disabled is False

@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, List
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.content import Content
@@ -408,7 +409,8 @@ class OVHBillingScreen(WorkspaceScreen):
             if self.app.demo_mode:
                 bill_id = f"invoice-{index:03d}"
                 amount = "Hidden"
-            tbl.add_row(date, bill_id, amount, status)
+            # API text, and the table parses str cells as markup when it paints.
+            tbl.add_row(Text(date), Text(bill_id), Text(amount), Text(status))
 
         max_page = max(0, (total - 1) // _PAGE_SIZE) if total else 0
         self.query_one("#invoices_page_info", Static).update(
