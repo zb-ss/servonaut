@@ -34,7 +34,7 @@ from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
-from servonaut.utils.ssh_names import SSHNameError
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -1911,7 +1911,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         instance, self.app.connection_service.host_key_policy(),
                     ),
                 )
-            except SSHNameError as exc:
+            except SSHRefusal as exc:
                 self.app.notify(str(exc), severity="error", markup=False)
                 return
 

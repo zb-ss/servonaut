@@ -30,7 +30,7 @@ from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
 from servonaut.utils.remote_shell import shell_quote
-from servonaut.utils.ssh_names import SSHNameError
+from servonaut.utils.ssh_names import SSHRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +359,7 @@ class CommandOverlay(ModalScreen):
                 extra_options=self._extra_options,
                 **(self._identity or {}),
             )
-        except SSHNameError as exc:
+        except SSHRefusal as exc:
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)

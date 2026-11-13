@@ -11,6 +11,7 @@ from servonaut.services.interfaces import SCPServiceInterface
 from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
 from servonaut.utils import scp_client
 from servonaut.utils.ssh_names import check_ssh_target
+from servonaut.utils.ssh_option_policy import raise_if_refused
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
 
@@ -86,6 +87,7 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
+        raise_if_refused(extra_options, proxy_args)
         check_ssh_target(host, username)
         sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(
@@ -141,6 +143,7 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
+        raise_if_refused(extra_options, proxy_args)
         check_ssh_target(host, username)
         sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(

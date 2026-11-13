@@ -678,6 +678,15 @@ class SSHConfig:
             key on first connect and refuses a changed one; ``yes`` accepts
             known hosts only; ``off`` skips verification entirely. An
             unrecognised value falls back to ``accept-new`` with a warning.
+        team_options: SSH options that arrived in a team configuration and
+            run a program or load a library on this computer (or are not
+            recognised). One item per option text: ``option`` (lower-cased
+            name, ``=``, value), ``team``, ``team_name`` and ``allowed``.
+            An option listed here is refused until its item is allowed; only
+            the JSON value ``true`` allows. Written when a team configuration
+            is applied; it is never part of what a team receives.
+        team_options_checked: True once the options saved before this list
+            existed have been looked at (see ``baseline_existing_options``).
     """
     server_alive_interval: int = 30
     server_alive_count_max: int = 5
@@ -687,6 +696,8 @@ class SSHConfig:
     live_stats_timeout_seconds: float = 20.0
     live_stats_interval_seconds: float = 3.0
     host_key_checking: str = DEFAULT_HOST_KEY_CHECKING
+    team_options: List[dict] = field(default_factory=list)
+    team_options_checked: bool = False
 
     def __post_init__(self) -> None:
         """Coerce ``host_key_checking`` into a supported mode."""

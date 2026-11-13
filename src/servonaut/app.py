@@ -649,6 +649,8 @@ class ServonautApp(App):
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
+        if self.config_manager.team_options_recorded:
+            self._notify_saved_team_options(self.config_manager.team_options_recorded)
         self._apply_configured_theme(config.theme)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         # Every provider account and its services. The ``*_service``
@@ -975,6 +977,27 @@ class ServonautApp(App):
             except Exception:
                 logger.debug("Failed to surface session-expired toast", exc_info=True)
 
+    def _notify_saved_team_options(self, recorded: int) -> None:
+        lead = (
+            f"{recorded} SSH option that runs a program was saved before this version and needs"
+            if recorded == 1 else
+            f"{recorded} SSH options that run programs were saved before this version and need"
+        )
+        self.notify(
+            lead + " your approval: Settings > Connections.",
+            severity="warning", timeout=15, markup=False,
+        )
+
+    def _note_saved_team_options(self) -> None:
+        """Record options saved before this version, now that an account exists."""
+        try:
+            recorded = self.config_manager.record_saved_team_options()
+        except Exception:  # noqa: BLE001 - signing in must not fail over this
+            logger.warning("Could not record saved SSH options after sign-in", exc_info=True)
+            return
+        if recorded:
+            self._notify_saved_team_options(recorded)
+
     def on_user_login_success(self) -> None:
         """Called by LoginScreen after a successful device-flow completion.
 
@@ -983,6 +1006,7 @@ class ServonautApp(App):
         independent: a missing relay configuration must not prevent a
         previously enrolled device from silently unlocking.
         """
+        self._note_saved_team_options()
         self._init_relay_manager()
         if self.relay_manager is not None:
             self.run_worker(

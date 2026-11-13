@@ -36,7 +36,7 @@ from servonaut.services.ssh_host_keys import (
     HostKeyTarget,
     detect_host_key_problem,
 )
-from servonaut.utils.ssh_names import SSHNameError
+from servonaut.utils.ssh_names import SSHRefusal
 
 # TYPE_CHECKING import for sync service (break circular dep at runtime)
 if TYPE_CHECKING:
@@ -1815,7 +1815,7 @@ class MemoryService(MemoryServiceInterface):
                     ],
                     **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
                 )
-            except SSHNameError as exc:
+            except SSHRefusal as exc:
                 # Every probe command is refused alike: report the reason once.
                 _record_problem(BAD_SSH_NAME_FAILURE, str(exc))
                 raise

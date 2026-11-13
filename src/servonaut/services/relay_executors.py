@@ -29,6 +29,7 @@ from servonaut.services.team_rules import (
     guard_for_target,
 )
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
+from servonaut.utils.ssh_option_policy import SSHOptionRefused
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
@@ -748,6 +749,18 @@ class RelayExecutors:
             request_id=request.id, status="rejected", error_message=refusal,
         )
 
+    def _option_refusal(
+        self, request: CommandRequest, instance: Mapping[str, Any], tool_name: str,
+        command: Optional[str], exc: SSHOptionRefused,
+    ) -> CommandResponse:
+        """The rejection for a team-supplied SSH option that has not been allowed."""
+        target = instance.get('id') or request.target_server_id
+        logger.warning("Relay %s on %s refused: %s", tool_name, target, exc)
+        self._audit_refusal(request, tool_name, target, command, 'team_option_refused')
+        return CommandResponse(
+            request_id=request.id, status="rejected", error_message=str(exc),
+        )
+
     def _audit_refusal(
         self, request: CommandRequest, tool_name: str, target: Any,
         command: Optional[str], reason: str,
@@ -866,6 +879,8 @@ class RelayExecutors:
                 status="timeout",
                 error_message=f"Command timed out after {request.ttl_seconds}s",
             )
+        except SSHOptionRefused as exc:
+            return self._option_refusal(request, instance, 'run_command', command, exc)
         except Exception as e:
             return CommandResponse(
                 request_id=request.id,
@@ -1020,6 +1035,8 @@ class RelayExecutors:
                     known_hosts_file=getattr(lease, "known_hosts_path", None),
                 )
             returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+        except SSHOptionRefused as exc:
+            return self._option_refusal(request, instance, 'transfer_file', None, exc)
         except ValueError as exc:
             # The remote path cannot be sent safely by this scp client.
             return CommandResponse(request_id=request.id, status="rejected", error_message=str(exc))
