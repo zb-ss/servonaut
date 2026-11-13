@@ -1432,7 +1432,7 @@ class ServonautTools:
         except Exception as e:
             self._audit.log(
                 'get_server_info', {'instance_id': instance_id}, '', False,
-                f"ssh_error: {e}", **key_extras,
+                self._ssh_failure_reason(e), **key_extras,
             )
             return f"Error: {e}"
         finally:
@@ -6105,6 +6105,13 @@ class ServonautTools:
     # Incident-response tools (Group A): SSH/network only, read-only
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _ssh_failure_reason(error: Exception) -> str:
+        """The audit reason for an ssh failure: a refused team option has its own."""
+        if isinstance(error, SSHOptionRefused):
+            return 'team_option_refused'
+        return f"ssh_error: {error}"
+
     async def _exec_ssh(
         self, instance: Dict, command: str, timeout: int = 60,
         audit_extras: Optional[Dict[str, Any]] = None,
@@ -6218,7 +6225,7 @@ class ServonautTools:
             return "Error: web_traffic_summary timed out after 90 seconds"
         except Exception as e:
             self._audit.log(
-                'web_traffic_summary', args, '', False, f"ssh_error: {e}",
+                'web_traffic_summary', args, '', False, self._ssh_failure_reason(e),
                 **key_extras,
             )
             return f"Error: {e}"
@@ -6657,7 +6664,7 @@ class ServonautTools:
             return "Error: db_processlist timed out after 30 seconds"
         except Exception as e:  # noqa: BLE001
             self._audit.log(
-                'db_processlist', args, '', False, f"ssh_error: {e}", **key_extras,
+                'db_processlist', args, '', False, self._ssh_failure_reason(e), **key_extras,
             )
             return f"Error: {e}"
 
@@ -6723,7 +6730,7 @@ class ServonautTools:
             return "Error: db_top_queries timed out after 30 seconds"
         except Exception as e:  # noqa: BLE001
             self._audit.log(
-                'db_top_queries', args, '', False, f"ssh_error: {e}", **key_extras,
+                'db_top_queries', args, '', False, self._ssh_failure_reason(e), **key_extras,
             )
             return f"Error: {e}"
 
@@ -7365,7 +7372,8 @@ class ServonautTools:
                 candidates = scanner.parse(stdout)
             except Exception as e:  # noqa: BLE001
                 if src == "ssh":
-                    return [], ("ssh_error", str(e))
+                    kind = "team_option_refused" if isinstance(e, SSHOptionRefused) else "ssh_error"
+                    return [], (kind, str(e))
         if not candidates and src in ("auto", "local") and search_path:
             import os
             if os.path.isfile(os.path.expanduser(search_path)):
@@ -7428,8 +7436,9 @@ class ServonautTools:
         )
         if err is not None:
             kind, msg = err
-            self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}", **key_extras)
-            if kind == "ssh_error":
+            reason = kind if kind == "team_option_refused" else f"{kind}: {msg}"
+            self._audit.log('db_setup_scan', args, '', False, reason, **key_extras)
+            if kind in ("ssh_error", "team_option_refused"):
                 return f"Error scanning on box: {msg}"
             return f"Error reading {search_path}: {msg}"
 
@@ -7947,7 +7956,7 @@ class ServonautTools:
             self._audit.log(tool, args, '', False, 'timeout')
             return f"Error: {tool} timed out after {timeout} seconds", None
         except Exception as e:
-            self._audit.log(tool, args, '', False, f"ssh_error: {e}")
+            self._audit.log(tool, args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}", None
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
@@ -8113,7 +8122,7 @@ class ServonautTools:
             self._audit.log('journal_errors', args, '', False, 'timeout')
             return "Error: journal_errors timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('journal_errors', args, '', False, f"ssh_error: {e}")
+            self._audit.log('journal_errors', args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
@@ -8172,7 +8181,7 @@ class ServonautTools:
             self._audit.log('disk_usage', args, '', False, 'timeout')
             return "Error: disk_usage timed out after 120 seconds"
         except Exception as e:
-            self._audit.log('disk_usage', args, '', False, f"ssh_error: {e}")
+            self._audit.log('disk_usage', args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         parsed = parse_disk_usage(
@@ -8231,7 +8240,7 @@ class ServonautTools:
             return "Error: pending_updates timed out after 120 seconds"
         except Exception as e:
             self._audit.log('pending_updates', args, '', False,
-                            f"ssh_error: {e}")
+                            self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
@@ -8303,7 +8312,7 @@ class ServonautTools:
             return "Error: security_audit timed out after 90 seconds"
         except Exception as e:
             self._audit.log('security_audit', args, '', False,
-                            f"ssh_error: {e}")
+                            self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         result = json.dumps(parse_security_audit(stdout))
@@ -8351,7 +8360,7 @@ class ServonautTools:
             self._audit.log('service_state', args, '', False, 'timeout')
             return "Error: service_state timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('service_state', args, '', False, f"ssh_error: {e}")
+            self._audit.log('service_state', args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         result = json.dumps(parse_service_state(stdout))
@@ -8407,7 +8416,7 @@ class ServonautTools:
             self._audit.log('tls_cert_check', args, '', False, 'timeout')
             return "Error: tls_cert_check timed out after 60 seconds"
         except Exception as e:
-            self._audit.log('tls_cert_check', args, '', False, f"ssh_error: {e}")
+            self._audit.log('tls_cert_check', args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
@@ -8494,7 +8503,7 @@ class ServonautTools:
             self._audit.log('auth_log_summary', args, '', False, 'timeout')
             return "Error: auth_log_summary timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('auth_log_summary', args, '', False, f"ssh_error: {e}")
+            self._audit.log('auth_log_summary', args, '', False, self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         stripped = stdout.strip()
@@ -8599,7 +8608,7 @@ class ServonautTools:
             return "Error: docker_log_summary timed out after 90 seconds"
         except Exception as e:
             self._audit.log('docker_log_summary', args, '', False,
-                            f"ssh_error: {e}")
+                            self._ssh_failure_reason(e))
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""

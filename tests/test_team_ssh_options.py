@@ -354,3 +354,18 @@ def test_a_refused_get_logs_is_audited_with_the_words_it_was_asked_for(monkeypat
     assert result.startswith("Error: Not connecting:")
     row = next(c for c in tools._audit.log.call_args_list if c.args[4:5] == ("team_option_refused",))
     assert row.args[1]["requested_as"] == "reading logs"
+
+
+@pytest.mark.parametrize("tool,args", [("disk_usage", {}), ("docker_ps", {}), ("service_state", {})])
+def test_a_refused_option_in_a_probe_tool_is_audited_with_its_own_reason(monkeypatch, tool, args):
+    from servonaut.mcp import tools as mcp_tools
+
+    async def boom(*a, **k):
+        raise AssertionError("ssh must not start")
+
+    monkeypatch.setattr(mcp_tools, "run_ssh_subprocess", boom)
+    tools = _real_mcp_tools()
+    result = asyncio.run(getattr(tools, tool)("custom-1", **args))
+    assert result.startswith("Error: Not connecting:")
+    rows = [c for c in tools._audit.log.call_args_list if c.args[0] == tool and c.args[3] is False]
+    assert [r.args[4] for r in rows] == ["team_option_refused"]
