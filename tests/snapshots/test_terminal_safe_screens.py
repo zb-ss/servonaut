@@ -78,6 +78,29 @@ def _table_text(frame: str) -> list[str]:
     return [_PLAIN.sub("", row)[:_TABLE_COLUMNS] for row in frame.split("\n")]
 
 
+_CURSOR_MOVE = re.compile(r"\x1b\[(\d+);(\d+)H")
+
+
+def _assert_cursor_moves_are_textuals_own(hostile: str, benign: str) -> None:
+    """Right of the table nothing is compared byte for byte, so count the cursor moves.
+
+    Textual starts every row at column 1; a cursor move a name smuggled into the
+    inspector would sit elsewhere or add one.
+    """
+    moves = _CURSOR_MOVE.findall(hostile)
+    assert all(column == "1" for _row, column in moves)
+    assert len(moves) == len(_CURSOR_MOVE.findall(benign))
+
+
+def test_a_cursor_move_injected_into_the_inspector_is_noticed() -> None:
+    benign = "\x1b[1;1Hrow one\n\x1b[2;1Hrow two"
+    _assert_cursor_moves_are_textuals_own(benign, benign)
+    with pytest.raises(AssertionError):
+        _assert_cursor_moves_are_textuals_own(benign.replace("two", "t\x1b[5;7Hwo"), benign)
+    with pytest.raises(AssertionError):
+        _assert_cursor_moves_are_textuals_own(benign.replace("row two", "\x1b[2;9Hrow two"), benign)
+
+
 def _named(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     rows = [dict(row) for row in _harness.AWS_ROWS]
     rows[0]["name"] = name
@@ -103,5 +126,6 @@ def test_instance_list(monkeypatch: pytest.MonkeyPatch, size: str) -> None:
         # check still covers the whole screen.
         assert _table_text(hostile) == _table_text(benign)
         _assert_same_and_safe(hostile, benign, rows=0)
+        _assert_cursor_moves_are_textuals_own(hostile, benign)
         return
     _assert_same_and_safe(hostile, benign, rows=_TABLE_ROWS[size])
