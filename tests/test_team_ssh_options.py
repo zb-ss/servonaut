@@ -369,3 +369,31 @@ def test_a_refused_option_in_a_probe_tool_is_audited_with_its_own_reason(monkeyp
     assert result.startswith("Error: Not connecting:")
     rows = [c for c in tools._audit.log.call_args_list if c.args[0] == tool and c.args[3] is False]
     assert [r.args[4] for r in rows] == ["team_option_refused"]
+
+
+def _no_ssh(monkeypatch):
+    from servonaut.mcp import tools as mcp_tools
+
+    async def boom(*a, **k):
+        raise AssertionError("ssh must not start")
+
+    monkeypatch.setattr(mcp_tools, "run_ssh_subprocess", boom)
+
+
+def test_the_fleet_snapshot_row_names_the_servers_a_team_option_refused(monkeypatch):
+    _no_ssh(monkeypatch)
+    tools = _real_mcp_tools()
+    result = asyncio.run(tools.fleet_health_snapshot())
+    assert "Not connecting" in result
+    [row] = [c for c in tools._audit.log.call_args_list if c.args[0] == "fleet_health_snapshot"]
+    assert row.kwargs["team_option_refused"] == ["web-1"]
+
+
+def test_an_automatic_db_scan_reports_a_refused_option_instead_of_finding_nothing(monkeypatch):
+    _no_ssh(monkeypatch)
+    tools = _real_mcp_tools()
+    result = asyncio.run(tools.db_setup_scan("custom-1"))
+    assert "Not connecting: the custom server 'web-1'" in result
+    assert "No DB credentials found" not in result
+    reasons = [c.args[4] for c in tools._audit.log.call_args_list if c.args[0] == "db_setup_scan"]
+    assert reasons == ["team_option_refused"]
