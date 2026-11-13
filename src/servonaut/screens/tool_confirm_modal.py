@@ -424,13 +424,18 @@ def build_modal_confirm(app: Any) -> Callable[[Any], Awaitable[bool]]:
     """
 
     async def _confirm(call: Any) -> bool:
+        shown_args = dict(call.args)
+        checked = getattr(call, "checked_command", None)
+        if isinstance(checked, str):
+            # Show the text that will run, not the text the model wrote.
+            shown_args["command"] = checked
         if call.guard_level == "dangerous":
             modal: ModalScreen[bool] = DangerousToolConfirmModal(
-                call.tool, dict(call.args), note=_note_of(call),
+                call.tool, shown_args, note=_note_of(call),
             )
         else:
             modal = ToolConfirmModal(
-                call.tool, dict(call.args), note=_note_of(call),
+                call.tool, shown_args, note=_note_of(call),
             )
         try:
             result = await app.push_screen_wait(modal)

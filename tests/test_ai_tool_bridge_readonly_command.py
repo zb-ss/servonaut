@@ -191,3 +191,66 @@ def test_other_tools_are_unchanged():
     )
     assert run(bridge.handle_tool_call(call)).status == "ok"
     confirm.assert_not_called()
+
+
+def test_checked_command_is_ignored_for_other_command_tools():
+    for tool, guard in (("run_command", "standard"), ("deploy", "dangerous")):
+        bridge, relay, _audit, _confirm = _bridge()
+        call = _call("uptime", tool=tool, guard=guard)
+        call.checked_command = "touch /tmp/marker"
+        run(bridge.handle_tool_call(call))
+        assert _sent(relay) == "uptime"
+
+
+def test_a_preset_checked_command_does_not_survive_the_gate():
+    bridge, relay, _audit, _confirm = _bridge(confirm=True)
+    call = _call("ls; id")
+    call.checked_command = "touch /tmp/marker"
+    run(bridge.handle_tool_call(call))
+    assert _sent(relay) == "ls; id"
+
+
+def test_the_chat_default_list_leaves_out_name_lookups_and_ping():
+    from servonaut.config.schema import (
+        AIProviderConfig, DEFAULT_READONLY_COMMANDS, MCPConfig,
+    )
+
+    for command in ("dig example.org", "nslookup example.org", "ping -c1 web-1"):
+        bridge, relay, _audit, confirm = _bridge(confirm=False)
+        run(bridge.handle_tool_call(_call(command)))
+        confirm.assert_awaited_once()
+        relay.execute.assert_not_called()
+    names = AIProviderConfig().readonly_command_allowlist
+    assert not {"dig", "nslookup", "ping"} & set(names)
+    assert {"dig", "nslookup", "ping"} <= set(MCPConfig().command_allowlist)
+    assert len(DEFAULT_READONLY_COMMANDS) == 28 and len(names) == 25
+
+
+def test_the_level_never_drops_when_the_run_command_level_is_lower():
+    bridge, _relay, _audit, confirm = _bridge(confirm=False)
+    with patch(
+        "servonaut.services.dangerous_tool_floor.is_dangerous_floor",
+        return_value=False,
+    ):
+        run(bridge.handle_tool_call(_call("ls; id", guard="dangerous")))
+    assert confirm.await_args.args[0].guard_level == "dangerous"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_name", ["standard", "dangerous"])
+async def test_the_dialog_shows_the_rebuilt_command_that_will_run(modal_name):
+    from textual.app import App
+
+    from servonaut.screens.tool_confirm_modal import build_modal_confirm
+
+    seen = {}
+
+    class _Host(App):
+        async def push_screen_wait(self, modal):
+            seen["args"] = modal._args
+            return True
+
+    call = _call('grep  "a b"   f', guard=modal_name)
+    call.checked_command = "grep 'a b' f"
+    assert await build_modal_confirm(_Host())(call) is True
+    assert seen["args"]["command"] == "grep 'a b' f"

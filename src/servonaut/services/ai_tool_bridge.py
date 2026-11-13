@@ -52,7 +52,7 @@ from servonaut.models.relay_messages import (
     CommandResponse,
     CommandType,
 )
-from servonaut.config.schema import DEFAULT_READONLY_COMMANDS
+from servonaut.config.schema import DEFAULT_CHAT_READONLY_COMMANDS
 from servonaut.mcp.audit import AuditOutcome, record_outcomes
 from servonaut.mcp.guards import check_standard_command, render_standard_command
 from servonaut.services.ai_split_turns import prompt_deadline
@@ -888,7 +888,7 @@ class AIToolBridge(_FloorDangerousMixin):
     def _readonly_allowlist(self) -> List[str]:
         """The commands that may run without asking, read live from config."""
         if self._readonly_commands is None:
-            return list(DEFAULT_READONLY_COMMANDS)
+            return list(DEFAULT_CHAT_READONLY_COMMANDS)
         try:
             return readonly_command_names(self._readonly_commands())
         except Exception:  # noqa: BLE001 — a broken getter means "ask"
@@ -900,6 +900,8 @@ class AIToolBridge(_FloorDangerousMixin):
 
         Returns an error result when there is no command, else ``None``.
         """
+        call.checked_command = None
+        call.readonly_check = ""
         command = call.args.get("command")
         if not isinstance(command, str) or not command.strip():
             return self._error_with_audit(
@@ -920,6 +922,7 @@ class AIToolBridge(_FloorDangerousMixin):
         effective, _ = self._floor_dangerous(
             "run_command", self.guard_for("run_command"),
         )
+        effective = _escalate_guard(call.guard_level, effective)
         call.guard_level = effective  # type: ignore[assignment]
         call.readonly_check = "needs_approval"
         call.confirm_note = READONLY_NOTE_TEXT
@@ -1492,7 +1495,11 @@ class AIToolBridge(_FloorDangerousMixin):
             }
         else:
             payload = {"command": call.args.get("command", "")}
-            if call.checked_command is not None:
+            if (
+                call.tool in _READONLY_COMMAND_TOOLS
+                and call.readonly_check == "allowlisted"
+                and call.checked_command is not None
+            ):
                 payload["command"] = call.checked_command
 
         return CommandRequest(

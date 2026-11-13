@@ -174,15 +174,19 @@ class TestAppConfigAdditiveSshField:
         assert config.memory.ai_summary_poll_timeout_seconds == 75.0
 
 
-def test_readonly_command_list_defaults_match_the_mcp_standard_list_but_are_separate():
+def test_readonly_command_lists_are_separate_copies_and_the_chat_one_is_shorter():
     from servonaut.config.schema import (
-        AIProviderConfig, DEFAULT_READONLY_COMMANDS, MCPConfig,
+        AIProviderConfig, DEFAULT_CHAT_READONLY_COMMANDS,
+        DEFAULT_READONLY_COMMANDS, MCPConfig,
     )
 
     ai, mcp = AIProviderConfig(), MCPConfig()
-    assert ai.readonly_command_allowlist == list(DEFAULT_READONLY_COMMANDS)
+    assert ai.readonly_command_allowlist == list(DEFAULT_CHAT_READONLY_COMMANDS)
     assert mcp.command_allowlist == list(DEFAULT_READONLY_COMMANDS)
     assert len(DEFAULT_READONLY_COMMANDS) == 28
+    assert set(DEFAULT_READONLY_COMMANDS) - set(DEFAULT_CHAT_READONLY_COMMANDS) == {
+        "dig", "nslookup", "ping",
+    }
     mcp.command_allowlist.append("systemctl")
     ai.readonly_command_allowlist.append("docker")
     assert "systemctl" not in AIProviderConfig().readonly_command_allowlist
