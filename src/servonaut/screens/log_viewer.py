@@ -263,12 +263,14 @@ class LogViewerScreen(WorkspaceScreen):
                 self.app.log_viewer_service, "last_probe_probed_at", None
             )
             age = _format_cache_age(probed_at)
-            status_parts.append(f"[dim $text-success]\\[cached{age}][/dim $text-success]")
-        status = "  " + " ".join(status_parts) if status_parts else ""
+            status_parts.append((f"[cached{age}]", "dim $text-success"))
+        status: list = []
+        for part in status_parts:
+            status += [" ", part] if status else ["  ", part]
         self.query_one("#log_header", Static).update(
             Content.assemble(
                 ("Log viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
-                ("Viewing:", "dim"), " ", literal(log_label), Content.from_markup(status),
+                ("Viewing:", "dim"), " ", literal(log_label), *status,
             )
         )
 

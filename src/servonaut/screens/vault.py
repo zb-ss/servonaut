@@ -1351,10 +1351,10 @@ class VaultScreen(WorkspaceScreen):
         for row in self._vaults:
             counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
             table.add_row(
-                markup_literal(self.scrub_text(row.get("name") or "Unnamed vault")),
-                markup_literal(self.scrub_text(row.get("kind") or "")),
-                str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
-                markup_literal(self.scrub_text(row.get("vault_id") or "")),
+                cell(self.scrub_text(row.get("name") or "Unnamed vault")),
+                cell(self.scrub_text(row.get("kind") or "")),
+                cell(str(counts.get("items", 0))), cell(str(counts.get("open_exposures", 0))),
+                cell(self.scrub_text(row.get("vault_id") or "")),
             )
         # The highlight stays on the vault that was last chosen.
         chosen = next((i for i, row in enumerate(self._vaults) if row.get("vault_id") == self._selected_vault_id), None)
@@ -1387,10 +1387,10 @@ class VaultScreen(WorkspaceScreen):
         for row in self._items:
             table.add_row(
                 self._item_name_cell(row),
-                markup_literal(self.scrub_text(row.get("type") or "unsupported")),
-                str(row.get("revision") or ""),
-                markup_literal(self.scrub_text(row.get("public_fingerprint") or "")),
-                markup_literal(self.scrub_text(row.get("item_id") or "")),
+                cell(self.scrub_text(row.get("type") or "unsupported")),
+                cell(self.scrub_text(row.get("revision") or "")),
+                cell(self.scrub_text(row.get("public_fingerprint") or "")),
+                cell(self.scrub_text(row.get("item_id") or "")),
             )
 
     def _render_exposures(self) -> None:
@@ -1399,21 +1399,21 @@ class VaultScreen(WorkspaceScreen):
         table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
             note = "Key replaced in vault; old key may still be on servers" if row.get("key_replaced") is True else ""
-            table.add_row(markup_literal(self.scrub_text(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self.scrub_text(row.get("reason") or "")), note, markup_literal(self.scrub_text(row.get("item_id") or "")), markup_literal(self.scrub_text(row.get("exposure_id") or "")))
+            table.add_row(cell(self.scrub_text(row.get("subject") or row.get("public_fingerprint") or "")), cell(self.scrub_text(row.get("reason") or "")), note, cell(self.scrub_text(row.get("item_id") or "")), cell(self.scrub_text(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
         self._records_heading("Key rotation", len(self._rotation_hosts), scoped=True)
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Server", "Status", "Detail")
         for host in self._rotation_hosts:
-            table.add_row(markup_literal(self.scrub_text(host.get("server_id") or host.get("server") or "")), markup_literal(self.scrub_text(host.get("status") or "unknown")), markup_literal(self.scrub_text(host.get("error") or "")))
+            table.add_row(cell(self.scrub_text(host.get("server_id") or host.get("server") or "")), cell(self.scrub_text(host.get("status") or "unknown")), cell(self.scrub_text(host.get("error") or "")))
 
     def _render_devices(self) -> None:
         self._records_heading("Devices", len(self._devices))
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Platform", "Status", "Device ID")
         for row in self._devices:
-            table.add_row(markup_literal(self.scrub_text(row.get("name") or "")), markup_literal(self.scrub_text(row.get("platform") or "")), markup_literal(self.scrub_text(row.get("status") or "")), markup_literal(self.scrub_text(row.get("device_id") or "")))
+            table.add_row(cell(self.scrub_text(row.get("name") or "")), cell(self.scrub_text(row.get("platform") or "")), cell(self.scrub_text(row.get("status") or "")), cell(self.scrub_text(row.get("device_id") or "")))
 
     def _render_roster(self) -> None:
         self._records_heading("Members", len(self._roster), scoped=True)
@@ -1421,7 +1421,7 @@ class VaultScreen(WorkspaceScreen):
         table.clear(columns=True); table.add_columns("Member", "Role", "Status", "Fingerprint")
         for member in self._roster:
             identity = member.get("identity") if isinstance(member.get("identity"), Mapping) else {}
-            table.add_row(markup_literal(self.scrub_text(member.get("display_name") or member.get("user_id") or "")), markup_literal(self.scrub_text(member.get("role") or "")), markup_literal(self.scrub_text(member.get("status") or "")), markup_literal(self.scrub_text(identity.get("fingerprint") or "")))
+            table.add_row(cell(self.scrub_text(member.get("display_name") or member.get("user_id") or "")), cell(self.scrub_text(member.get("role") or "")), cell(self.scrub_text(member.get("status") or "")), cell(self.scrub_text(identity.get("fingerprint") or "")))
 
     def _records_heading(self, label: str, count: int, *, scoped: bool = False) -> None:
         """Frame the current native table without changing its rows or selection."""
