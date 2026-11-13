@@ -19,6 +19,8 @@ from . import test_memory_share as share
 from .test_terminal_safe_screens import (
     BENIGN,
     HOSTILE,
+    _STILL_UNSAFE,
+    _TEXTUAL_OWN,
     _assert_same_and_safe,
     _frame,
     _named,
@@ -61,3 +63,19 @@ def test_server_memory_shared_with_line(size: str) -> None:
     hostile = _frame(size, scenario(HOSTILE))
     assert "web]52" in hostile
     _assert_same_and_safe(hostile, _frame(size, scenario(BENIGN)))
+
+
+def test_fleet_memory_team_cell_is_drawn_as_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A short server name keeps the "Shared with" column on screen, so the team
+    # cell is really drawn (a long hostile server name pushes it out of view).
+    # Only the wide size shows that column; the narrow one has no room for it.
+    size = "160x50"
+    monkeypatch.setitem(share._TEAM, "name", HOSTILE)
+    frame = _frame(size, share._fleet_memory_shared)
+    assert "Shared with" in frame
+    assert not _STILL_UNSAFE.search(_TEXTUAL_OWN.sub("", frame))
+    assert "\x1b]52" not in frame
+    # The cell is plain text: the control bytes are written out, not drawn, and
+    # no link is attached to it.
+    assert "web\\x1b]52" in frame
+    assert "http://1.2.3.4/" not in frame
