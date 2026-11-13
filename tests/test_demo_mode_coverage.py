@@ -382,7 +382,7 @@ class TestMemoryScreenDemoMode:
 
         mock_table = MagicMock()
         rows = []
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_banner = MagicMock()
         mock_banner.classes = []
 
@@ -426,7 +426,7 @@ class TestMemoryScreenDemoMode:
 
         mock_table = MagicMock()
         rows = []
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_banner = MagicMock()
         mock_banner.classes = []
 
@@ -1697,7 +1697,7 @@ class TestHetznerManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -1786,7 +1786,7 @@ class TestOvhManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -1919,7 +1919,7 @@ class TestMemoryDriftDemoMode:
         mock_table = MagicMock()
         # The unfiltered fixture has one rendered event, as a native table would.
         mock_table.row_count = len(screen._events)
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_label = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2764,7 +2764,7 @@ class TestAWSManagerDemoMode:
         # Capture rows added to the table
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2825,7 +2825,7 @@ class TestAWSManagerDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
 
         def _query_one(selector, widget_type=None):
@@ -2896,7 +2896,7 @@ class TestObjectStorageDemoMode:
         # Capture rows added to the table
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
         mock_breadcrumb = MagicMock()
 
@@ -2959,7 +2959,7 @@ class TestObjectStorageDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_status = MagicMock()
         mock_breadcrumb = MagicMock()
 
@@ -3157,7 +3157,7 @@ class TestCustomServersDemoMode:
         mock_app.custom_server_service.list_servers.return_value = servers
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
             with patch.object(screen, "query_one", return_value=mock_table):
                 screen._populate_table()
@@ -3231,7 +3231,7 @@ class TestHetznerCreateWizardDemoMode:
         mock_app.config_manager.get.return_value.hetzner.default_hetzner_ssh_key = ""
         rows: list = []
         mock_table = MagicMock()
-        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
 
         async def _run():
             with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):

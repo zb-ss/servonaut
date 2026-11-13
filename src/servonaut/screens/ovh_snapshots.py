@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from rich.markup import escape
 from textual.app import ComposeResult
+from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.utils.markup import literal, with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -70,7 +70,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                 yield BusyIndicator(id="read_loading", classes="read-loading")
                 with Vertical(classes="provider-lifecycle-heading"):
                     yield Static(
-                        f"Snapshots: {escape(str(instance_name))}",
+                        literal(f"Snapshots: {instance_name}"),
                         id="snapshots_title",
                         classes="screen-title",
                     )
@@ -260,7 +260,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         except Exception as e:
             logger.error("Error fetching backup options: %s", e)
             backup_status_widget.update(
-                f"[$text-error]Error loading backup status: {escape(self._display_error(e))}[/$text-error]"
+                literal(f"Error loading backup status: {self._display_error(e)}", "$text-error")
             )
             return
 
@@ -271,11 +271,12 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
         state = options.get("state") or options.get("status") or "unknown"
         schedule = options.get("schedule") or options.get("cron") or ""
         if schedule:
-            backup_status_widget.update(
-                f"[$text-success]Enabled[/$text-success] — Schedule: [bold]{schedule}[/bold] — State: {state}"
-            )
+            backup_status_widget.update(Content.assemble(
+                ("Enabled", "$text-success"), " — Schedule: ", literal(str(schedule), "bold"),
+                " — State: ", literal(str(state)),
+            ))
         else:
-            backup_status_widget.update(f"State: {state}")
+            backup_status_widget.update(Content.assemble("State: ", literal(str(state))))
 
     def _populate_table(self) -> None:
         """Populate the DataTable with the current snapshot list."""
@@ -306,7 +307,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
                     description = self.app.redaction_service.redact_name(str(description))
                 else:
                     description = self.app.redaction_service.scrub_stream(str(description))
-            table.add_row(self._display_snapshot_name(snap), str(created_at), str(description))
+            table.add_row(cell(self._display_snapshot_name(snap)), cell(created_at), cell(description))
         self._update_selected_context()
 
     def _set_empty_inventory(self, is_empty: bool) -> None:

@@ -22,6 +22,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.utils.ssh_names import SSHRefusal
+from servonaut.utils.ssh_option_policy import raise_if_refused
 from servonaut.services.bw_resolver import (
     BwResolver,
     BwCliMissingError,
@@ -180,6 +182,8 @@ def _run_ssh_probe(
             None for a team server, which only gets the alias options.
     """
     policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
+    if route is not None:
+        raise_if_refused(route["extra_options"], route["proxy_args"])
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
@@ -541,6 +545,10 @@ async def _cmd_verify(args: Any) -> int:
                 checked_by_client=checked_by_client,
             )
 
+    except SSHRefusal as exc:
+        # Nothing was started, and nothing is reported as the key's result.
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return _EXIT_FATAL
     except BwCliMissingError as exc:
         print(
             f"Bitwarden CLI not found: {exc.message}",

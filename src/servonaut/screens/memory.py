@@ -16,14 +16,14 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.text import Text
+from textual.content import Content
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.text_fit import cut
-from servonaut.utils.markup import literal as literal_text
+from servonaut.utils.markup import cell, literal as literal_text
 from servonaut.utils.theme_text import themed_text
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
-from textual.content import Content
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
@@ -869,10 +869,10 @@ class MemoryScreen(WorkspaceScreen):
                 obs_cell = cut(" ".join(obs_str.split()), _VALUE_CELL_WIDTH)
                 decl_cell = cut(" ".join(decl_str.split()), _VALUE_CELL_WIDTH)
                 table.add_row(
-                    module_name,
-                    Text(str(key)) if literal else key,
-                    Text(obs_cell) if literal else obs_cell,
-                    Text(decl_cell) if literal else decl_cell,
+                    cell(module_name),
+                    cell(key),
+                    cell(obs_cell),
+                    cell(decl_cell),
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",

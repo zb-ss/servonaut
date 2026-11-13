@@ -1,7 +1,6 @@
 """Command overlay modal for Servonaut v2.0."""
 
 from __future__ import annotations
-import shlex
 import subprocess
 import logging
 import threading
@@ -33,6 +32,8 @@ from servonaut.utils.markup import inert_text, literal
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
+from servonaut.utils.remote_shell import shell_quote
+from servonaut.utils.ssh_names import SSHRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class CommandOverlay(ModalScreen):
 
         # Use bash -ic (interactive) so .bashrc is fully sourced, including
         # nvm/rbenv/pyenv init blocks guarded by the non-interactive check.
-        login_command = f'bash -ic {shlex.quote(command)}'
+        login_command = f'bash -ic {shell_quote(command)}'
         self.run_worker(
             self._resolve_and_run(login_command, output_widget),
             name=f"resolve_{len(self._history)}",
@@ -371,16 +372,25 @@ class CommandOverlay(ModalScreen):
             self._output_lines.append(message)
             return
 
-        ssh_cmd = self.app.ssh_service.build_ssh_command(
-            host=self._host,
-            username=self._username,
-            key_path=self._key_path,
-            remote_command=login_command,
-            proxy_args=self._proxy_args,
-            port=self._port,
-            extra_options=self._extra_options,
-            **(self._identity or {}),
-        )
+        try:
+            ssh_cmd = self.app.ssh_service.build_ssh_command(
+                host=self._host,
+                username=self._username,
+                key_path=self._key_path,
+                remote_command=login_command,
+                proxy_args=self._proxy_args,
+                port=self._port,
+                extra_options=self._extra_options,
+                **(self._identity or {}),
+            )
+        except SSHRefusal as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            output_widget.append_error(escape(message))
+            self._output_lines.append(message)
+            self.app.notify(message, severity="error", markup=False)
+            return
 
         logger.debug("Command overlay executing: %s", ' '.join(ssh_cmd))
 

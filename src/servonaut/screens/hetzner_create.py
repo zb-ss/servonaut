@@ -35,7 +35,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -400,9 +400,9 @@ class HetznerCreateScreen(WorkspaceScreen):
                 if self.app.demo_mode and self.app.redaction_service:
                     name = self.app.redaction_service.redact_key_name(name)
                 tbl.add_row(
-                    name,
-                    key.get("id", ""),
-                    key.get("fingerprint", "")[:32],
+                    cell(name),
+                    cell(key.get("id", "")),
+                    cell(key.get("fingerprint", "")[:32]),
                 )
             # Pre-select the row matching the configured default key so
             # the cursor lands on what the user expects without them

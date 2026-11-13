@@ -35,7 +35,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.utils.markup import inert_text, with_bold_values
+from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
@@ -288,18 +288,16 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
                     "create one.[/dim]"
                 )
             else:
-                self._set_status(
-                    f"[dim]{n} server{'s' if n != 1 else ''}.[/dim]"
-                    + self._project_errors(svc)
-                )
+                self._set_status(Content.assemble(
+                    literal(f"{n} server{'s' if n != 1 else ''}.", "dim"),
+                    self._project_errors(svc),
+                ))
         except Exception as exc:
             logger.error("Failed to load Hetzner servers: %s", exc)
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(
-                f"[$text-error]Failed to load servers: {err_msg}[/$text-error]"
-            )
+            self._set_status(literal(f"Failed to load servers: {err_msg}", "$text-error"))
         finally:
             self._loading = False
 
@@ -405,7 +403,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         """
         return display_name(inst) or str(inst.get("id") or "")
 
-    def _project_errors(self, svc) -> str:
+    def _project_errors(self, svc) -> Content:
         """Status suffix naming projects whose servers could not be refreshed.
 
         Only several projects are reported here: one failing project among
@@ -413,10 +411,10 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         """
         error = getattr(svc, "last_fetch_error", None)
         if not getattr(svc, "multi", False) or not isinstance(error, str) or not error:
-            return ""
+            return Content("")
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
+        return literal(f"\n⚠ {error}", "$text-warning")
 
     def _sync_action_buttons(self) -> None:
         self.sync_action_buttons()
@@ -560,7 +558,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             message = text.failed_message(label, err_msg)
-            self._set_status(f"[$text-error]{escape(message)}[/$text-error]")
+            self._set_status(literal(message, "$text-error"))
             self.notify(message, severity="error", markup=False)
             return
         self.notify(text.done_message(label), severity="information", markup=False)
@@ -594,7 +592,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
         if not confirmed:
             return
 
-        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
+        self._set_status(literal(f"Deleting {label}…", "dim"))
         try:
             await svc.delete_server(identifier)
         except Exception as exc:
@@ -605,7 +603,7 @@ class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[$text-error]Delete failed: {err_msg}[/$text-error]"
+                literal(f"Delete failed: {err_msg}", "$text-error")
             )
             self.notify(
                 f"Delete failed: {err_msg}",

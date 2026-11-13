@@ -23,6 +23,8 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
 )
 from servonaut.utils.match_utils import matches_conditions
+from servonaut.utils.remote_shell import shell_path
+from servonaut.utils.ssh_names import SSHRefusal, check_ssh_target
 from servonaut.utils.ssh_utils import run_ssh
 
 logger = logging.getLogger(__name__)
@@ -221,6 +223,10 @@ class ScanService(ScanServiceInterface):
 
         target = self._resolve_target(instance, ssh_service, connection_service)
         target = await self._with_vault(target, instance, connection_service)
+        try:
+            check_ssh_target(target.host, target.username)
+        except SSHRefusal as exc:
+            raise ScanConnectionError("invalid host or user name", str(exc)) from exc
         await self._check_connection(target)
 
         results = []
@@ -420,14 +426,7 @@ class ScanService(ScanServiceInterface):
         Returns:
             Scan result dictionary or None on failure
         """
-        # Expand ~ to $HOME for remote shell (shlex.quote prevents tilde expansion)
-        if path.startswith('~/'):
-            safe_path = '$HOME/' + path[2:]
-        elif path == '~':
-            safe_path = '$HOME'
-        else:
-            safe_path = path
-        ssh_cmd = target.argv(f'ls -la "{safe_path}" 2>/dev/null')
+        ssh_cmd = target.argv(f'ls -la {shell_path(path)} 2>/dev/null')
 
         try:
             result = await self._run_ssh(ssh_cmd, timeout=_PATH_SCAN_TIMEOUT)

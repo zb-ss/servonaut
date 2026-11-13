@@ -248,3 +248,29 @@ async def test_cancelled_confirmation_never_pops_another_modal() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert original not in app.screen_stack
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_class,note_id,body_id", [
+    (ToolConfirmModal, "tool_confirm_note", "tool_confirm_body"),
+    (DangerousToolConfirmModal, "dangerous_confirm_note", "dangerous_confirm_body"),
+])
+async def test_dialog_shows_the_note_as_literal_text(modal_class, note_id, body_id):
+    app = _WrapperApp(modal_class("ssh_exec_readonly", {}, note="[bold]x"))
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause()
+        note = app._modal.query_one(f"#{note_id}", Static)
+        assert note.render().plain == "[bold]x"
+        assert app._modal.query_one(f"#{body_id}", Static) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal_class,note_id", [
+    (ToolConfirmModal, "tool_confirm_note"),
+    (DangerousToolConfirmModal, "dangerous_confirm_note"),
+])
+async def test_dialog_without_a_note_has_no_note_line(modal_class, note_id):
+    app = _WrapperApp(modal_class("deploy", {}))
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause()
+        assert not app._modal.query(f"#{note_id}")

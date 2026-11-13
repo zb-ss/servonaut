@@ -55,7 +55,7 @@ def dns_screen(is_demo: bool) -> Iterator[tuple]:
 @pytest.mark.parametrize("is_demo", [False, True])
 def test_rdns_form_display_preserves_private_target(is_demo: bool) -> None:
     with dns_screen(is_demo) as (screen, app, widgets, _, _notify):
-        label = Text.from_markup(widgets["#rdns_form_ip_label"].update.call_args.args[0]).plain
+        label = str(widgets["#rdns_form_ip_label"].update.call_args.args[0])
         hostname = widgets["#input_rdns_hostname"].value
         for value in ENTRY.values():
             shown = app.redaction_service.redact_host(value) if is_demo else value
@@ -200,7 +200,7 @@ def test_snapshot_identity_is_redacted_without_mutating_source(is_demo: bool, sn
             if snapshot.get("description"):
                 assert snapshot["description"] not in str(first_render)
         else:
-            assert first_render[0] == name
+            assert str(first_render[0]) == name
 
 
 @pytest.mark.parametrize("is_demo", [False, True])
@@ -213,7 +213,7 @@ def test_snapshot_confirmation_preserves_selected_operation_target(
     with snapshots_screen(is_demo, snapshot, provider_type) as (screen, app, table, queued, raw_id):
         app.push_screen_wait.return_value = confirmed
         screen._populate_table()
-        alias = table.add_row.call_args.args[0]
+        alias = str(table.add_row.call_args.args[0])
 
         async def run() -> None:
             await getattr(screen, f"_on_{operation}_snapshot")()

@@ -36,9 +36,8 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
-from rich.markup import escape
 
-from servonaut.utils.markup import inert_text, with_bold_values
+from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_actions import (
@@ -292,27 +291,26 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                         cred_error = self.app.redaction_service.scrub_stream(
                             cred_error
                         )
-                    self._set_status(f"[$text-error]⚠ {escape(cred_error)}[/$text-error]")
+                    self._set_status(literal(f"⚠ {cred_error}", "$text-error"))
                 else:
                     self._set_status(
                         "[dim]No OVH instances. Press [b]n[/b] to create a "
                         "Public Cloud instance.[/dim]"
                     )
             else:
-                self._set_status(
-                    f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
-                    + self._account_errors(svc)
-                )
+                self._set_status(Content.assemble(
+                    literal(f"{n} instance{'s' if n != 1 else ''}.", "dim"),
+                    self._account_errors(svc),
+                ))
             # An empty answer from refused credentials is not an empty fleet.
             if update_fleet and not cred_error:
                 replace_instances(self.app, "ovh", instances)
                 reconcile_team_memory(self.app)
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
-            err_msg = escape(self._provider_error(exc))
-            self._set_status(
-                f"[$text-error]Failed to load instances: {err_msg}[/$text-error]"
-            )
+            self._set_status(literal(
+                f"Failed to load instances: {self._provider_error(exc)}", "$text-error",
+            ))
         finally:
             self._loading = False
 
@@ -331,7 +329,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                 errors.append(f"{binding.ref.label}: {error}" if svc.multi else error)
         return "; ".join(errors) or None
 
-    def _account_errors(self, svc) -> str:
+    def _account_errors(self, svc) -> Content:
         """Status suffix naming accounts whose instances could not be refreshed.
 
         Only several accounts are reported here: one failing account among
@@ -339,10 +337,10 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         """
         error = getattr(svc, "last_fetch_error", None)
         if not getattr(svc, "multi", False) or not isinstance(error, str) or not error:
-            return ""
+            return Content("")
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
+        return literal(f"\n⚠ {error}", "$text-warning")
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
@@ -662,7 +660,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
                 method, identifier, ptype, exc,
             )
             message = text.failed_message(label, self._provider_error(exc))
-            self._set_status(f"[$text-error]{escape(message)}[/$text-error]")
+            self._set_status(literal(message, "$text-error"))
             self.notify(message, severity="error", markup=False)
             return
 
@@ -713,7 +711,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
         if not confirmed:
             return
 
-        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
+        self._set_status(literal(f"Deleting {label}…", "dim"))
         cloud_svc = services.cloud
         if cloud_svc is None:
             self.notify(
@@ -728,10 +726,7 @@ class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
                                error=str(exc)[:200], account=account)
-            err_msg = escape(self._provider_error(exc))
-            self._set_status(
-                f"[$text-error]Delete failed: {err_msg}[/$text-error]"
-            )
+            self._set_status(literal(f"Delete failed: {self._provider_error(exc)}", "$text-error"))
             self.notify(
                 f"Delete failed: {self._provider_error(exc)}",
                 severity="error", markup=False,

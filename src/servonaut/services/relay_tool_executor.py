@@ -47,6 +47,7 @@ from servonaut.services.ai_tool_bridge import (
     ToolCall,
     ToolConfirmDenied,
     ToolResult,
+    READONLY_HEADLESS_TEXT,
     # Relay-bound tool names — used to decide whether CommandRequest-style
     # top-level fields (target_server_id) should be folded into args.
     _RELAY_TOOL_TO_TYPE,
@@ -231,6 +232,11 @@ def build_headless_confirm(config_manager: "ConfigManager"):
                 call.tool, call.guard_level, auto_approve, call.tool_call_id,
             )
             return True
+        if call.readonly_check == "needs_approval":
+            raise ToolConfirmDenied(
+                READONLY_HEADLESS_TEXT.format(check_reason=call.check_reason),
+                reason="readonly_command_headless_denied",
+            )
         raise ToolConfirmDenied(
             f"Tool {call.tool!r} requires {call.guard_level!r} approval, but "
             f"this headless relay listener auto-approves up to "

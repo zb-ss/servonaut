@@ -30,7 +30,7 @@ from textual.widgets.selection_list import Selection
 from textual.timer import Timer
 from textual.worker import Worker
 
-from servonaut.utils.markup import literal
+from servonaut.utils.markup import cell, literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
@@ -1361,13 +1361,13 @@ class VaultScreen(WorkspaceScreen):
         if chosen is not None:
             table.move_cursor(row=chosen)
 
-    def _item_name_cell(self, row: Mapping[str, Any]) -> str:
+    def _item_name_cell(self, row: Mapping[str, Any]) -> Text | str:
         if row.get("type") != "ssh_key":
             return ""
         text = self._key_display_name(str(row.get("item_id") or ""))
         if len(text) > _ITEM_NAME_DISPLAY_MAX:
             text = text[:_ITEM_NAME_DISPLAY_MAX] + "…"
-        return markup_literal(text)
+        return cell(text)
 
     def _key_display_name(self, item_id: str) -> str:
         name = self._key_names.get(item_id)

@@ -24,8 +24,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
-import shlex
 from typing import Any, Dict, Optional, Tuple
+from servonaut.utils.remote_shell import shell_quote
 
 #: Relay envelopes with this ``source`` route to the remediation path.
 REMEDIATION_SOURCE = "proactive_remediation"
@@ -162,14 +162,14 @@ def _build_certbot_renew(payload: Dict[str, Any]) -> str:
     ]
     if _coerce_dry_run(payload):
         argv.append("--dry-run")
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 # systemd unit names: alnum plus ``: _ . @ -`` (the ``@`` is required for
 # systemd template/instance unit names), with an optional known unit-type
 # suffix. Deliberately excludes ``/``, ``..``, whitespace,
 # and every shell metacharacter — the unit is interpolated into an argv that
-# is shlex-quoted, but the allowlist is the primary guard. Kept in lockstep
+# is shell-quoted, but the allowlist is the primary guard. Kept in lockstep
 # with the server-side unit validator.
 _SAFE_UNIT_RE = re.compile(
     r"^[A-Za-z0-9:_.@-]+"
@@ -201,13 +201,13 @@ def _build_restart_service(payload: Dict[str, Any]) -> str:
         argv_active = ["systemctl", "is-active", unit]
         argv_status = ["systemctl", "status", unit, "--no-pager"]
         return (
-            " ".join(shlex.quote(a) for a in argv_active)
+            " ".join(shell_quote(a) for a in argv_active)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_status)
+            + " ".join(shell_quote(a) for a in argv_status)
             + "; true"
         )
     argv = ["sudo", "-n", "systemctl", "restart", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_enable_service(payload: Dict[str, Any]) -> str:
@@ -220,15 +220,15 @@ def _build_enable_service(payload: Dict[str, Any]) -> str:
         argv_enabled = ["systemctl", "is-enabled", unit]
         argv_active = ["systemctl", "is-active", unit]
         return (
-            " ".join(shlex.quote(a) for a in argv_enabled)
+            " ".join(shell_quote(a) for a in argv_enabled)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_active)
+            + " ".join(shell_quote(a) for a in argv_active)
             + "; true"
         )
     # ``--now`` also starts the unit; idempotent (enabling an enabled unit is
     # a no-op success).
     argv = ["sudo", "-n", "systemctl", "enable", "--now", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_reload_service(payload: Dict[str, Any]) -> str:
@@ -237,16 +237,16 @@ def _build_reload_service(payload: Dict[str, Any]) -> str:
         argv_active = ["systemctl", "is-active", unit]
         argv_status = ["systemctl", "status", unit, "--no-pager"]
         return (
-            " ".join(shlex.quote(a) for a in argv_active)
+            " ".join(shell_quote(a) for a in argv_active)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_status)
+            + " ".join(shell_quote(a) for a in argv_status)
             + "; true"
         )
     # Plain reload (not reload-or-restart): a ``needs_reload`` finding wants a
     # config re-read, not a restart's downtime. A unit with no reload support
     # fails cleanly and is surfaced as reload_unsupported.
     argv = ["sudo", "-n", "systemctl", "reload", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_disable_service(payload: Dict[str, Any]) -> str:
@@ -255,15 +255,15 @@ def _build_disable_service(payload: Dict[str, Any]) -> str:
         argv_enabled = ["systemctl", "is-enabled", unit]
         argv_active = ["systemctl", "is-active", unit]
         return (
-            " ".join(shlex.quote(a) for a in argv_enabled)
+            " ".join(shell_quote(a) for a in argv_enabled)
             + "; "
-            + " ".join(shlex.quote(a) for a in argv_active)
+            + " ".join(shell_quote(a) for a in argv_active)
             + "; true"
         )
     # ``--now`` also stops the unit; the Tier-1 inverse of enable_service.
     # Idempotent (disabling a disabled unit is a no-op success).
     argv = ["sudo", "-n", "systemctl", "disable", "--now", unit]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 # Docker/OCI container names: an alphanumeric first char, then up to 127 more
@@ -300,7 +300,7 @@ def _build_container_dry_run(name: str) -> str:
     # ``.RestartCount`` are always present, so the Go template can't hit a nil.
     fmt = "status={{.State.Status}} restarts={{.RestartCount}}"
     argv = ["docker", "inspect", "-f", fmt, name]
-    return " ".join(shlex.quote(a) for a in argv) + "; true"
+    return " ".join(shell_quote(a) for a in argv) + "; true"
 
 
 def _build_restart_container(payload: Dict[str, Any]) -> str:
@@ -308,7 +308,7 @@ def _build_restart_container(payload: Dict[str, Any]) -> str:
     if _coerce_dry_run(payload):
         return _build_container_dry_run(name)
     argv = ["docker", "restart", name]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 def _build_start_container(payload: Dict[str, Any]) -> str:
@@ -318,7 +318,7 @@ def _build_start_container(payload: Dict[str, Any]) -> str:
     # Idempotent: ``docker start`` on an already-running container exits 0
     # (goal state reached) — the same idempotence contract as the on-box unban.
     argv = ["docker", "start", name]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 #: Multipliers the ``raise_container_memory`` envelope may request, as strings.
@@ -338,6 +338,15 @@ def _require_multiplier(payload: Dict[str, Any]) -> str:
     return m
 
 
+def _plain_address(ip: str):
+    """The address *ip* names, refusing one that carries a scope id (``fe80::1%eth0``)."""
+    if "%" in ip:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {ip!r} names a network interface (a scope id)",
+        )
+    return ipaddress.ip_address(ip)
+
+
 def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
     """Raise a compose-managed container's memory limit by a multiplier and
     recreate it. A Tier-2 config-edit primitive, so the whole thing is a
@@ -351,13 +360,13 @@ def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
     restores it. Refuses cleanly (no change) when: the container has no limit,
     it is not compose-managed, or no safe YAML editor is present.
 
-    The container name is validated + shlex-quoted; the multiplier is a single
+    The container name is validated + shell-quoted; the multiplier is a single
     digit from :data:`RAISE_MEM_MULTIPLIERS`. Failure paths echo an uppercase
     token that :func:`classify_failure` maps to a curated slug.
     """
     name = _require_container(payload)
     mult = _require_multiplier(payload)
-    c = shlex.quote(name)
+    c = shell_quote(name)
     inspect_mem = f"docker inspect -f '{{{{.HostConfig.Memory}}}}' {c}"
     inspect_file = (
         f"docker inspect -f "
@@ -469,13 +478,13 @@ def _build_set_config_value(payload: Dict[str, Any]) -> str:
     passes does it reload; a reload failure also restores. Failure paths echo
     an uppercase token that :func:`classify_failure` maps to a curated slug.
 
-    file/key/value are validated + shlex-quoted into shell vars; the argv is
+    file/key/value are validated + shell-quoted into shell vars; the argv is
     built LOCALLY, never from raw server text.
     """
     file, key, value = _require_config_triplet(payload)
     setvars = (
-        f"FILE={shlex.quote(file)}; KEY={shlex.quote(key)}; "
-        f"VAL={shlex.quote(value)}; "
+        f"FILE={shell_quote(file)}; KEY={shell_quote(key)}; "
+        f"VAL={shell_quote(value)}; "
     )
     if _coerce_dry_run(payload):
         # Read-only preview: report the current EFFECTIVE value (sshd -T, the
@@ -530,7 +539,7 @@ def _build_set_config_value(payload: Dict[str, Any]) -> str:
 # from its FIX_PERMISSIONS_TARGETS policy catalog. The CLI holds no perms
 # policy; it re-validates defensively: the path must match a curated candidate
 # category (mirrors the probe list), the mode a 3-4 digit octal, the owner a
-# user or user:group. shlex-quoted, argv built LOCALLY.
+# user or user:group. shell-quoted, argv built LOCALLY.
 _FIX_PERMS_PATH_RE = re.compile(
     r"^/etc/ssh/sshd_config(?:\.d/[A-Za-z0-9._-]+)?$"
     r"|^/etc/ssh/ssh_host_[A-Za-z0-9_]+_key$"
@@ -571,12 +580,12 @@ def _build_fix_permissions(payload: Dict[str, Any]) -> str:
     Captures the prior mode+owner first (the revert handle), then chmod +
     chown to the target and re-stats to confirm. Failure paths echo an
     uppercase token that :func:`classify_failure` maps to a curated slug.
-    path/mode/owner are validated + shlex-quoted; the argv is built LOCALLY.
+    path/mode/owner are validated + shell-quoted; the argv is built LOCALLY.
     """
     path, mode, owner = _require_fix_perms_triplet(payload)
     setvars = (
-        f"P={shlex.quote(path)}; M={shlex.quote(mode)}; "
-        f"O={shlex.quote(owner)}; "
+        f"P={shell_quote(path)}; M={shell_quote(mode)}; "
+        f"O={shell_quote(owner)}; "
     )
     if _coerce_dry_run(payload):
         # Read-only: report the current mode+owner and the planned target;
@@ -615,11 +624,11 @@ def _build_rotate_logs(payload: Dict[str, Any]) -> str:
         # reports exactly what a real run would rotate. sudo is needed to read
         # the root-owned state file and logs.
         argv = ["sudo", "-n", "logrotate", "-d", _LOGROTATE_CONF]
-        return " ".join(shlex.quote(a) for a in argv)
+        return " ".join(shell_quote(a) for a in argv)
     # ``--force`` rotates now regardless of size/age conditions — the point of
     # an operator-triggered rotation under disk pressure.
     argv = ["sudo", "-n", "logrotate", "--force", _LOGROTATE_CONF]
-    return " ".join(shlex.quote(a) for a in argv)
+    return " ".join(shell_quote(a) for a in argv)
 
 
 _VERB_BUILDERS = {
@@ -672,6 +681,11 @@ def validate_block_ip_payload(
         raise RemediationValidationError(
             f"invalid_block_ip_address: {candidate!r} is a network — "
             f"block_ip takes exactly one address (no CIDR in v1)",
+        )
+    if "%" in candidate:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {candidate!r} names a network interface "
+            f"(a scope id); give the plain address",
         )
     try:
         addr = ipaddress.ip_address(candidate)
@@ -727,20 +741,22 @@ def build_onbox_block_command(method: str, ip: str) -> str:
             f"invalid_block_ip_method: {method!r} is not an on-box "
             f"firewall method",
         )
-    is_v6 = ipaddress.ip_address(ip).version == 6
+    is_v6 = _plain_address(ip).version == 6
+    quoted_ip = shell_quote(ip)
+    grep_ip = f"'{ip}'" if quoted_ip == ip else quoted_ip
     if method == "ufw":
         # ufw takes v4/v6 transparently; it skips a duplicate rule (exit 0).
         return (
-            f"sudo -n ufw deny from {ip} to any; "
-            f"sudo -n ufw status | grep -qF '{ip}'"
+            f"sudo -n ufw deny from {quoted_ip} to any; "
+            f"sudo -n ufw status | grep -qF {grep_ip}"
         )
     if method == "firewalld":
         fam = "ipv6" if is_v6 else "ipv4"
-        rule = f'rule family="{fam}" source address="{ip}" drop'
+        rule = shell_quote(f'rule family="{fam}" source address="{ip}" drop')
         return (
-            f"sudo -n firewall-cmd --add-rich-rule='{rule}'; "
-            f"sudo -n firewall-cmd --permanent --add-rich-rule='{rule}'; "
-            f"sudo -n firewall-cmd --list-rich-rules | grep -qF '{ip}'"
+            f"sudo -n firewall-cmd --add-rich-rule={rule}; "
+            f"sudo -n firewall-cmd --permanent --add-rich-rule={rule}; "
+            f"sudo -n firewall-cmd --list-rich-rules | grep -qF {grep_ip}"
         )
     # nftables: a dedicated servonaut_ban table/set/chain/drop-rule,
     # bootstrapped ONCE (guarded on table existence so a repeat ban never
@@ -762,9 +778,9 @@ def build_onbox_block_command(method: str, ip: str) -> str:
         "if ! sudo -n nft list table inet servonaut_ban "
         f">/dev/null 2>&1; then {bootstrap}fi; "
         f"sudo -n nft add element inet servonaut_ban {set_name} "
-        f"'{{ {ip} }}' 2>/dev/null; "
+        f"{shell_quote('{ ' + ip + ' }')} 2>/dev/null; "
         f"sudo -n nft list set inet servonaut_ban {set_name} "
-        f"| grep -qF '{ip}'"
+        f"| grep -qF {grep_ip}"
     )
 
 
@@ -794,6 +810,11 @@ def validate_unblock_ip_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
         raise RemediationValidationError(
             f"invalid_unblock_ip_address: {candidate!r} is a network — "
             f"unblock_ip takes exactly one address (no CIDR)",
+        )
+    if "%" in candidate:
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_address: {candidate!r} names a network interface "
+            f"(a scope id); give the plain address",
         )
     try:
         addr = ipaddress.ip_address(candidate)
@@ -840,21 +861,23 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
             f"invalid_unblock_ip_method: {method!r} is not an on-box "
             f"firewall method",
         )
-    is_v6 = ipaddress.ip_address(ip).version == 6
+    is_v6 = _plain_address(ip).version == 6
+    quoted_ip = shell_quote(ip)
+    grep_ip = f"'{ip}'" if quoted_ip == ip else quoted_ip
     if method == "ufw":
         return (
-            f"sudo -n ufw delete deny from {ip} to any 2>/dev/null; "
-            f"! sudo -n ufw status | grep -qF '{ip}'"
+            f"sudo -n ufw delete deny from {quoted_ip} to any 2>/dev/null; "
+            f"! sudo -n ufw status | grep -qF {grep_ip}"
         )
     if method == "firewalld":
         fam = "ipv6" if is_v6 else "ipv4"
-        rule = f'rule family="{fam}" source address="{ip}" drop'
+        rule = shell_quote(f'rule family="{fam}" source address="{ip}" drop')
         return (
-            f"sudo -n firewall-cmd --remove-rich-rule='{rule}' 2>/dev/null; "
-            f"sudo -n firewall-cmd --permanent --remove-rich-rule='{rule}' "
+            f"sudo -n firewall-cmd --remove-rich-rule={rule} 2>/dev/null; "
+            f"sudo -n firewall-cmd --permanent --remove-rich-rule={rule} "
             f"2>/dev/null; "
             f"! sudo -n firewall-cmd --list-rich-rules 2>/dev/null "
-            f"| grep -qF '{ip}'"
+            f"| grep -qF {grep_ip}"
         )
     # nftables: drop the ip from the servonaut_ban set (the ban added it as
     # a set element). The set/table may not exist if the ip was never banned
@@ -863,9 +886,9 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
     set_name = "banned6" if is_v6 else "banned4"
     return (
         f"sudo -n nft delete element inet servonaut_ban {set_name} "
-        f"'{{ {ip} }}' 2>/dev/null; "
+        f"{shell_quote('{ ' + ip + ' }')} 2>/dev/null; "
         f"! sudo -n nft list set inet servonaut_ban {set_name} 2>/dev/null "
-        f"| grep -qF '{ip}'"
+        f"| grep -qF {grep_ip}"
     )
 
 

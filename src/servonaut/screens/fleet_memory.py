@@ -19,7 +19,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING, Union
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.widgets.busy_indicator import BusyIndicator

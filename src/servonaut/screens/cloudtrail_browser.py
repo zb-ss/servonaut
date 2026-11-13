@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
-from servonaut.utils.markup import literal
+from servonaut.utils.markup import cell, literal
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -378,8 +378,10 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
             previous = select.value
             options = [
                 (
-                    f"{self._username_label(value) if field == 'username' else value}"
-                    f"  ({count})",
+                    literal(
+                        f"{self._username_label(value) if field == 'username' else value}"
+                        f"  ({count})"
+                    ),
                     value,
                 )
                 for value, count in sorted(
@@ -393,7 +395,7 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                 and previous != _TYPE_A_VALUE
                 and previous not in counts
             ):
-                options.append((f"{previous}  (typed)", previous))
+                options.append((literal(f"{previous}  (typed)"), previous))
             options.append(("Type a value...", _TYPE_A_VALUE))
             self._suppress_filter_events = True
             try:
@@ -421,12 +423,12 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
                     select.value = Select.NULL
                     return
                 options = [
-                    (str(text), val)
+                    (literal(str(text)), val)
                     for text, val in select._options
                     if val is not Select.NULL and val != _TYPE_A_VALUE
                 ]
                 if value not in [val for _, val in options]:
-                    options.append((f"{value}  (typed)", value))
+                    options.append((literal(f"{value}  (typed)"), value))
                 options.append(("Type a value...", _TYPE_A_VALUE))
                 select.set_options(options)
                 select.value = value
@@ -562,13 +564,13 @@ class CloudTrailBrowserScreen(WorkspaceScreen):
             if hasattr(event_time, "strftime"):
                 event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
             table.add_row(
-                str(event_time),
-                ev.get("event_name", ""),       # public taxonomy — NOT scrubbed
-                self._username_label(ev.get("username", "")),
-                _s(ev.get("source_ip", "")),
-                _s(ev.get("resource_name", "") or ev.get("resource_type", "")),
-                ev.get("region", ""),            # public taxonomy — NOT scrubbed
-                ev.get("error_code", "") or "",  # public taxonomy — NOT scrubbed
+                cell(event_time),
+                cell(ev.get("event_name", "")),       # public taxonomy — NOT scrubbed
+                cell(self._username_label(ev.get("username", ""))),
+                cell(_s(ev.get("source_ip", ""))),
+                cell(_s(ev.get("resource_name", "") or ev.get("resource_type", ""))),
+                cell(ev.get("region", "")),            # public taxonomy — NOT scrubbed
+                cell(ev.get("error_code", "") or ""),  # public taxonomy — NOT scrubbed
             )
 
     def action_next_page(self) -> None:

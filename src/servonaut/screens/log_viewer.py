@@ -19,6 +19,7 @@ from textual.widgets import Button, Footer, Static, RichLog
 
 from servonaut.utils.markup import literal
 from servonaut.utils.theme_text import themed_text
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
@@ -249,13 +250,12 @@ class LogViewerScreen(WorkspaceScreen):
         """Update header with current log path and status."""
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         log_label = self._current_log or "none"
-        status_parts = []
+        status_parts: list = []
         if self._is_paused:
-            # Brackets that are text, not markup, are escaped.
-            status_parts.append("[$text-warning]\\[PAUSED][/$text-warning]")
+            status_parts.append(("[PAUSED]", "$text-warning"))
         if self._is_static_view:
             classification = self.app.log_viewer_service.classify_log_file(log_label)
-            status_parts.append(f"[dim]\\[{classification}][/dim]")
+            status_parts.append((f"[{classification}]", "dim"))
         # T10: "from cache" indicator when memory.logs supplied the paths.
         source = getattr(self.app.log_viewer_service, "last_probe_source", None)
         if source == "cache":
@@ -305,16 +305,24 @@ class LogViewerScreen(WorkspaceScreen):
             self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
-        ssh_cmd = self.app.ssh_service.build_ssh_command(
-            host=conn["host"],
-            username=conn["username"],
-            key_path=conn["key_path"],
-            proxy_args=conn["proxy_args"],
-            remote_command=read_cmd,
-            port=conn["port"],
-            extra_options=conn.get("extra_options") or [],
-            **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
-        )
+        try:
+            ssh_cmd = self.app.ssh_service.build_ssh_command(
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn["key_path"],
+                proxy_args=conn["proxy_args"],
+                remote_command=read_cmd,
+                port=conn["port"],
+                extra_options=conn.get("extra_options") or [],
+                **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
+            )
+        except SSHRefusal as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
 
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
 
@@ -701,7 +709,7 @@ class LogViewerScreen(WorkspaceScreen):
         output = self.query_one("#log_output", RichLog)
         output.clear()
         self._content_buffer.clear()
-        output.write(f"[dim]Connecting to {log_path}...[/dim]")
+        output.write(Text(f"Connecting to {log_path}...", style="dim"))
         self._current_log = log_path
         self._update_header()
         self.app.notify(f"Loading {log_path.split('/')[-1]}...")

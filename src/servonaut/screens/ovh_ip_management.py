@@ -16,7 +16,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.utils.markup import literal, with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -355,7 +355,9 @@ class OVHIPManagementScreen(WorkspaceScreen):
                 else ip.get("routedTo") or "—"
             )
             reverse = str(ip.get("reverse") or "—")
-            table.add_row(_h(ip_addr), ip_type, _h(routed_to, is_service=True), _h(reverse))
+            table.add_row(
+                cell(_h(ip_addr)), cell(ip_type), cell(_h(routed_to, is_service=True)), cell(_h(reverse)),
+            )
 
     # ------------------------------------------------------------------
     # Move failover IP

@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -136,6 +136,18 @@ def _format_args(args: Dict[str, Any]) -> Content:
     return Content("\n").join(lines)
 
 
+def _note_of(call: Any) -> str:
+    note = getattr(call, "confirm_note", "")
+    return note if isinstance(note, str) else ""
+
+
+def _note_widgets(note: str, widget_id: str) -> List[Static]:
+    """The optional one-line note under the dialog body; empty when no note."""
+    if not note:
+        return []
+    return [Static(literal(note), id=widget_id, classes="tool_confirm_note")]
+
+
 # ---------------------------------------------------------------------------
 # Standard (single y/n) confirm modal
 # ---------------------------------------------------------------------------
@@ -158,10 +170,16 @@ class ToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
     AUTO_FOCUS = "#btn_tool_cancel"
     VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
-    def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        tool: str,
+        args: Optional[Dict[str, Any]] = None,
+        note: str = "",
+    ) -> None:
         super().__init__(classes="dialog-screen dialog-approval")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
+        self._note = note
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -173,6 +191,7 @@ class ToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
             ),
             body=_arguments_box(self._args, "tool"),
             status=Vertical(
+                *_note_widgets(self._note, "tool_confirm_note"),
                 _overflow_cue("tool"),
                 Static(
                     "Servonaut AI wants to run this tool. "
@@ -245,10 +264,16 @@ class DangerousToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
 
     """
 
-    def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        tool: str,
+        args: Optional[Dict[str, Any]] = None,
+        note: str = "",
+    ) -> None:
         super().__init__(classes="dialog-screen dialog-approval")
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
+        self._note = note
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -264,6 +289,7 @@ class DangerousToolConfirmModal(_ArgumentScrollMixin, ModalScreen[bool]):
             ),
             body=_arguments_box(self._args, "dangerous"),
             status=Vertical(
+                *_note_widgets(self._note, "dangerous_confirm_note"),
                 _overflow_cue("dangerous"),
                 Static(
                     "Servonaut AI wants to run a [bold]potentially destructive[/bold] tool. "
@@ -355,10 +381,21 @@ def build_modal_confirm(app: Any) -> Callable[[Any], Awaitable[bool]]:
     """
 
     async def _confirm(call: Any) -> bool:
+        shown_args = dict(call.args)
+        from servonaut.services.ai_tool_bridge import command_to_send
+
+        checked = command_to_send(call)
+        if isinstance(checked, str):
+            # Show the text that will run, not the text the model wrote.
+            shown_args["command"] = checked
         if call.guard_level == "dangerous":
-            modal: ModalScreen[bool] = DangerousToolConfirmModal(call.tool, dict(call.args))
+            modal: ModalScreen[bool] = DangerousToolConfirmModal(
+                call.tool, shown_args, note=_note_of(call),
+            )
         else:
-            modal = ToolConfirmModal(call.tool, dict(call.args))
+            modal = ToolConfirmModal(
+                call.tool, shown_args, note=_note_of(call),
+            )
         try:
             result = await app.push_screen_wait(modal)
         except asyncio.CancelledError:

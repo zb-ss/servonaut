@@ -43,6 +43,16 @@ def add_team_parser(subparsers: Any) -> None:
     )
     rules.add_argument("team", help="The team's slug or name.")
     rules.add_argument("--json", action="store_true", help="Print the rules as JSON.")
+    options = commands.add_parser(
+        "options",
+        help="List the SSH options from a team that run programs here, and allow or refuse them.",
+    )
+    actions = options.add_subparsers(dest="options_action")
+    allow = actions.add_parser("allow", help="Allow one option by its number, or all of them.")
+    allow.add_argument("number", nargs="?", type=int, help="The option's number in the list.")
+    allow.add_argument("--all", action="store_true", help="Allow every listed option.")
+    refuse = actions.add_parser("refuse", help="Refuse one option by its number.")
+    refuse.add_argument("number", type=int, help="The option's number in the list.")
 
 
 def _default_team_service() -> Any:
@@ -127,7 +137,63 @@ def _print_view(view: Mapping[str, Any], as_json: bool) -> None:
         print(terminal_safe(line))
 
 
+_EXIT_USAGE = 2
+
+
+def _handle_options(args: argparse.Namespace) -> int:
+    """``servonaut team options [allow N|--all | refuse N]``."""
+    import dataclasses
+
+    from servonaut.config.manager import ConfigManager
+    from servonaut.utils.ssh_option_policy import origin_label, set_allowed, team_option_rows
+
+    manager = ConfigManager()
+    config = manager.load()
+    items = team_option_rows(config.ssh.team_options)
+    action = getattr(args, "options_action", None)
+
+    if action is None:
+        if not items:
+            print("No team options need your approval.")
+            return _EXIT_OK
+        print("Team options that run programs on this computer\n")
+        width = max(len(origin_label(item)) for item in items)
+        for number, item in enumerate(items, 1):
+            state = "allowed" if item.get("allowed") is True else "refused"
+            print(f"  {number}  {state}  {origin_label(item).ljust(width)}  {terminal_safe(item['option'])}")
+        print("\nAllow one: servonaut team options allow 1")
+        return _EXIT_OK
+
+    if action == "allow" and args.all:
+        chosen = list(range(len(items)))
+    else:
+        number = getattr(args, "number", None)
+        if number is None or not 1 <= number <= len(items):
+            label = "" if number is None else f" {number}"
+            print(
+                f'No option{label}. Run "servonaut team options" to see the list.',
+                file=sys.stderr,
+            )
+            return _EXIT_USAGE
+        chosen = [number - 1]
+
+    allowed = action == "allow"
+    options = [dict(item) for item in config.ssh.team_options if isinstance(item, dict)]
+    texts = [items[index]["option"] for index in chosen]
+    for text in texts:
+        set_allowed(options, text, allowed)
+    manager.update(ssh=dataclasses.replace(config.ssh, team_options=options))
+    for text in texts:
+        print(
+            f"Allowed: {terminal_safe(text)}. Connections that use it will run it on this computer."
+            if allowed else f"Refused: {terminal_safe(text)}."
+        )
+    return _EXIT_OK
+
+
 def handle_team_command(args: argparse.Namespace) -> int:
+    if args.team_command == "options":
+        return _handle_options(args)
     if args.team_command != "rules":
         print(f"Unknown team command: {args.team_command}", file=sys.stderr)
         return _EXIT_ERROR

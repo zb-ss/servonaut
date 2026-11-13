@@ -23,6 +23,8 @@ def test_vault_key_management(screen_snapshot, size, state) -> None:
             app.screen.query_one("#vault_rename_key_input", Input).value = ""
             app.screen.query_one("#vault_rename_key_save", Button).press()
             await wait_until(lambda: "Name is required." in str(app.screen.query_one("#vault_rename_key_feedback").render()))
+            # A pressed button keeps its "-active" look for a moment; capture after it ends.
+            await wait_until(lambda: not app.screen.query_one("#vault_rename_key_save", Button).has_class("-active"))
         elif state == "delete":
             screen.action_delete_key()
             await wait_until(lambda: _confirm_open(app))

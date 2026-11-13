@@ -61,7 +61,7 @@ def test_the_hetzner_status_line_hides_a_real_server_id() -> None:
         shown = screen._instances[0]
         app.push_screen_wait = AsyncMock(return_value=True)
         asyncio.run(screen._do_delete(shown))
-    lines = [call.args[0] for call in status.update.call_args_list]
+    lines = [str(call.args[0]) for call in status.update.call_args_list]
     assert lines and all("48151623" not in line for line in lines)
     assert any(shown["id"] in line for line in lines)
 

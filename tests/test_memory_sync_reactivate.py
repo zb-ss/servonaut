@@ -159,6 +159,7 @@ def _make_login_lifecycle_stub(
         auth_service=_make_auth_service(),
         run_worker=MagicMock(),
         _init_relay_manager=MagicMock(),
+        _note_saved_team_options=MagicMock(),
     )
     stub._reactivate_memory_sync = types.MethodType(
         ServonautApp._reactivate_memory_sync, stub

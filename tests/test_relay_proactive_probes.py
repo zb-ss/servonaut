@@ -166,6 +166,19 @@ class TestProbeRouting:
         assert response.status == "error"
         assert response.error_message.startswith("not_permitted:")
 
+    def test_a_mismatched_tool_in_the_envelope_is_refused(self):
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock()
+        listener = make_listener(probe_bridge=bridge)
+        event = json.loads(probe_event(tool="docker_ps"))
+        event["tool"] = "ssh_exec_readonly"
+        event["payload"] = {"command": "cat /etc/hostname"}
+        run(listener._handle_event(json.dumps(event)))
+        bridge.handle_tool_call.assert_not_awaited()
+        response = listener._post_result.await_args.args[0]
+        assert response.status == "error"
+        assert response.error_message.startswith("not_permitted:")
+
     def test_bridge_exception_still_answers(self):
         bridge = MagicMock()
         bridge.handle_tool_call = AsyncMock(side_effect=RuntimeError("kaput"))
@@ -406,3 +419,14 @@ class TestProbeFailedResultSlugs:
 
         assert response.status == "timeout"
         assert response.error_message.startswith("probe_failed:")
+
+
+class TestProbeRefusesReadonlyShell:
+    def test_probe_confirm_denies_ssh_exec_readonly(self):
+        from servonaut.services.ai_tool_bridge import ToolConfirmDenied
+
+        confirm = build_probe_confirm()
+        call = MagicMock()
+        call.tool = "ssh_exec_readonly"
+        with pytest.raises(ToolConfirmDenied):
+            run(confirm(call))

@@ -114,10 +114,10 @@ async def test_browse_the_remote_file_tree(tui, seed, journey, sshd):
 
     listed = [c for c in sshd.target.commands(user=WEB_1.username) if c.startswith("ls -la")]
     assert listed == [
-        'ls -la "$HOME/"',
-        'ls -la "$HOME/releases"',
-        'ls -la "/var/www/"',
-        'ls -la "/var/www/html"',
+        'ls -la "$HOME"/',
+        'ls -la "$HOME"/releases',
+        'ls -la /var/www/',
+        'ls -la /var/www/html',
     ]
 
 

@@ -22,6 +22,7 @@ import time_machine
 from textual.app import App
 
 from e2e.harness import markup_guard
+from servonaut.utils import markup_backstop
 
 from .. import _home_isolation
 from . import _harness, _snapshot
@@ -147,7 +148,12 @@ def snapshot_mode(request: pytest.FixtureRequest) -> _snapshot.Mode:
 
 @pytest.fixture(autouse=True)
 def theme_coloured_markup() -> Iterator[None]:
-    """Fail a screen that draws text no theme can colour (see markup_guard)."""
+    """Fail a screen that draws text no theme can colour (see markup_guard).
+
+    Every screen is drawn with the app's safe parsers live, also the ones a
+    plain test host shows (the app installs them when it starts).
+    """
+    markup_backstop.install()
     with markup_guard.watch() as markup:
         yield
     if markup.findings:

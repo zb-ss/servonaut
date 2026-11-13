@@ -52,7 +52,9 @@ from servonaut.models.relay_messages import (
     CommandResponse,
     CommandType,
 )
+from servonaut.config.schema import DEFAULT_CHAT_READONLY_COMMANDS
 from servonaut.mcp.audit import AuditOutcome, record_outcomes
+from servonaut.mcp.guards import check_standard_command, render_standard_command
 from servonaut.services.ai_split_turns import prompt_deadline
 from servonaut.services.team_rules import TEAM_RULE_REASON, is_team_refusal
 
@@ -541,6 +543,67 @@ def _compact_for_post(
 # ---------------------------------------------------------------------------
 
 
+# Tools whose ``command`` argument is model-written text run on a server.
+_READONLY_COMMAND_TOOLS = frozenset({"ssh_exec_readonly"})
+
+READONLY_NOTE_TEXT = (
+    "This command is not on the read-only command list, "
+    "so Servonaut asks before running it."
+)
+READONLY_NO_ENTITLEMENT_TEXT = (
+    "Not run: this command is not on the read-only command list "
+    "({check_reason}). It needs the same approval as run_command, and "
+    "dangerous tools are not enabled for this account. Use a command from "
+    "the read-only list or one of the read-only tools."
+)
+READONLY_HEADLESS_TEXT = (
+    "Not run: this command is not on the read-only command list "
+    "({check_reason}), and nobody is at this computer to approve it. Run it "
+    "from the chat in the Servonaut app, or use a command from the "
+    "read-only list."
+)
+READONLY_REFUSED_TEXT = (
+    "Not run: this command is not on the read-only command list ({check_reason})."
+)
+READONLY_MISSING_TEXT = "ssh_exec_readonly needs a command."
+
+
+def readonly_command_names(value: Any) -> List[str]:
+    """The allowlist from config; a value that is not a list of strings is empty."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    if not all(isinstance(name, str) for name in value):
+        return []
+    return list(value)
+
+
+def command_to_send(call: "ToolCall") -> Optional[str]:
+    """The rebuilt command an allowlisted read-only call sends, else ``None``.
+
+    The confirmation dialog and the sender both use this, so what is shown
+    is what runs.
+    """
+    if (
+        call.tool in _READONLY_COMMAND_TOOLS
+        and call.readonly_check == "allowlisted"
+        and call.checked_command is not None
+    ):
+        return call.checked_command
+    return None
+
+
+def check_readonly_command(command: Any, allowlist: Any) -> Tuple[bool, str]:
+    """Is *command* a read-only command on *allowlist*? ``(ok, reason)``.
+
+    ``sudo`` is never accepted: a privileged read is not clearly read-only.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False, "No command was given"
+    return check_standard_command(
+        command, readonly_command_names(allowlist), allow_sudo=False,
+    )
+
+
 @dataclass
 class ToolCall:
     """A ``tool_call`` SSE event the model wants the CLI to execute."""
@@ -559,6 +622,17 @@ class ToolCall:
     # for this call (split turns); ``None`` when the turn is not paused or
     # its window is unknown. The confirmation prompt is sized from it.
     respond_by: Optional[float] = None
+    # ``ssh_exec_readonly`` only: the checked command, rebuilt from the words
+    # that were checked, which is what is sent. ``None`` when not applicable
+    # or when the command asks first (then the model's text is what the
+    # member approves and what is sent).
+    checked_command: Optional[str] = None
+    # "allowlisted" or "needs_approval" once the read-only check has run.
+    readonly_check: str = ""
+    # One line shown in the confirmation dialog; "" for none.
+    confirm_note: str = ""
+    # Why the read-only check asked (the matcher's own sentence).
+    check_reason: str = ""
 
 
 @dataclass
@@ -660,6 +734,7 @@ class AIToolBridge(_FloorDangerousMixin):
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         audit_source: str = "ai_chat",
         confirm_timeout: Optional[Callable[[], Any]] = None,
+        readonly_commands: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._api = api_client
         self._executors = relay_executors
@@ -678,6 +753,10 @@ class AIToolBridge(_FloorDangerousMixin):
         # read per call so config edits apply live. ``None`` = no
         # deadline (policy callbacks that answer immediately).
         self._confirm_timeout = confirm_timeout
+        # Zero-argument getter for the commands ``ssh_exec_readonly`` may run
+        # without asking, read per call so config edits apply live. ``None``
+        # = the built-in default list.
+        self._readonly_commands = readonly_commands
         # conversation_id → {(tool, canonical_args_json): count}. Ordered so
         # the oldest conversation can be evicted when the bound is hit.
         self._repeated_call_counts: "OrderedDict[str, Dict[tuple, int]]" = (
@@ -735,6 +814,14 @@ class AIToolBridge(_FloorDangerousMixin):
         # Each escalation writes its own audit row.
         self._resolve_guard_level(call)
 
+        # 0b. ``ssh_exec_readonly`` runs model-written text on a server: it is
+        # only read-only when the command is on the read-only list. Anything
+        # else takes the ``run_command`` path.
+        if call.tool in _READONLY_COMMAND_TOOLS:
+            missing = self._gate_readonly_command(call)
+            if missing is not None:
+                return missing
+
         # 0c. Agentic-loop circuit breaker. Refuse the Nth identical call
         # (same tool + same canonical args) in one conversation with an
         # explanatory error the model can act on. Protects the user's
@@ -759,6 +846,14 @@ class AIToolBridge(_FloorDangerousMixin):
         # the user a typed-confirm dialog they can't satisfy).
         if call.guard_level == "dangerous":
             if not self._has_dangerous_entitlement():
+                if call.readonly_check == "needs_approval":
+                    return self._deny_with_audit(
+                        call,
+                        reason="readonly_command_dangerous_disallowed",
+                        error_message=READONLY_NO_ENTITLEMENT_TEXT.format(
+                            check_reason=call.check_reason,
+                        ),
+                    )
                 return self._deny_with_audit(
                     call,
                     reason="dangerous_disallowed_client_side",
@@ -804,6 +899,54 @@ class AIToolBridge(_FloorDangerousMixin):
             reason="tool_unavailable",
             error_message=hint,
         )
+
+    def _readonly_allowlist(self) -> List[str]:
+        """The commands that may run without asking, read live from config."""
+        if self._readonly_commands is None:
+            return list(DEFAULT_CHAT_READONLY_COMMANDS)
+        try:
+            return readonly_command_names(self._readonly_commands())
+        except Exception:  # noqa: BLE001 — a broken getter means "ask"
+            logger.exception("Could not read the read-only command list")
+            return []
+
+    def _gate_readonly_command(self, call: ToolCall) -> Optional[ToolResult]:
+        """Check an ``ssh_exec_readonly`` command; escalate it when not allowlisted.
+
+        Returns an error result when there is no command, else ``None``.
+        """
+        call.checked_command = None
+        call.readonly_check = ""
+        command = call.args.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return self._error_with_audit(
+                call,
+                reason="readonly_command_missing",
+                error_message=READONLY_MISSING_TEXT,
+            )
+        allowed, reason = check_readonly_command(command, self._readonly_allowlist())
+        if allowed:
+            call.checked_command = render_standard_command(command)
+            call.readonly_check = "allowlisted"
+            return None
+        server_tier = (
+            call.server_guard_level
+            if call.server_guard_level is not None
+            else str(call.guard_level or "")
+        )
+        effective, _ = self._floor_dangerous(
+            "run_command", self.guard_for("run_command"),
+        )
+        effective = _escalate_guard(call.guard_level, effective)
+        call.guard_level = effective  # type: ignore[assignment]
+        call.readonly_check = "needs_approval"
+        call.confirm_note = READONLY_NOTE_TEXT
+        call.check_reason = reason
+        self._audit_guard_change(
+            call, "readonly_command_not_allowlisted", server_tier, effective,
+            check_reason=reason,
+        )
+        return None
 
     async def _confirm_or_refuse(self, call: ToolCall) -> Optional[ToolResult]:
         """Ask for confirmation; return a refusal result, or ``None`` if approved.
@@ -1367,6 +1510,9 @@ class AIToolBridge(_FloorDangerousMixin):
             }
         else:
             payload = {"command": call.args.get("command", "")}
+            rebuilt = command_to_send(call)
+            if rebuilt is not None:
+                payload["command"] = rebuilt
 
         return CommandRequest(
             id=call.tool_call_id,
@@ -1505,6 +1651,14 @@ class AIToolBridge(_FloorDangerousMixin):
         and ``tool_call_id`` are persisted as extras so an operator can
         replay the round-trip from the audit log alone.
         """
+        extras: Dict[str, Any] = {}
+        if call.readonly_check:
+            ran = reason == "ok"
+            extras["readonly_check"] = (
+                "approved"
+                if ran and call.readonly_check == "needs_approval"
+                else call.readonly_check
+            )
         try:
             self._audit.log(
                 call.tool,
@@ -1518,6 +1672,7 @@ class AIToolBridge(_FloorDangerousMixin):
                 guard_level=call.guard_level,
                 status=result.status,
                 bytes=int(result.bytes or 0),
+                **extras,
             )
         except Exception:  # noqa: BLE001
             # Audit MUST NOT block the user-visible flow. Log and move on.

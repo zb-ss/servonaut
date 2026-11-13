@@ -549,3 +549,58 @@ def test_parse_keeps_the_guard_label_as_sent(
     call = parse_mercure_tool_call(envelope)
     assert call.server_guard_level == expected_sent
     assert call.guard_level == expected_guard
+
+
+# ---------------------------------------------------------------------------
+# ssh_exec_readonly with a command outside the read-only list
+# ---------------------------------------------------------------------------
+
+
+def _readonly_bridge(policy: str, *, entitled: bool = True):
+    from servonaut.models.relay_messages import CommandResponse
+
+    relay = MagicMock()
+    relay.execute = AsyncMock(
+        side_effect=lambda req: CommandResponse(
+            request_id=req.id, status="success", output="done",
+        )
+    )
+    audit = MagicMock()
+    auth = MagicMock()
+    auth.has_dangerous_ai_tools = entitled
+    bridge = AIToolBridge(
+        api_client=MagicMock(),
+        relay_executors=relay,
+        mcp_audit=audit,
+        confirm_callback=build_headless_confirm(_config_manager(policy)),
+        auth_service=auth,
+    )
+    return bridge, relay, audit
+
+
+def _readonly_call(command: str) -> ToolCall:
+    return ToolCall(
+        tool_call_id="tc-1", tool="ssh_exec_readonly",
+        args={"instance_id": "web-1", "command": command},
+        guard_level="readonly", conversation_id="conv-1",
+    )
+
+
+def test_headless_refuses_a_command_outside_the_read_only_list():
+    bridge, relay, audit = _readonly_bridge("standard")
+    result = run(bridge.handle_tool_call(_readonly_call("ls; id")))
+    assert result.status == "denied"
+    assert "nobody is at this computer to approve it" in result.result
+    relay.execute.assert_not_called()
+    assert audit.log.call_args_list[-1].args[4] == "readonly_command_headless_denied"
+
+    ok = run(bridge.handle_tool_call(_readonly_call("uptime")))
+    assert ok.status == "ok"
+    relay.execute.assert_awaited_once()
+
+
+def test_headless_dangerous_policy_runs_it_like_run_command():
+    bridge, relay, _audit = _readonly_bridge("dangerous")
+    result = run(bridge.handle_tool_call(_readonly_call("ls; id")))
+    assert result.status == "ok"
+    assert relay.execute.await_args.args[0].payload["command"] == "ls; id"

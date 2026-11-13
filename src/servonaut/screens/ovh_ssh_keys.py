@@ -547,7 +547,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
         )
         if not confirmed:
             return
-        self._set_status(f"[dim]Deleting key {key_name}…[/dim]")
+        self._set_status(literal(f"Deleting key {key_name}…", "dim"))
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             return
@@ -560,7 +560,7 @@ class OVHSSHKeysScreen(WorkspaceScreen):
                 key_id, exc,
             )
             self._set_status(
-                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
+                literal(f"Delete failed: {self._short_err(exc)}", "$text-error")
             )
             self.notify(f"Delete failed: {self._short_err(exc)}", severity="error",
                         markup=False)

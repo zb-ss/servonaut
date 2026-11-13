@@ -29,6 +29,7 @@ from servonaut.services.team_rules import (
     guard_for_target,
 )
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
+from servonaut.utils.ssh_option_policy import SSHOptionRefused
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
@@ -151,6 +152,43 @@ class RelayExecutors:
                 error_message=str(e),
             )
 
+    def _check_readonly_for_ai(self, call: "ToolCall"):
+        """Gate an ``ssh_exec_readonly`` call that skipped the bridge.
+
+        Returns ``(command_to_send, None)`` for an allowlisted command, or
+        ``(None, error_result)`` when nothing may run.
+        """
+        from servonaut.services.ai_tool_bridge import (
+            READONLY_MISSING_TEXT,
+            READONLY_REFUSED_TEXT,
+            ToolResult,
+            _utf8_len,
+            check_readonly_command,
+        )
+        from servonaut.mcp.guards import render_standard_command
+
+        command = call.args.get("command")
+        audit_reason = "readonly_command_refused"
+        if not isinstance(command, str) or not command.strip():
+            allowed, reason = False, ""
+            message = READONLY_MISSING_TEXT
+            audit_reason = "readonly_command_missing"
+        else:
+            allowlist = self._config_manager.get().ai_provider.readonly_command_allowlist
+            allowed, reason = check_readonly_command(command, allowlist)
+            message = READONLY_REFUSED_TEXT.format(check_reason=reason)
+        if allowed:
+            return render_standard_command(command), None
+        self._audit_ai_refusal(call, audit_reason)
+        return None, ToolResult(
+            tool_call_id=call.tool_call_id,
+            conversation_id=call.conversation_id,
+            status="error",
+            result=message,
+            error=message,
+            bytes=_utf8_len(message),
+        )
+
     async def execute_for_ai(self, call: "ToolCall") -> "ToolResult":
         """Dispatch an AI-originated tool call and return a :class:`ToolResult`.
 
@@ -181,6 +219,7 @@ class RelayExecutors:
         from servonaut.services.ai_tool_bridge import (
             ToolResult,
             _RELAY_TOOL_TO_TYPE,
+            _READONLY_COMMAND_TOOLS,
             _utf8_len,
         )
 
@@ -196,6 +235,12 @@ class RelayExecutors:
                 error=error,
                 bytes=_utf8_len(error),
             )
+
+        checked_command: Optional[str] = None
+        if call.tool in _READONLY_COMMAND_TOOLS:
+            checked_command, refusal = self._check_readonly_for_ai(call)
+            if refusal is not None:
+                return refusal
 
         # Build a minimal CommandRequest from the call args. Mirrors the
         # AIToolBridge._build_command_request mapping so behaviour stays
@@ -220,6 +265,8 @@ class RelayExecutors:
             }
         else:
             payload = {"command": call.args.get("command", "")}
+            if checked_command is not None:
+                payload["command"] = checked_command
 
         request = CommandRequest(
             id=call.tool_call_id,
@@ -702,6 +749,18 @@ class RelayExecutors:
             request_id=request.id, status="rejected", error_message=refusal,
         )
 
+    def _option_refusal(
+        self, request: CommandRequest, instance: Mapping[str, Any], tool_name: str,
+        command: Optional[str], exc: SSHOptionRefused,
+    ) -> CommandResponse:
+        """The rejection for a team-supplied SSH option that has not been allowed."""
+        target = instance.get('id') or request.target_server_id
+        logger.warning("Relay %s on %s refused: %s", tool_name, target, exc)
+        self._audit_refusal(request, tool_name, target, command, 'team_option_refused')
+        return CommandResponse(
+            request_id=request.id, status="rejected", error_message=str(exc),
+        )
+
     def _audit_refusal(
         self, request: CommandRequest, tool_name: str, target: Any,
         command: Optional[str], reason: str,
@@ -725,6 +784,21 @@ class RelayExecutors:
             )
         except Exception as exc:  # noqa: BLE001 - the refusal stands either way
             logger.warning("Could not audit a refused agent request: %s", exc)
+
+    def _audit_ai_refusal(self, call: "ToolCall", reason: str) -> None:
+        """Record an AI tool call refused before anything was sent; never raises."""
+        try:
+            if self._audit is None:
+                from servonaut.mcp.audit import AuditTrail
+
+                self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
+            self._audit.log(
+                call.tool, dict(call.args), '', False, reason,
+                source='ai_chat', conversation_id=call.conversation_id,
+                tool_call_id=call.tool_call_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - the refusal stands either way
+            logger.warning("Could not audit a refused AI tool call: %s", exc)
 
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""
@@ -805,6 +879,8 @@ class RelayExecutors:
                 status="timeout",
                 error_message=f"Command timed out after {request.ttl_seconds}s",
             )
+        except SSHOptionRefused as exc:
+            return self._option_refusal(request, instance, 'run_command', command, exc)
         except Exception as e:
             return CommandResponse(
                 request_id=request.id,
@@ -959,6 +1035,11 @@ class RelayExecutors:
                     known_hosts_file=getattr(lease, "known_hosts_path", None),
                 )
             returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+        except SSHOptionRefused as exc:
+            return self._option_refusal(request, instance, 'transfer_file', None, exc)
+        except ValueError as exc:
+            # The remote path cannot be sent safely by this scp client.
+            return CommandResponse(request_id=request.id, status="rejected", error_message=str(exc))
         finally:
             self._close_lease(hop)
             self._close_lease(lease)

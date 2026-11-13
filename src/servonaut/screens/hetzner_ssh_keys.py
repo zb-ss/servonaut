@@ -478,7 +478,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
             return
 
         self._set_status(
-            f"[dim]Deleting key {key.get('name', identifier)}…[/dim]"
+            literal(f"Deleting key {key.get('name', identifier)}…", "dim")
         )
         try:
             await svc.delete_ssh_key(identifier)
@@ -487,7 +487,7 @@ class HetznerSSHKeysScreen(WorkspaceScreen):
                 "Hetzner SSH key delete failed for %s: %s", identifier, exc,
             )
             self._set_status(
-                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
+                literal(f"Delete failed: {self._short_err(exc)}", "$text-error")
             )
             self.notify(
                 f"Delete failed: {exc}", severity="error", markup=False,

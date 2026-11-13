@@ -36,6 +36,7 @@ from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.action_button import ActionButton, ActionRow
@@ -59,7 +60,6 @@ from servonaut.screens._demo_resolve import (
 )
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
-from servonaut.utils.markup import literal
 
 #: Per-action one-line help shown in the detail pane on focus.
 # How many findings the count looks at, and the statuses that no longer count as open.
@@ -2122,7 +2122,14 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                     markup=True,
                 )
             else:
-                self.app.notify("Could not launch the terminal.", severity="error", markup=False)
+                terminal_error = getattr(self.app.terminal_service, "last_error", None)
+                self.app.notify(
+                    terminal_error
+                    if isinstance(terminal_error, str) and terminal_error
+                    else "Could not launch the terminal.",
+                    severity="error",
+                    markup=False,
+                )
             return
 
         if source in ("personal", "team"):
@@ -2203,16 +2210,20 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             )
             port = instance.get("port")
 
-            ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                key_path=key_path,
-                port=port,
-                # Pin a cloud instance by its alias, as every other path does.
-                extra_options=host_key_alias_options(
-                    instance, self.app.connection_service.host_key_policy(),
-                ),
-            )
+            try:
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    port=port,
+                    # Pin a cloud instance by its alias, as every other path does.
+                    extra_options=host_key_alias_options(
+                        instance, self.app.connection_service.host_key_policy(),
+                    ),
+                )
+            except SSHRefusal as exc:
+                self.app.notify(str(exc), severity="error", markup=False)
+                return
 
             tier_label = "personal" if source == "personal" else "team"
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
