@@ -1316,6 +1316,32 @@ class TeamManagementScreen(Screen):
         if config is not None:
             self._render_push_config_preview(config)
 
+    @staticmethod
+    def _refused_options_lines(options: list) -> list[str]:
+        """The pull preview's lines on SSH options that need the member's approval."""
+        if not options:
+            return []
+        lines = [
+            f"This team configuration sets {len(options)} SSH options that run programs on this "
+            "computer. Servonaut will not use them, and connections that need them are refused, "
+            "until you allow each one in Settings > Connections."
+        ]
+        lines.extend(
+            "  • " + markup_literal(f"{item['where']}: {terminal_safe(item['option'])}")
+            for item in options[:5]
+        )
+        if len(options) > 5:
+            lines.append(f"  and {len(options) - 5} more")
+        return lines
+
+    def _team_for_options(self) -> dict:
+        """The team on screen, as ``apply_team_config`` records it."""
+        record = dict(self._teams_by_slug.get(self._current_team_slug) or {})
+        return {
+            "id": record.get("id"), "slug": self._current_team_slug,
+            "name": getattr(self, "_current_team_name", None) or record.get("name"),
+        }
+
     def _show_pull_config_form(self, remote_payload: dict) -> None:
         from servonaut.services.team_config_subset import diff_against_local
         config_manager = getattr(self.app, "config_manager", None)
@@ -1340,6 +1366,7 @@ class TeamManagementScreen(Screen):
             )
         if diff["kept_key_paths"]:
             lines.append(f"  {_kept_key_paths_text(diff['kept_key_paths'])}: a team config never carries key paths.")
+        lines.extend(self._refused_options_lines(diff["refused_options"]))
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
@@ -1793,7 +1820,10 @@ class TeamManagementScreen(Screen):
         from servonaut.services.team_config_apply import apply_team_config
         payload = self._pending_pull_payload
         try:
-            applied = apply_team_config(config, payload, shared_servers=self._team_shared_servers())
+            applied = apply_team_config(
+                config, payload, shared_servers=self._team_shared_servers(),
+                team=self._team_for_options(),
+            )
             config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
@@ -1801,8 +1831,13 @@ class TeamManagementScreen(Screen):
             return
         self._pending_pull_payload = None
         self._hide_pull_config_form()
-        skipped, kept = applied
+        skipped, kept, refused = applied
         message = "Team config applied" + (f"; {_kept_key_paths_text(kept)}." if kept else ".")
+        if refused:
+            message += (
+                f" {refused} SSH options from the team need your approval before connections "
+                "that use them work: Settings > Connections."
+            )
         if skipped:
             message += (f" Not added, the team already shares {'it' if len(skipped) == 1 else 'them'} "
                         f"(connect with the team key): {self._names_for_display(skipped)}.")

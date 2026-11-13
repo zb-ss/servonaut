@@ -649,6 +649,12 @@ class ServonautApp(App):
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
+        if self.config_manager.team_options_recorded:
+            self.notify(
+                f"{self.config_manager.team_options_recorded} SSH options that run programs "
+                "were saved before this version and need your approval: Settings > Connections.",
+                severity="warning", timeout=15, markup=False,
+            )
         self._apply_configured_theme(config.theme)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         # Every provider account and its services. The ``*_service``

@@ -362,10 +362,12 @@ def collect_team_options(profiles: Sequence[Any], servers: Sequence[Any]) -> Lis
         command = getattr(profile, "proxy_command", None)
         if isinstance(command, str) and command.strip():
             add(f"ProxyCommand={command.strip()}")
-        for entry in getattr(profile, "extra_ssh_options", None) or []:
+        extras = getattr(profile, "extra_ssh_options", None)
+        for entry in extras if isinstance(extras, (list, tuple)) else ():
             add(entry)
     for server in servers:
-        for entry in getattr(server, "extra_ssh_options", None) or []:
+        extras = getattr(server, "extra_ssh_options", None)
+        for entry in extras if isinstance(extras, (list, tuple)) else ():
             add(entry)
     return found
 

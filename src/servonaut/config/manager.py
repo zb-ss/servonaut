@@ -374,6 +374,7 @@ class ConfigManager:
         """
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
+        self.team_options_recorded = 0
         _migrate_legacy_paths()
         _ensure_config_dir()
         load_secrets_env()
@@ -391,6 +392,8 @@ class ConfigManager:
         if not self._config_path.exists():
             logger.info("No config file found at %s, using defaults", self._config_path)
             self._config = AppConfig()
+            # A new install has nothing saved before options were recorded.
+            self._config.ssh.team_options_checked = True
             return self._config
 
         # Older releases wrote config.json (which holds credentials) and its
@@ -421,6 +424,8 @@ class ConfigManager:
             if self._config.ai_chunk_size == 4000:
                 self._config.ai_chunk_size = 100000
                 self.save(self._config)
+
+            self._baseline_team_options()
 
             # Validate and warn
             warnings = self._validate(self._config)
@@ -469,6 +474,24 @@ class ConfigManager:
         _write_json_secure(self._config_path, migrated)
         logger.info("Migration complete")
         return migrated
+
+    def _baseline_team_options(self) -> None:
+        """Once per config: record saved SSH options a team may have supplied.
+
+        Nothing recorded where a pulled profile came from before the list
+        existed (see ``utils.ssh_option_policy.baseline_existing_options``).
+        ``self.team_options_recorded`` says how many items were added, for
+        a notice at start-up.
+        """
+        config = self._config
+        if config is None or config.ssh.team_options_checked is True:
+            return
+        from servonaut.services import auth_service
+        from servonaut.utils.ssh_option_policy import baseline_existing_options
+
+        recorded = baseline_existing_options(config, auth_service.AUTH_FILE)
+        self.team_options_recorded += recorded
+        self.save(config)
 
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk.

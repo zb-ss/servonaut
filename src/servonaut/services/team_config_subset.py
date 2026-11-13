@@ -154,4 +154,38 @@ def diff_against_local(
         ]
     kept = local_key_paths(local, {**remote_payload, "custom_servers": kept_servers})
     diff["kept_key_paths"] = len(kept["bastion_key"]) + len(kept["ssh_key"])
+    diff["refused_options"] = _refused_options(remote_payload.get("connection_profiles"), kept_servers)
     return diff
+
+
+def _refused_options(profiles: Any, servers: Any) -> list:
+    """The ``{"where", "option"}`` pairs of options a pull would carry that need approval."""
+    from servonaut.utils.ssh_option_policy import canonical, classify
+
+    found: list = []
+    seen: set = set()
+
+    def add(where: str, entry: Any) -> None:
+        text = canonical(entry)
+        if classify(entry).kind != "accepted" and text not in seen:
+            seen.add(text)
+            found.append({"where": where, "option": text})
+
+    def entries(row: dict) -> list:
+        extras = row.get("extra_ssh_options")
+        return list(extras) if isinstance(extras, (list, tuple)) else []
+
+    for row in profiles if isinstance(profiles, list) else []:
+        if not isinstance(row, dict):
+            continue
+        where = f"profile '{row.get('name', '')}'"
+        command = row.get("proxy_command")
+        if isinstance(command, str) and command.strip():
+            add(where, f"ProxyCommand={command.strip()}")
+        for entry in entries(row):
+            add(where, entry)
+    for row in servers if isinstance(servers, list) else []:
+        if isinstance(row, dict):
+            for entry in entries(row):
+                add(f"server '{row.get('name', '')}'", entry)
+    return found
