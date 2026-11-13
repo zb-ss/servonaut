@@ -389,3 +389,45 @@ async def test_settings_shows_the_whole_option_before_and_after_it_is_allowed(tm
             assert time.monotonic() < deadline
             await pilot.pause()
     assert toasts[0] == f"Allowed: {LONG}\\x1b[2J. Connections that use it will run it on this computer."
+
+
+# --- the sign-in window and the User value ---------------------------------------------
+
+def test_the_step_runs_when_a_member_signs_in_during_a_session(home):
+    path = _old_config(home)
+    manager = ConfigManager(config_path=path)
+    config = manager.load()
+    conn = ConnectionService(manager)
+    profile = config.connection_profiles[0]
+    assert conn.get_proxy_args(profile) == ["-o", "ProxyCommand=ssh -W %h:%p jump"]
+
+    (home / "auth.json").write_text(json.dumps({"teams_fetched_at": 1.0, "teams_cached": [{"slug": "a"}]}))
+    assert manager.record_saved_team_options() == 1
+
+    assert isinstance(conn.get_proxy_args(profile)[1], RefusedOption)
+    assert json.loads(path.read_text())["ssh"]["team_options_checked"] is True
+    assert manager.record_saved_team_options() == 0
+
+
+def test_the_app_runs_the_step_after_a_sign_in(home):
+    from servonaut.app import ServonautApp
+
+    (home / "auth.json").write_text(json.dumps({"teams_fetched_at": 1.0, "teams_cached": [{"slug": "a"}]}))
+    fake = MagicMock()
+    fake.config_manager.record_saved_team_options.return_value = 2
+    ServonautApp._note_saved_team_options(fake)
+    fake._notify_saved_team_options.assert_called_once_with(2)
+    fake._notify_saved_team_options.reset_mock()
+    fake.config_manager.record_saved_team_options.return_value = 0
+    ServonautApp._note_saved_team_options(fake)
+    fake._notify_saved_team_options.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["a$(id)", "a;id", "a`id`", "a|b", "a&b", "a<b", "a>b", "a(b)", "-oProxyCommand=x", "a\"b"])
+def test_a_user_with_shell_syntax_is_refused(value):
+    assert classify(f"User={value}").kind == "refused"
+
+
+@pytest.mark.parametrize("value", ["deploy", "DOMAIN\\svc account", "jdoe@CORP", "%r", "john.smith", "ü"])
+def test_real_user_names_are_accepted(value):
+    assert classify(f"User={value}").kind == "accepted"
