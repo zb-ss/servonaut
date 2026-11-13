@@ -100,11 +100,13 @@ async def _wheel_to(app, pilot, screen, rack, *, bottom: bool, expected: str) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(160, 50), (100, 30), (80, 24)])
 @pytest.mark.parametrize("route", ["fleet", "actions"])
 async def test_notifications_keep_live_composer_controls_and_footer_clear(
     size: tuple[int, int], route: str,
 ) -> None:
+    # Two rows on short terminals (below 36), four otherwise.
+    lane_rows = 2 if size[1] < 36 else 4
     app = _LayoutHost(navigation_visible=False)
     # The measured source defect was visible in this actual registered theme.
     app.theme = "atom-one-dark"
@@ -148,12 +150,12 @@ async def test_notifications_keep_live_composer_controls_and_footer_clear(
             arrangement = screen.arrange(screen.scrollable_content_region.size)
             placement = next(p for p in arrangement.placements if p.widget is lanes[0])
             reserved = placement.region + placement.offset + screen.scrollable_content_region.offset
-            assert reserved.height == 4 and reserved.width == screen.scrollable_content_region.width
+            assert reserved.height == lane_rows and reserved.width == screen.scrollable_content_region.width
             assert reserved.bottom == screen.scrollable_content_region.bottom - 2
             assert screen.region.contains_region(reserved)
-            assert arrangement.scroll_spacing.bottom >= 6
+            assert arrangement.scroll_spacing.bottom >= lane_rows + 2
             assert screen.query_one("#main-layout").region.bottom <= reserved.y
-            assert rack.region.height <= 4
+            assert rack.region.height <= lane_rows
             assert not worker.is_finished and not stopped.is_set()
             assert composer.document is document and composer.selection == selection
             assert app.focused is composer
@@ -203,3 +205,27 @@ async def test_notifications_keep_live_composer_controls_and_footer_clear(
             await wait_until(stopped.is_set)
             await wait_until(lambda: worker.is_finished and not panel.is_attached)
         assert worker.is_finished and not panel.is_attached
+
+
+@pytest.mark.asyncio
+async def test_the_lane_follows_the_terminal_height_across_the_threshold() -> None:
+    app = _LayoutHost(navigation_visible=False)
+
+    def lane_rows() -> tuple[bool, int, int]:
+        screen = app.screen
+        lane = screen.query_one("WorkspaceNotificationSpace")
+        arrangement = screen.arrange(screen.scrollable_content_region.size)
+        placement = next(p for p in arrangement.placements if p.widget is lane)
+        return (
+            screen.has_class("-lane-compact"), placement.region.height,
+            screen.query_one(ToastRack).styles.max_height.value,
+        )
+
+    async with app.run_test(size=(100, 35), notifications=True) as pilot:
+        await wait_until(lambda: lane_rows() == (True, 2, 2))
+        await pilot.resize_terminal(100, 36)
+        await wait_until(lambda: lane_rows() == (False, 4, 4))
+        await pilot.resize_terminal(100, 30)
+        await wait_until(lambda: lane_rows() == (True, 2, 2))
+        await pilot.resize_terminal(160, 50)
+        await wait_until(lambda: lane_rows() == (False, 4, 4))

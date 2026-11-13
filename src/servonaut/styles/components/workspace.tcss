@@ -24,6 +24,16 @@ WorkspaceScreen > ToastRack {
     visibility: visible;
 }
 
+/* Short terminals give two of the four rows back; the lane is constant within
+   a size class, so nothing moves when a toast appears or expires. */
+WorkspaceScreen.-lane-compact > WorkspaceNotificationSpace {
+    height: 2;
+}
+
+WorkspaceScreen.-lane-compact > ToastRack {
+    max-height: 2;
+}
+
 WorkspaceScreen > ToastRack Toast {
     padding: 0 1;
     margin-top: 0;

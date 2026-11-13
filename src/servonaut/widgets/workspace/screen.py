@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+from textual import events
 from textual.binding import Binding
 from textual.css.scalar import Scalar
 from textual.geometry import Size
@@ -47,6 +48,9 @@ class WorkspaceScreen(Screen):
 
     # Below this many columns the navigation collapses by itself.
     NAVIGATION_AUTO_HIDE_WIDTH = 110
+    # Below this many rows the notification lane and toast rack are two rows
+    # instead of four (class ``-lane-compact``, styled in workspace.tcss).
+    NOTIFICATION_LANE_COMPACT_HEIGHT = 36
 
     CHAT_REFLOW = False
     CHAT_MIN_CONTENT_WIDTH: int | None = None
@@ -65,8 +69,14 @@ class WorkspaceScreen(Screen):
         ] | None = None
 
     async def on_mount(self) -> None:
+        self._sync_notification_lane()
         if not any(isinstance(child, WorkspaceNotificationSpace) for child in self.children):
             await self.mount(WorkspaceNotificationSpace())
+
+    def _sync_notification_lane(self, height: int | None = None) -> None:
+        """Use the two-row lane on short terminals, from the terminal's own height."""
+        rows = self.app.size.height if height is None else height
+        self.set_class(rows < self.NOTIFICATION_LANE_COMPACT_HEIGHT, "-lane-compact")
 
     def _reflow_thresholds(self) -> tuple[int, int]:
         minimum, narrow = self.CHAT_MIN_CONTENT_WIDTH, self.CONTENT_NARROW_WIDTH
@@ -126,7 +136,8 @@ class WorkspaceScreen(Screen):
         for controls in self.query(WorkspaceControls):
             controls.sync_state()
 
-    def on_resize(self) -> None:
+    def on_resize(self, event: events.Resize) -> None:
+        self._sync_notification_lane(event.size.height)
         self.call_after_refresh(self.apply_workspace_state)
         if self.CHAT_REFLOW:
             self.call_after_refresh(self.sync_workspace_controls)
