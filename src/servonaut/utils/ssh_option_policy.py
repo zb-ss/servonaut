@@ -259,7 +259,10 @@ def _unsafe_value(key: str, value: str) -> str:
     try:
         if key in ("hostname", "hostkeyalias"):
             check_ssh_host(value)
-        elif key == "user" and (_USER_SHELL.search(value) or value.startswith("-")):
+        elif key == "user" and (
+            _USER_SHELL.search(value) or value.startswith("-")
+            or re.search(r"\s-", value) or value.endswith("\\")
+        ):
             return "holds characters a shell reads as a command"
         elif key == "port" and not (value.isascii() and value.isdigit()):
             return "is not a number"
