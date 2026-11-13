@@ -1007,6 +1007,9 @@ class ServonautTools:
         args = {
             'instance_id': instance_id, 'command': command, 'transport': transport,
         }
+        if requested_as:
+            # Names the tool that composed the command, as relay rows do.
+            args['requested_as'] = requested_as
         allowed, reason = self._guard.check_tool('run_command')
         if not allowed:
             self._audit.log('run_command', args, '', False, reason)
