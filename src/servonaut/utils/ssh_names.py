@@ -25,7 +25,11 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066
 _SHOWN_LIMIT = 60
 
 
-class SSHNameError(ValueError):
+class SSHRefusal(ValueError):
+    """A connection Servonaut will not start; the message says what to fix."""
+
+
+class SSHNameError(SSHRefusal):
     """A host or user name that cannot be used safely in an ssh command."""
 
 
@@ -34,7 +38,7 @@ def _write_out(match: "re.Match[str]") -> str:
     return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
 
 
-def _shown(value: str) -> str:
+def shown(value: str) -> str:
     # Written out here (not through the markup helpers) so the MCP server,
     # which loads no UI library, can import this module.
     text = _CONTROL.sub(_write_out, value)
@@ -45,7 +49,7 @@ def check_ssh_host(host: object) -> None:
     """Raise ``SSHNameError`` when *host* holds a character a host name never needs."""
     if isinstance(host, str) and _HOST_UNSAFE.search(host):
         raise SSHNameError(
-            f"Not connecting: the host name {_shown(host)!r} contains a space, quote, backslash "
+            f"Not connecting: the host name {shown(host)!r} contains a space, quote, backslash "
             "or shell symbol. Correct the server's address in its details."
         )
 
@@ -54,7 +58,7 @@ def check_ssh_user(user: object) -> None:
     """Raise ``SSHNameError`` when *user* holds a quote or a control character."""
     if isinstance(user, str) and _USER_UNSAFE.search(user):
         raise SSHNameError(
-            f"Not connecting: the user name {_shown(user)!r} contains a quote or control "
+            f"Not connecting: the user name {shown(user)!r} contains a quote or control "
             "character. Correct the server's user name in its details."
         )
 

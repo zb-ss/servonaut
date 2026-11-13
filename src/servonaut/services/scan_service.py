@@ -24,7 +24,7 @@ from servonaut.services.ssh_host_keys import (
 )
 from servonaut.utils.match_utils import matches_conditions
 from servonaut.utils.remote_shell import shell_path
-from servonaut.utils.ssh_names import SSHNameError, check_ssh_target
+from servonaut.utils.ssh_names import SSHRefusal, check_ssh_target
 from servonaut.utils.ssh_utils import run_ssh
 
 logger = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ class ScanService(ScanServiceInterface):
         target = await self._with_vault(target, instance, connection_service)
         try:
             check_ssh_target(target.host, target.username)
-        except SSHNameError as exc:
+        except SSHRefusal as exc:
             raise ScanConnectionError("invalid host or user name", str(exc)) from exc
         await self._check_connection(target)
 

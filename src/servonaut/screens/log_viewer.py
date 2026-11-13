@@ -19,7 +19,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Static, RichLog
 
 from servonaut.utils.markup import literal
-from servonaut.utils.ssh_names import SSHNameError
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
@@ -285,7 +285,7 @@ class LogViewerScreen(Screen):
                 extra_options=conn.get("extra_options") or [],
                 **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
             )
-        except SSHNameError as exc:
+        except SSHRefusal as exc:
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)

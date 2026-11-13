@@ -23,7 +23,7 @@ from servonaut.services.ssh_host_keys import (
 )
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
-from servonaut.utils.ssh_names import SSHNameError
+from servonaut.utils.ssh_names import SSHRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ async def visit_for_host_key(
             extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
             record_to_known_hosts=known_hosts_path,
         )
-    except SSHNameError as exc:
+    except SSHRefusal as exc:
         return str(exc)
     try:
         output = await run_ssh_subprocess(argv, timeout=timeout)
