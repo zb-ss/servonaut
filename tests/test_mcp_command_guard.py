@@ -195,3 +195,100 @@ def test_standard_commands_are_rebuilt_from_checked_tokens(command, rendered):
 def test_dangerous_commands_run_unchanged():
     command = "tail -n 1 /var/log/syslog; uptime"
     assert _guard(GuardLevel.DANGEROUS).command_for_execution(command) == command
+
+
+_DEFAULTS = MCPConfig().command_allowlist
+
+
+@pytest.mark.parametrize("command", [
+    "ip --batch -",
+    "ip -batch -",
+    "ip --b /etc/hostname",
+    "ip --force --batch -",
+    "ip -force -batch x",
+    "ip -- link set lo down",
+    "date '+netns exec x sh -c id' | ip --batch -",
+    "find /dev/null -printf 'link set dev eth0 down\\n' | ip --batch -",
+    "sudo ip --batch -",
+    "ip -b -",
+])
+def test_ip_batch_in_any_spelling_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "ip -br addr", "ip --netns ns addr list", "ip -s link", "ip -4 addr show",
+    "ip --json addr",
+])
+def test_ip_display_options_are_accepted(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is True
+
+
+@pytest.mark.parametrize("command", [
+    "date 12:30", "date @0", "date '2020-01-01 00:00'", "date 1200",
+    "date -f %s 0", "date -s now", "date --set=now", "sudo date 12:30",
+])
+def test_date_with_a_bare_operand_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "date", "date +%s", "date -u", "date -d '1 day ago' +%F", "date -I",
+    "date -r /etc/hostname",
+])
+def test_date_that_only_prints_is_accepted(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is True
+
+
+@pytest.mark.parametrize("command", ["grep '|' f", "ls \\| sort", "cat 'a' '|' sort"])
+def test_a_quoted_or_escaped_pipe_word_is_refused(command):
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command(command, _DEFAULTS)[0] is False
+
+
+def test_find_rm_is_refused():
+    from servonaut.mcp.guards import check_standard_command
+
+    assert check_standard_command("find / -rm", _DEFAULTS)[0] is False
+
+
+@pytest.mark.parametrize("command", [
+    "grep 'a b' f", 'grep "a  b"   f', "grep '' f", "ls '*.log'",
+    "grep 'x;y' f", "grep a\\|b f", "echo_not cat", "ls -la | sort | head -3",
+])
+def test_rebuilt_text_parses_back_to_the_same_words(command):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    allowlist = [*_DEFAULTS, "echo_not"]
+    if not check_standard_command(command, allowlist)[0]:
+        pytest.skip("refused by the matcher")
+    rendered = render_standard_command(command)
+    assert render_standard_command(rendered) == rendered
+    original = [shlex.split(part) for part in command.split(" | ")]
+    rebuilt = [shlex.split(part) for part in rendered.split(" | ")]
+    assert original == rebuilt
+
+
+def test_rebuilt_text_reaches_a_real_shell_as_the_same_argument():
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    text = render_standard_command("cat x 'a b' '$HOME' '' 'x;y' 'a\"b'")
+    rendered = text.replace("cat", "printf '[%s]'", 1)
+    out = subprocess.run(
+        ["sh", "-c", rendered], capture_output=True, text=True, check=True,
+    ).stdout
+    assert out == '[x][a b][$HOME][][x;y][a"b]'
