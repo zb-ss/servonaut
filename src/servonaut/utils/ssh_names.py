@@ -38,6 +38,11 @@ def _write_out(match: "re.Match[str]") -> str:
     return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
 
 
+def shown_full(value: str) -> str:
+    """*value* with control characters written out, never cut."""
+    return _CONTROL.sub(_write_out, value)
+
+
 def shown(value: str) -> str:
     # Written out here (not through the markup helpers) so the MCP server,
     # which loads no UI library, can import this module.

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from servonaut.utils.ssh_names import SSHRefusal, shown
+from servonaut.utils.ssh_names import SSHNameError, SSHRefusal, check_ssh_host, check_ssh_user, shown
 
 __all__ = [
     "ACCEPTED_OPTIONS",
@@ -40,12 +40,15 @@ __all__ = [
     "classify",
     "collect_team_options",
     "judge_entries",
+    "non_accepted_texts",
+    "option_entries",
+    "proxy_command_entry",
     "judge_proxy_command",
     "merge_recorded",
     "origin_label",
     "team_option_rows",
     "parse_option",
-    "possible_team_member",
+    "membership",
     "raise_if_refused",
     "set_allowed",
 ]
@@ -83,11 +86,17 @@ REFUSED_OPTIONS: Dict[str, str] = {
     "forwardagent": "lets the server use this computer's SSH keys",
     "sendenv": "sends this computer's environment variables to the server",
     "remoteforward": "lets the server reach this computer's network",
+    "streamlocalbindunlink": "can replace a file on this computer",
+    "gssapidelegatecredentials": "lets the server use this computer's Kerberos credentials",
+    "ignoreunknown": "makes SSH skip settings it does not know",
 }
 
 # These only switch a feature off, so the value "no" or "false" is accepted.
 _SWITCHES = frozenset(
-    {"permitlocalcommand", "forwardx11", "forwardx11trusted", "proxyusefdpass", "forwardagent"}
+    {
+        "permitlocalcommand", "forwardx11", "forwardx11trusted", "proxyusefdpass", "forwardagent",
+        "streamlocalbindunlink", "gssapidelegatecredentials",
+    }
 )
 _OFF_VALUES = frozenset({"no", "false"})
 
@@ -102,16 +111,16 @@ ACCEPTED_OPTIONS = frozenset(
     controlpersist dynamicforward enableescapecommandline enablesshkeysign escapechar
     exitonforwardfailure fingerprinthash forkafterauthentication forwardx11timeout
     gatewayports globalknownhostsfile gssapiauthentication gssapiclientidentity
-    gssapidelegatecredentials gssapikexalgorithms gssapikeyexchange gssapirenewalforcesrekey
+    gssapikexalgorithms gssapikeyexchange gssapirenewalforcesrekey
     gssapiserveridentity gssapitrustdns hashknownhosts hostbasedacceptedalgorithms
     hostbasedauthentication hostbasedkeytypes hostkeyalgorithms hostkeyalias hostname identitiesonly
-    identityagent identityfile ignoreunknown ipqos kbdinteractiveauthentication kbdinteractivedevices
+    identityagent identityfile ipqos kbdinteractiveauthentication kbdinteractivedevices
     kexalgorithms localforward loglevel logverbose macs nohostauthenticationforlocalhost
     numberofpasswordprompts obscurekeystroketiming passwordauthentication permitremoteopen port
     preferredauthentications pubkeyacceptedalgorithms pubkeyacceptedkeytypes pubkeyauthentication
     refuseconnection rekeylimit requesttty requiredrsasize revokedhostkeys
     serveralivecountmax serveraliveinterval sessiontype setenv stdinnull streamlocalbindmask
-    streamlocalbindunlink stricthostkeychecking syslogfacility tag tcpkeepalive tunnel tunneldevice
+    stricthostkeychecking syslogfacility tag tcpkeepalive tunnel tunneldevice
     updatehostkeys user verifyhostkeydns versionaddendum visualhostkey warnweakcrypto
     """.split()
 )
@@ -174,15 +183,85 @@ def parse_option(entry: object) -> Optional[_Parsed]:
     match = _ENTRY.match(entry)
     if match is None:
         return None
-    return _Parsed(match.group("quoted") or match.group("bare"), match.group("value").strip())
+    return _Parsed(match.group("quoted") or match.group("bare"), match.group("value").strip(" \t"))
 
 
 def canonical(entry: object) -> str:
     """The text a recorded option is compared by: ``name`` lower-cased, ``=``, value stripped."""
     parsed = parse_option(entry)
-    if parsed is None:
-        return entry.strip() if isinstance(entry, str) else str(entry)
-    return f"{parsed.name.lower()}={parsed.value}"
+    if parsed is not None:
+        return f"{parsed.name.lower()}={parsed.value}"
+    if not isinstance(entry, str):
+        return str(entry)
+    # Not an option ssh reads: keep the text, with the name part lower-cased
+    # so the same entry always has the same text, however it was built.
+    text = entry.strip(" \t")
+    name, sep, rest = text.partition("=")
+    return f"{name.lower()}{sep}{rest}"
+
+
+def proxy_command_entry(command: object) -> Optional[str]:
+    """The ``ProxyCommand=...`` entry a profile's ``proxy_command`` field stands for.
+
+    The one place that reads the field, for recording, the pull preview and
+    connecting alike, so all of them judge and run the same text. A command is
+    stripped of surrounding whitespace (line breaks included); a value that is
+    not text is kept as it is written, so it is recorded and refused like any
+    other odd entry. None when the field is empty.
+    """
+    if command is None or command == "" or command == []:
+        return None
+    if isinstance(command, str):
+        command = command.strip()
+        return f"ProxyCommand={command}" if command else None
+    return f"ProxyCommand={command}"
+
+
+def option_entries(extras: object) -> List[Any]:
+    """The entries of an ``extra_ssh_options`` field, whatever shape it came in.
+
+    A list or tuple is its items. Any other value (a text, a mapping, a
+    number) is one entry, which then fails to parse and is refused from a team.
+    """
+    if not extras:
+        return []
+    return list(extras) if isinstance(extras, (list, tuple)) else [extras]
+
+
+def non_accepted_texts(entry: object) -> List[str]:
+    """The canonical texts to record for *entry*: itself, and each of its lines.
+
+    The editors split an entry that holds line breaks into several options,
+    so every line is recorded too: a team's entry cannot turn into the
+    member's own by being saved from a form.
+    """
+    texts = [] if classify(entry).kind == "accepted" else [canonical(entry)]
+    if isinstance(entry, str):
+        lines = entry.splitlines()
+        if len(lines) > 1 or (lines and lines[0] != entry):
+            for line in lines:
+                if line.strip() and classify(line).kind != "accepted":
+                    texts.append(canonical(line))
+    return texts
+
+
+def _unsafe_value(key: str, value: str) -> str:
+    """What is wrong with the value of an accepted option Servonaut later puts in a command.
+
+    ``HostName`` and ``HostKeyAlias`` become the ``%h`` of a hop's command, and
+    ``User`` and ``Port`` its ``%r`` and ``%p``; the value must not hold
+    anything a shell reads. "" when the value is fine or the option is not one of these.
+    """
+    try:
+        if key in ("hostname", "hostkeyalias"):
+            check_ssh_host(value)
+        elif key == "user":
+            check_ssh_user(value)
+        elif key == "port" and not (value.isascii() and value.isdigit()):
+            return "is not a number"
+    except SSHNameError:
+        return "holds characters a shell reads as a command"
+    return ""
 
 
 def classify(entry: object) -> Verdict:
@@ -192,6 +271,9 @@ def classify(entry: object) -> Verdict:
     if parsed is None:
         return Verdict("malformed", "", "", text)
     key = parsed.name.lower()
+    unsafe = _unsafe_value(key, parsed.value)
+    if unsafe:
+        return Verdict("refused", parsed.name, unsafe, text)
     if key in REFUSED_OPTIONS:
         if key in _SWITCHES and parsed.value.lower() in _OFF_VALUES:
             return Verdict("accepted", parsed.name, "", text)
@@ -326,9 +408,11 @@ def judge_entries(
     return result
 
 
-def judge_proxy_command(proxy_command: str, *, where: str, team_options: object) -> Optional[RefusedOption]:
+def judge_proxy_command(proxy_command: object, *, where: str, team_options: object) -> Optional[RefusedOption]:
     """The carrier for a profile's ``proxy_command`` field, or None when it may run."""
-    entry = f"ProxyCommand={proxy_command}"
+    entry = proxy_command_entry(proxy_command)
+    if entry is None:
+        return None
     (judged,) = judge_entries([entry], where=where, team_options=team_options)
     return judged if isinstance(judged, RefusedOption) else None
 
@@ -353,25 +437,21 @@ def raise_if_refused(*option_lists: Optional[Iterable[object]]) -> None:
 def collect_team_options(profiles: Sequence[Any], servers: Sequence[Any]) -> List[str]:
     """Every option text in *profiles* and *servers* that is not accepted from a team."""
     found: List[str] = []
-
-    def add(entry: object) -> None:
-        if classify(entry).kind != "accepted":
-            text = canonical(entry)
-            if text not in found:
-                found.append(text)
-
     for profile in profiles:
-        command = getattr(profile, "proxy_command", None)
-        if isinstance(command, str) and command.strip():
-            add(f"ProxyCommand={command.strip()}")
-        extras = getattr(profile, "extra_ssh_options", None)
-        for entry in extras if isinstance(extras, (list, tuple)) else ():
-            add(entry)
+        entries = [proxy_command_entry(getattr(profile, "proxy_command", None))]
+        entries += option_entries(getattr(profile, "extra_ssh_options", None))
+        found += _texts_of(entries)
     for server in servers:
-        extras = getattr(server, "extra_ssh_options", None)
-        for entry in extras if isinstance(extras, (list, tuple)) else ():
-            add(entry)
-    return found
+        found += _texts_of(option_entries(getattr(server, "extra_ssh_options", None)))
+    return list(dict.fromkeys(found))
+
+
+def _texts_of(entries: Iterable[object]) -> List[str]:
+    texts: List[str] = []
+    for entry in entries:
+        if entry is not None:
+            texts += non_accepted_texts(entry)
+    return texts
 
 
 def merge_recorded(
@@ -402,37 +482,46 @@ def merge_recorded(
 # Profiles and servers saved before options were recorded
 # ---------------------------------------------------------------------------
 
-def possible_team_member(auth_path: Path) -> bool:
-    """True unless the sign-in file proves the member belongs to no team.
+def membership(auth_path: Path) -> str:
+    """What the sign-in file says about teams: ``none`` (no account), ``member`` or ``alone``.
 
     A pull needs an account, and the screen that pulls also lists the teams.
-    No file means no account. A file that cannot be read, or whose team list
-    was never fetched, counts as a member.
+    ``none``: the file is missing. ``alone``: the teams were fetched and the
+    list is empty. ``member``: anything else, including a file that cannot be
+    read and a team list never fetched.
     """
     import json
 
     if not auth_path.exists():
-        return False
+        return "none"
     try:
         data = json.loads(auth_path.read_text(encoding="utf-8"))
         fetched = data.get("teams_fetched_at") or 0
-        cached = data.get("teams_cached")
-        if isinstance(fetched, (int, float)) and fetched > 0 and cached == []:
-            return False
+        if isinstance(fetched, (int, float)) and fetched > 0 and data.get("teams_cached") == []:
+            return "alone"
     except (OSError, ValueError, AttributeError):
-        return True
-    return True
+        return "member"
+    return "member"
 
 
 def baseline_existing_options(config: Any, auth_path: Path) -> int:
     """Record, once, the options already saved that a team may have supplied.
 
-    Returns how many items were recorded. Sets ``ssh.team_options_checked``
-    either way, so the step never runs twice.
+    Returns how many items were recorded. The step is decided only when the
+    sign-in file exists. Without it the flag stays unset and the step runs on
+    the first load that finds one: the file is also removed when a session is
+    revoked, so its absence proves nothing about earlier pulls. Until then the
+    saved options keep working, and they are never recorded as a team's by
+    a file that is not there.
     """
     ssh = config.ssh
+    if ssh.team_options_checked:
+        return 0
+    state = membership(auth_path)
+    if state == "none":
+        return 0
     recorded = 0
-    if not ssh.team_options_checked and possible_team_member(auth_path):
+    if state == "member":
         existing = list(_items(ssh.team_options))
         for text in collect_team_options(config.connection_profiles, config.custom_servers):
             if _item_for(existing, text) is None:

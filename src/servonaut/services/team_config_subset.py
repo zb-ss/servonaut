@@ -159,33 +159,34 @@ def diff_against_local(
 
 
 def _refused_options(profiles: Any, servers: Any) -> list:
-    """The ``{"where", "option"}`` pairs of options a pull would carry that need approval."""
-    from servonaut.utils.ssh_option_policy import canonical, classify
+    """The ``{"where", "option"}`` pairs of options a pull would carry that need approval.
+
+    Reads each field through the same helpers the recorder and the
+    connection use, so the preview lists exactly what will be recorded.
+    """
+    from servonaut.utils.ssh_option_policy import non_accepted_texts, option_entries, proxy_command_entry
 
     found: list = []
     seen: set = set()
 
-    def add(where: str, entry: Any) -> None:
-        text = canonical(entry)
-        if classify(entry).kind != "accepted" and text not in seen:
-            seen.add(text)
-            found.append({"where": where, "option": text})
+    def label(kind: str, row: dict) -> str:
+        name = row.get("name")
+        return f"{kind} '{name if isinstance(name, str) else ''}'"
 
-    def entries(row: dict) -> list:
-        extras = row.get("extra_ssh_options")
-        return list(extras) if isinstance(extras, (list, tuple)) else []
+    def add(where: str, entries: list) -> None:
+        for entry in entries:
+            if entry is None:
+                continue
+            for text in non_accepted_texts(entry):
+                if text not in seen:
+                    seen.add(text)
+                    found.append({"where": where, "option": text})
 
     for row in profiles if isinstance(profiles, list) else []:
-        if not isinstance(row, dict):
-            continue
-        where = f"profile '{row.get('name', '')}'"
-        command = row.get("proxy_command")
-        if isinstance(command, str) and command.strip():
-            add(where, f"ProxyCommand={command.strip()}")
-        for entry in entries(row):
-            add(where, entry)
+        if isinstance(row, dict):
+            add(label("profile", row), [proxy_command_entry(row.get("proxy_command")),
+                                        *option_entries(row.get("extra_ssh_options"))])
     for row in servers if isinstance(servers, list) else []:
         if isinstance(row, dict):
-            for entry in entries(row):
-                add(f"server '{row.get('name', '')}'", entry)
+            add(label("server", row), option_entries(row.get("extra_ssh_options")))
     return found

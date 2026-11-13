@@ -28,6 +28,8 @@ from servonaut.utils.ssh_option_policy import (
     bastion_name_message,
     judge_entries,
     judge_proxy_command,
+    option_entries,
+    proxy_command_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -346,8 +348,9 @@ class ConnectionService(ConnectionServiceInterface):
         if not profile:
             return []
 
-        # Use explicit proxy_command if set
-        if profile.proxy_command:
+        # Use explicit proxy_command if set. The entry judged is the entry run.
+        entry = proxy_command_entry(profile.proxy_command)
+        if entry is not None:
             refused = judge_proxy_command(
                 profile.proxy_command,
                 where=f"the connection profile '{shown(profile.name)}'",
@@ -355,8 +358,8 @@ class ConnectionService(ConnectionServiceInterface):
             )
             if refused is not None:
                 return ['-o', refused]
-            logger.debug("Using explicit ProxyCommand: %s", profile.proxy_command)
-            return ['-o', f'ProxyCommand={profile.proxy_command}']
+            logger.debug("Using explicit ProxyCommand: %s", entry)
+            return ['-o', entry]
 
         if not profile.bastion_host:
             return []
@@ -494,11 +497,11 @@ class ConnectionService(ConnectionServiceInterface):
         team_options = self._ssh_config().team_options
         if profile and profile.extra_ssh_options:
             extras.extend(judge_entries(
-                profile.extra_ssh_options,
+                option_entries(profile.extra_ssh_options),
                 where=f"the connection profile '{shown(profile.name)}'",
                 team_options=team_options,
             ))
-        instance_extras = instance.get('extra_ssh_options') or []
+        instance_extras = option_entries(instance.get('extra_ssh_options'))
         if instance_extras:
             name = shown(str(instance.get('name') or instance.get('id') or ''))
             if instance.get('is_shared') is True:

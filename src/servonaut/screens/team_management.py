@@ -1322,12 +1322,12 @@ class TeamManagementScreen(Screen):
         if not options:
             return []
         lines = [
-            f"This team configuration sets {len(options)} SSH options that run programs on this "
+            f"This team configuration sets {len(options)} SSH {'option' if len(options) == 1 else 'options'} that run programs on this "
             "computer. Servonaut will not use them, and connections that need them are refused, "
             "until you allow each one in Settings > Connections."
         ]
         lines.extend(
-            "  • " + markup_literal(f"{item['where']}: {terminal_safe(item['option'])}")
+            "  • " + markup_literal(terminal_safe(f"{item['where']}: {item['option']}"))
             for item in options[:5]
         )
         if len(options) > 5:
@@ -1835,8 +1835,9 @@ class TeamManagementScreen(Screen):
         message = "Team config applied" + (f"; {_kept_key_paths_text(kept)}." if kept else ".")
         if refused:
             message += (
-                f" {refused} SSH options from the team need your approval before connections "
-                "that use them work: Settings > Connections."
+                f" {refused} SSH {'option from the team needs' if refused == 1 else 'options from the team need'} "
+                f"your approval before connections that use {'it' if refused == 1 else 'them'} work: "
+                "Settings > Connections."
             )
         if skipped:
             message += (f" Not added, the team already shares {'it' if len(skipped) == 1 else 'them'} "

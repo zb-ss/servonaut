@@ -649,10 +649,15 @@ class ServonautApp(App):
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
-        if self.config_manager.team_options_recorded:
+        recorded = self.config_manager.team_options_recorded
+        if recorded:
+            lead = (
+                f"{recorded} SSH option that runs a program was saved before this version and needs"
+                if recorded == 1 else
+                f"{recorded} SSH options that run programs were saved before this version and need"
+            )
             self.notify(
-                f"{self.config_manager.team_options_recorded} SSH options that run programs "
-                "were saved before this version and need your approval: Settings > Connections.",
+                lead + " your approval: Settings > Connections.",
                 severity="warning", timeout=15, markup=False,
             )
         self._apply_configured_theme(config.theme)

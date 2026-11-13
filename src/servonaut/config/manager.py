@@ -426,9 +426,9 @@ class ConfigManager:
                 self.save(self._config)
 
             # A config this release left as it was (a version it cannot
-            # upgrade) is not rewritten for this either.
-            if not self._needs_migration(raw_data):
-                self._baseline_team_options()
+            # upgrade) is not rewritten for this either; its options are
+            # still recorded in memory.
+            self._baseline_team_options(write=not self._needs_migration(raw_data))
 
             # Validate and warn
             warnings = self._validate(self._config)
@@ -478,25 +478,32 @@ class ConfigManager:
         logger.info("Migration complete")
         return migrated
 
-    def _baseline_team_options(self) -> None:
+    def _baseline_team_options(self, *, write: bool) -> None:
         """Once per config: record saved SSH options a team may have supplied.
 
         Nothing recorded where a pulled profile came from before the list
         existed (see ``utils.ssh_option_policy.baseline_existing_options``).
         ``self.team_options_recorded`` says how many items were added, for
-        a notice at start-up.
+        a notice at start-up. A config that cannot be written (read-only
+        directory) still loads, with the options recorded in memory.
         """
         config = self._config
-        if config is None or config.ssh.team_options_checked is True:
+        if config is None:
             return
         from servonaut.services import auth_service
         from servonaut.utils.ssh_option_policy import baseline_existing_options
 
+        was_checked = config.ssh.team_options_checked
         recorded = baseline_existing_options(config, auth_service.AUTH_FILE)
         self.team_options_recorded += recorded
+        if not write or (not recorded and config.ssh.team_options_checked == was_checked):
+            return
         # Written in place, with no backup of its own: only the recorded
         # options and the flag are new, and an upgrade has just kept a copy.
-        _write_json_secure(self._config_path, self._serialize(config))
+        try:
+            _write_json_secure(self._config_path, self._serialize(config))
+        except OSError as exc:
+            logger.warning("Could not record the SSH options saved before this version: %s", exc)
 
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk.

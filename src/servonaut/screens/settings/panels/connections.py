@@ -25,7 +25,7 @@ from textual.widgets import Button, DataTable, Input, Select, Static
 from servonaut.config.schema import ConnectionProfile, ConnectionRule
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
-from servonaut.utils.ssh_names import shown
+from servonaut.utils.ssh_names import shown, shown_full
 from servonaut.utils.ssh_option_policy import origin_label, set_allowed, team_option_rows
 
 logger = logging.getLogger(__name__)
@@ -386,11 +386,15 @@ class ConnectionsPanel(SettingsPanel):
             return getattr(self.app, "redaction_service", None)
         return None
 
-    def _team_option_text(self, text: str) -> str:
-        """An option as shown; in demo mode only its name (the value can name a host)."""
+    def _team_option_text(self, text: str, *, full: bool = False) -> str:
+        """An option as shown; in demo mode only its name (the value can name a host).
+
+        The table cell is cut to fit. Everything the member decides on (the
+        line under the table, the toasts) is the whole text.
+        """
         if getattr(self.app, "demo_mode", False):
             return text.split("=", 1)[0] + "=…"
-        return shown(text)
+        return shown_full(text) if full else shown(text)
 
     def _selected_team_option(self) -> Optional[str]:
         """The option text on the selected row of the team options table."""
@@ -402,7 +406,7 @@ class ConnectionsPanel(SettingsPanel):
         """The selected option's full text, under the table."""
         text = self._selected_team_option()
         self.query_one("#conn_team_option_text", Static).update(
-            self._team_option_text(text) if text else ""
+            self._team_option_text(text, full=True) if text else ""
         )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -420,7 +424,7 @@ class ConnectionsPanel(SettingsPanel):
         set_allowed(options, text, allowed)
         self.app.config_manager.update(ssh=dataclasses.replace(config.ssh, team_options=options))
         self._refresh_team_options()
-        shown_text = self._team_option_text(text)
+        shown_text = self._team_option_text(text, full=True)
         self.app.notify(
             f"Allowed: {shown_text}. Connections that use it will run it on this computer."
             if allowed else f"Refused: {shown_text}.",

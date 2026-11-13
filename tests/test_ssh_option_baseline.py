@@ -62,7 +62,8 @@ def test_a_signed_in_member_has_old_options_recorded_and_refused_with_the_saved_
 def test_without_an_account_nothing_is_recorded_and_the_options_work_as_before(home):
     manager = load(write_config(home))
     config = manager.get()
-    assert config.ssh.team_options == [] and config.ssh.team_options_checked is True
+    # No sign-in file: nothing to decide on yet, so the step waits for one.
+    assert config.ssh.team_options == [] and config.ssh.team_options_checked is False
     service = ConnectionService(MagicMock(get=MagicMock(return_value=config)))
     assert service.get_proxy_args(config.connection_profiles[0]) == ["-o", f"ProxyCommand={PROXY}"]
 

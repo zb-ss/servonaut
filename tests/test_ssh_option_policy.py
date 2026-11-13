@@ -175,7 +175,7 @@ def test_an_option_saved_before_recording_says_so():
 def test_unknown_and_malformed_messages():
     recorded = [
         {"option": "foobar=1", "team": "1", "team_name": "", "allowed": False},
-        {"option": "-oProxyCommand=x", "team": "1", "team_name": "Acme", "allowed": False},
+        {"option": "-oproxycommand=x", "team": "1", "team_name": "Acme", "allowed": False},
     ]
     unknown, bad = judge_entries(["FooBar=1", "-oProxyCommand=x"], where="the custom server 'w'",
                                  team_options=recorded)
