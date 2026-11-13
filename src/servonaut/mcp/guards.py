@@ -245,8 +245,26 @@ def _check_segment(
     return True, "OK"
 
 
-def _render_token(token: str) -> str:
-    return token if _PLAIN_TOKEN.match(token) else shell_quote(token)
+_GLOB_CHARS = frozenset("*?[")
+# A glob may expand only when every result starts the same way, so it can
+# never become an option or a bare operand of a command with argument rules.
+_GLOB_ANCHORS = ("/", "./", "../", "~")
+
+
+def _render_token(token: str, literal_globs: bool = False) -> str:
+    if not _PLAIN_TOKEN.match(token):
+        return shell_quote(token)
+    if literal_globs and _GLOB_CHARS & set(token) and not token.startswith(_GLOB_ANCHORS):
+        return shell_quote(token)
+    return token
+
+
+def _render_segment(segment: List[str]) -> str:
+    words = segment[1:] if segment and segment[0] == "sudo" else segment
+    # Only commands with argument rules are checked word by word; a file name
+    # the shell expands into one of their options would skip those rules.
+    literal_globs = bool(words) and words[0] in _ARGUMENT_RULES
+    return " ".join(_render_token(token, literal_globs) for token in segment)
 
 
 def render_standard_command(command: str) -> str:
@@ -256,9 +274,7 @@ def render_standard_command(command: str) -> str:
     pipes between segments and literal arguments, whatever shell it is.
     """
     segments = _pipeline_segments(_tokenize(command))
-    return " | ".join(
-        " ".join(_render_token(token) for token in segment) for segment in segments
-    )
+    return " | ".join(_render_segment(segment) for segment in segments)
 
 
 def standard_command_names(command: str) -> List[str]:

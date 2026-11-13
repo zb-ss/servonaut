@@ -292,3 +292,81 @@ def test_rebuilt_text_reaches_a_real_shell_as_the_same_argument():
         ["sh", "-c", rendered], capture_output=True, text=True, check=True,
     ).stdout
     assert out == '[x][a b][$HOME][][x;y][a"b]'
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("find -d*", "find '-d*'"),
+    ("find . -name '*.log'", "find . -name '*.log'"),
+    ("find . -name *.log", "find . -name '*.log'"),
+    ("sudo find -d*", "sudo find '-d*'"),
+    ("sort *.txt", "sort '*.txt'"),
+    ("sort ./*.txt", "sort ./*.txt"),
+    ("find /var/log/*.d -type f", "find /var/log/*.d -type f"),
+    ("find ./su* -type f", "find ./su* -type f"),
+    ("ls *.log", "ls *.log"),
+    ("ls /var/log/*.log", "ls /var/log/*.log"),
+    ("grep --include=*.txt x .", "grep --include=*.txt x ."),
+    ("cat ./*.csv | sort ~/x*", "cat ./*.csv | sort ~/x*"),
+])
+def test_globs_expand_only_where_they_cannot_become_options(command, expected):
+    from servonaut.mcp.guards import render_standard_command
+
+    got = render_standard_command(command)
+    assert got == expected
+    assert render_standard_command(got) == got
+
+
+_PLANTED_HOLES = [
+    ("find -d*", ["-delete"]),
+    ("find notes.txt ?exec sh -c 'touch MARKER' sh {} +", ["-exec"]),
+    ("find notes.txt [-]execdir sh -c 'touch MARKER' sh {} +", ["-execdir"]),
+    ("cat notes.txt | sort ?onew-file", ["-onew-file"]),
+    ("find notes.txt ?fprint written-by-find", ["-fprint"]),
+]
+
+
+@pytest.mark.parametrize("command,planted", _PLANTED_HOLES)
+def test_a_planted_file_name_never_becomes_an_option(command, planted, tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    allowlist = [*_DEFAULTS]
+    if not check_standard_command(command, allowlist)[0]:
+        pytest.skip("refused by the matcher")
+    for name in ["notes.txt", "data.csv", *planted]:
+        (tmp_path / name).write_text("precious\n")
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+    for shell in ("/bin/sh", "/bin/bash"):
+        subprocess.run(
+            [shell, "-c", render_standard_command(command)], cwd=tmp_path,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+        )
+        assert sorted(p.name for p in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("command,stdout", [
+    ("ls *.txt", "a.txt\nb.txt\n"),
+    ("ls ./*.txt", "./a.txt\n./b.txt\n"),
+    ("find . -name '*.txt' -type f", None),
+    ("sort ./*.txt", "x\ny\n"),
+    ("grep --include=*.txt -r x .", None),
+])
+def test_legitimate_globs_still_work(command, stdout, tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import check_standard_command, render_standard_command
+
+    (tmp_path / "a.txt").write_text("x\n")
+    (tmp_path / "b.txt").write_text("y\n")
+    assert check_standard_command(command, _DEFAULTS)[0]
+    out = subprocess.run(
+        ["/bin/sh", "-c", render_standard_command(command)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=20,
+    ).stdout
+    if stdout is not None:
+        assert out == stdout
+    elif command.startswith("find"):
+        assert sorted(out.split()) == ["./a.txt", "./b.txt"]
+    else:
+        assert "a.txt" in out
