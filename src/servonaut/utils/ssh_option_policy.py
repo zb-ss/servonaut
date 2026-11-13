@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from servonaut.utils.ssh_names import SSHNameError, SSHRefusal, check_ssh_host, check_ssh_user, shown
+from servonaut.utils.ssh_names import SSHNameError, SSHRefusal, check_ssh_host, shown
 
 __all__ = [
     "ACCEPTED_OPTIONS",
@@ -133,6 +133,7 @@ _ENTRY = re.compile(
     r"(?:[ \t]*=[ \t]*|[ \t]+)(?P<value>.*)$",
     re.DOTALL,
 )
+_USER_SHELL = re.compile("[\\x00-\\x1f\\x7f-\\x9f'\"`;&<>|(){}$]")
 _BAD_CHARS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 
@@ -229,34 +230,37 @@ def option_entries(extras: object) -> List[Any]:
 
 
 def non_accepted_texts(entry: object) -> List[str]:
-    """The canonical texts to record for *entry*: itself, and each of its lines.
+    """The canonical texts to record for *entry*, as written and as an editor would save it.
 
-    The editors split an entry that holds line breaks into several options,
-    so every line is recorded too: a team's entry cannot turn into the
+    The editors split an entry that holds line breaks into several options
+    and save ``str.strip()`` of each (which removes more than space and tab).
+    Every piece is recorded both ways, so a team's entry cannot become the
     member's own by being saved from a form.
     """
-    texts = [] if classify(entry).kind == "accepted" else [canonical(entry)]
-    if isinstance(entry, str):
-        lines = entry.splitlines()
-        if len(lines) > 1 or (lines and lines[0] != entry):
-            for line in lines:
-                if line.strip() and classify(line).kind != "accepted":
-                    texts.append(canonical(line))
-    return texts
+    if not isinstance(entry, str):
+        return [] if classify(entry).kind == "accepted" else [canonical(entry)]
+    texts: List[str] = []
+    for piece in (entry, *entry.splitlines()):
+        for text in (piece, piece.strip()):
+            if text and classify(text).kind != "accepted":
+                texts.append(canonical(text))
+    return list(dict.fromkeys(texts))
 
 
 def _unsafe_value(key: str, value: str) -> str:
     """What is wrong with the value of an accepted option Servonaut later puts in a command.
 
-    ``HostName`` and ``HostKeyAlias`` become the ``%h`` of a hop's command, and
-    ``User`` and ``Port`` its ``%r`` and ``%p``; the value must not hold
-    anything a shell reads. "" when the value is fine or the option is not one of these.
+    ``HostName`` becomes the ``%h`` and ``Port`` the ``%p`` of a hop's command;
+    neither may hold anything a shell reads. ``HostKeyAlias`` and ``User`` are
+    not used in a command Servonaut builds, but a value with shell syntax is
+    refused as well, for a ProxyCommand the member wrote that uses ``%k`` or
+    ``%r``. "" when the value is fine or the option is not one of these.
     """
     try:
         if key in ("hostname", "hostkeyalias"):
             check_ssh_host(value)
-        elif key == "user":
-            check_ssh_user(value)
+        elif key == "user" and (_USER_SHELL.search(value) or value.startswith("-")):
+            return "holds characters a shell reads as a command"
         elif key == "port" and not (value.isascii() and value.isdigit()):
             return "is not a number"
     except SSHNameError:

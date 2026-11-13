@@ -375,6 +375,7 @@ class ConfigManager:
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
         self.team_options_recorded = 0
+        self._left_alone = False
         _migrate_legacy_paths()
         _ensure_config_dir()
         load_secrets_env()
@@ -428,7 +429,8 @@ class ConfigManager:
             # A config this release left as it was (a version it cannot
             # upgrade) is not rewritten for this either; its options are
             # still recorded in memory.
-            self._baseline_team_options(write=not self._needs_migration(raw_data))
+            self._left_alone = self._needs_migration(raw_data)
+            self._baseline_team_options(write=not self._left_alone)
 
             # Validate and warn
             warnings = self._validate(self._config)
@@ -477,6 +479,17 @@ class ConfigManager:
         _write_json_secure(self._config_path, migrated)
         logger.info("Migration complete")
         return migrated
+
+    def record_saved_team_options(self) -> int:
+        """Run the one-time step now (after a sign-in); returns how many options it recorded.
+
+        The step otherwise runs when a process loads the config, so a session
+        that signs in would keep running options saved earlier until restart.
+        """
+        self.get()
+        before = self.team_options_recorded
+        self._baseline_team_options(write=not self._left_alone)
+        return self.team_options_recorded - before
 
     def _baseline_team_options(self, *, write: bool) -> None:
         """Once per config: record saved SSH options a team may have supplied.
