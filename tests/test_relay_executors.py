@@ -1143,6 +1143,13 @@ class TestTeamRulesOnRelay:
         with self._ssh_ok():
             ran = run(executor.execute_for_ai(call("uptime")))
         assert ran.status == "ok"
+        # Every refusal leaves an audit row with its own reason.
+        executor._audit = MagicMock()
+        run(executor.execute_for_ai(call("ls; id")))
+        run(executor.execute_for_ai(call("")))
+        reasons = [c.args[4] for c in executor._audit.log.call_args_list]
+        assert reasons == ["readonly_command_refused", "readonly_command_missing"]
+        assert executor._audit.log.call_args_list[0].kwargs["source"] == "ai_chat"
 
     def test_a_local_blocklist_addition_made_after_start_applies(self):
         # The executor compiled its own blocklist when it was built, so only

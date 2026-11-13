@@ -167,15 +167,18 @@ class RelayExecutors:
         from servonaut.mcp.guards import render_standard_command
 
         command = call.args.get("command")
+        audit_reason = "readonly_command_refused"
         if not isinstance(command, str) or not command.strip():
             allowed, reason = False, ""
             message = READONLY_MISSING_TEXT
+            audit_reason = "readonly_command_missing"
         else:
             allowlist = self._config_manager.get().ai_provider.readonly_command_allowlist
             allowed, reason = check_readonly_command(command, allowlist)
             message = READONLY_REFUSED_TEXT.format(check_reason=reason)
         if allowed:
             return render_standard_command(command), None
+        self._audit_ai_refusal(call, audit_reason)
         return None, ToolResult(
             tool_call_id=call.tool_call_id,
             conversation_id=call.conversation_id,
@@ -768,6 +771,21 @@ class RelayExecutors:
             )
         except Exception as exc:  # noqa: BLE001 - the refusal stands either way
             logger.warning("Could not audit a refused agent request: %s", exc)
+
+    def _audit_ai_refusal(self, call: "ToolCall", reason: str) -> None:
+        """Record an AI tool call refused before anything was sent; never raises."""
+        try:
+            if self._audit is None:
+                from servonaut.mcp.audit import AuditTrail
+
+                self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
+            self._audit.log(
+                call.tool, dict(call.args), '', False, reason,
+                source='ai_chat', conversation_id=call.conversation_id,
+                tool_call_id=call.tool_call_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - the refusal stands either way
+            logger.warning("Could not audit a refused AI tool call: %s", exc)
 
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""
