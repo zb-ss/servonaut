@@ -517,3 +517,16 @@ class TestStandardCommandNames:
     ])
     def test_the_name_each_segment_runs(self, command, names):
         assert standard_command_names(command) == names
+
+
+def test_sudo_is_allowed_by_default_and_refused_when_asked():
+    from servonaut.mcp.guards import check_standard_command
+
+    allowlist = ["ls", "cat"]
+    assert check_standard_command("sudo ls", allowlist)[0] is True
+    assert check_standard_command("ls | sudo cat", allowlist)[0] is True
+    allowed, reason = check_standard_command("sudo ls", allowlist, allow_sudo=False)
+    assert allowed is False
+    assert reason == "sudo is not on the read-only command list"
+    assert check_standard_command("ls | sudo cat", allowlist, allow_sudo=False)[0] is False
+    assert check_standard_command("ls /tmp", allowlist, allow_sudo=False)[0] is True

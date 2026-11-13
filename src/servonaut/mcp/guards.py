@@ -185,9 +185,13 @@ def _reported(name: str) -> str:
     return name[:_REPORTED_NAME_LIMIT]
 
 
-def _check_segment(segment: List[str], allowlist: Sequence[str]) -> Tuple[bool, str]:
+def _check_segment(
+    segment: List[str], allowlist: Sequence[str], *, allow_sudo: bool = True,
+) -> Tuple[bool, str]:
     if not segment:
         return False, "Empty pipeline segment is not allowed in standard mode"
+    if segment[0] == "sudo" and not allow_sudo:
+        return False, "sudo is not on the read-only command list"
     words = segment[1:] if segment[0] == "sudo" else segment
     if not words:
         return False, "sudo must be followed by an allowlisted command"
@@ -237,8 +241,13 @@ def standard_command_names(command: str) -> List[str]:
     return names
 
 
-def check_standard_command(command: str, allowlist: Sequence[str]) -> Tuple[bool, str]:
-    """Allow read-only allowlisted commands, optionally piped, and nothing else."""
+def check_standard_command(
+    command: str, allowlist: Sequence[str], *, allow_sudo: bool = True,
+) -> Tuple[bool, str]:
+    """Allow read-only allowlisted commands, optionally piped, and nothing else.
+
+    With ``allow_sudo=False`` a segment that starts with ``sudo`` is refused.
+    """
     if any(sequence in command for sequence in _FORBIDDEN_SEQUENCES):
         return False, "Command substitution and multiple lines are not allowed in standard mode"
     try:
@@ -254,7 +263,7 @@ def check_standard_command(command: str, allowlist: Sequence[str]) -> Tuple[bool
                 "use the dangerous tier for command lists, redirects or subshells"
             )
     for segment in _pipeline_segments(tokens):
-        allowed, reason = _check_segment(segment, allowlist)
+        allowed, reason = _check_segment(segment, allowlist, allow_sudo=allow_sudo)
         if not allowed:
             return False, reason
     return True, "OK"
