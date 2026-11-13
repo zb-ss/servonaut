@@ -431,3 +431,43 @@ def test_a_user_with_shell_syntax_is_refused(value):
 @pytest.mark.parametrize("value", ["deploy", "DOMAIN\\svc account", "jdoe@CORP", "%r", "john.smith", "ü"])
 def test_real_user_names_are_accepted(value):
     assert classify(f"User={value}").kind == "accepted"
+
+
+@pytest.mark.parametrize("value", ["x -oProxyCommand=id", "x  -E/tmp/log", "a\\", "a b\\", "x\t-oX"])
+def test_a_user_that_would_start_an_option_or_end_in_a_backslash_is_refused(value):
+    assert classify(f"User={value}").kind == "refused"
+
+
+LEGITIMATE_USERS = [
+    "DOMAIN\\svc account", "CORP\\jdoe", "jdoe@corp.example.com", "%r", "%u", "john.smith", "svc+deploy",
+    "ünal", "用户", "user#1", "A B C", "deploy", "ec2-user", "ubuntu", "root", "web_1", "a-b", "j.doe-2",
+    "o'neil".replace("'", ""), "x y-z", "name@DOMAIN",
+]
+
+
+@pytest.mark.parametrize("value", LEGITIMATE_USERS)
+def test_legitimate_user_names_stay_accepted(value):
+    assert classify(f"User={value}").kind == "accepted"
+
+
+def test_the_sign_in_hook_runs_the_saved_options_step():
+    """The real hook, not a copy: with the call removed from it this fails."""
+    from servonaut.app import ServonautApp
+
+    calls = []
+    stub = MagicMock()
+    stub.relay_manager = None
+    stub.memory_sync_service = None
+    stub.auth_service = None
+    stub._note_saved_team_options = lambda: calls.append("step")
+    ServonautApp.on_user_login_success(stub)
+    assert calls == ["step"]
+
+
+def test_the_login_screen_calls_the_app_hook_after_a_successful_sign_in():
+    import inspect
+
+    from servonaut.screens import login
+
+    source = inspect.getsource(login)
+    assert 'getattr(self.app, "on_user_login_success", None)' in source
