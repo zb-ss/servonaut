@@ -202,27 +202,27 @@ class TestProviderRefreshKeepsPristineInStep:
 
 class TestToolBridgeTargetResolution:
     def test_relay_target_is_mapped_when_a_resolver_is_installed(self) -> None:
-        from servonaut.services.ai_tool_bridge import AIToolBridge
+        from servonaut.services.ai_tool_bridge import AIToolBridge, ToolCall
         from servonaut.services.relay_listener import CommandType
 
         bridge = object.__new__(AIToolBridge)
         bridge.instance_id_resolver = lambda i: {"i-fake": "i-real"}.get(i, i)
         bridge._default_ttl_seconds = 30
-        call = SimpleNamespace(
-            name="run_command", tool_call_id="tc-1", conversation_id="conv-1",
+        call = ToolCall(
+            tool="run_command", tool_call_id="tc-1", conversation_id="conv-1",
             args={"instance_id": "i-fake", "command": "uptime"},
         )
         request = bridge._build_command_request(call, CommandType.RUN_COMMAND)
         assert request.target_server_id == "i-real"
 
     def test_identity_without_a_resolver(self) -> None:
-        from servonaut.services.ai_tool_bridge import AIToolBridge
+        from servonaut.services.ai_tool_bridge import AIToolBridge, ToolCall
         from servonaut.services.relay_listener import CommandType
 
         bridge = object.__new__(AIToolBridge)
         bridge._default_ttl_seconds = 30
-        call = SimpleNamespace(
-            name="run_command", tool_call_id="tc-1", conversation_id="conv-1",
+        call = ToolCall(
+            tool="run_command", tool_call_id="tc-1", conversation_id="conv-1",
             args={"instance_id": "i-real", "command": "uptime"},
         )
         assert bridge._build_command_request(call, CommandType.RUN_COMMAND).target_server_id == "i-real"
