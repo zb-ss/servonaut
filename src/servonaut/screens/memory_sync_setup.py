@@ -24,6 +24,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -568,9 +569,7 @@ class MemorySyncSetupScreen(Screen):
         # The label can carry the server's error text: never parse it as markup.
         self.app.notify(label, severity="error", timeout=8, markup=False)
         try:
-            self.query_one("#msync_status", Static).update(
-                f"[$error]✗ {escape(label)}[/$error]"
-            )
+            self.query_one("#msync_status", Static).update(literal(f"✗ {label}", "$error"))
         except Exception:
             pass
 
