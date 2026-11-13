@@ -172,3 +172,18 @@ class TestAppConfigAdditiveSshField:
         assert "operator-friendly Markdown" in config.memory.ai_enhancement_prompt
         assert config.memory.ai_summary_poll_interval_seconds == 2.0
         assert config.memory.ai_summary_poll_timeout_seconds == 75.0
+
+
+def test_readonly_command_list_defaults_match_the_mcp_standard_list_but_are_separate():
+    from servonaut.config.schema import (
+        AIProviderConfig, DEFAULT_READONLY_COMMANDS, MCPConfig,
+    )
+
+    ai, mcp = AIProviderConfig(), MCPConfig()
+    assert ai.readonly_command_allowlist == list(DEFAULT_READONLY_COMMANDS)
+    assert mcp.command_allowlist == list(DEFAULT_READONLY_COMMANDS)
+    assert len(DEFAULT_READONLY_COMMANDS) == 28
+    mcp.command_allowlist.append("systemctl")
+    ai.readonly_command_allowlist.append("docker")
+    assert "systemctl" not in AIProviderConfig().readonly_command_allowlist
+    assert "docker" not in MCPConfig().command_allowlist
