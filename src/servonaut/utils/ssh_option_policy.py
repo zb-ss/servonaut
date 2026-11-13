@@ -42,6 +42,8 @@ __all__ = [
     "judge_entries",
     "judge_proxy_command",
     "merge_recorded",
+    "origin_label",
+    "team_option_rows",
     "parse_option",
     "possible_team_member",
     "raise_if_refused",
@@ -442,6 +444,14 @@ def baseline_existing_options(config: Any, auth_path: Path) -> int:
         ssh.team_options = existing
     ssh.team_options_checked = True
     return recorded
+
+
+def origin_label(item: Mapping[str, Any]) -> str:
+    """Where a recorded option came from, as the Settings table and the CLI say it."""
+    if item.get("saved_before") is True:
+        return "Saved before 2.33.1"
+    name = item.get("team_name")
+    return f"Team {shown(name)}" if isinstance(name, str) and name else "A team"
 
 
 def team_option_rows(team_options: object) -> List[Mapping[str, Any]]:

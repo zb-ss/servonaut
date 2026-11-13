@@ -25,6 +25,8 @@ from textual.widgets import Button, DataTable, Input, Select, Static
 from servonaut.config.schema import ConnectionProfile, ConnectionRule
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
+from servonaut.utils.ssh_names import shown
+from servonaut.utils.ssh_option_policy import origin_label, set_allowed, team_option_rows
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,7 @@ class ConnectionsPanel(SettingsPanel):
     }
     ConnectionsPanel .conn-form-buttons Button { margin-right: 1; }
     ConnectionsPanel DataTable { height: 8; }
+    ConnectionsPanel #team_options_block { height: auto; }
     """
 
     # ------------------------------------------------------------------
@@ -220,6 +223,23 @@ class ConnectionsPanel(SettingsPanel):
                 classes="conn-form-buttons",
             )
 
+        # ---- Team options that run programs --------------------------------
+        # Shown only while an option from a team is on the list.
+        with Vertical(id="team_options_block"):
+            yield Static("Team options that run programs", classes="conn-section-header")
+            yield Static(
+                "These SSH options arrived in a team configuration. Servonaut does not use "
+                "one until you allow it; a connection that needs it is refused.",
+                classes="conn-note",
+            )
+            yield DataTable(id="conn_team_options_table")
+            yield Static("", id="conn_team_option_text", classes="conn-note", markup=False)
+            yield Horizontal(
+                Button("Allow", id="btn_team_option_allow", variant="primary"),
+                Button("Refuse", id="btn_team_option_refuse"),
+                classes="conn-action-row",
+            )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -243,6 +263,9 @@ class ConnectionsPanel(SettingsPanel):
         rules_table.cursor_type = "row"
         rules_table.add_columns("Rule Name", "Match Conditions", "Profile")
 
+        options_table = self.query_one("#conn_team_options_table", DataTable)
+        options_table.cursor_type = "row"
+
     def load(self) -> None:
         """Populate the DataTables from config and hide the edit forms."""
         config = self.app.config_manager.get()
@@ -250,6 +273,7 @@ class ConnectionsPanel(SettingsPanel):
         self._rules = list(config.connection_rules)
         self._refresh_profiles_table()
         self._refresh_rules_table()
+        self._refresh_team_options()
         self._hide_profile_form()
         self._hide_rule_form()
         self._snapshot_now()
@@ -336,6 +360,53 @@ class ConnectionsPanel(SettingsPanel):
                 escape(user or "—"),
                 str(profile.ssh_port),
             )
+
+    def _refresh_team_options(self) -> None:
+        """Fill the team options table; the whole block is hidden while it is empty."""
+        items = team_option_rows(self.app.config_manager.get().ssh.team_options)
+        self.query_one("#team_options_block").display = bool(items)
+        table = self.query_one("#conn_team_options_table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Option", "From", "State")
+        for item in items:
+            table.add_row(
+                escape(shown(item["option"])),
+                escape(origin_label(item)),
+                "Allowed" if item.get("allowed") is True else "Refused",
+            )
+        self._show_team_option_text()
+
+    def _selected_team_option(self) -> Optional[str]:
+        """The option text on the selected row of the team options table."""
+        items = team_option_rows(self.app.config_manager.get().ssh.team_options)
+        idx = self.query_one("#conn_team_options_table", DataTable).cursor_row
+        return items[idx]["option"] if 0 <= idx < len(items) else None
+
+    def _show_team_option_text(self) -> None:
+        """The selected option's full text, under the table."""
+        self.query_one("#conn_team_option_text", Static).update(self._selected_team_option() or "")
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "conn_team_options_table":
+            self._show_team_option_text()
+
+    def _set_team_option(self, allowed: bool) -> None:
+        """Allow or refuse the selected option and save it at once."""
+        text = self._selected_team_option()
+        if text is None:
+            self.app.notify("Select an option first", severity="warning", markup=False)
+            return
+        config = self.app.config_manager.get()
+        options = [dict(item) for item in config.ssh.team_options if isinstance(item, dict)]
+        set_allowed(options, text, allowed)
+        self.app.config_manager.update(ssh=dataclasses.replace(config.ssh, team_options=options))
+        self._refresh_team_options()
+        shown_text = shown(text)
+        self.app.notify(
+            f"Allowed: {shown_text}. Connections that use it will run it on this computer."
+            if allowed else f"Refused: {shown_text}.",
+            markup=False,
+        )
 
     def _refresh_rules_table(self) -> None:
         table = self.query_one("#conn_rules_table", DataTable)
@@ -625,6 +696,13 @@ class ConnectionsPanel(SettingsPanel):
 
         elif btn_id == "btn_rule_cancel":
             self._hide_rule_form()
+
+        # ---- Team options ---------------------------------------------
+        elif btn_id == "btn_team_option_allow":
+            self._set_team_option(True)
+
+        elif btn_id == "btn_team_option_refuse":
+            self._set_team_option(False)
 
     # ------------------------------------------------------------------
     # Profile / rule save handlers
