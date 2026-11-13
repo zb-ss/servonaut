@@ -19,13 +19,32 @@ from tests import test_memory_shared_with as shared
 from tests._literal_probe import (  # noqa: F401 - no_backstop is a fixture
     PAYLOADS, assert_literal, clickable_cells, no_backstop, screen_text,
 )
-from tests.test_fleet_memory_shared import _table, _Team, _wait_for
+from tests._async_bounds import wait_until
+from tests.test_fleet_memory_shared import _table, _Team
 
 KINDS = list(PAYLOADS)
 
 # A name that ends in backslashes used to swallow or double them, or to show
 # the closing tag; a filler character is drawn wider than it is measured.
 TRAILING = ["team\\", "team\\\\", "team\\\\\\"]
+
+
+def _shared_cell_text(app):
+    table = _table(app)
+    return table.get_row_at(0)[shared.SHARED_WITH] if table.row_count else None
+
+
+async def _shared_cell_drawn(app) -> None:
+    """Wait until the table itself holds the team cell and no refresh is running.
+
+    The rows gain their teams in one step and the table is rebuilt by another
+    (a slow fleet refresh rebuilds the rows without them until the team lookup
+    runs again), so the rows alone do not say the table shows the cell.
+    """
+    await wait_until(lambda: (
+        str(_shared_cell_text(app) or "") != ""
+        and not any(w.group in ("memory_fleet", "memory_shared_listing") for w in app.workers)
+    ))
 
 
 @pytest.mark.asyncio
@@ -42,9 +61,7 @@ async def test_fleet_memory_shared_with_draws_the_team_name_as_typed(
         listings["team-b"] = [shared._grant("i-own-1", shared.ME)]
     app = shared._app(tmp_path, _Team(listings))
     async with app.run_test(headless=True, size=(160, 50)) as pilot:
-        await _wait_for(pilot, lambda: _table(app).row_count and any(
-            row.get("shared_with") for row in app.screen._rows))
-        await pilot.pause()
+        await _shared_cell_drawn(app)
         cell = _table(app).get_row_at(0)[shared.SHARED_WITH]
         assert isinstance(cell, Text), "a team name is never a markup string"
         # With two teams the first by name is shown, then the count.
@@ -63,8 +80,7 @@ async def test_fleet_memory_shared_with_shows_a_filler_character_visibly(
     monkeypatch.setattr(shared, "TEAMS", [{"slug": "team-a", "name": "TeamㅤA"}])
     app = shared._app(tmp_path, _Team({"team-a": [shared._grant("i-own-1", shared.ME)]}))
     async with app.run_test(headless=True, size=(160, 50)) as pilot:
-        await _wait_for(pilot, lambda: _table(app).row_count and any(
-            row.get("shared_with") for row in app.screen._rows))
+        await _shared_cell_drawn(app)
         assert str(_table(app).get_row_at(0)[shared.SHARED_WITH]) == "Team\\u3164A"
 
 
