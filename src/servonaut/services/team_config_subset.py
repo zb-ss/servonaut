@@ -148,7 +148,10 @@ def diff_against_local(
             "remote": len(remote_entries),
             "after": len(after),  # replace-whole-section
         }
-        kept_names = {entry.get("name") for entry in after if isinstance(entry, dict)}
+        kept_names = {
+            entry.get("name") for entry in after
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
         diff["removed"][name] = [
             entry.name for entry in local_entries if getattr(entry, "name", None) not in kept_names
         ]
