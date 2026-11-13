@@ -71,7 +71,11 @@ def test_a_payload_cannot_allow_anything_itself():
         "team_options": [{"option": "proxycommand=ssh -W %h:%p jump", "allowed": True}],
     }
     apply_team_config(config, payload, team=TEAM)
-    assert all(entry["allowed"] is False for entry in config.ssh.team_options)
+    assert [(e["option"], e["allowed"]) for e in config.ssh.team_options] == [
+        ("proxycommand=ssh -W %h:%p jump", False),
+        ("localcommand=notify-send hi", False),
+        ("foobar=1", False),
+    ]
 
 
 def test_editing_another_field_of_a_pulled_profile_keeps_it_refused():

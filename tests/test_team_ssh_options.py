@@ -340,3 +340,17 @@ def test_the_relay_rejects_a_refused_transfer(tmp_path):
     assert response.status == "rejected"
     assert response.error_message.startswith("Not connecting:")
     assert executors._audit.log.call_args.args[4] == "team_option_refused"
+
+
+def test_a_refused_get_logs_is_audited_with_the_words_it_was_asked_for(monkeypatch):
+    from servonaut.mcp import tools as mcp_tools
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("ssh must not start")
+
+    monkeypatch.setattr(mcp_tools, "run_ssh_subprocess", boom)
+    tools = _real_mcp_tools()
+    result = asyncio.run(tools.get_logs("custom-1", "/var/log/syslog", 5))
+    assert result.startswith("Error: Not connecting:")
+    row = next(c for c in tools._audit.log.call_args_list if c.args[4:5] == ("team_option_refused",))
+    assert row.args[1]["requested_as"] == "reading logs"
