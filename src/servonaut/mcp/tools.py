@@ -79,6 +79,7 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
 )
 from servonaut.utils.remote_shell import shell_quote
+from servonaut.utils.ssh_option_policy import SSHOptionRefused
 
 logger = logging.getLogger(__name__)
 
@@ -1254,6 +1255,8 @@ class ServonautTools:
                 f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
             )
             return (msg, False, True, None, key_source)
+        except SSHOptionRefused as e:
+            return (f"Error: {e}", False, False, 'team_option_refused', key_source)
         except Exception as e:  # noqa: BLE001
             return (f"Error: {e}", False, False, 'ssh_error', key_source)
         finally:
@@ -1537,6 +1540,12 @@ class ServonautTools:
                     _build_scp(None)
                 )
                 key_extras = {'key_source': 'ssh_agent'}
+        except SSHOptionRefused as exc:
+            self._audit.log('transfer_file', {
+                'instance_id': instance_id, 'local_path': local_path,
+                'remote_path': remote_path, 'direction': direction,
+            }, '', False, 'team_option_refused')
+            return f"Error: {exc}"
         except ValueError as exc:
             # The remote path cannot be sent safely by this scp client.
             self._audit.log('transfer_file', {
