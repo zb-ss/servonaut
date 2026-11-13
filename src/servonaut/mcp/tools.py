@@ -6330,6 +6330,8 @@ class ServonautTools:
         # Full host-key explanations, listed under the table: its error
         # column is too narrow for them.
         host_key_notes: List[str] = []
+        # Servers whose connection a team's SSH option refused.
+        refused_option_hosts: List[str] = []
 
         async def _probe(inst: Dict) -> Dict:
             name = inst.get('name') or inst.get('id') or '?'
@@ -6345,6 +6347,9 @@ class ServonautTools:
             except HostKeyVerificationError as e:
                 host_key_notes.append(f"{name}: {e}")
                 return {'name': name, 'error': e.problem.reason_code}
+            except SSHOptionRefused as e:
+                refused_option_hosts.append(str(name))
+                return {'name': name, 'error': str(e)[:80]}
             except Exception as e:  # noqa: BLE001 — one bad host must not fail all
                 return {'name': name, 'error': str(e)[:80]}
             finally:
@@ -6359,6 +6364,8 @@ class ServonautTools:
             {'key_sources': sorted(fleet_key_sources)}
             if fleet_key_sources else {}
         )
+        if refused_option_hosts:
+            agg_extras['team_option_refused'] = sorted(refused_option_hosts)
         self._audit.log('fleet_health_snapshot', args, result, True, **agg_extras)
         return result
 
@@ -7370,10 +7377,12 @@ class ServonautTools:
                     instance, command, timeout=30, audit_extras=audit_extras,
                 )
                 candidates = scanner.parse(stdout)
+            except SSHOptionRefused as e:
+                # Never a quiet "nothing found": the member must learn why, and how to allow it.
+                return [], ("team_option_refused", str(e))
             except Exception as e:  # noqa: BLE001
                 if src == "ssh":
-                    kind = "team_option_refused" if isinstance(e, SSHOptionRefused) else "ssh_error"
-                    return [], (kind, str(e))
+                    return [], ("ssh_error", str(e))
         if not candidates and src in ("auto", "local") and search_path:
             import os
             if os.path.isfile(os.path.expanduser(search_path)):
