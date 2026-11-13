@@ -425,3 +425,26 @@ def test_an_unquoted_glob_in_a_command_without_rules_still_expands(tmp_path):
         capture_output=True, text=True,
     ).stdout
     assert out == "a.txt\n"
+
+
+@pytest.mark.parametrize("command", [
+    "grep '~' notes.txt", "grep '~user' notes.txt", "grep '$HOME' notes.txt",
+    "grep \"~\" notes.txt",
+])
+def test_a_quoted_word_without_glob_characters_stays_quoted(command, tmp_path):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    rendered = render_standard_command(command)
+    assert render_standard_command(rendered) == rendered
+    home = tmp_path / "home"
+    home.mkdir()
+    words = subprocess.run(
+        ["/bin/sh", "-c", "for w in " + rendered.split(" ", 1)[1]
+         + '; do printf "[%s]" "$w"; done'],
+        cwd=tmp_path, env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert words == "".join(f"[{w}]" for w in shlex.split(command)[1:])

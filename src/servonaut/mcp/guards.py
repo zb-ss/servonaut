@@ -311,7 +311,7 @@ def render_standard_command(command: str) -> str:
         literal_globs = bool(head) and head[0] in _ARGUMENT_RULES
         parts = []
         for token in segment:
-            if next(was_quoted) and _GLOB_CHARS & set(token):
+            if next(was_quoted):
                 parts.append(shell_quote(token))
             else:
                 parts.append(_render_token(token, literal_globs))
