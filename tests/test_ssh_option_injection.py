@@ -75,8 +75,8 @@ def test_scp_paths_follow_an_end_of_options_marker(direction):
 def test_bastion_destination_is_quoted_for_the_proxy_shell():
     profile = ConnectionProfile(
         name="bastion",
-        bastion_host="bastion[1].example.com",
-        bastion_user="ops",
+        bastion_host="bastion-1.example.com",
+        bastion_user="ops;touch /tmp/x",
         bastion_key="/keys/bastion.pem",
     )
     manager = MagicMock()
