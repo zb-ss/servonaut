@@ -439,7 +439,7 @@ def test_a_user_that_would_start_an_option_or_end_in_a_backslash_is_refused(valu
 
 
 LEGITIMATE_USERS = [
-    "DOMAIN\\svc account", "CORP\\jdoe", "jdoe@corp.example.com", "%r", "%u", "john.smith", "svc+deploy",
+    "DOMAIN\\svc account", "CORP\\jdoe", "jdoe@corp.example.com", "%r", "%u", "john.smith", "svc+deploy",  # leak-guard:allow — example.com user name
     "ünal", "用户", "user#1", "A B C", "deploy", "ec2-user", "ubuntu", "root", "web_1", "a-b", "j.doe-2",
     "o'neil".replace("'", ""), "x y-z", "name@DOMAIN",
 ]
