@@ -1468,6 +1468,10 @@ class ServonautApp(App):
                         self.config_manager.get()
                         .ai_provider.tool_confirm_timeout_seconds
                     ),
+                    readonly_commands=lambda: (
+                        self.config_manager.get()
+                        .ai_provider.readonly_command_allowlist
+                    ),
                 )
                 # Demo mode: the model reasons over redacted rows and asks for
                 # tools by fake id; the relay needs the real one.

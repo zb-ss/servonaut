@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -97,6 +97,18 @@ def _format_args(args: Dict[str, Any]) -> Content:
     return Content("\n").join(lines)
 
 
+def _note_of(call: Any) -> str:
+    note = getattr(call, "confirm_note", "")
+    return note if isinstance(note, str) else ""
+
+
+def _note_widgets(note: str, widget_id: str) -> List[Static]:
+    """The optional one-line note under the dialog body; empty when no note."""
+    if not note:
+        return []
+    return [Static(literal(note), id=widget_id, classes="tool_confirm_note")]
+
+
 # ---------------------------------------------------------------------------
 # Standard (single y/n) confirm modal
 # ---------------------------------------------------------------------------
@@ -161,10 +173,16 @@ class ToolConfirmModal(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        tool: str,
+        args: Optional[Dict[str, Any]] = None,
+        note: str = "",
+    ) -> None:
         super().__init__()
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
+        self._note = note
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -178,6 +196,7 @@ class ToolConfirmModal(ModalScreen[bool]):
                 "Press [bold]y[/bold] to confirm or [bold]n[/bold] to cancel.",
                 id="tool_confirm_body",
             ),
+            *_note_widgets(self._note, "tool_confirm_note"),
             VerticalScroll(
                 Static(_format_args(self._args), id="tool_confirm_args"),
                 id="tool_confirm_scroll",
@@ -290,10 +309,16 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, tool: str, args: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        tool: str,
+        args: Optional[Dict[str, Any]] = None,
+        note: str = "",
+    ) -> None:
         super().__init__()
         self._tool = tool or "<unknown tool>"
         self._args = args or {}
+        self._note = note
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -311,6 +336,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
                 f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] below to confirm, or press Escape to cancel.",
                 id="dangerous_confirm_body",
             ),
+            *_note_widgets(self._note, "dangerous_confirm_note"),
             VerticalScroll(
                 Static(_format_args(self._args), id="dangerous_confirm_args"),
                 id="dangerous_confirm_scroll",
@@ -399,9 +425,13 @@ def build_modal_confirm(app: Any) -> Callable[[Any], Awaitable[bool]]:
 
     async def _confirm(call: Any) -> bool:
         if call.guard_level == "dangerous":
-            modal: ModalScreen[bool] = DangerousToolConfirmModal(call.tool, dict(call.args))
+            modal: ModalScreen[bool] = DangerousToolConfirmModal(
+                call.tool, dict(call.args), note=_note_of(call),
+            )
         else:
-            modal = ToolConfirmModal(call.tool, dict(call.args))
+            modal = ToolConfirmModal(
+                call.tool, dict(call.args), note=_note_of(call),
+            )
         try:
             result = await app.push_screen_wait(modal)
         except asyncio.CancelledError:

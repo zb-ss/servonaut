@@ -406,3 +406,14 @@ class TestProbeFailedResultSlugs:
 
         assert response.status == "timeout"
         assert response.error_message.startswith("probe_failed:")
+
+
+class TestProbeRefusesReadonlyShell:
+    def test_probe_confirm_denies_ssh_exec_readonly(self):
+        from servonaut.services.ai_tool_bridge import ToolConfirmDenied
+
+        confirm = build_probe_confirm()
+        call = MagicMock()
+        call.tool = "ssh_exec_readonly"
+        with pytest.raises(ToolConfirmDenied):
+            run(confirm(call))
