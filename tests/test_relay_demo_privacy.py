@@ -149,7 +149,9 @@ async def test_relay_dynamic_diagnostics_use_demo_redaction_and_paint_literal_te
             assert not content.spans  # Payload theme tags remain literal.
         await pilot.pause()
         target.scroll_visible(animate=False, immediate=True)
-        await pilot.pause()
+        # The card grows to its text over a layout pass or two; wait for the
+        # painted rows to hold it instead of a fixed number of frames.
+        await wait_until(lambda: _compact(expected) in _compact(_painted(app, target)))
         paint = _painted(app, target)
         assert _compact(expected) in _compact(paint)
         if demo and path != "valid-heartbeat":

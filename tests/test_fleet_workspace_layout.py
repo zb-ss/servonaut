@@ -207,6 +207,7 @@ async def test_click_copies_the_complete_unicode_value_with_chat_open(
         assert row.value == identifier
         clipboard.calls.clear()
         assert await pilot.click(row.value_widget)
+        await wait_until(lambda: bool(clipboard.calls))
         await pilot.pause()
         assert clipboard.calls == [identifier]
         assert app.screen.query_one(ChatPanel) is panel
