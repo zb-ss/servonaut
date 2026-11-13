@@ -577,6 +577,21 @@ def readonly_command_names(value: Any) -> List[str]:
     return list(value)
 
 
+def command_to_send(call: "ToolCall") -> Optional[str]:
+    """The rebuilt command an allowlisted read-only call sends, else ``None``.
+
+    The confirmation dialog and the sender both use this, so what is shown
+    is what runs.
+    """
+    if (
+        call.tool in _READONLY_COMMAND_TOOLS
+        and call.readonly_check == "allowlisted"
+        and call.checked_command is not None
+    ):
+        return call.checked_command
+    return None
+
+
 def check_readonly_command(command: Any, allowlist: Any) -> Tuple[bool, str]:
     """Is *command* a read-only command on *allowlist*? ``(ok, reason)``.
 
@@ -1495,12 +1510,9 @@ class AIToolBridge(_FloorDangerousMixin):
             }
         else:
             payload = {"command": call.args.get("command", "")}
-            if (
-                call.tool in _READONLY_COMMAND_TOOLS
-                and call.readonly_check == "allowlisted"
-                and call.checked_command is not None
-            ):
-                payload["command"] = call.checked_command
+            rebuilt = command_to_send(call)
+            if rebuilt is not None:
+                payload["command"] = rebuilt
 
         return CommandRequest(
             id=call.tool_call_id,

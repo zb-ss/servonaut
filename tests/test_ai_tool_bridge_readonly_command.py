@@ -252,5 +252,29 @@ async def test_the_dialog_shows_the_rebuilt_command_that_will_run(modal_name):
 
     call = _call('grep  "a b"   f', guard=modal_name)
     call.checked_command = "grep 'a b' f"
+    call.readonly_check = "allowlisted"
     assert await build_modal_confirm(_Host())(call) is True
     assert seen["args"]["command"] == "grep 'a b' f"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["run_command", "deploy"])
+async def test_the_dialog_ignores_a_preset_checked_command_on_other_tools(tool):
+    from textual.app import App
+
+    from servonaut.screens.tool_confirm_modal import build_modal_confirm
+
+    seen = {}
+
+    class _Host(App):
+        async def push_screen_wait(self, modal):
+            seen["args"] = modal._args
+            return True
+
+    call = _call("touch /tmp/marker", tool=tool, guard="dangerous")
+    call.checked_command = "uptime"
+    assert await build_modal_confirm(_Host())(call) is True
+    assert seen["args"]["command"] == "touch /tmp/marker"
+    bridge, relay, _audit, _confirm = _bridge()
+    await bridge.handle_tool_call(call)
+    assert _sent(relay) == "touch /tmp/marker"

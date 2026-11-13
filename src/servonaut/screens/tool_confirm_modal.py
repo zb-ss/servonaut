@@ -425,7 +425,9 @@ def build_modal_confirm(app: Any) -> Callable[[Any], Awaitable[bool]]:
 
     async def _confirm(call: Any) -> bool:
         shown_args = dict(call.args)
-        checked = getattr(call, "checked_command", None)
+        from servonaut.services.ai_tool_bridge import command_to_send
+
+        checked = command_to_send(call)
         if isinstance(checked, str):
             # Show the text that will run, not the text the model wrote.
             shown_args["command"] = checked
