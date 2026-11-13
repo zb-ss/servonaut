@@ -317,6 +317,11 @@ class OVHBillingScreen(WorkspaceScreen):
         message = f"Could not load {what}. Reopen this screen to retry; details are in the log."
         widget.update(literal(f"  {message}", "$text-error"))
 
+    def _show_unreadable_bill(self, widget: Static, what: str) -> None:
+        """End a card's state when the bill data could not be read."""
+        message = f"Could not read the bill data for {what}. Reopen this screen to retry; details are in the log."
+        widget.update(literal(f"  {message}", "$text-error"))
+
     def _log_load_failure(self, what: str, exc: Exception) -> None:
         if isinstance(exc, asyncio.TimeoutError):
             logger.warning("Loading OVH %s timed out after %s s", what, _CARD_TIMEOUT_SECONDS)
@@ -333,10 +338,15 @@ class OVHBillingScreen(WorkspaceScreen):
             usage = await asyncio.wait_for(
                 svc.get_current_usage(), timeout=_CARD_TIMEOUT_SECONDS,
             )
-            widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
             self._log_load_failure("current usage", exc)
             self._show_card_error(widget, "the current month")
+            return
+        try:
+            widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
+        except Exception as exc:
+            logger.exception("Could not read the OVH usage: %s", exc)
+            self._show_unreadable_bill(widget, "the current month")
 
     async def _load_invoices(self) -> None:
         """Fetch each bill once and fill both the invoice list and the history."""
@@ -358,11 +368,21 @@ class OVHBillingScreen(WorkspaceScreen):
             self._show_card_error(page_info, "the invoices")
             return
         self._invoice_page = 0
-        self._render_invoice_page()
-        history.update(_format_spend_history(
-            spend_history_from_invoices(self._all_invoices, months=6),
-            redact=self.app.demo_mode,
-        ))
+        try:
+            self._render_invoice_page()
+            history.update(_format_spend_history(
+                spend_history_from_invoices(self._all_invoices, months=6),
+                redact=self.app.demo_mode,
+            ))
+        except Exception as exc:
+            # A bill the parser cannot read must not end the app.
+            logger.exception("Could not read the OVH bills: %s", exc)
+            self._all_invoices = []
+            self.query_one("#invoices_table", DataTable).clear()
+            self._show_unreadable_bill(history, "the monthly history")
+            self._show_unreadable_bill(page_info, "the invoices")
+            for name in ("#btn_prev_page", "#btn_next_page"):
+                self.query_one(name, Button).disabled = True
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""

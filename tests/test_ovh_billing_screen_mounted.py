@@ -67,3 +67,75 @@ async def test_failed_bill_list_ends_history_and_invoices_with_a_short_error(acc
         await _wait_for(pilot, lambda: "Could not load the invoices" in _text(app, "#invoices_page_info"), "card")
         assert "secret" not in _text(app, "#spend_history")
         assert "3.00 EUR" in _text(app, "#current_usage")
+
+
+def _bad_bill(**price) -> list[dict]:
+    return [{"billId": "B1", "date": "2026-01-01", "priceWithTax": price}]
+
+
+MALFORMED_BILLS = {
+    "text value": _bad_bill(value="abc", currencyCode="EUR"),
+    "null currency": _bad_bill(value=5.0, currencyCode=None),
+    "missing value": _bad_bill(currencyCode="EUR"),
+    "list for a dict": [{"billId": "B1", "date": "2026-01-01", "priceWithTax": [5.0, "EUR"]}],
+    "bill that is not a mapping": ["B1"],
+    "date that is not text": [{"billId": "B1", "date": 20260101, "priceWithTax": {"value": 1, "currencyCode": "EUR"}}],
+}
+MALFORMED_USAGE = {
+    "text value": {"current_spend": [{"price": {"value": "abc", "currencyCode": "EUR"}}], "forecast": []},
+    "null currency": {"current_spend": [{"price": {"value": 1.0, "currencyCode": None}}], "forecast": []},
+    "list for a dict": {"current_spend": [{"price": [1.0]}], "forecast": []},
+    "payload that is not a mapping": {"current_spend": "n/a", "forecast": 3},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(MALFORMED_BILLS))
+async def test_a_bill_the_parser_cannot_read_ends_on_the_card_and_the_app_keeps_running(
+    shape, accounts, config,
+) -> None:
+    app = Host(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=MALFORMED_BILLS[shape])
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(
+            pilot, lambda: "Loading" not in _text(app, "#invoices_page_info")
+            and "Loading" not in _text(app, "#spend_history"), "card",
+        )
+        assert isinstance(app.screen, OVHBillingScreen) and app._exception is None
+        history = _text(app, "#spend_history")
+        assert "Traceback" not in history
+        if "Could not read" in history:
+            assert "Could not read the bill data" in _text(app, "#invoices_page_info")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["text value", "list for a dict", "bill that is not a mapping"])
+async def test_the_listed_unreadable_bills_say_so_on_the_cards(shape, accounts, config) -> None:
+    app = Host(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=MALFORMED_BILLS[shape])
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(
+            pilot, lambda: "Could not read the bill data" in _text(app, "#invoices_page_info"), "card",
+        )
+        assert "Could not read the bill data" in _text(app, "#spend_history")
+        assert app.screen.query_one("#invoices_table").row_count == 0
+        assert isinstance(app.screen, OVHBillingScreen) and app._exception is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(MALFORMED_USAGE))
+async def test_unreadable_usage_ends_on_the_card_and_the_app_keeps_running(shape, accounts, config) -> None:
+    app = Host(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value=MALFORMED_USAGE[shape])
+    billing.get_invoices = AsyncMock(return_value=_bills())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "Loading" not in _text(app, "#current_usage"), "card")
+        assert isinstance(app.screen, OVHBillingScreen) and app._exception is None
