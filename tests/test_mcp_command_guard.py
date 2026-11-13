@@ -370,3 +370,58 @@ def test_legitimate_globs_still_work(command, stdout, tmp_path):
         assert sorted(out.split()) == ["./a.txt", "./b.txt"]
     else:
         assert "a.txt" in out
+
+
+_QUOTED_CASES = [
+    ("grep '[0-9]' notes.txt", "grep '[0-9]' notes.txt"),
+    ("grep 'a*' notes.txt", "grep 'a*' notes.txt"),
+    ("ls '[0-9]'", "ls '[0-9]'"),
+    ("find . -name '~*'", "find . -name '~*'"),
+    ("find . -name \\~\\*", "find . -name '~*'"),
+    ("grep \"x?\" notes.txt", "grep 'x?' notes.txt"),
+]
+
+
+@pytest.mark.parametrize("command,expected", _QUOTED_CASES)
+def test_a_word_the_model_quoted_stays_quoted(command, expected):
+    from servonaut.mcp.guards import render_standard_command
+
+    got = render_standard_command(command)
+    assert got == expected
+    assert render_standard_command(got) == got
+
+
+@pytest.mark.parametrize("planted", [True, False])
+@pytest.mark.parametrize("command", [
+    "grep '[0-9]' notes.txt", "grep 'a*' notes.txt", "ls '[0-9]'",
+])
+def test_a_quoted_pattern_reaches_the_program_as_written(command, planted, tmp_path):
+    import shlex
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    (tmp_path / "notes.txt").write_text("a1\n")
+    if planted:
+        for name in ("1", "5", "a"):
+            (tmp_path / name).write_text("")
+    rendered = render_standard_command(command)
+    words = subprocess.run(
+        ["/bin/sh", "-c", 'for w in ' + rendered.split(" ", 1)[1] + '; do printf "[%s]" "$w"; done'],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    expected = "".join(f"[{w}]" for w in shlex.split(command)[1:])
+    assert words == expected
+
+
+def test_an_unquoted_glob_in_a_command_without_rules_still_expands(tmp_path):
+    import subprocess
+
+    from servonaut.mcp.guards import render_standard_command
+
+    (tmp_path / "a.txt").write_text("x\n")
+    out = subprocess.run(
+        ["/bin/sh", "-c", render_standard_command("ls *.txt")], cwd=tmp_path,
+        capture_output=True, text=True,
+    ).stdout
+    assert out == "a.txt\n"

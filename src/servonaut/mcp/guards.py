@@ -259,22 +259,64 @@ def _render_token(token: str, literal_globs: bool = False) -> str:
     return token
 
 
-def _render_segment(segment: List[str]) -> str:
-    words = segment[1:] if segment and segment[0] == "sudo" else segment
-    # Only commands with argument rules are checked word by word; a file name
-    # the shell expands into one of their options would skip those rules.
-    literal_globs = bool(words) and words[0] in _ARGUMENT_RULES
-    return " ".join(_render_token(token, literal_globs) for token in segment)
+def _word_quoting(command: str) -> List[bool]:
+    """One flag per word of *command*: was any part of it quoted or escaped?"""
+    flags: List[bool] = []
+    in_word = touched = escaped = False
+    quote = ""
+
+    def end() -> None:
+        nonlocal in_word, touched
+        if in_word:
+            flags.append(touched)
+        in_word = touched = False
+
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = in_word = touched = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+            in_word = touched = True
+        elif char in " \t" or char == _PIPE:
+            end()
+        else:
+            in_word = True
+    end()
+    return flags
 
 
 def render_standard_command(command: str) -> str:
     """Rebuild an accepted standard-tier command from its checked tokens.
 
     The remote login shell then sees exactly the words that were checked:
-    pipes between segments and literal arguments, whatever shell it is.
+    pipes between segments and literal arguments, whatever shell it is. A
+    word the model quoted stays quoted when it holds a glob character, and a
+    glob in a command with argument rules expands only behind a path anchor
+    (a file name the shell expanded into an option would skip those rules).
     """
-    segments = _pipeline_segments(_tokenize(command))
-    return " | ".join(_render_segment(segment) for segment in segments)
+    tokens = _tokenize(command)
+    words = [token for token in tokens if token != _PIPE]
+    quoted = _word_quoting(command)
+    if len(quoted) != len(words):
+        quoted = [True] * len(words)  # cannot line them up: keep every glob literal
+    was_quoted = iter(quoted)
+    rendered = []
+    for segment in _pipeline_segments(tokens):
+        head = segment[1:] if segment and segment[0] == "sudo" else segment
+        literal_globs = bool(head) and head[0] in _ARGUMENT_RULES
+        parts = []
+        for token in segment:
+            if next(was_quoted) and _GLOB_CHARS & set(token):
+                parts.append(shell_quote(token))
+            else:
+                parts.append(_render_token(token, literal_globs))
+        rendered.append(" ".join(parts))
+    return " | ".join(rendered)
 
 
 def standard_command_names(command: str) -> List[str]:
