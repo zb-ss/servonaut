@@ -23,7 +23,7 @@ _REPORTED_NAME_LIMIT = 64
 # operator checks.
 _FIND_ACTIONS: FrozenSet[str] = frozenset({
     "-exec", "-execdir", "-ok", "-okdir", "-delete",
-    "-fprint", "-fprint0", "-fprintf", "-fls",
+    "-fprint", "-fprint0", "-fprintf", "-fls", "-rm",
 })
 # ``ip OBJECT [VERB ...]``: only these full verbs are accepted, because ip
 # resolves abbreviated verbs itself (a one-letter verb can mean delete).
@@ -31,6 +31,14 @@ _IP_READ_VERBS: FrozenSet[str] = frozenset({"show", "list", "lst", "ls", "get", 
 # Global ip options that consume the next word as their value.
 _IP_VALUE_OPTIONS: FrozenSet[str] = frozenset({
     "-f", "-family", "-n", "-netns", "-l", "-loops", "-rc", "-rcvbuf",
+})
+# Global ip options that only change what is displayed.
+_IP_READ_OPTIONS: FrozenSet[str] = frozenset({
+    "-4", "-6", "-0", "-B", "-M", "-s", "-stats", "-statistics", "-d", "-details",
+    "-h", "-human", "-human-readable", "-iec", "-j", "-json", "-p", "-pretty",
+    "-o", "-oneline", "-r", "-resolve", "-a", "-all", "-c", "-color", "-br",
+    "-brief", "-t", "-timestamp", "-ts", "-tshort", "-N", "-Numeric", "-V",
+    "-Version",
 })
 _IFCONFIG_READ_FLAGS: FrozenSet[str] = frozenset({"-a", "-s", "-v"})
 _HOSTNAME_READ_FLAGS: FrozenSet[str] = frozenset({
@@ -76,14 +84,26 @@ def _sort_reason(args: Sequence[str]) -> str:
     return ""
 
 
+_DATE_READ_VALUE_OPTIONS: FrozenSet[str] = frozenset({
+    "-d", "--date", "-r", "--reference", "-D",
+})
+
+
 def _date_reason(args: Sequence[str]) -> str:
-    sets_clock = any(
-        _long_option_matches(arg, "--set")
-        or (not arg.startswith("-I") and "s" in _short_flags(arg))
-        or _DATE_SET_OPERAND.match(arg)
-        for arg in args
-    )
-    return "setting the date is not allowed" if sets_clock else ""
+    previous = ""
+    for arg in args:
+        sets_clock = (
+            _long_option_matches(arg, "--set")
+            or (not arg.startswith("-I") and "s" in _short_flags(arg))
+            or _DATE_SET_OPERAND.match(arg)
+        )
+        # busybox and BSD read a bare operand as the time to set; only
+        # ``+FORMAT`` and the value of a read option are safe operands.
+        is_operand = not arg.startswith(("-", "+")) or arg == "-"
+        if sets_clock or (is_operand and previous not in _DATE_READ_VALUE_OPTIONS):
+            return "setting the date is not allowed"
+        previous = arg
+    return ""
 
 
 def _ss_reason(args: Sequence[str]) -> str:
@@ -106,23 +126,23 @@ def _ping_reason(args: Sequence[str]) -> str:
     return ""
 
 
-def _ip_positionals(args: Sequence[str]) -> List[str]:
+def _ip_reason(args: Sequence[str]) -> str:
     words: List[str] = []
     skip_value = False
     for arg in args:
         if skip_value:
             skip_value = False
-        elif arg.startswith("-"):
-            skip_value = arg in _IP_VALUE_OPTIONS
-        else:
-            words.append(arg)
-    return words
-
-
-def _ip_reason(args: Sequence[str]) -> str:
-    if any(arg.startswith(("-b", "-for")) for arg in args):
-        return "ip batch and force options are not allowed"
-    words = _ip_positionals(args)
+            continue
+        if words or not arg.startswith("-"):
+            words.append(arg)  # ip stops reading options at the object
+            continue
+        # ip reads ``--x`` as ``-x``, and accepts abbreviations of long options.
+        option = arg[1:] if arg.startswith("--") and len(arg) > 2 else arg
+        name = option.split("=", 1)[0]
+        if name in _IP_VALUE_OPTIONS:
+            skip_value = True
+        elif name not in _IP_READ_OPTIONS:
+            return "only ip display options are allowed"
     if len(words) >= 2 and words[1] not in _IP_READ_VERBS:
         return "only ip show, list and get are allowed"
     return ""
@@ -177,6 +197,24 @@ def _pipeline_segments(tokens: Sequence[str]) -> List[List[str]]:
     return segments
 
 
+def _unquoted_pipe_count(command: str) -> int:
+    """How many ``|`` in *command* are outside quotes and not escaped."""
+    count, quote, escaped = 0, "", False
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == _PIPE:
+            count += 1
+    return count
+
+
 def _is_operator(token: str) -> bool:
     return bool(token) and all(char in "();<>|&" for char in token)
 
@@ -185,9 +223,13 @@ def _reported(name: str) -> str:
     return name[:_REPORTED_NAME_LIMIT]
 
 
-def _check_segment(segment: List[str], allowlist: Sequence[str]) -> Tuple[bool, str]:
+def _check_segment(
+    segment: List[str], allowlist: Sequence[str], *, allow_sudo: bool = True,
+) -> Tuple[bool, str]:
     if not segment:
         return False, "Empty pipeline segment is not allowed in standard mode"
+    if segment[0] == "sudo" and not allow_sudo:
+        return False, "sudo is not on the read-only command list"
     words = segment[1:] if segment[0] == "sudo" else segment
     if not words:
         return False, "sudo must be followed by an allowlisted command"
@@ -203,20 +245,78 @@ def _check_segment(segment: List[str], allowlist: Sequence[str]) -> Tuple[bool, 
     return True, "OK"
 
 
-def _render_token(token: str) -> str:
-    return token if _PLAIN_TOKEN.match(token) else shell_quote(token)
+_GLOB_CHARS = frozenset("*?[")
+# A glob may expand only when every result starts the same way, so it can
+# never become an option or a bare operand of a command with argument rules.
+_GLOB_ANCHORS = ("/", "./", "../", "~")
+
+
+def _render_token(token: str, literal_globs: bool = False) -> str:
+    if not _PLAIN_TOKEN.match(token):
+        return shell_quote(token)
+    if literal_globs and _GLOB_CHARS & set(token) and not token.startswith(_GLOB_ANCHORS):
+        return shell_quote(token)
+    return token
+
+
+def _word_quoting(command: str) -> List[bool]:
+    """One flag per word of *command*: was any part of it quoted or escaped?"""
+    flags: List[bool] = []
+    in_word = touched = escaped = False
+    quote = ""
+
+    def end() -> None:
+        nonlocal in_word, touched
+        if in_word:
+            flags.append(touched)
+        in_word = touched = False
+
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = in_word = touched = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+            in_word = touched = True
+        elif char in " \t" or char == _PIPE:
+            end()
+        else:
+            in_word = True
+    end()
+    return flags
 
 
 def render_standard_command(command: str) -> str:
     """Rebuild an accepted standard-tier command from its checked tokens.
 
     The remote login shell then sees exactly the words that were checked:
-    pipes between segments and literal arguments, whatever shell it is.
+    pipes between segments and literal arguments, whatever shell it is. A
+    word the model quoted stays quoted when it holds a glob character, and a
+    glob in a command with argument rules expands only behind a path anchor
+    (a file name the shell expanded into an option would skip those rules).
     """
-    segments = _pipeline_segments(_tokenize(command))
-    return " | ".join(
-        " ".join(_render_token(token) for token in segment) for segment in segments
-    )
+    tokens = _tokenize(command)
+    words = [token for token in tokens if token != _PIPE]
+    quoted = _word_quoting(command)
+    if len(quoted) != len(words):
+        quoted = [True] * len(words)  # cannot line them up: keep every glob literal
+    was_quoted = iter(quoted)
+    rendered = []
+    for segment in _pipeline_segments(tokens):
+        head = segment[1:] if segment and segment[0] == "sudo" else segment
+        literal_globs = bool(head) and head[0] in _ARGUMENT_RULES
+        parts = []
+        for token in segment:
+            if next(was_quoted):
+                parts.append(shell_quote(token))
+            else:
+                parts.append(_render_token(token, literal_globs))
+        rendered.append(" ".join(parts))
+    return " | ".join(rendered)
 
 
 def standard_command_names(command: str) -> List[str]:
@@ -237,8 +337,13 @@ def standard_command_names(command: str) -> List[str]:
     return names
 
 
-def check_standard_command(command: str, allowlist: Sequence[str]) -> Tuple[bool, str]:
-    """Allow read-only allowlisted commands, optionally piped, and nothing else."""
+def check_standard_command(
+    command: str, allowlist: Sequence[str], *, allow_sudo: bool = True,
+) -> Tuple[bool, str]:
+    """Allow read-only allowlisted commands, optionally piped, and nothing else.
+
+    With ``allow_sudo=False`` a segment that starts with ``sudo`` is refused.
+    """
     if any(sequence in command for sequence in _FORBIDDEN_SEQUENCES):
         return False, "Command substitution and multiple lines are not allowed in standard mode"
     try:
@@ -253,8 +358,12 @@ def check_standard_command(command: str, allowlist: Sequence[str]) -> Tuple[bool
                 "Only single pipes between allowlisted commands are allowed in standard mode; "
                 "use the dangerous tier for command lists, redirects or subshells"
             )
+    if tokens.count(_PIPE) != _unquoted_pipe_count(command):
+        # A quoted or escaped ``|`` is a word, but the rebuilt command line
+        # would turn it into a real pipe.
+        return False, "A quoted or escaped pipe character is not allowed in standard mode"
     for segment in _pipeline_segments(tokens):
-        allowed, reason = _check_segment(segment, allowlist)
+        allowed, reason = _check_segment(segment, allowlist, allow_sudo=allow_sudo)
         if not allowed:
             return False, reason
     return True, "OK"

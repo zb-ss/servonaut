@@ -886,6 +886,9 @@ def _relay_run_foreground() -> None:
                 auth_service=auth_service,
                 servonaut_tools=headless_tools,
                 ip_ban_service=ip_ban_service,
+                readonly_commands=lambda: (
+                    config_manager.get().ai_provider.readonly_command_allowlist
+                ),
             )
             ai_tool_executor = RelayAIToolExecutor(bridge)
             # Separate bridge for proactive-monitoring probes: fixed

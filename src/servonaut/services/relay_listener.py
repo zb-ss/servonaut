@@ -1103,6 +1103,12 @@ class RelayListener:
                     error_message = (
                         "invalid_probe_envelope: missing tool name or id"
                     )
+                elif not probe_tool_allowed(call.tool):
+                    # The pre-filter read ``type``; the bridge runs ``tool``.
+                    error_message = (
+                        f"not_permitted: {call.tool} is denied by the "
+                        f"unattended probe policy (read-only probes only)"
+                    )
                 else:
                     filtered = filter_probe_args(call.tool, dict(call.args))
                     if filtered != call.args:

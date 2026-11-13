@@ -994,3 +994,31 @@ def test_ai_conversations_list_json(monkeypatch, capsys):
     assert isinstance(data, list)
     assert data[0]["id"] == "conv-1"
     assert data[0]["status"] == "active"
+
+
+def test_ai_chat_stream_does_not_run_an_ssh_exec_readonly_tool_call(
+    monkeypatch, capsys,
+):
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    provider = services[3]
+    ran = []
+
+    async def _fake_stream(*_a, **_kw):
+        yield {
+            "event": "tool_call",
+            "data": {"tool": "ssh_exec_readonly", "args": {"command": "touch x"}},
+        }
+        yield {"event": "done", "data": {}}
+
+    provider.stream_chat = _fake_stream
+    monkeypatch.setattr(
+        "servonaut.services.relay_executors.RelayExecutors.execute",
+        lambda *a, **k: ran.append(a),
+        raising=False,
+    )
+    cli_ai.handle_ai_command(_chat_args(stream=True))
+    assert "[tool_call] ssh_exec_readonly (TUI required to confirm/execute)" in (
+        capsys.readouterr().err
+    )
+    assert ran == []
