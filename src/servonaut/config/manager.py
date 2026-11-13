@@ -425,7 +425,10 @@ class ConfigManager:
                 self._config.ai_chunk_size = 100000
                 self.save(self._config)
 
-            self._baseline_team_options()
+            # A config this release left as it was (a version it cannot
+            # upgrade) is not rewritten for this either.
+            if not self._needs_migration(raw_data):
+                self._baseline_team_options()
 
             # Validate and warn
             warnings = self._validate(self._config)
@@ -491,7 +494,9 @@ class ConfigManager:
 
         recorded = baseline_existing_options(config, auth_service.AUTH_FILE)
         self.team_options_recorded += recorded
-        self.save(config)
+        # Written in place, with no backup of its own: only the recorded
+        # options and the flag are new, and an upgrade has just kept a copy.
+        _write_json_secure(self._config_path, self._serialize(config))
 
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk.

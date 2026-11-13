@@ -157,6 +157,25 @@ async def test_allow_in_settings_flips_the_item_and_the_next_build_passes(tmp_pa
         assert _reload(tmp_path).ssh.team_options[0]["allowed"] is False
 
 
+@pytest.mark.asyncio
+async def test_demo_mode_shows_the_option_name_and_a_stand_in_for_the_team(tmp_path):
+    from unittest.mock import MagicMock
+
+    config = AppConfig()
+    config.ssh.team_options = [{"option": "proxycommand=ssh -W %h:%p secret-jump.example.net",
+                                "team": "7", "team_name": "Acme", "allowed": False}]
+    manager = _temp_config_manager(tmp_path, config)
+    app = _PanelHost(ConnectionsPanel, manager)
+    app.demo_mode = True
+    app.redaction_service = MagicMock()
+    app.redaction_service.redact_name = lambda name: "Team-1"
+    async with app.run_test() as pilot:
+        await _wait(pilot, lambda: app.panel is not None and app.panel.is_mounted)
+        table = app.panel.query_one("#conn_team_options_table", DataTable)
+        await _wait(pilot, lambda: table.row_count == 1)
+        assert table.get_row_at(0) == ["proxycommand=…", "Team Team-1", "Refused"]
+
+
 # --- the app ------------------------------------------------------------------
 
 def _seed_home(home: Path) -> None:

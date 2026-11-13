@@ -368,13 +368,29 @@ class ConnectionsPanel(SettingsPanel):
         table = self.query_one("#conn_team_options_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Option", "From", "State")
+        redaction = self._team_option_redaction()
         for item in items:
+            origin = origin_label(item)
+            if redaction is not None and item.get("team_name") and item.get("saved_before") is not True:
+                origin = "Team " + redaction.redact_name(str(item["team_name"]))
             table.add_row(
-                escape(shown(item["option"])),
-                escape(origin_label(item)),
+                escape(self._team_option_text(item["option"])),
+                escape(origin),
                 "Allowed" if item.get("allowed") is True else "Refused",
             )
         self._show_team_option_text()
+
+    def _team_option_redaction(self) -> Any:
+        """The demo-mode redactor, or None outside demo mode."""
+        if getattr(self.app, "demo_mode", False):
+            return getattr(self.app, "redaction_service", None)
+        return None
+
+    def _team_option_text(self, text: str) -> str:
+        """An option as shown; in demo mode only its name (the value can name a host)."""
+        if getattr(self.app, "demo_mode", False):
+            return text.split("=", 1)[0] + "=…"
+        return shown(text)
 
     def _selected_team_option(self) -> Optional[str]:
         """The option text on the selected row of the team options table."""
@@ -384,7 +400,10 @@ class ConnectionsPanel(SettingsPanel):
 
     def _show_team_option_text(self) -> None:
         """The selected option's full text, under the table."""
-        self.query_one("#conn_team_option_text", Static).update(self._selected_team_option() or "")
+        text = self._selected_team_option()
+        self.query_one("#conn_team_option_text", Static).update(
+            self._team_option_text(text) if text else ""
+        )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "conn_team_options_table":
@@ -401,7 +420,7 @@ class ConnectionsPanel(SettingsPanel):
         set_allowed(options, text, allowed)
         self.app.config_manager.update(ssh=dataclasses.replace(config.ssh, team_options=options))
         self._refresh_team_options()
-        shown_text = shown(text)
+        shown_text = self._team_option_text(text)
         self.app.notify(
             f"Allowed: {shown_text}. Connections that use it will run it on this computer."
             if allowed else f"Refused: {shown_text}.",
