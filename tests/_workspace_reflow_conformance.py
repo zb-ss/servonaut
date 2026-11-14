@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -160,6 +161,30 @@ def assert_layout(app: ServonautApp, screen: WorkspaceScreen) -> None:
     assert_controls(app, screen)
 
 
+async def settled_layout(app: ServonautApp, screen: WorkspaceScreen) -> None:
+    """Run ``assert_layout`` once the layout has caught up with the last change.
+
+    A resize or toggle is applied on later loop turns, so a single pause can
+    be too short on a loaded machine. Wait, bounded, for the very assertions
+    of ``assert_layout`` to hold; if they never do, the last failure is raised.
+    """
+    failure: AssertionError | None = None
+
+    def holds() -> bool:
+        nonlocal failure
+        try:
+            assert_layout(app, screen)
+        except AssertionError as error:
+            failure = error
+            return False
+        return True
+
+    try:
+        await wait_until(holds)
+    except asyncio.TimeoutError:
+        raise failure or AssertionError("layout did not settle") from None
+
+
 @contextmanager
 def one_layout_transition(screen: WorkspaceScreen) -> Iterator[None]:
     with patch.object(screen, "set_class", Mock(wraps=screen.set_class)) as changes:
@@ -174,7 +199,7 @@ async def open_chat(
 ) -> ChatPanel:
     with one_layout_transition(screen):
         panel = await _open_chat(app, pilot)
-    assert_layout(app, screen)
+    await settled_layout(app, screen)
     return panel
 
 
@@ -185,7 +210,7 @@ async def collapse_chat(
         await pilot.press("f2")
         await pilot.pause()
     await wait_until(lambda: not screen.has_class("-chat-replace"))
-    assert_layout(app, screen)
+    await settled_layout(app, screen)
 
 
 async def assert_essential_targets(
@@ -236,14 +261,14 @@ async def preserve_native_state(
     with one_layout_transition(screen):
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
-    assert_layout(app, screen)
+    await settled_layout(app, screen)
     assert case.state(screen) == baseline
     assert editor.document is document
     assert editor.selection == selection
     with one_layout_transition(screen):
         await pilot.resize_terminal(160, 50)
         await pilot.pause()
-    assert_layout(app, screen)
+    await settled_layout(app, screen)
     await collapse_chat(app, pilot, screen)
     await wait_until(lambda: app.focused is screen.query_one(case.primary_focus_selector))
     assert editor.document is document and editor.text == "Keep this café Ω draft"
@@ -254,8 +279,9 @@ async def preserve_native_state(
         with one_layout_transition(screen):
             await _click(pilot, "#workspace_navigation")
             await pilot.pause()
+        await wait_until(lambda: screen.query_one(Sidebar).display is visible)
         assert screen.query_one(Sidebar).display is visible
-        assert_layout(app, screen)
+        await settled_layout(app, screen)
         assert case.state(screen) == baseline
     for selector in case.essential_targets:
         target = screen.query_one(selector)

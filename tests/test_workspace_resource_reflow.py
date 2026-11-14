@@ -32,7 +32,7 @@ from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase,
     assert_button_label_painted,
     assert_essential_targets,
-    assert_layout,
+    settled_layout,
     collapse_chat,
     content,
     one_layout_transition,
@@ -427,7 +427,7 @@ async def test_resource_reflow_retains_four_visibility_states(
         baseline = case.state(screen)
         if chat:
             await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
+        await settled_layout(app, screen)
         assert screen.query_one(Sidebar).display is navigation
         assert case.state(screen) == baseline
         if chat and size == (160, 50):
@@ -471,9 +471,13 @@ async def test_resource_qualified_native_boundary_and_all_action_fit(
             with one_layout_transition(screen):
                 await pilot.resize_terminal(*sample.size)
                 await pilot.pause()
+            await wait_until(
+                lambda: screen.has_class("-chat-replace") is sample.expected_replace
+                and screen.has_class("-content-narrow") is sample.expected_content_narrow
+            )
             assert screen.has_class("-chat-replace") is sample.expected_replace
             assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
+            await settled_layout(app, screen)
             with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
                 screen.apply_workspace_state()
                 await pilot.pause()
@@ -489,7 +493,7 @@ async def test_resource_qualified_native_boundary_and_all_action_fit(
             assert screen.has_class("-content-narrow") is sample.expected_content_narrow
             assert content(screen).display is not sample.expected_replace
             assert case.state(screen) == baseline
-            assert_layout(app, screen)
+            await settled_layout(app, screen)
 
 
 @pytest.mark.asyncio
@@ -647,7 +651,7 @@ async def test_mixed_screen_native_confirmation_resume_applies_preference_once(
         apply_state.assert_called_once_with()
         assert screen.query_one(Sidebar).display and content(screen).display
         assert app.focused is origin and case.state(screen) == baseline
-        assert_layout(app, screen)
+        await settled_layout(app, screen)
 
 
 @pytest.mark.asyncio
