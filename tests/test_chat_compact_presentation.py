@@ -82,11 +82,26 @@ async def test_height_state_uses_row_allocation_and_clears_on_collapse(
         panel = await _open_chat(app, pilot)
         screen = app.screen
         row = screen.query_one("#main-layout")
-        overhead = app.size.height - row.content_region.height
-        # Default chrome takes19rows; six transcript rows fit at25.
+
+        async def resize_content_to(height: int) -> None:
+            """Size the terminal so the chat row is *height* rows tall.
+
+            The rows around the chat row (header, notification lane, footer)
+            change with the terminal's height class, so the terminal height is
+            found from the layout, not from a fixed overhead.
+            """
+            terminal = app.size.height - row.content_region.height + height
+            for _ in range(6):
+                await pilot.resize_terminal(width, terminal)
+                await pilot.pause()
+                if row.content_region.height == height:
+                    return
+                terminal += height - row.content_region.height
+            raise AssertionError(f"no terminal height gives a {height}-row chat row")
+
+        # Six transcript rows fit at 25.
         for height in (24, 25, 26, 24):
-            await pilot.resize_terminal(width, overhead + height)
-            await pilot.pause()
+            await resize_content_to(height)
             assert row.content_region.height == height
             assert screen.has_class("-chat-compact") is (height < 25)
             header = panel.query_one("#chat-header")
@@ -110,11 +125,9 @@ async def test_height_state_uses_row_allocation_and_clears_on_collapse(
         await wait_until(lambda: not panel._collapsed)
         await pilot.pause()
         assert screen.has_class("-chat-compact")
-        await pilot.resize_terminal(width, overhead + 26)
-        await pilot.pause()
+        await resize_content_to(26)
         assert not screen.has_class("-chat-compact")
-        await pilot.resize_terminal(width, overhead + 24)
-        await pilot.pause()
+        await resize_content_to(24)
         assert screen.has_class("-chat-compact")
         await pilot.press("f3")
         await wait_until(lambda: not panel.is_attached)
