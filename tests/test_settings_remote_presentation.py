@@ -177,7 +177,16 @@ async def _click(app: _RemoteApp, pilot: Pilot, button: Button) -> None:
     await wait_until(lambda: not button.has_class("-active"))
     button.scroll_visible(animate=False)
     await pilot.pause()
-    await wait_until(lambda: _exposed(app, button))
+
+    def exposed_after_scrolling() -> bool:
+        # A scroll requested before the form reached its final height can stop
+        # short; ask again while the button is still not in view.
+        if _exposed(app, button):
+            return True
+        button.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, button)
+
+    await wait_until(exposed_after_scrolling)
     assert await pilot.click(button)
 
 
