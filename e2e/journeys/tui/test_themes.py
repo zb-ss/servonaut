@@ -157,6 +157,8 @@ async def test_new_theme_from_current_creates_a_file_that_loads(tui, seed):
         await t.fill("#theme_name_input", "mine")
         await t.click("#theme_name_save")
         await t.wait_until(lambda: (seed.home / ".servonaut" / "themes" / "mine.toml").exists(), desc="theme file written")
+        # The card mounts after the file is written.
+        await t.wait_until(lambda: bool(t.app.screen.query("#theme_card_mine")), desc="the new theme's card")
         card = t.on_screen("#theme_card_mine", ThemeCard)
         await t.click(card)
         await t.wait_until(lambda: t.app.theme == "mine", desc="the new theme applied")
