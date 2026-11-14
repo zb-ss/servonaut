@@ -322,7 +322,7 @@ class LogViewerScreen(WorkspaceScreen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
 
