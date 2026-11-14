@@ -313,7 +313,7 @@ def test_ci_runs_the_screenshot_tests_strictly_in_their_own_job() -> None:
     job = jobs["screenshots"]
     assert '.[test]"' in job
     assert 'SERVONAUT_SNAPSHOTS_STRICT: "1"' in job
-    assert "pytest --tb=short -q tests/snapshots" in job
+    assert "pytest --tb=short -q -n auto tests/snapshots" in job
     assert "tests/snapshots/__failures__/" in job
     # Elsewhere a Textual version mismatch skips them instead of failing.
     assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["test"]
