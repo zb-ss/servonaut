@@ -25,7 +25,7 @@ from servonaut.screens._provider_accounts import (
     show_account_labels,
 )
 from servonaut.services.ovh_billing_service import spend_history_from_invoices, usage_figures
-from servonaut.utils.markup import literal
+from servonaut.utils.markup import cell, literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -262,7 +262,7 @@ class OVHBillingScreen(Screen):
                 row_data = tbl.get_row(event.row_key)
                 bill_id = str(row_data[1]) if len(row_data) > 1 else ""
                 if bill_id:
-                    self.notify(f"Invoice selected: {bill_id}", title="Invoice")
+                    self.notify(f"Invoice selected: {bill_id}", title="Invoice", markup=False)
             except Exception:
                 pass
 
@@ -358,7 +358,8 @@ class OVHBillingScreen(Screen):
             if self.app.demo_mode:
                 bill_id = f"invoice-{index:03d}"
                 amount = "Hidden"
-            tbl.add_row(date, bill_id, amount, status)
+            # API text: a plain string cell is read as markup when the table paints.
+            tbl.add_row(cell(date), cell(bill_id), cell(amount), cell(status))
 
         max_page = max(0, (total - 1) // _PAGE_SIZE) if total else 0
         self.query_one("#invoices_page_info", Static).update(
@@ -375,7 +376,7 @@ class OVHBillingScreen(Screen):
         try:
             services = await svc.get_service_list()
             if not services:
-                tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
+                tbl.add_row(cell("No services found", "dim"), "", "", "", "")
                 return
             def _h(x: str) -> str:
                 # Service names are domains or dashed-IP hostnames.
@@ -389,15 +390,17 @@ class OVHBillingScreen(Screen):
                 name = _h(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
-                status_display = {
-                    "ok": "[green]ok[/green]",
-                    "expired": "[red]expired[/red]",
-                    "unpaid": "[red]unpaid[/red]",
-                    "pending": "[cyan]pending[/cyan]",
-                }.get(status, status)
+                status_style = {
+                    "ok": "green", "expired": "red", "unpaid": "red", "pending": "cyan",
+                }.get(status, "")
                 expiry = str(service.get("expiration", ""))[:10]
-                auto_renew = "[green]yes[/green]" if service.get("auto_renew") else "[dim]no[/dim]"
-                tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
+                auto_renew = (
+                    cell("yes", "green") if service.get("auto_renew") else cell("no", "dim")
+                )
+                tbl.add_row(
+                    cell(name), cell(svc_type), cell(status, status_style),
+                    cell(expiry), auto_renew,
+                )
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
             self.notify(f"Error loading services: {self._display_error(exc)}", severity="error", markup=False)
