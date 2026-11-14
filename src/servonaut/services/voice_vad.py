@@ -60,7 +60,7 @@ _DETECTOR_BUFFER_SECONDS = 2.0
 
 _INSTALL_HINT = "Conversation mode needs: pip install 'servonaut[voice-output]'"
 NO_VAD_MODEL_HINT = (
-    "The voice-detection model is not downloaded yet — see Settings > Voice Input"
+    "The voice-detection model is not downloaded yet — see Settings > Voice input"
 )
 
 

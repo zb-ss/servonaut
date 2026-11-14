@@ -170,7 +170,7 @@ class TestFindingsScreenStates:
             await pilot.pause(0.05)
             text = _rendered_text(app)
             assert "Sign in required" in text
-            assert "Open Login" in text
+            assert "Open login" in text
 
     @pytest.mark.asyncio
     async def test_free_tier_shows_upgrade_card(self):
@@ -184,7 +184,7 @@ class TestFindingsScreenStates:
             await pilot.pause(0.05)
             text = _rendered_text(app)
             assert "Upgrade required" in text
-            assert "Open Pricing" in text
+            assert "Open pricing" in text
 
     @pytest.mark.asyncio
     async def test_server_402_shows_upgrade_card(self):
@@ -1402,8 +1402,14 @@ class TestConfirmModalPresentation:
 
     @pytest.mark.asyncio
     async def test_revert_plan_rendered_at_confirm_time(self):
+        from textual.widgets import Button, Input
+
+        from servonaut.screens.remediation_confirm import RemediationConfirmModal
+        from tests._async_bounds import wait_until
+
         svc = _mock_findings_service()
-        svc.remediate_preview = AsyncMock(return_value=self._preview())
+        preview = self._preview()
+        svc.remediate_preview = AsyncMock(return_value=preview)
         ip_ban = MagicMock()
         ip_ban.get_configs = MagicMock(return_value=[
             MagicMock(method="security_group"),
@@ -1425,10 +1431,44 @@ class TestConfirmModalPresentation:
             screen = app.screen_stack[-1]
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await wait_until(lambda: isinstance(app.screen, RemediationConfirmModal))
+            modal = app.screen
+            required = (
+                "#remediation_confirm_command", "#remediation_confirm_revert",
+                "#remediation_confirm_input", "#remediation_confirm_run",
+            )
+
+            def children_ready() -> bool:
+                if app.screen is not modal or not modal.is_mounted:
+                    return False
+                for selector in required:
+                    matches = list(modal.query(selector))
+                    if len(matches) != 1:
+                        return False
+                    child = matches[0]
+                    if not child.is_mounted or not child.is_attached:
+                        return False
+                    if not child.size.width or not child.size.height:
+                        return False
+                return True
+
+            await wait_until(children_ready)
+            field = modal.query_one("#remediation_confirm_input", Input)
+            await wait_until(lambda: app.focused is field)
+            undo = modal.query_one("#remediation_confirm_revert", Static)
+            assert undo.render().plain == preview["revert_plan"]["human"]
+            assert modal.query_one("#remediation_confirm_run", Button).disabled
             text = _rendered_text(app)
             # The operator sees the undo path BEFORE typing RUN.
-            assert "Undo, if needed: unblock 9.9.9.9 via nftables" in text
+            assert "Undo, if needed:" in text
+            assert "unblock 9.9.9.9 via nftables" in text
+            painted = "\n".join(strip.text for strip in modal._compositor.render_strips())
+            assert "Undo, if needed:" in painted
+            assert preview["revert_plan"]["human"] in painted
+            await pilot.press("escape")
+            await wait_until(lambda: app.screen is screen)
+            svc.remediate.assert_not_awaited()
+            svc.revert.assert_not_called()
 
     def test_revert_plan_summary_fallbacks(self):
         from servonaut.screens.remediation_confirm import (

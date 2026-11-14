@@ -918,6 +918,25 @@ pipe) it lists what it found, stores nothing and exits `5`, unless `--yes` or
 
 ---
 
+## `servonaut theme`
+
+List, export and check colour themes. See [Themes](themes.md) for the theme file
+format.
+
+| Command | Description |
+|---------|-------------|
+| `servonaut theme list` | Every theme with its source (`built-in` or `user`) and status: `ok`, a readability warning, or the error that stopped a theme file loading |
+| `servonaut theme export <name> [--output PATH] [--force]` | Print any theme as a theme file, as a starting point for your own. With `--output` it writes the file instead, and refuses to replace an existing one unless you add `--force` |
+| `servonaut theme check <file>` | Check one theme file and list every problem with its line number |
+
+| Code | Meaning |
+|------|---------|
+| `0` | Listed, exported, or the file is valid |
+| `1` | `check` found problems in the file |
+| `2` | `export` names no such theme, the theme follows the terminal's colours and has nothing to export, or the output file could not be written |
+
+---
+
 ## Other top-level commands
 
 | Command | Description |

@@ -17,6 +17,8 @@ from textual.widgets import Button, DataTable, Input
 
 from servonaut.config.schema import AppConfig, OVHConfig
 from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,8 @@ class _WrapperApp(App):
     that backs list/add/delete.
     """
 
+    CSS_PATH = CSS_FILES
+
     def __init__(self, cloud_service, project_ids=None) -> None:
         super().__init__()
         self.ovh_cloud_service = cloud_service
@@ -114,7 +118,7 @@ class TestKeyListing:
 
     @pytest.mark.asyncio
     async def test_table_truncates_long_public_key(self):
-        """Public keys longer than 40 chars are shown truncated with an ellipsis."""
+        """Public keys longer than 24 chars are shown truncated with an ellipsis."""
         long_key = "ssh-rsa " + "A" * 80
         svc = _make_cloud_service(keys=[
             {
@@ -134,7 +138,7 @@ class TestKeyListing:
             # Column 2 is the truncated public key.
             cell = str(row[2])
             assert cell.endswith("…")
-            assert len(cell) == 41  # 40 chars + single-char ellipsis
+            assert 13 <= len(cell) <= 41  # fits the table; at most 40 characters + the ellipsis
 
     @pytest.mark.asyncio
     async def test_table_populated_with_key_data(self):
@@ -302,6 +306,12 @@ class TestScreenRendering:
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
+            button = app.screen.query_one("#btn_add_key", Button)
+            button.scroll_visible(animate=False)
+            await wait_until(
+                lambda: app.screen.region.contains_region(button.region)
+                and app.get_widget_at(*button.region.center)[0] is button,
+            )
             await pilot.click("#btn_add_key")
             await pilot.pause(0.1)
             form = app.screen.query_one("#add_key_form")

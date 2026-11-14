@@ -116,6 +116,8 @@ class _PickerService:
 
 
 class _Host(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, service: Any) -> None:
         super().__init__()
         self.vault_command_service = service
@@ -171,7 +173,14 @@ async def _click(pilot: Pilot, selector: str) -> None:
     """Click a button once its last press has finished: a button ignores clicks while it animates one."""
     button = pilot.app.screen.query_one(selector, Button)
     await wait_until(lambda: not button.has_class("-active"))
-    await pilot.click(selector)
+    button.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    assert button.region.width > 0 and button.region.height > 0
+    assert pilot.app.screen.region.contains_region(button.region)
+    assert pilot.app.get_widget_at(*button.region.center)[0] is button
+    assert await pilot.click(
+        button, offset=(button.region.width // 2, button.region.height // 2),
+    )
 
 
 async def _press(pilot: Pilot, service: _PickerService, button: str, call: str) -> dict[str, Any]:
@@ -481,13 +490,13 @@ async def test_no_teams_explains_where_to_join_one_and_refresh_lists_them_again(
         screen = app.screen
         team = await _teams_loaded(screen)
         assert team.disabled and team.prompt == "No teams"
-        assert "create or join one from Team Management" in _text(screen, "ca_hint")
+        assert "create or join one from Team management" in _text(screen, "ca_hint")
 
         service.teams = list(_TEAMS)
         await pilot.press("r")
         await wait_until(lambda: not team.disabled)
         assert _labels(team) == ["Ops (ops)", "Platform (platform)"]
-        assert "Team Management" not in _text(screen, "ca_hint")
+        assert "Team management" not in _text(screen, "ca_hint")
 
 
 @pytest.mark.asyncio
@@ -518,7 +527,7 @@ async def test_a_team_without_shared_servers_points_to_team_management() -> None
         server = _picker(screen, "ca_server")
         assert server.disabled and server.prompt == "No shared servers"
         assert _labels(server) == []  # nothing to deliver to, not even "every enrolled server"
-        hint = "No shared servers in this team yet: share one from Team Management."
+        hint = "No shared servers in this team yet: share one from Team management."
         assert _text(screen, "ca_hint") == hint
         assert _ca_actions_disabled(screen) == [False, True, True, True]
         await _refused(pilot, screen, "#ca_krl", hint)

@@ -12,79 +12,369 @@
     overflow-y: auto;
 }
 
-#vault_title, #ca_title {
+#ca_status {
+    margin-bottom: 1;
+}
+
+/* Vault identity determines whether this is a setup desk or a metadata workspace. */
+VaultScreen #vault_content {
+    width: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+VaultScreen #vault_identity_panel {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+VaultScreen #vault_identity_heading,
+VaultScreen #vault_records_header {
+    height: auto;
+    min-height: 1;
+}
+
+/* The status shares the title's row, which the shared header keeps one row
+   below the top of the content. */
+VaultScreen #vault_identity_heading #vault_identity_state {
+    margin-top: 1;
+}
+
+VaultScreen #vault_records_heading {
+    width: auto;
+    height: auto;
     text-style: bold;
-    margin-bottom: 1;
 }
 
-#vault_status, #ca_status {
-    margin-bottom: 1;
+VaultScreen #vault_identity_state,
+VaultScreen #vault_records_context {
+    width: 1fr;
+    height: auto;
+    margin-left: 2;
+    text-align: right;
+    color: $text-muted;
 }
 
-#vault_table {
+VaultScreen #vault_refresh {
+    margin: 0 0 0 1;
+}
+
+/* The one-row (compact) button sits on the title's row, one below the top. */
+VaultScreen.-narrow #vault_refresh,
+VaultScreen.-content-narrow #vault_refresh {
+    margin-top: 1;
+}
+
+VaultScreen #vault_status {
+    height: auto;
+    margin: 0;
+}
+
+VaultScreen #vault_next_step {
+    display: none;
+    height: auto;
+    color: $text-accent;
+    text-style: bold;
+}
+
+VaultScreen #vault_next_step.-shown {
+    display: block;
+}
+
+VaultScreen #vault_busy_row {
+    height: auto;
+}
+
+VaultScreen #vault_busy {
+    width: 1fr;
+}
+
+VaultScreen #vault_cancel_wait {
+    display: none;
+    margin: 0;
+}
+
+VaultScreen #vault_cancel_wait.-shown {
+    display: block;
+}
+
+/* The views of the records table, as one segmented switch. */
+VaultScreen #vault_views {
+    width: 100%;
+    height: auto;
+}
+
+VaultScreen #vault_views.-wrap {
+    grid-size: 3;
+}
+
+VaultScreen .vault_view {
+    margin: 0 1 0 0;
+}
+
+VaultScreen .vault_view.-current-view {
+    border: round $accent;
+    color: $text-accent;
+    text-style: bold;
+}
+
+VaultScreen .vault_view.-textual-compact.-current-view {
+    background: $primary;
+    color: $background;
+}
+
+VaultScreen #vault_workspace {
+    height: 1fr;
+    min-height: 12;
+}
+
+VaultScreen #vault_records_panel {
+    width: 1fr;
+    height: 1fr;
+    min-height: 11;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+VaultScreen #vault_records_header {
+    padding: 0 1;
+}
+
+VaultScreen #vault_records_hint {
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+VaultScreen #vault_records_empty {
+    display: none;
+    height: auto;
+    padding: 1 2;
+    color: $text-muted;
+}
+
+VaultScreen #vault_records_empty.-shown {
+    display: block;
+}
+
+VaultScreen #vault_records_panel.-empty {
+    height: auto;
+    min-height: 0;
+}
+
+VaultScreen #vault_table {
     height: 1fr;
     min-height: 7;
 }
 
-#vault_action_scroll {
+/* The inspector: the selected record, then the actions that act on it. */
+VaultScreen #vault_action_scroll {
+    width: 52;
+    height: 1fr;
+    min-height: 7;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+VaultScreen #vault_actions {
     height: auto;
-    max-height: 9;
-    min-height: 3;
+    layout: vertical;
+}
+
+VaultScreen .vault_action_group {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* Section headings are quiet labels, not bars that read as table headers. */
+VaultScreen .vault_group_heading {
+    height: auto;
+    min-height: 1;
+    margin-bottom: 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+VaultScreen #vault_inspector_heading {
+    height: auto;
+}
+
+VaultScreen #vault_inspector_facts {
+    height: auto;
+}
+
+VaultScreen .vault_group_buttons {
+    width: 100%;
+    height: auto;
+}
+
+/* Each button's own margin is the gap, so the two columns keep every label whole. */
+VaultScreen .vault_group_buttons.-wrap {
+    grid-size: 2;
+    grid-gutter: 0 0;
+}
+
+VaultScreen #vault_actions ActionButton {
+    min-width: 0;
+}
+
+/* The risky actions sit apart from the everyday ones. */
+VaultScreen #vault_danger_group {
+    padding-top: 1;
+    border-top: solid $border-blurred;
+}
+
+VaultScreen #vault_danger_group.-lead {
+    padding-top: 0;
+    border-top: none;
+}
+
+/* Setup, Add device and Recover only show while the identity needs them. */
+VaultScreen #vault_onboarding_group {
+    display: none;
+}
+
+VaultScreen.-identity-pending #vault_onboarding_group {
+    display: block;
+}
+
+VaultScreen.-identity-pending #vault_actions ActionButton {
+    display: none;
+}
+
+VaultScreen.-identity-pending #vault_actions ActionButton.-state-action {
+    display: block;
+}
+
+/* The mounted records and ready-only actions wait for verified custody. */
+VaultScreen.-identity-pending #vault_records_panel,
+VaultScreen.-identity-pending #vault_views,
+VaultScreen.-identity-pending #vault_inspector,
+VaultScreen.-identity-pending #vault_keys_group,
+VaultScreen.-identity-pending #vault_identity_group,
+VaultScreen.-identity-pending #vault_maintenance_group,
+VaultScreen.-identity-pending #vault_danger_group {
+    display: none;
+}
+
+VaultScreen.-identity-pending #vault_identity_panel {
+    border: round $panel;
+    background: transparent;
+    padding: 0 2;
+}
+
+/* Inside a bordered card the border already keeps the title off the top
+   edge, so the shared title margin and the status offset are dropped. */
+VaultScreen.-identity-pending #vault_title,
+VaultScreen.-identity-error #vault_title,
+VaultScreen.-identity-pending #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-error #vault_identity_heading #vault_identity_state,
+VaultScreen.-identity-pending.-narrow #vault_refresh,
+VaultScreen.-identity-pending.-content-narrow #vault_refresh,
+VaultScreen.-identity-error.-narrow #vault_refresh,
+VaultScreen.-identity-error.-content-narrow #vault_refresh {
+    margin-top: 0;
+}
+
+VaultScreen.-identity-pending #vault_identity_state {
+    color: $text-warning;
+}
+
+VaultScreen.-identity-error #vault_identity_panel {
+    border: round $error;
+}
+
+VaultScreen.-identity-error #vault_identity_state {
+    color: $text-error;
+}
+
+VaultScreen.-identity-pending #vault_workspace {
+    height: auto;
+    min-height: 0;
+}
+
+VaultScreen.-identity-pending #vault_action_scroll {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    max-height: initial;
+    margin: 0;
+    padding: 0 1;
+}
+
+VaultScreen.-identity-pending.-vault-busy #vault_action_scroll {
+    display: none;
+}
+
+/* Narrow terminals stack the inspector below the table and let it scroll. */
+/* The table's minimum, the gap and the inspector's height. */
+VaultScreen.-content-narrow #vault_workspace {
+    layout: vertical;
+    min-height: 22;
+}
+
+VaultScreen.-content-narrow #vault_records_panel {
+    width: 100%;
+}
+
+VaultScreen.-content-narrow #vault_action_scroll {
+    width: 100%;
+    height: 1fr;
+    min-height: 10;
+    margin: 1 0 0 0;
+}
+
+VaultScreen.-content-narrow .vault_group_heading {
+    margin-bottom: 0;
+}
+
+/* The table row shows the facts; only the name and state stay, so the actions have the room. */
+VaultScreen.-content-narrow #vault_inspector_heading {
+    display: none;
+}
+
+VaultScreen.-content-narrow #vault_inspector_facts {
+    height: 1;
+}
+
+/* Pinned above the scrolling actions, so the selection stays named while they scroll. */
+VaultScreen.-content-narrow #vault_inspector {
+    dock: top;
+    height: 1;
+    margin-bottom: 0;
+}
+
+VaultScreen.-content-narrow #vault_actions {
     margin-top: 1;
 }
 
-#vault_actions {
+VaultScreen.-content-narrow #vault_identity_panel {
+    margin-bottom: 0;
+}
+
+VaultScreen.-content-narrow .vault_view {
+    margin: 0 1 0 0;
+}
+
+VaultScreen.-content-narrow.-records-empty #vault_workspace,
+VaultScreen.-content-narrow.-identity-pending #vault_workspace {
+    min-height: 0;
+}
+
+VaultScreen.-content-narrow.-records-empty #vault_action_scroll {
+    height: 8;
+    min-height: 8;
+}
+
+VaultScreen.-content-narrow.-identity-pending #vault_action_scroll {
     height: auto;
-    layout: grid;
-    grid-size: 4;
-    grid-columns: 1fr 1fr 1fr 1fr;
-    grid-gutter: 0 1;
-}
-
-#vault_actions #vault_refresh,
-#vault_actions #vault_setup,
-#vault_actions #vault_confirm_identity,
-#vault_actions #vault_create,
-#vault_actions #vault_items,
-#vault_actions #vault_reveal,
-#vault_actions #vault_rename_key,
-#vault_actions #vault_delete_key,
-#vault_actions #vault_delete_keys,
-#vault_actions #vault_exposures,
-#vault_actions #vault_resolve_exposure,
-#vault_actions #vault_rotate_exposure,
-#vault_actions #vault_devices,
-#vault_actions #vault_add_device,
-#vault_actions #vault_approve,
-#vault_actions #vault_recover,
-#vault_actions #vault_recovery_rotate,
-#vault_actions #vault_reset,
-#vault_actions #vault_import,
-#vault_actions #vault_auto_bind,
-#vault_actions #vault_roster,
-#vault_actions #vault_grants,
-#vault_actions #vault_rotate {
-    width: 100%;
-    min-width: 0;
+    min-height: 0;
+    max-height: initial;
     margin: 0;
-}
-
-VaultScreen.-narrow #vault_actions {
-    grid-size: 2;
-    grid-columns: 1fr 1fr;
-}
-
-VaultScreen.-narrow #vault_action_scroll {
-    max-height: 8;
-}
-
-VaultScreen.-short #vault_action_scroll {
-    max-height: 7;
-}
-
-ConfirmActionScreen.vault_key_delete #modal_container {
-    max-height: 90%;
-    overflow-y: auto;
 }
 
 VaultRevealModal {
@@ -126,11 +416,8 @@ CaEnrollmentConfirmModal {
 #vault_exposure_modal,
 #vault_import_bind_reference_modal,
 #vault_import_bind_target_modal,
-#vault_bind_modal,
-#vault_create_modal,
-#vault_import_modal,
-#ca_confirm_modal,
-#ca_enable_modal {
+VaultBindingModal Container#vault_bind_modal,
+#vault_create_modal {
     width: 72;
     max-width: 92%;
     height: auto;
@@ -172,7 +459,6 @@ CaEnrollmentConfirmModal {
 #vault_bind_login,
 #vault_bind_host_keys,
 #vault_import_path,
-#ca_confirm_host,
 #ca_team,
 #ca_server,
 #ca_break_glass,
@@ -192,7 +478,7 @@ CaEnrollmentConfirmModal {
     margin: 1 0;
     padding: 1;
     border: round $accent;
-    background: $boost;
+    background: transparent;
     text-style: bold;
 }
 
@@ -239,9 +525,7 @@ CaEnrollmentConfirmModal {
 }
 
 #vault_import_choices #vault_import_local,
-#vault_import_choices #vault_import_bitwarden,
-#vault_import_actions #vault_import_cancel,
-#vault_import_actions #vault_import_confirm {
+#vault_import_choices #vault_import_bitwarden {
     width: 1fr;
     min-width: 0;
 }
@@ -259,15 +543,11 @@ CaEnrollmentConfirmModal {
 #vault_pending_device_review,
 #vault_exposure_cancel,
 #vault_exposure_confirm,
-#vault_bind_cancel,
-#vault_bind_confirm,
+VaultBindingModal Container#vault_bind_modal #vault_bind_cancel,
+VaultBindingModal Container#vault_bind_modal #vault_bind_confirm,
 #vault_create_cancel,
 #vault_create_confirm,
-#vault_import_go,
-#ca_cancel,
-#ca_confirm,
-#ca_enable_cancel,
-#ca_enable_confirm {
+#vault_import_go {
     min-width: 12;
     margin-top: 1;
 }
@@ -281,26 +561,6 @@ CaEnrollmentConfirmModal {
 #ca_confirm_modal > Horizontal,
 #ca_enable_modal > Horizontal {
     height: auto;
-}
-
-#ca_content #ca_enable,
-#ca_content #ca_refresh,
-#ca_content #ca_audit,
-#ca_content #ca_enroll,
-#ca_content #ca_krl,
-#ca_content #ca_break_glass_scan {
-    width: 1fr;
-    margin-top: 1;
-}
-
-/* Accent text only: a border of its own hid the label in the one-line narrow
-   and short layouts, and focus keeps the readable text of every other button. */
-#action_buttons #btn_use_vault_key {
-    color: $accent;
-}
-
-#action_buttons #btn_use_vault_key:focus {
-    color: $text;
 }
 
 /* Auto-bind: the review of which vault key each server gets. */
@@ -362,50 +622,41 @@ CaEnrollmentConfirmModal {
     margin-top: 1;
 }
 
-#auto_bind_actions #auto_bind_apply,
-#auto_bind_actions #auto_bind_fetch_keys,
-#auto_bind_actions #auto_bind_all,
-#auto_bind_actions #auto_bind_none,
-#auto_bind_actions #auto_bind_back {
-    width: 100%;
-    min-width: 0;
-    margin: 0;
-}
-
-VaultAutoBindScreen.-narrow #auto_bind_content {
+VaultAutoBindScreen.-content-narrow #auto_bind_content {
     padding: 0 1;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_title {
+VaultAutoBindScreen.-content-narrow #auto_bind_title {
     margin-bottom: 0;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_vault_select {
+VaultAutoBindScreen.-content-narrow #auto_bind_vault_select {
     margin-bottom: 0;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_intro {
+VaultAutoBindScreen.-content-narrow #auto_bind_intro {
     margin-bottom: 0;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_status {
+VaultAutoBindScreen.-content-narrow #auto_bind_status {
     margin-bottom: 0;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_table {
+VaultAutoBindScreen.-content-narrow #auto_bind_table {
     min-height: 4;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_detail {
+VaultAutoBindScreen.-content-narrow #auto_bind_detail {
     margin-top: 0;
     max-height: 2;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_trust {
+VaultAutoBindScreen.-content-narrow #auto_bind_trust {
     margin-top: 0;
+    padding: 0;
 }
 
-VaultAutoBindScreen.-narrow #auto_bind_actions {
+VaultAutoBindScreen.-content-narrow #auto_bind_actions {
     grid-size: 2;
     grid-columns: 1fr 1fr;
     margin-top: 0;
@@ -469,7 +720,7 @@ VaultAutoBindReviewModal {
 
 #auto_bind_review_scroll {
     height: 1fr;
-    border: solid $panel;
+    border: round $border-blurred;
     padding: 0 1;
     margin-bottom: 1;
 }
@@ -541,4 +792,216 @@ VaultAutoBindScreen.-short #auto_bind_actions {
 #vault_bind_vault_search,
 #vault_bind_item_search {
     margin: 0;
+}
+
+/* Adopt native frame sizing without changing shared legacy consumers. */
+VaultRevealModal DialogFrame#vault_reveal_modal,
+VaultRecoveryConfirmModal DialogFrame#vault_recovery_confirm_modal,
+VaultSasConfirmModal DialogFrame#vault_sas_modal,
+VaultMemberApprovalModal DialogFrame#vault_member_modal,
+VaultPendingDeviceModal DialogFrame#vault_pending_device_modal,
+VaultExposureActionModal DialogFrame#vault_exposure_modal,
+VaultImportedReferenceModal DialogFrame#vault_import_bind_reference_modal,
+VaultImportedTeamBindingModal DialogFrame#vault_import_bind_target_modal,
+VaultCreateModal DialogFrame#vault_create_modal,
+VaultAddDeviceModal DialogFrame#vault_add_device_modal,
+AutoBindFetchConfirmModal DialogFrame#auto_bind_confirm_container,
+VaultAutoBindReviewModal DialogFrame#auto_bind_review_container {
+    width: initial;
+    max-width: initial;
+}
+
+VaultRevealModal DialogFrame#vault_reveal_modal,
+VaultSecretPromptModal DialogFrame#vault_secret_modal,
+VaultRecoveryConfirmModal DialogFrame#vault_recovery_confirm_modal,
+VaultSasConfirmModal DialogFrame#vault_sas_modal,
+VaultMemberApprovalModal DialogFrame#vault_member_modal,
+VaultPendingDeviceModal DialogFrame#vault_pending_device_modal,
+VaultExposureActionModal DialogFrame#vault_exposure_modal,
+VaultImportedReferenceModal DialogFrame#vault_import_bind_reference_modal,
+VaultImportedTeamBindingModal DialogFrame#vault_import_bind_target_modal,
+VaultCreateModal DialogFrame#vault_create_modal,
+VaultAddDeviceModal DialogFrame#vault_add_device_modal,
+AutoBindFetchConfirmModal DialogFrame#auto_bind_confirm_container,
+VaultAutoBindReviewModal DialogFrame#auto_bind_review_container {
+    height: initial;
+    max-height: initial;
+    border-top: initial;
+    border-right: initial;
+    border-bottom: initial;
+    border-left: initial;
+    padding: initial;
+    overflow-x: initial;
+    overflow-y: initial;
+}
+
+VaultRevealModal #vault_reveal_close,
+VaultSecretPromptModal #vault_secret_cancel,
+VaultSecretPromptModal #vault_secret_continue,
+VaultRecoveryConfirmModal #vault_recovery_cancel,
+VaultRecoveryConfirmModal #vault_recovery_confirm,
+VaultSasConfirmModal #vault_sas_no,
+VaultSasConfirmModal #vault_sas_yes,
+VaultMemberApprovalModal #vault_member_skip,
+VaultMemberApprovalModal #vault_member_approve,
+VaultPendingDeviceModal #vault_pending_device_later,
+VaultPendingDeviceModal #vault_pending_device_review,
+VaultExposureActionModal #vault_exposure_cancel,
+VaultExposureActionModal #vault_exposure_confirm,
+VaultCreateModal #vault_create_cancel,
+VaultCreateModal #vault_create_confirm {
+    margin-top: 0;
+}
+
+/* The reference list owns scrolling; its frame body does not. */
+VaultImportedReferenceModal #vault_import_bind_list {
+    height: 1fr;
+    max-height: initial;
+}
+
+/* Keep the masked field beside its existing Show control in pinned rows. */
+VaultSecretPromptModal SecretInput.dialog-status > Input,
+VaultRecoveryConfirmModal .dialog-status SecretInput > Input {
+    width: 1fr;
+}
+
+/* The adopted frame supplies spacing around its fields and pinned status. */
+VaultSecretPromptModal #vault_secret_input_field,
+VaultRecoveryConfirmModal SecretInput,
+VaultExposureActionModal #vault_exposure_team,
+VaultExposureActionModal #vault_exposure_servers,
+VaultExposureActionModal #vault_exposure_resolution,
+VaultExposureActionModal #vault_exposure_note,
+VaultImportedTeamBindingModal #vault_import_bind_team,
+VaultImportedTeamBindingModal #vault_import_bind_server,
+VaultImportedTeamBindingModal #vault_import_bind_login,
+VaultCreateModal #vault_create_target {
+    margin-top: 0;
+}
+
+/* Reserve the current Bind selected count before sharing the other columns. */
+VaultAutoBindScreen #auto_bind_actions {
+    grid-columns: auto 1fr 1fr 1fr 1fr;
+}
+
+/* Keep the revealed recovery key beside its native Show/Hide control. */
+VaultSecretPromptModal #vault_secret_input_field > .secret-reveal {
+    min-width: 10;
+}
+
+/* Auto-bind keeps vault scope, server matches and host-key review distinct. */
+VaultAutoBindScreen #auto_bind_content {
+    overflow-y: auto;
+}
+
+VaultAutoBindScreen #auto_bind_scope {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+VaultAutoBindScreen #auto_bind_title,
+VaultAutoBindScreen #auto_bind_vault_select {
+    height: auto;
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen #auto_bind_intro {
+    height: auto;
+    margin: 1 0 0 0;
+}
+
+VaultAutoBindScreen #auto_bind_status {
+    height: auto;
+    min-height: 1;
+    margin: 0 0 1 0;
+}
+
+VaultAutoBindScreen #auto_bind_records {
+    height: 1fr;
+    min-height: 7;
+    padding: 0 1;
+    margin-bottom: 1;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+VaultAutoBindScreen #auto_bind_records:focus-within {
+    border: round $primary;
+}
+
+VaultAutoBindScreen #auto_bind_table {
+    height: 1fr;
+    min-height: 5;
+    margin: 0;
+}
+
+VaultAutoBindScreen #auto_bind_review {
+    height: auto;
+    padding: 0;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+VaultAutoBindScreen #auto_bind_review:focus-within {
+    border: round $primary;
+}
+
+VaultAutoBindScreen #auto_bind_detail_scroll {
+    height: auto;
+    min-height: 1;
+    max-height: 6;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+VaultAutoBindScreen #auto_bind_detail {
+    height: auto;
+    max-height: initial;
+    margin: 0;
+}
+
+VaultAutoBindScreen.-content-narrow #auto_bind_detail {
+    max-height: initial;
+}
+
+VaultAutoBindScreen #auto_bind_trust {
+    width: 100%;
+    height: auto;
+    margin: 1 0 0 0;
+    border: none;
+    padding: 0;
+}
+
+/* Short terminals retain the native table, review and all five actions. */
+VaultAutoBindScreen.-short #auto_bind_content {
+    padding: 0 1;
+}
+
+VaultAutoBindScreen.-short #auto_bind_scope,
+VaultAutoBindScreen.-short #auto_bind_status,
+VaultAutoBindScreen.-short #auto_bind_records,
+VaultAutoBindScreen.-short #auto_bind_trust,
+VaultAutoBindScreen.-short #auto_bind_actions {
+    margin: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_records {
+    min-height: 5;
+}
+
+VaultAutoBindScreen.-short #auto_bind_table {
+    min-height: 3;
+}
+
+VaultAutoBindScreen.-short #auto_bind_detail_scroll {
+    max-height: 2;
+}
+
+VaultAutoBindScreen.-short #auto_bind_detail {
+    max-height: initial;
 }

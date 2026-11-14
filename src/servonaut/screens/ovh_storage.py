@@ -9,12 +9,14 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
@@ -27,14 +29,29 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class OVHStorageScreen(Screen):
+class OVHStorageScreen(WorkspaceScreen):
     """Manage OVH Public Cloud block storage volumes."""
+
+    DEFAULT_CSS = """
+    OVHStorageScreen .add_row {
+        height: auto;
+    }
+    OVHStorageScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 112
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -47,39 +64,65 @@ class OVHStorageScreen(Screen):
     _loads: int = 0
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
     # Compose
     # ------------------------------------------------------------------
 
+    def __init__(
+        self, name: str | None = None, id: str | None = None,
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(name=name, id=id, classes=classes)
+        self._read_loading = BusyWork(self, "#read_loading")
+
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]OVH Block Storage[/bold $text-accent]",
-                    id="storage_title",
-                ),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh", id="storage_account",
-                ),
+        yield WorkspaceControls("Block storage")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            inventory_panel = Vertical(
+                Static("Volumes", classes="resource-section-title"),
                 DataTable(id="volumes_table"),
+                classes="resource-panel provider-aux-inventory",
+            )
+            actions = Vertical(
                 Horizontal(
-                    Button("Create Volume", id="btn_create", variant="primary"),
-                    Button("Attach", id="btn_attach", variant="default"),
-                    Button("Detach", id="btn_detach", variant="default"),
-                    Button("Delete", id="btn_delete", variant="error"),
-                    Button("Snapshot", id="btn_snapshot", variant="default"),
-                    Button("Refresh", id="btn_refresh", variant="default"),
-                    Button("Back", id="btn_back", variant="default"),
-                    id="storage_actions",
+                    Static("Volumes", classes="resource-action-label"),
+                    Horizontal(
+                        Button("Create volume", id="btn_create", variant="primary"),
+                        Button("Attach", id="btn_attach", variant="default"),
+                        Button("Detach", id="btn_detach", variant="default"),
+                        Button("Delete", id="btn_delete", variant="error"),
+                        classes="resource-action-buttons",
+                    ),
+                    classes="resource-action-group",
                 ),
-                # Create Volume form (hidden by default)
+                Horizontal(
+                    Static("Tools", classes="resource-action-label"),
+                    Horizontal(
+                        Button("Snapshot", id="btn_snapshot", variant="default"),
+                        Button("Refresh", id="btn_refresh", variant="default"),
+                        Button("Back", id="btn_back", variant="default"),
+                        classes="resource-action-buttons",
+                    ),
+                    classes="resource-action-group",
+                ),
+                id="storage_actions",
+                classes="resource-grouped-actions",
+            )
+            operations = Vertical(
+                Static("Selected resource", classes="provider-aux-section-heading"),
+                Static(
+                    "Select a volume to review its ID and attachments.", id="storage_selected_resource",
+                    classes="provider-aux-selection", markup=False,
+                ),
+                actions,
                 Container(
-                    Static("[bold]Create Volume[/bold]", classes="section_header"),
+                    Static("[bold]Create volume[/bold]", classes="section_header"),
                     Label("Name:"),
                     Input(placeholder="my-volume", id="input_vol_name"),
                     Label("Size (GB):"),
@@ -89,15 +132,14 @@ class OVHStorageScreen(Screen):
                     Label("Type:"),
                     Input(placeholder="classic", id="input_vol_type"),
                     Horizontal(
-                        Button("Save Volume", id="btn_save_vol", variant="primary"),
+                        Button("Save volume", id="btn_save_vol", variant="primary"),
                         Button("Cancel", id="btn_cancel_form", variant="default"),
                         classes="add_row",
                     ),
                     id="create_vol_form",
                 ),
-                # Attach Volume form (hidden by default)
                 Container(
-                    Static("[bold]Attach Volume[/bold]", classes="section_header"),
+                    Static("[bold]Attach volume[/bold]", classes="section_header"),
                     Label("Instance ID:"),
                     Input(placeholder="instance-uuid", id="input_attach_instance_id"),
                     Horizontal(
@@ -107,19 +149,46 @@ class OVHStorageScreen(Screen):
                     ),
                     id="attach_vol_form",
                 ),
-                # Snapshot form (hidden by default)
                 Container(
-                    Static("[bold]Create Snapshot[/bold]", classes="section_header"),
-                    Label("Snapshot Name:"),
+                    Static("[bold]Create snapshot[/bold]", classes="section_header"),
+                    Label("Snapshot name:"),
                     Input(placeholder="snapshot-name", id="input_snapshot_name"),
                     Horizontal(
-                        Button("Create Snapshot", id="btn_confirm_snapshot", variant="primary"),
+                        Button("Create snapshot", id="btn_confirm_snapshot", variant="primary"),
                         Button("Cancel", id="btn_cancel_snapshot", variant="default"),
                         classes="add_row",
                     ),
                     id="snapshot_form",
                 ),
+                classes="provider-aux-operations",
+            )
+            operations.border_title = "Volume operations"
+            yield ScrollableContainer(
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Horizontal(
+                    Vertical(
+                        Static(
+                            "OVH block storage",
+                            id="storage_title",
+                            classes="screen-title",
+                        ),
+                        Static(
+                            "Public Cloud volumes: select a volume to attach, detach "
+                            "or snapshot it.",
+                            classes="resource-context",
+                        ),
+                        classes="provider-aux-heading",
+                    ),
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh", id="storage_account",
+                    ),
+                    classes="provider-aux-heading-row",
+                ),
+                Horizontal(
+                    inventory_panel, operations, classes="provider-aux-body",
+                ),
                 id="storage_container",
+                classes="workspace-content resource-workspace-content provider-aux-workspace",
             )
         yield Footer()
 
@@ -145,7 +214,7 @@ class OVHStorageScreen(Screen):
     def _setup_table(self) -> None:
         table = self.query_one("#volumes_table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Name", "Size (GB)", "Region", "Status", "Attached To")
+        table.add_columns("Name", "Size (GB)", "Region", "Status", "Attached to")
 
     def _hide_all_forms(self) -> None:
         self.query_one("#create_vol_form").display = False
@@ -229,6 +298,29 @@ class OVHStorageScreen(Screen):
             return []
         return list(getattr(ovh_cfg, "cloud_project_ids", []))
 
+    def _update_selected_resource(self) -> None:
+        """Keep the complete volume identity next to its operations."""
+        try:
+            selected = self.query_one("#storage_selected_resource", Static)
+        except NoMatches:
+            return
+        volume = self._get_selected_volume()
+        if volume is None:
+            selected.update("Select a volume to review its ID and attachments.")
+            return
+        name = str(volume.get("name") or volume.get("id") or "—")
+        identifier = str(volume.get("id") or "—")
+        content = Text(self._display_name(name), style="bold")
+        content.append(f"\n{self._display_name(identifier)}", style="")
+        attachments = self._attachment_instance_ids(volume)
+        attached_to = ", ".join(self._display_instance_id(item) for item in attachments)
+        content.append(f"\nAttached to: {attached_to or '—'}", style="")
+        selected.update(content)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "volumes_table":
+            self._update_selected_resource()
+
     def _get_selected_volume(self) -> Optional[dict]:
         """Return the _volumes list entry for the currently selected row."""
         table = self.query_one("#volumes_table", DataTable)
@@ -255,38 +347,40 @@ class OVHStorageScreen(Screen):
         self._loads += 1
         load = self._loads
         all_volumes: List[dict] = []
-        for pid in project_ids:
-            try:
-                vols = await svc.list_volumes(pid)
-                for v in vols:
-                    v["_project_id"] = pid
-                all_volumes.extend(vols)
-            except Exception as exc:
-                logger.error("list_volumes failed for project %s: %s", pid, exc)
-                self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error", markup=False)
+        with self._read_loading.running('Loading volumes…'):
+            for pid in project_ids:
+                try:
+                    vols = await svc.list_volumes(pid)
+                    for v in vols:
+                        v["_project_id"] = pid
+                    all_volumes.extend(vols)
+                except Exception as exc:
+                    logger.error("list_volumes failed for project %s: %s", pid, exc)
+                    self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error", markup=False)
 
-        if load != self._loads:
-            return
-        self._volumes: List[dict] = all_volumes
+            if load != self._loads:
+                return
+            self._volumes: List[dict] = all_volumes
 
-        table = self.query_one("#volumes_table", DataTable)
-        table.clear()
+            table = self.query_one("#volumes_table", DataTable)
+            table.clear()
 
-        for vol in all_volumes:
-            name = vol.get("name") or vol.get("id", "—")
-            size = str(vol.get("size", "—"))
-            region = vol.get("region") or "—"
-            status = vol.get("status") or "—"
-            attachments = self._attachment_instance_ids(vol)
-            if attachments:
-                attached_to = ", ".join(
-                    self._display_instance_id(identifier) for identifier in attachments
+            for vol in all_volumes:
+                name = vol.get("name") or vol.get("id", "—")
+                size = str(vol.get("size", "—"))
+                region = vol.get("region") or "—"
+                status = vol.get("status") or "—"
+                attachments = self._attachment_instance_ids(vol)
+                if attachments:
+                    attached_to = ", ".join(
+                        self._display_instance_id(identifier) for identifier in attachments
+                    )
+                else:
+                    attached_to = "—"
+                table.add_row(
+                    cell(self._display_name(name)), cell(size), cell(region), cell(status), cell(attached_to),
                 )
-            else:
-                attached_to = "—"
-            table.add_row(
-                cell(self._display_name(name)), cell(size), cell(region), cell(status), cell(attached_to),
-            )
+            self._update_selected_resource()
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -404,14 +498,14 @@ class OVHStorageScreen(Screen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Volume",
+                    title="Delete volume",
                     description=with_bold_values("Permanently delete volume {}.", self._display_name(volume_name)),
                     consequences=[
                         "All data on this volume will be permanently lost",
                         "Any remaining snapshots may also be affected",
                     ],
                     confirm_text=self._display_name(volume_name),
-                    action_label="Delete Volume",
+                    action_label="Delete volume",
                     severity="danger",
                 )
             )
@@ -478,7 +572,7 @@ class OVHStorageScreen(Screen):
         async def _confirm_and_attach() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Attach Volume",
+                    title="Attach volume",
                     description=with_bold_values(
                         "Attach volume {} to instance {}.",
                         self._display_name(volume_name), self._display_instance_id(instance_id),
@@ -545,7 +639,7 @@ class OVHStorageScreen(Screen):
         async def _confirm_and_detach() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Detach Volume",
+                    title="Detach volume",
                     description=with_bold_values(
                         "Detach volume {} from instance {}.",
                         self._display_name(volume_name), self._display_instance_id(instance_id),

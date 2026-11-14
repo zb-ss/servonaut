@@ -257,6 +257,20 @@ async def test_share_again_revokes_then_grants_and_never_purges():
     assert writes == [f"DELETE /api/v1/teams/{SLUG}/memory/grant/g-1", f"POST /api/v1/teams/{SLUG}/memory/grant"]
 
 
+def _purge_confirmation_ready(app) -> bool:
+    modal = app.screen
+    if not isinstance(modal, PurgeCopiesModal) or not modal.is_mounted:
+        return False
+    cancel = list(modal.query("#purge-btn-cancel"))
+    confirm = list(modal.query("#purge-btn-confirm"))
+    return (
+        len(cancel) == len(confirm) == 1
+        and isinstance(cancel[0], Button) and cancel[0].is_mounted
+        and isinstance(confirm[0], Button) and confirm[0].is_mounted
+        and app.focused is cancel[0]
+    )
+
+
 async def test_purge_waits_for_the_confirmation_and_cancel_changes_nothing():
     backend = _Backend(members=[_member(1, "Kim Member")], live=[_grant("g-1")])
     app = _Host(backend)
@@ -264,7 +278,7 @@ async def test_purge_waits_for_the_confirmation_and_cancel_changes_nothing():
         screen = await _open(app, pilot)
         await _settle(pilot, screen, lambda: screen.query_one("#share-existing").has_class("-shown"), "panel")
         screen.query_one("#share-btn-purge", Button).press()
-        await _settle(pilot, screen, lambda: isinstance(app.screen, PurgeCopiesModal), "confirmation")
+        await _settle(pilot, screen, lambda: _purge_confirmation_ready(app), "confirmation")
         assert app.screen.query_one("#purge-btn-cancel", Button).has_focus
         assert not [c for c in backend.calls if not c.startswith("GET")]
         await pilot.press("escape")
@@ -281,7 +295,7 @@ async def test_confirmed_purge_calls_the_purge_route_only():
         screen = await _open(app, pilot)
         await _settle(pilot, screen, lambda: screen.query_one("#share-existing").has_class("-shown"), "panel")
         screen.query_one("#share-btn-purge", Button).press()
-        await _settle(pilot, screen, lambda: isinstance(app.screen, PurgeCopiesModal), "confirmation")
+        await _settle(pilot, screen, lambda: _purge_confirmation_ready(app), "confirmation")
         app.screen.query_one("#purge-btn-confirm", Button).press()
         await _settle(pilot, screen, lambda: any("purge" in c for c in backend.calls), "purge")
     assert [c for c in backend.calls if not c.startswith("GET")] == [

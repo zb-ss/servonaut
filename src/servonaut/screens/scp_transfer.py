@@ -7,17 +7,18 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, Horizontal
+from textual.containers import Container, Vertical, Horizontal, VerticalScroll
 from textual.content import Content
-from textual.screen import Screen
-from textual.widgets import Footer, Static, Input, Button, RadioSet, RadioButton
+from textual.widgets import Footer, Static, Input, Button, RadioSet, RadioButton, LoadingIndicator
 from textual.worker import Worker
 
 from servonaut.utils.markup import inert_text
 from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, fleet_rows, team_rows
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.screens._demo_resolve import connection_instance, display_text, fleet_rows, team_rows
+from servonaut.services.vault.display import terminal_safe
+from servonaut.utils.instance_resolver import display_name
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
@@ -26,9 +27,18 @@ from servonaut.services.ssh_host_keys import (
 )
 
 
+
+def path_roles(is_upload: bool) -> tuple[str, str]:
+    """The role each path plays: (this computer's, the remote server's)."""
+    if is_upload:
+        return "Source · This computer", "Destination · Remote server"
+    return "Destination · This computer", "Source · Remote server"
+
+
 logger = logging.getLogger(__name__)
 
-class SCPTransferScreen(Screen):
+
+class SCPTransferScreen(WorkspaceScreen):
     """Screen for SCP file transfers (upload/download).
 
     Allows user to select direction and specify paths.
@@ -37,6 +47,11 @@ class SCPTransferScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    AUTO_FOCUS = "#local_path_input"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 52
+    CONTENT_NARROW_WIDTH = 88
 
     def __init__(self, instance: dict) -> None:
         """Initialize SCP transfer screen.
@@ -47,40 +62,99 @@ class SCPTransferScreen(Screen):
         super().__init__()
         self._instance = instance
         self._transfer_direction = "upload"  # "upload" or "download"
+        self._transfer_worker: Optional[Worker] = None
 
     def compose(self) -> ComposeResult:
         """Compose the SCP transfer UI."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls(self._workspace_context())
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
                 Static(
-                    f"[bold $text-accent]SCP File Transfer[/bold $text-accent]\n"
-                    f"Instance: {self._instance.get('name') or self._instance.get('id')}",
+                    self._banner_text(),
                     id="transfer_banner"
                 ),
-                Vertical(
-                    Static("[bold]Transfer Direction:[/bold]", id="direction_label"),
-                    RadioSet(
-                        RadioButton("Upload (Local → Remote)", value=True, id="radio_upload"),
-                        RadioButton("Download (Remote → Local)", id="radio_download"),
-                        id="direction_selector"
+                Horizontal(
+                    Vertical(
+                        Static("Transfer direction", id="direction_label"),
+                        RadioSet(
+                            RadioButton("Upload (local → remote)", value=True, id="radio_upload"),
+                            RadioButton("Download (remote → local)", id="radio_download"),
+                            id="direction_selector"
+                        ),
+                        Horizontal(
+                            Vertical(
+                                Horizontal(
+                                    Static("Local path", id="local_path_label"),
+                                    Static(path_roles(True)[0], id="local_path_role", classes="transfer-path-role"),
+                                    classes="transfer-path-heading",
+                                ),
+                                Input(placeholder="/path/to/local/file", id="local_path_input"),
+                                id="local_path_group", classes="transfer-path-group",
+                            ),
+                            Vertical(
+                                Horizontal(
+                                    Static("Remote path", id="remote_path_label"),
+                                    Static(path_roles(True)[1], id="remote_path_role", classes="transfer-path-role"),
+                                    classes="transfer-path-heading",
+                                ),
+                                Input(placeholder="/path/to/remote/file", id="remote_path_input"),
+                                id="remote_path_group", classes="transfer-path-group",
+                            ),
+                            id="transfer_paths",
+                        ),
+                        Static(
+                            "Review both paths, then choose Start transfer.",
+                            id="transfer_manual_hint", markup=False,
+                        ),
+                        Horizontal(
+                            Button("Start transfer", id="transfer_button", variant="primary"),
+                            Button("Cancel", variant="default", id="cancel_button"),
+                            id="button_container"
+                        ),
+                        id="transfer_form"
                     ),
-                    Static("[bold]Local Path:[/bold]", id="local_path_label"),
-                    Input(placeholder="/path/to/local/file", id="local_path_input"),
-                    Static("[bold]Remote Path:[/bold]", id="remote_path_label"),
-                    Input(placeholder="/path/to/remote/file", id="remote_path_input"),
-                    Horizontal(
-                        Button("Start Transfer", id="transfer_button"),
-                        Button("Cancel", variant="default", id="cancel_button"),
-                        id="button_container"
+                    VerticalScroll(
+                        Static("Transfer status", id="transfer_status_title"),
+                        LoadingIndicator(id="transfer_loading"),
+                        Static(
+                            "Ready to transfer.\n\nChoose a direction and enter both paths.",
+                            id="status_output",
+                        ),
+                        id="transfer_result",
                     ),
-                    Static("", id="status_output"),
-                    id="transfer_form"
+                    id="transfer_workbench",
                 ),
-                id="transfer_container"
+                id="transfer_container",
+                classes="workspace-content",
             )
         yield Footer()
+
+    def _display_identity(self, value: object) -> str:
+        """Keep the displayed identity literal and safe when demo mode changes."""
+        shown = display_text(self.app, str(value))
+        redactor = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redactor is not None:
+            shown = str(redactor.scrub_stream(shown))
+        return terminal_safe(shown)
+
+    def _workspace_context(self) -> str:
+        name = display_name(self._instance) or self._instance.get("id") or "server"
+        return f"Transfer · {self._display_identity(name)}"
+
+    def _banner_text(self) -> str:
+        name = self._instance.get("name") or self._instance.get("id")
+        return (
+            "[bold]SCP file transfer[/bold]\n"
+            f"Instance: {escape(self._display_identity(name))}"
+        )
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the existing identity widgets without rebuilding the form."""
+        self.query_one("#transfer_banner", Static).update(self._banner_text())
+        for controls in self.query(WorkspaceControls):
+            controls.set_context(self._workspace_context())
 
     def on_mount(self) -> None:
         """Focus local path input when mounted."""
@@ -97,10 +171,14 @@ class SCPTransferScreen(Screen):
             selected = event.pressed
             if selected.id == "radio_upload":
                 self._transfer_direction = "upload"
-                self.app.notify("Direction: Upload (Local → Remote)", severity="information")
+                self.app.notify(f"Direction: {selected.label}", severity="information")
             elif selected.id == "radio_download":
                 self._transfer_direction = "download"
-                self.app.notify("Direction: Download (Remote → Local)", severity="information")
+                self.app.notify(f"Direction: {selected.label}", severity="information")
+            is_upload = self._transfer_direction == "upload"
+            local_role, remote_role = path_roles(is_upload)
+            self.query_one("#local_path_role", Static).update(local_role)
+            self.query_one("#remote_path_role", Static).update(remote_role)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
@@ -148,7 +226,7 @@ class SCPTransferScreen(Screen):
             if not expanded_local_path.exists():
                 self.app.notify(f"Local path not found: {local_path}", severity="error")
                 logger.error("Upload failed: local path does not exist: %s", local_path)
-                status_output.update(f"[$text-error]Error:[/$text-error] Local path not found: {_s(local_path)}")
+                status_output.update(f"[$text-error]Error:[/$text-error] Local path not found: {escape(_s(local_path))}")
                 return
 
         # Update status
@@ -159,8 +237,9 @@ class SCPTransferScreen(Screen):
         conn = connection_instance(self.app, self._instance)
 
         # Execute transfer in worker
+        self.query_one("#transfer_loading", LoadingIndicator).display = True
         status_output.update(f"[$text-warning]Transferring...[/$text-warning]")
-        self.run_worker(
+        self._transfer_worker = self.run_worker(
             self._transfer(conn, local_path, remote_path),
             name="scp_transfer",
             exclusive=True,
@@ -272,8 +351,16 @@ class SCPTransferScreen(Screen):
             event: Worker state changed event.
         """
         if event.worker.name == "scp_transfer":
+            # An exclusive restart cancels its predecessor. Only the active
+            # worker may replace the new transfer's progress or result.
+            if event.worker is not getattr(self, "_transfer_worker", event.worker):
+                return
             if event.worker.is_finished:
+                self.query_one("#transfer_loading", LoadingIndicator).display = False
                 status_output = self.query_one("#status_output", Static)
+                if getattr(event.worker, "is_cancelled", False):
+                    status_output.update("Transfer cancelled.")
+                    return
 
                 def _s(x: str) -> str:
                     if self.app.demo_mode and self.app.redaction_service:

@@ -1,4 +1,4 @@
-"""OVH Billing Dashboard screen for Servonaut.
+"""OVH billing dashboard screen for Servonaut.
 
 Billing is per OVH account: with several accounts configured, a picker
 chooses whose usage, invoices and services are shown.
@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
 
@@ -30,10 +29,11 @@ from servonaut.services.ovh_billing_service import (
     unreadable_bill_count,
     usage_figures,
 )
+from servonaut.utils.theme_text import themed_text
 from servonaut.utils.markup import cell, literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -104,8 +104,12 @@ _CARD_TIMEOUT_SECONDS = 45
 _LOAD_GROUP = "ovh_billing_load"
 
 
-class OVHBillingScreen(Screen):
-    """OVH Billing Dashboard — shows usage, history, invoices, and services."""
+class OVHBillingScreen(WorkspaceScreen):
+    """OVH billing dashboard — shows usage, history, invoices, and services."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -121,6 +125,8 @@ class OVHBillingScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -129,35 +135,59 @@ class OVHBillingScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Billing")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static("[bold $text-accent]OVH Billing Dashboard[/bold $text-accent]", id="billing_title"),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh", id="billing_account",
-                ),
-
-                Static("[bold]Current Month[/bold]", classes="section_header"),
-                Static("[dim]Loading...[/dim]", id="current_usage"),
-
-                Static("[bold]Monthly History[/bold]", classes="section_header"),
-                Static("[dim]Loading...[/dim]", id="spend_history"),
-
-                Static("[bold]Invoices[/bold]", classes="section_header"),
-                DataTable(id="invoices_table"),
-                Static("", id="invoices_page_info"),
                 Horizontal(
-                    Button("Previous", id="btn_prev_page", variant="default"),
-                    Button("Next", id="btn_next_page", variant="default"),
-                    id="invoice_pagination",
+                    Vertical(
+                        Static("OVH billing dashboard", id="billing_title", classes="screen-title"),
+                        Static("Account usage, invoice history and billed services.", classes="resource-context"),
+                        classes="provider-account-heading",
+                    ),
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh", id="billing_account",
+                    ),
+                    classes="provider-account-heading-row",
                 ),
-
-                Static("[bold]Services[/bold]", classes="section_header"),
-                DataTable(id="services_table"),
-
-                Button("Back", id="btn_back", variant="default"),
+                Horizontal(
+                    Vertical(
+                        Static("[bold]Current month[/bold]", classes="section_header"),
+                        Static("[dim]Loading...[/dim]", id="current_usage"),
+                        classes="resource-panel provider-billing-current",
+                    ),
+                    Vertical(
+                        Static("[bold]Monthly history[/bold]", classes="section_header"),
+                        Static("[dim]Loading...[/dim]", id="spend_history"),
+                        classes="resource-panel provider-billing-history",
+                    ),
+                    classes="resource-billing-summary provider-billing-summary",
+                ),
+                Horizontal(
+                    Vertical(
+                        Static("[bold]Invoices[/bold]", classes="section_header"),
+                        DataTable(id="invoices_table"),
+                        Static("", id="invoices_page_info"),
+                        Horizontal(
+                            Button("Previous", id="btn_prev_page", variant="default"),
+                            Button("Next", id="btn_next_page", variant="default"),
+                            id="invoice_pagination",
+                        ),
+                        classes="resource-panel provider-billing-invoices",
+                    ),
+                    Vertical(
+                        Static("[bold]Services[/bold]", classes="section_header"),
+                        DataTable(id="services_table"),
+                        classes="resource-panel provider-billing-services",
+                    ),
+                    classes="provider-billing-ledgers",
+                ),
+                Horizontal(
+                    Button("Back", id="btn_back", variant="default"),
+                    classes="resource-back-actions",
+                ),
                 id="billing_container",
+                classes="workspace-content resource-workspace-content provider-account-workspace",
             )
         yield Footer()
 
@@ -306,6 +336,11 @@ class OVHBillingScreen(Screen):
         message = f"Could not load {what}. Reopen this screen to retry; details are in the log."
         widget.update(literal(f"  {message}", "$text-error"))
 
+    def _show_unreadable_bill(self, widget: Static, what: str) -> None:
+        """End a card's state when the bill data could not be read."""
+        message = f"Could not read the bill data for {what}. Reopen this screen to retry; details are in the log."
+        widget.update(literal(f"  {message}", "$text-error"))
+
     def _log_load_failure(self, what: str, exc: Exception) -> None:
         if isinstance(exc, asyncio.TimeoutError):
             logger.warning("Loading OVH %s timed out after %s s", what, _CARD_TIMEOUT_SECONDS)
@@ -322,10 +357,15 @@ class OVHBillingScreen(Screen):
             usage = await asyncio.wait_for(
                 svc.get_current_usage(), timeout=_CARD_TIMEOUT_SECONDS,
             )
-            widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
             self._log_load_failure("current usage", exc)
             self._show_card_error(widget, "the current month")
+            return
+        try:
+            widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
+        except Exception as exc:
+            logger.exception("Could not read the OVH usage: %s", exc)
+            self._show_unreadable_bill(widget, "the current month")
 
     async def _load_invoices(self) -> None:
         """Fetch each bill once and fill both the invoice list and the history."""
@@ -426,17 +466,20 @@ class OVHBillingScreen(Screen):
                 name = _h(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
-                status_style = {
-                    "ok": "green", "expired": "red", "unpaid": "red", "pending": "cyan",
-                }.get(status, "")
+                status_token = {
+                    "ok": "$text-success", "expired": "$text-error",
+                    "unpaid": "$text-error", "pending": "$text-accent",
+                }.get(status)
+                # Provider text: Text cells, so a plain string is never read as markup.
+                status_display = (
+                    themed_text(self.app, status, status_token) if status_token else cell(status)
+                )
                 expiry = str(service.get("expiration", ""))[:10]
                 auto_renew = (
-                    cell("yes", "green") if service.get("auto_renew") else cell("no", "dim")
+                    themed_text(self.app, "yes", "$text-success") if service.get("auto_renew")
+                    else themed_text(self.app, "no", "$text-muted")
                 )
-                tbl.add_row(
-                    cell(name), cell(svc_type), cell(status, status_style),
-                    cell(expiry), auto_renew,
-                )
+                tbl.add_row(cell(name), cell(svc_type), status_display, cell(expiry), auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
             self.notify(f"Error loading services: {self._display_error(exc)}", severity="error", markup=False)

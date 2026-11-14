@@ -17,7 +17,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen, Screen
+from textual.geometry import Size
+from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
@@ -38,9 +39,13 @@ from servonaut.services.vault.auto_bind import (
 from servonaut.services.vault.display import strip_terminal_controls, terminal_safe
 from servonaut.services.vault.ec2_host_keys import key_family_from_public_key
 from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +60,17 @@ INTRO = (
 )
 
 
+class _AutoBindTrustCheckbox(Checkbox):
+    """Keep the native consent label complete when it wraps."""
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        return self.render().get_height(self.styles, width) if width else 0
+
+
 class AutoBindFetchConfirmModal(ModalScreen[bool]):
     """Confirm connecting once to record host keys."""
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -65,11 +79,19 @@ class AutoBindFetchConfirmModal(ModalScreen[bool]):
         self._message = message
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="auto_bind_confirm_container"):
-            yield Static(escape(self._message), id="auto_bind_confirm_message")
-            with Horizontal(id="auto_bind_confirm_actions"):
-                yield Button("Cancel", id="auto_bind_confirm_no")
-                yield Button("Connect", variant="primary", id="auto_bind_confirm_yes")
+        heading = Static("")
+        heading.display = False
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=heading,
+            body=DialogBody(Static(escape(self._message), id="auto_bind_confirm_message")),
+            actions=DialogActions(
+                Button("Cancel", id="auto_bind_confirm_no"),
+                Button("Connect", variant="primary", id="auto_bind_confirm_yes"),
+                id="auto_bind_confirm_actions",
+            ),
+            severity="warning", id="auto_bind_confirm_container",
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "auto_bind_confirm_yes":
@@ -81,8 +103,17 @@ class AutoBindFetchConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class _AutoBindReviewBody(DialogBody):
+    """Keep the review as the initial keyboard target before confirmation."""
+
+    def allow_focus(self) -> bool:
+        return VerticalScroll.allow_focus(self)
+
+
 class VaultAutoBindReviewModal(ModalScreen[bool]):
     """Review host keys and fingerprints before binding."""
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -104,49 +135,50 @@ class VaultAutoBindReviewModal(ModalScreen[bool]):
         self._all_verified = bool(self._review_rows) and all(row.verified for row in self._review_rows)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="auto_bind_review_container"):
-            yield Static("Review host keys before binding", id="auto_bind_review_title")
-            if self._team:
-                team_display = self._scrub(self._team_name or self._team)
-                yield Static(
-                    f"Everyone in {escape(team_display)} will connect with these keys.",
-                    id="auto_bind_review_team_note",
-                )
-            with VerticalScroll(id="auto_bind_review_scroll"):
-                for row in self._review_rows:
-                    with Vertical(classes="auto_bind_review_item"):
-                        s_name = self._scrub(self._server_name(row))
-                        addr = f"{row.host}:{row.port}" if row.host and row.port != 22 else (row.host or "")
-                        login_addr = f"{row.login}@{addr}" if row.login else addr
-                        yield Static(f"[bold]{escape(s_name)}[/bold] ({escape(self._scrub(login_addr))})")
-                        if row.host_keys:
-                            for key in row.host_keys:
-                                family = key_family_from_public_key(key)
-                                try:
-                                    fp = crypto.ssh_public_fingerprint(key)
-                                except Exception:
-                                    fp = "unknown fingerprint"
-                                yield Static(f"  {escape(family)} · {escape(self._scrub(fp))}")
-                        source = row.verification_source or ("verified by AWS console output" if row.verified else "trusted by this computer")
-                        if not row.verified or "not verified" in source:
-                            yield Static(f"  [dim]Verification:[/dim]\n    [dim]{escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source")
-                        else:
-                            yield Static(f"  [dim]Source: {escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source")
-
-            yield Checkbox(
+        heading = [Static("Review host keys before binding", id="auto_bind_review_title")]
+        if self._team:
+            team_display = self._scrub(self._team_name or self._team)
+            heading.append(Static(
+                f"Everyone in {escape(team_display)} will connect with these keys.",
+                id="auto_bind_review_team_note",
+            ))
+        items = []
+        for row in self._review_rows:
+            s_name = self._scrub(self._server_name(row))
+            addr = f"{row.host}:{row.port}" if row.host and row.port != 22 else (row.host or "")
+            login_addr = f"{row.login}@{addr}" if row.login else addr
+            fields = [Static(f"[bold]{escape(s_name)}[/bold] ({escape(self._scrub(login_addr))})")]
+            if row.host_keys:
+                for key in row.host_keys:
+                    family = key_family_from_public_key(key)
+                    try:
+                        fp = crypto.ssh_public_fingerprint(key)
+                    except Exception:
+                        fp = "unknown fingerprint"
+                    fields.append(Static(f"  {escape(family)} · {escape(self._scrub(fp))}"))
+            source = row.verification_source or ("verified by AWS console output" if row.verified else "trusted by this computer")
+            if not row.verified or "not verified" in source:
+                fields.append(Static(f"  [dim]Verification:[/dim]\n    [dim]{escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source"))
+            else:
+                fields.append(Static(f"  [dim]Source: {escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source"))
+            items.append(Vertical(*fields, classes="auto_bind_review_item"))
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(*heading),
+            body=_AutoBindReviewBody(*items, id="auto_bind_review_scroll"),
+            status=Checkbox(
                 "I checked these fingerprints: pin them",
                 value=self._all_verified,
                 id="vault_auto_bind_review_use_trusted",
                 disabled=False,
-            )
-            with Horizontal(id="auto_bind_review_actions"):
-                yield Button("Cancel", id="vault_auto_bind_review_cancel")
-                yield Button(
-                    "Bind",
-                    variant="primary",
-                    id="vault_auto_bind_review_confirm",
-                    disabled=not self._all_verified,
-                )
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="vault_auto_bind_review_cancel"),
+                Button("Bind", variant="primary", id="vault_auto_bind_review_confirm", disabled=not self._all_verified),
+                id="auto_bind_review_actions",
+            ),
+            size="large", id="auto_bind_review_container",
+        )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "vault_auto_bind_review_use_trusted":
@@ -163,8 +195,14 @@ class VaultAutoBindReviewModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class VaultAutoBindScreen(Screen):
+class VaultAutoBindScreen(WorkspaceScreen):
     """Review and bind vault SSH keys to the servers named like them."""
+
+    CHAT_REFLOW = True
+    # Leave room for two action columns and content padding.
+    CHAT_MIN_CONTENT_WIDTH = 56
+    # Wider content can show the complete multi-column action grid.
+    CONTENT_NARROW_WIDTH = 110
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -194,31 +232,59 @@ class VaultAutoBindScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
+        yield WorkspaceControls("Auto-bind vault keys")
         with Horizontal(id="auto_bind_layout"):
-            yield Sidebar()
-            with Vertical(id="auto_bind_content"):
-                yield Static("[bold]Auto-bind vault keys[/bold]", id="auto_bind_title")
-                yield Select[str](
-                    [(Text("Personal vault: binds for you"), "personal")],
-                    value="personal",
-                    prompt="Select vault…",
-                    id="auto_bind_vault_select",
-                    allow_blank=False,
-                    compact=True,
-                )
-                yield Static(INTRO, id="auto_bind_intro", markup=False)
-                yield BusyIndicator(id="auto_bind_busy")
-                yield Static("", id="auto_bind_status", markup=False)
-                yield DataTable(id="auto_bind_table", cursor_type="row", zebra_stripes=True)
-                yield Static("", id="auto_bind_detail", markup=False)
-                yield Checkbox("I checked these host-key fingerprints: pin them", id="auto_bind_trust")
-                with Horizontal(id="auto_bind_actions"):
-                    yield Button("Bind selected", variant="primary", id="auto_bind_apply")
-                    yield Button("Fetch host keys", id="auto_bind_fetch_keys")
-                    yield Button("Select all", id="auto_bind_all")
-                    yield Button("Select none", id="auto_bind_none")
-                    yield Button("Back", id="auto_bind_back")
+            with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+                yield self.workspace_sidebar()
+                with Vertical(id="auto_bind_content", classes="workspace-content"):
+                    with Vertical(id="auto_bind_scope"):
+                        with Horizontal(id="auto_bind_heading"):
+                            yield Static("[bold]Auto-bind vault keys[/bold]", id="auto_bind_title")
+                            yield Select[str](
+                                [(Text("Personal vault: binds for you"), "personal")],
+                                value="personal",
+                                prompt="Select vault…",
+                                id="auto_bind_vault_select",
+                                allow_blank=False,
+                                compact=True,
+                            )
+                        yield Static(INTRO, id="auto_bind_intro", markup=False)
+                    yield BusyIndicator(id="auto_bind_busy")
+                    yield Static("", id="auto_bind_status", markup=False)
+                    with Horizontal(id="auto_bind_workspace"):
+                        records = Vertical(
+                            DataTable(id="auto_bind_table", cursor_type="row", zebra_stripes=True),
+                            id="auto_bind_records",
+                        )
+                        records.border_title = "Server matches"
+                        yield records
+                        review = Vertical(
+                            VerticalScroll(
+                                Static("", id="auto_bind_detail", markup=False),
+                                id="auto_bind_detail_scroll",
+                            ),
+                            _AutoBindTrustCheckbox(
+                                "I checked these host-key fingerprints: pin them",
+                                id="auto_bind_trust", compact=True,
+                            ),
+                            id="auto_bind_review",
+                        )
+                        review.border_title = "Host-key review"
+                        yield review
+                    with Horizontal(id="auto_bind_actions"):
+                        with Vertical(id="auto_bind_binding_actions"):
+                            yield Static("Binding", classes="credential_action_heading")
+                            with ActionRow(classes="credential_binding_buttons"):
+                                yield ActionButton("Bind selected", role="primary", id="auto_bind_apply")
+                                yield ActionButton("Fetch host keys", "f", short="Fetch", id="auto_bind_fetch_keys")
+                        with Vertical(id="auto_bind_selection_actions"):
+                            yield Static("Selection", classes="credential_action_heading")
+                            with ActionRow(classes="credential_selection_buttons"):
+                                yield ActionButton("Select all", id="auto_bind_all")
+                                yield ActionButton("Select none", id="auto_bind_none")
+                                yield ActionButton("Back", "esc", id="auto_bind_back")
         yield Footer()
+
 
     def on_mount(self) -> None:
         self._sync_compact_layout()
@@ -241,9 +307,12 @@ class VaultAutoBindScreen(Screen):
         self._sync_compact_layout()
 
     def _sync_compact_layout(self) -> None:
-        """Two buttons to a row once four labels no longer fit; no intro on a short terminal."""
-        self.set_class(self.size.width <= 110, "-narrow")
-        self.set_class(self.size.height <= 32, "-short")
+        """Keep the short-terminal presentation alongside content-width reflow."""
+        short = self.size.height <= 32
+        self.set_class(short, "-short")
+        # A short terminal has no room for bordered buttons: one row each.
+        for button in self.query(ActionButton):
+            button.compact = short
 
     # ------------------------------------------------------------------
     # Display helpers
@@ -412,11 +481,13 @@ class VaultAutoBindScreen(Screen):
         detail.update(self.scrub_for_display(text))
 
     def _sync_apply(self) -> None:
-        apply = self.query_one("#auto_bind_apply", Button)
+        apply = self.query_one("#auto_bind_apply", ActionButton)
         if self._busy.holds("#auto_bind_apply"):
             return  # running work gives the button back its state when it ends
         count = len(self._selected)
-        apply.label = f"Bind selected ({count})" if count else "Bind selected"
+        label = f"Bind selected ({count})" if count else "Bind selected"
+        if apply.words != label:
+            apply.set_text(label)
         apply.disabled = count == 0
 
     # ------------------------------------------------------------------

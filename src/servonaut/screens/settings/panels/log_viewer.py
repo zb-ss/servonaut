@@ -28,10 +28,11 @@ from typing import Any, Dict, List
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
 
 
@@ -45,7 +46,8 @@ class LogViewerPanel(SettingsPanel):
     """
 
     PANEL_ID = "log_viewer"
-    TITLE = "Log Viewer"
+    TITLE = "Log viewer"
+    DESCRIPTION = "Reading limits and paths used for remote log discovery."
 
     DEFAULT_CSS = """
     LogViewerPanel .lv-section-header {
@@ -68,58 +70,52 @@ class LogViewerPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the log-viewer form rows."""
-        # --- Scalar limits ---
-        yield Static("Scan limits", classes="lv-section-header")
-        yield Horizontal(
-            Static("Max scan depth", classes="label"),
-            Input(placeholder="2", id="lv_scan_max_depth"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max lines to load", classes="label"),
-            Input(placeholder="10000", id="lv_max_lines"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Tail lines (follow mode)", classes="label"),
-            Input(placeholder="100", id="lv_tail_lines"),
-            classes="setting_row",
-        )
-
-        # --- Default log paths ---
-        yield Static("Default log paths", classes="lv-section-header")
-        yield Static(
-            "Paths offered in the log-viewer path picker by default.",
-            classes="lv-help",
-        )
-        yield StringListEditor(
-            placeholder="/var/log/syslog",
-            id="lv_default_paths",
-        )
-
-        # --- Scan directories ---
-        yield Static("Scan directories", classes="lv-section-header")
-        yield Static(
-            "Directories searched when scanning for log files.",
-            classes="lv-help",
-        )
-        yield StringListEditor(
-            placeholder="/var/log",
-            id="lv_scan_directories",
-        )
-
-        # --- Custom paths per label ---
-        yield Static("Custom paths (per label)", classes="lv-section-header")
-        yield Static(
-            "Map a label (e.g. instance name) to a comma-separated list of paths.",
-            classes="lv-help",
-        )
-        yield KeyValueEditor(
-            key_placeholder="label",
-            value_placeholder="/path/one,/path/two",
-            value_is_int=False,
-            id="lv_custom_paths",
-        )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Scan limits", classes="lv-section-header")
+            yield setting_row(
+                "Max scan depth",
+                Input(placeholder="2", id="lv_scan_max_depth"),
+            )
+            yield setting_row(
+                "Max lines to load",
+                Input(placeholder="10000", id="lv_max_lines"),
+            )
+            yield setting_row(
+                "Tail lines (follow mode)",
+                Input(placeholder="100", id="lv_tail_lines"),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Default log paths", classes="lv-section-header")
+            yield Static(
+                "Paths offered in the log-viewer path picker by default.",
+                classes="lv-help",
+            )
+            yield StringListEditor(
+                placeholder="/var/log/syslog",
+                id="lv_default_paths",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Scan directories", classes="lv-section-header")
+            yield Static(
+                "Directories searched when scanning for log files.",
+                classes="lv-help",
+            )
+            yield StringListEditor(
+                placeholder="/var/log",
+                id="lv_scan_directories",
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Custom paths (per label)", classes="lv-section-header")
+            yield Static(
+                "Map a label (e.g. instance name) to a comma-separated list of paths.",
+                classes="lv-help",
+            )
+            yield KeyValueEditor(
+                key_placeholder="label",
+                value_placeholder="/path/one,/path/two",
+                value_is_int=False,
+                id="lv_custom_paths",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

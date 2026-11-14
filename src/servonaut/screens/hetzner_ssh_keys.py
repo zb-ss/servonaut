@@ -19,15 +19,17 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
 
-from servonaut.utils.markup import cell, literal, with_bold_values
+from servonaut.screens._compact_actions import sync_compact_buttons
+from servonaut.utils.markup import inert_text, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -38,8 +40,9 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -48,8 +51,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class HetznerSSHKeysScreen(Screen):
+class HetznerSSHKeysScreen(WorkspaceScreen):
     """Manage Hetzner Cloud project SSH keys."""
+
+    AUTO_FOCUS = "#hetzner_ssh_keys_container"
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 80
+    CONTENT_NARROW_WIDTH = 104
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -68,6 +77,8 @@ class HetznerSSHKeysScreen(Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -80,89 +91,91 @@ class HetznerSSHKeysScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]Hetzner SSH Keys[/bold $text-accent]",
-                    id="hetzner_ssh_keys_header",
+        yield WorkspaceControls("Hetzner SSH keys")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield Container(
+                ScrollableContainer(
+                    Horizontal(
+                        Static(
+                            "Hetzner SSH keys",
+                            id="hetzner_ssh_keys_header",
+                            classes="screen-title",
+                        ),
+                        AccountPicker.for_provider(
+                            registry_for(self.app, "hetzner"), "hetzner",
+                            id="hetzner_ssh_keys_account",
+                        ),
+                        classes="provider-key-scope",
+                    ),
+                    Horizontal(
+                        Container(
+                            Static("[bold]Registered project keys[/bold]", classes="provider_catalog_heading"),
+                            Static("", id="hetzner_ssh_keys_status"),
+                            DataTable(id="hetzner_ssh_keys_table"),
+                            classes="provider_key_catalog",
+                        ),
+                        Vertical(
+                            Static(
+                                "[dim]Project-level SSH keys registered with Hetzner "
+                                "Cloud. The create-server wizard injects keys from "
+                                "this list at provision time — they do NOT touch "
+                                "your local ~/.ssh.[/dim]",
+                                id="hetzner_ssh_keys_hint",
+                            ),
+                            Static("Selected key", classes="provider-key-selection-heading"),
+                            Static("Select a registered key to inspect its identity.", id="provider_key_selection", classes="provider-key-selection", markup=False),
+                            classes="provider-key-context",
+                        ),
+                        classes="provider-key-inventory",
+                    ),
+                    Container(
+                        Static(
+                            "[bold]Add SSH key[/bold]",
+                            classes="section_header",
+                        ),
+                        Label("Key name:"),
+                        Input(
+                            placeholder="my-laptop",
+                            id="hetzner_ssh_input_name",
+                        ),
+                        Label(
+                            "Public key (paste full ssh-ed25519 / ssh-rsa "
+                            "line):",
+                        ),
+                        Input(
+                            placeholder="ssh-ed25519 AAAA... user@host",
+                            id="hetzner_ssh_input_public_key",
+                        ),
+                        id="hetzner_ssh_add_form",
+                        classes="hidden provider_key_editor",
+                    ),
+                    id="hetzner_ssh_keys_container",
+                    classes="provider-key-document",
                 ),
-                Static(
-                    "[dim]Project-level SSH keys registered with Hetzner "
-                    "Cloud. The create-server wizard injects keys from "
-                    "this list at provision time — they do NOT touch "
-                    "your local ~/.ssh.[/dim]",
-                    id="hetzner_ssh_keys_hint",
+                Vertical(
+                    Horizontal(
+                        Button(
+                            "Save", id="btn_hetzner_ssh_save",
+                            variant="primary",
+                        ),
+                        Button(
+                            "Cancel", id="btn_hetzner_ssh_cancel",
+                        ),
+                        id="hetzner_ssh_add_form_actions",
+                        classes="hidden",
+                    ),
+                    ActionRow(
+                        ActionButton("Refresh", "r", id="btn_hetzner_ssh_refresh"),
+                        ActionButton("Add key", "n", role="primary", id="btn_hetzner_ssh_add"),
+                        ActionButton("Delete", "d", role="error", id="btn_hetzner_ssh_delete", disabled=True),
+                        ActionButton("Back", "esc", id="btn_hetzner_ssh_back"),
+                        id="hetzner_ssh_keys_actions",
+                    ),
+                    classes="provider-key-footer",
                 ),
-                # Hidden unless several Hetzner projects are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "hetzner"), "hetzner",
-                    id="hetzner_ssh_keys_account",
-                ),
-
-                DataTable(id="hetzner_ssh_keys_table"),
-                Static("", id="hetzner_ssh_keys_status"),
-
-                Horizontal(
-                    Button(
-                        "Refresh (r)", id="btn_hetzner_ssh_refresh",
-                    ),
-                    Button(
-                        "+ Add Key (n)", variant="primary",
-                        id="btn_hetzner_ssh_add",
-                    ),
-                    Button(
-                        "Delete (d)", variant="error",
-                        id="btn_hetzner_ssh_delete",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Back",
-                        id="btn_hetzner_ssh_back",
-                    ),
-                    id="hetzner_ssh_keys_actions",
-                ),
-
-                # Add form — hidden by default (atomic show/hide via
-                # the global ``.hidden`` rule).
-                Container(
-                    Static(
-                        "[bold]Add SSH Key[/bold]",
-                        classes="section_header",
-                    ),
-                    Label("Key name:"),
-                    Input(
-                        placeholder="my-laptop",
-                        id="hetzner_ssh_input_name",
-                    ),
-                    Label(
-                        "Public key (paste full ssh-ed25519 / ssh-rsa "
-                        "line):",
-                    ),
-                    Input(
-                        placeholder="ssh-ed25519 AAAA... user@host",
-                        id="hetzner_ssh_input_public_key",
-                    ),
-                    id="hetzner_ssh_add_form",
-                    classes="hidden",
-                ),
-
-                # Bottom-docked Save/Cancel — visibility mirrors the
-                # form's. Same pattern as the custom-servers and OVH
-                # cloud-create wizards.
-                Horizontal(
-                    Button(
-                        "Save", id="btn_hetzner_ssh_save",
-                        variant="primary",
-                    ),
-                    Button(
-                        "Cancel", id="btn_hetzner_ssh_cancel",
-                    ),
-                    id="hetzner_ssh_add_form_actions",
-                    classes="hidden",
-                ),
-
-                id="hetzner_ssh_keys_container",
+                id="hetzner_ssh_keys_workspace",
+                classes="workspace-content provider-key-workspace",
             )
         yield Footer()
 
@@ -170,7 +183,12 @@ class HetznerSSHKeysScreen(Screen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        sync_compact_buttons(self)
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "ID", "Fingerprint")
@@ -255,9 +273,9 @@ class HetznerSSHKeysScreen(Screen):
         for key in self._keys:
             fp = key.get("fingerprint", "") or ""
             table.add_row(
-                cell(_s(str(key.get("name", "")))),
-                str(key.get("id", "")),
-                fp[:32],
+                Text(inert_text(_s(str(key.get("name", ""))))),
+                Text(inert_text(str(key.get("id", "")))),
+                Text(inert_text(fp[:32])),
                 key=str(key.get("id", "")) or str(key.get("name", "")),
             )
         n = len(self._keys)
@@ -271,6 +289,7 @@ class HetznerSSHKeysScreen(Screen):
                 f"[dim]{n} key{'s' if n != 1 else ''}.[/dim]"
             )
         self._sync_action_buttons()
+        self._update_selected_context()
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
@@ -278,6 +297,23 @@ class HetznerSSHKeysScreen(Screen):
 
     def on_data_table_row_highlighted(self, event) -> None:
         self._sync_action_buttons()
+        self._update_selected_context()
+
+    def _update_selected_context(self) -> None:
+        """Keep the chosen registry identity readable beside the inventory."""
+        try:
+            context = self.query_one("#provider_key_selection", Static)
+        except NoMatches:
+            return
+        key = self._selected_key()
+        if key is None:
+            context.update("Select a registered key to inspect its identity.")
+            return
+        name = str(key.get("name") or "—")
+        if self.app.demo_mode and self.app.redaction_service:
+            name = self.app.redaction_service.redact_key_name(name)
+        identifier = str(key.get("id") or "—")
+        context.update(literal(f"{name}\nID: {identifier}"))
 
     def _selected_key(self) -> dict | None:
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
@@ -422,7 +458,7 @@ class HetznerSSHKeysScreen(Screen):
             return
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete SSH Key",
+                title="Delete SSH key",
                 description=with_bold_values(
                     "Remove {} from your Hetzner Cloud project.",
                     key.get('name', identifier),
@@ -434,7 +470,7 @@ class HetznerSSHKeysScreen(Screen):
                     "New servers can no longer reference this key by name",
                 ],
                 confirm_text="delete",
-                action_label="Delete Key",
+                action_label="Delete key",
                 severity="warning",
             )
         )

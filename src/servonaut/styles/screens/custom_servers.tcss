@@ -1,65 +1,128 @@
-/* ===================================================================
-   CUSTOM SERVERS SCREEN
-   =================================================================== */
-
-#custom_servers_container {
+/* Saved inventory stays distinct from the connection editor. */
+CustomServersScreen #custom_servers_workspace {
     width: 1fr;
     height: 100%;
-    padding: 1;
+    padding: 0 2 1 2;
 }
-
-#custom_servers_header {
-    text-align: center;
-    padding: 1;
-    margin-bottom: 1;
-    color: $accent;
+CustomServersScreen #custom_servers_container {
+    width: 100%;
+    height: 1fr;
+    background: transparent;
+}
+CustomServersScreen #custom_servers_header {
+    height: auto;
+    color: $text;
     text-style: bold;
 }
-
-#custom_servers_table {
+CustomServersScreen #custom_servers_intro {
     height: auto;
-    max-height: 16;
-    margin: 1 0;
-}
-
-#add_form {
-    /* Container defaults to `height: 1fr` + hidden overflow: inside the
-       scrolling column that left a 7-row box on a 47-row terminal with
-       every Input clipped below it. Auto height lets the column scroll
-       through the whole form; the Save row stays docked. */
-    height: auto;
-    border: round $primary;
-    padding: 1;
-    margin: 1 0;
-    background: $boost;
-}
-
-#add_form Label {
-    padding: 0 0 0 1;
+    margin: 0 0 1 0;
     color: $text-muted;
 }
-
-#add_form Input {
-    margin: 0 0 1 0;
-    width: 1fr;
+CustomServersScreen #custom_servers_records {
+    height: auto;
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    background: transparent;
 }
-
-/* Docked Save / Cancel row — sibling of #add_form so it stays pinned
-   to the screen bottom while the user scrolls through form fields.
-   Mirrors the dock-bottom pattern used by #cloud_create_actions and
-   #hetzner_create_actions on the wizard screens. */
-#add_form_actions {
-    layout: horizontal;
+CustomServersScreen #custom_servers_toolbar {
+    height: auto;
+    margin: 0 0 1 0;
+    align: left middle;
+}
+CustomServersScreen .custom-section-title {
+    width: 1fr;
+    height: auto;
+    color: $text;
+    text-style: bold;
+}
+CustomServersScreen #custom_servers_toolbar .custom-section-title {
+    height: 3;
+    content-align: left middle;
+}
+CustomServersScreen .add_row {
+    width: 64;
+    max-width: 100%;
+    height: auto;
+}
+CustomServersScreen #custom_servers_table {
+    width: 100%;
+    height: auto;
+    min-height: 8;
+    max-height: 18;
+    background: $surface;
+}
+CustomServersScreen .custom-record-note {
+    height: auto;
+    margin-top: 1;
+    color: $text-muted;
+}
+CustomServersScreen #add_form {
+    height: auto;
+    border: round $primary;
+    padding: 1 2;
+    margin: 1 0;
+    background: transparent;
+}
+CustomServersScreen .custom-form-group-title {
+    height: auto;
+    margin: 1 0;
+    padding-bottom: 1;
+    border-bottom: solid $border-blurred;
+    color: $text;
+    text-style: bold;
+}
+CustomServersScreen .custom-field-grid {
+    grid-size: 2;
+    grid-columns: 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 2;
+    height: auto;
+}
+CustomServersScreen .custom-field {
+    height: auto;
+    min-width: 0;
+}
+CustomServersScreen #add_form Label {
+    height: auto;
+    padding: 0;
+    color: $text;
+}
+CustomServersScreen #add_form Input {
+    margin: 0 0 1 0;
+    width: 100%;
+    min-width: 0;
+}
+CustomServersScreen .extra_ssh_options {
+    height: 6;
+    margin: 1 0;
+}
+CustomServersScreen #add_form_actions {
     dock: bottom;
     height: auto;
     width: 100%;
-    padding: 1 0;
+    padding: 0 1;
+    border-top: solid $border-blurred;
     background: $surface;
     align: left middle;
 }
-
-#add_form_actions Button {
-    margin: 0 1 0 0;
-    min-width: 14;
+CustomServersScreen.-content-narrow #custom_servers_workspace {
+    padding: 0 1 1 1;
 }
-
+CustomServersScreen.-content-narrow #custom_servers_toolbar {
+    layout: vertical;
+}
+CustomServersScreen.-content-narrow #custom_servers_toolbar .custom-section-title {
+    height: 1;
+    margin: 1 0;
+}
+CustomServersScreen.-content-narrow .add_row {
+    width: 100%;
+}
+CustomServersScreen.-content-narrow #add_form {
+    padding: 1;
+}
+CustomServersScreen.-content-narrow .custom-field-grid {
+    grid-size: 1;
+    grid-columns: 1fr;
+}

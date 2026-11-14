@@ -29,13 +29,13 @@ from __future__ import annotations
 
 import logging
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Union
 
 from rich.markup import escape
 from textual.binding import Binding
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.content import Content
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -51,8 +51,13 @@ from servonaut.utils.instance_resolver import (
     display_name,
     resolve_unique,
 )
+from servonaut.utils.markup import literal
+from servonaut.utils.text_fit import cut
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
+from servonaut.utils.theme_text import rebuild_keeping_cursor, themed_text
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -62,23 +67,21 @@ logger = logging.getLogger(__name__)
 _UPGRADE_URL = "https://servonaut.dev/pricing"
 _DOCS_URL = "https://servonaut.dev/docs/proactive-monitoring"
 
-# Severity / status → (style in table cells, style everywhere else). Table
-# cells are read as Rich markup, where colour names follow the theme's ANSI
-# palette; other text is Textual markup, which takes the theme's colours.
-_SEVERITY_STYLE: Dict[str, Tuple[str, str]] = {
-    "critical": ("bold red", "bold $text-error"),
-    "high": ("red", "$text-error"),
-    "medium": ("yellow", "$text-warning"),
-    "low": ("cyan", "$text-accent"),
-    "info": ("dim", "dim"),
+# Severity / status → the theme style they are shown in.
+_SEVERITY_STYLE: Dict[str, str] = {
+    "critical": "bold $text-error",
+    "high": "$text-error",
+    "medium": "$text-warning",
+    "low": "$text-accent",
+    "info": "dim",
 }
 
-_STATUS_STYLE: Dict[str, Tuple[str, str]] = {
-    "detected": ("yellow", "$text-warning"),
-    "acked": ("cyan", "$text-accent"),
-    "remediating": ("magenta", "$text-primary"),
-    "resolved": ("green", "$text-success"),
-    "suppressed": ("dim", "dim"),
+_STATUS_STYLE: Dict[str, str] = {
+    "detected": "$text-warning",
+    "acked": "$text-accent",
+    "remediating": "$text-primary",
+    "resolved": "$text-success",
+    "suppressed": "dim",
 }
 
 # Severity order for the summary line, worst first.
@@ -151,36 +154,40 @@ def _recon_note(recon: Any) -> str:
     return note
 
 
-def _styled(styles: Dict[str, Tuple[str, str]], value: str, *, cell: bool) -> str:
-    style = styles.get(value)
-    if style is None:
-        return escape(value or "unknown")
-    tag = style[0] if cell else style[1]
-    return f"[{tag}]{value}[/{tag}]"
+def _styled(styles: Dict[str, str], value: str) -> Content:
+    return literal(value or "unknown", styles.get(value, ""))
 
 
-def _severity_markup(severity: str, *, cell: bool = False) -> str:
-    """*severity* in its colour; ``cell=True`` for a table cell."""
-    return _styled(_SEVERITY_STYLE, severity, cell=cell)
+def _severity_markup(severity: str) -> Content:
+    """*severity* in its colour, as literal content (not for a table cell)."""
+    return _styled(_SEVERITY_STYLE, severity)
 
 
-def _status_markup(status: str, *, cell: bool = False) -> str:
-    """*status* in its colour; ``cell=True`` for a table cell."""
-    return _styled(_STATUS_STYLE, status, cell=cell)
+def _status_markup(status: str) -> Content:
+    """*status* in its colour, as literal content (not for a table cell)."""
+    return _styled(_STATUS_STYLE, status)
 
 
-class FindingsScreen(Screen):
+# Below this many cells the inbox drops its detector column and trims the rest.
+_NARROW_TABLE_WIDTH = 116
+
+
+class FindingsScreen(WorkspaceScreen):
     """Findings inbox — fleet-wide, or scoped to one instance."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 104
+    CONTENT_NARROW_WIDTH = 120
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
-        Binding("s", "scan_now", "Scan Now", show=True),
+        Binding("s", "scan_now", "Scan now", show=True),
         Binding("enter", "open_selected", "Open", show=True),
-        Binding("f", "cycle_status", "Status Filter", show=True),
-        Binding("v", "cycle_severity", "Severity Filter", show=True),
-        Binding("n", "next_page", "Next Page", show=False),
-        Binding("p", "prev_page", "Prev Page", show=False),
+        Binding("f", "cycle_status", "Status filter", show=True),
+        Binding("v", "cycle_severity", "Severity filter", show=True),
+        Binding("n", "next_page", "Next page", show=False),
+        Binding("p", "prev_page", "Previous page", show=False),
         Binding("u", "open_upgrade", "Upgrade", show=False),
         Binding("o", "open_docs", "Docs", show=False),
         Binding("l", "open_login", "Sign in", show=False),
@@ -201,6 +208,8 @@ class FindingsScreen(Screen):
             return False
         if action == "open_login" and self._gate_state != "unauth":
             return False
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: Optional[dict] = None) -> None:
@@ -227,54 +236,91 @@ class FindingsScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        scope = ""
+        scope = Content("")
         if self._instance is not None:
             name = self._display_name(self._instance)
-            scope = f" — [dim]{escape(name)}[/dim]"
+            scope = Content.assemble(" — ", literal(name, "dim"))
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(f"🛡 [bold]Monitoring findings[/bold]{scope}", id="findings_title"),
-                Static(
-                    "Proactive monitoring findings from server-side scans. "
-                    "The CLI renders and triages — detection runs in the "
-                    "Servonaut cloud over your connected relay.",
+        yield WorkspaceControls("Findings")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="findings_container", classes="workspace-content"):
+                yield Horizontal(
+                    Static(
+                        Content.assemble(literal("Monitoring findings", "bold"), scope),
+                        id="findings_title",
+                        classes="screen-title",
+                    ),
+                    Static("", id="findings_status_pill"),
+                    id="findings_heading",
+                )
+                yield Static(
+                    "Scans run in the Servonaut cloud over your connected relay. "
+                    "Review evidence and triage findings for this server."
+                    if self._instance is not None else
+                    "Scans run in the Servonaut cloud over your connected relay. "
+                    "Review evidence and triage findings across your servers.",
                     id="findings_subtitle",
-                ),
-                Static("", id="findings_status_pill"),
-                Static("", id="findings_filter_line"),
-                # Live scan progress — hidden while idle.
-                Static("", id="findings_progress", classes="hidden"),
-                # State cards (sign-in / upgrade / error) swap in here;
-                # hidden while the table is active.
-                VerticalScroll(id="findings_state_body", classes="hidden"),
-                Container(
-                    DataTable(id="findings_table"),
-                    id="findings_table_card",
-                ),
-                Horizontal(
-                    Button("s. Scan Now", id="btn_findings_scan", variant="primary"),
-                    Button("r. Refresh", id="btn_findings_refresh"),
-                    Button("enter. Open", id="btn_findings_open"),
-                    Button("f. Status Filter", id="btn_findings_status_filter"),
-                    Button("v. Severity Filter", id="btn_findings_severity_filter"),
-                    id="findings_actions",
-                ),
-                id="findings_container",
-            )
+                )
+                yield Static("", id="findings_progress", classes="hidden")
+                yield VerticalScroll(id="findings_state_body", classes="hidden")
+                with Horizontal(id="findings_triage_workspace"):
+                    yield ActionRow(
+                        ActionButton("Scan now", "s", role="primary", id="btn_findings_scan"),
+                        ActionButton("Refresh", "r", id="btn_findings_refresh"),
+                        ActionButton("Open", "enter", id="btn_findings_open"),
+                        ActionButton("Status filter", "f", short="Status", id="btn_findings_status_filter"),
+                        ActionButton("Severity filter", "v", short="Severity", id="btn_findings_severity_filter"),
+                        id="findings_actions",
+                    )
+                    yield Container(
+                        Static("", id="findings_filter_line"),
+                        PlannedTable(id="findings_table"),
+                        id="findings_table_card",
+                    )
         yield Footer()
 
+    def _add_columns(self, table: DataTable, *, narrow: bool) -> None:
+        """The inbox columns; a narrow content area drops the detector and trims the rest."""
+        table.add_column("Severity", key="severity", width=9 if narrow else 10)
+        table.add_column("Status", key="status", width=10 if narrow else 12)
+        if self._instance is None:
+            table.add_column("Instance", key="instance", width=16 if narrow else 22)
+        if not narrow:
+            table.add_column("Detector", key="detector", width=18)
+        table.add_column("Title", key="title", width=28 if narrow else None)
+        table.add_column("Detected", key="detected", width=10 if narrow else 16)
+
+    def _sync_columns(self) -> None:
+        """Choose the columns from the table's own width; rebuild only on a change."""
+        table = self.query_one("#findings_table", DataTable)
+        narrow = 0 < plannable_width(table) < _NARROW_TABLE_WIDTH
+        if narrow == getattr(self, "_narrow_columns", False):
+            return
+        self._narrow_columns = narrow
+        table = self.query_one("#findings_table", DataTable)
+        table.clear(columns=True)
+        self._add_columns(table, narrow=narrow)
+        if self._rows:
+            self._populate_table()
+
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        if self._rows:
+            self.call_after_refresh(
+                rebuild_keeping_cursor,
+                self.query_one("#findings_table", DataTable),
+                self._populate_table,
+            )
+
     def on_mount(self) -> None:
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
+        self.query_one("#findings_table_card").border_title = "Findings inbox"
         table = self.query_one("#findings_table", DataTable)
         table.cursor_type = "row"
-        table.add_column("Severity", key="severity", width=10)
-        table.add_column("Status", key="status", width=12)
-        if self._instance is None:
-            table.add_column("Instance", key="instance", width=22)
-        table.add_column("Detector", key="detector", width=18)
-        table.add_column("Title", key="title")
-        table.add_column("Detected", key="detected", width=20)
+        self._narrow_columns = False
+        self._add_columns(table, narrow=False)
+        table.set_plan_handler(self._sync_columns)
         self._render_gate()
 
     # ------------------------------------------------------------------
@@ -343,6 +389,7 @@ class FindingsScreen(Screen):
         state.set_class(not show, "hidden")
         table_card.display = not show
         actions.display = not show
+        self.query_one("#findings_triage_workspace").display = not show
         if show:
             state.remove_children()
 
@@ -408,7 +455,7 @@ class FindingsScreen(Screen):
         body.mount(self._card(
             "Actions",
             self._actions_list(
-                ("l", "Open Login"),
+                ("l", "Open login"),
                 ("o", "Open docs"),
             ),
         ))
@@ -434,14 +481,14 @@ class FindingsScreen(Screen):
         ]
         if reason:
             children.append(Static(
-                f"[dim]{escape(reason)}[/dim]",
+                literal(reason, "dim"),
                 classes="findings_card_note",
             ))
         body.mount(self._card("Upgrade required", *children, primary=True))
         body.mount(self._card(
             "Actions",
             self._actions_list(
-                ("u", "Open Pricing"),
+                ("u", "Open pricing"),
                 ("o", "Open docs"),
             ),
         ))
@@ -525,19 +572,28 @@ class FindingsScreen(Screen):
         for finding in self._rows:
             severity = str(finding.get("severity") or "")
             status = str(finding.get("status") or "")
-            detector = escape(str(finding.get("detector") or ""))
-            title = escape(redact_demo_text(
+            detector = themed_text(self.app, cut(str(finding.get("detector") or ""), 18))
+            title = themed_text(self.app, redact_demo_text(
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
-            detected = escape(str(finding.get("detected_at") or ""))
-            row = [_severity_markup(severity, cell=True), _status_markup(status, cell=True)]
+            narrow = getattr(self, "_narrow_columns", False)
+            stamp = str(finding.get("detected_at") or "")
+            detected = themed_text(self.app, stamp[:10] if narrow else stamp[:16].replace("T", " "))
+            if narrow and len(title.plain) > 28:
+                title = themed_text(self.app, title.plain[:27] + "…")
+            row = [
+                themed_text(self.app, severity or "unknown", _SEVERITY_STYLE.get(severity, "")),
+                themed_text(self.app, status or "unknown", _STATUS_STYLE.get(status, "")),
+            ]
             if self._instance is None:
                 instance_id = str(finding.get("instance_id") or "")
                 label = redact_demo_instance(
                     self.app, self._instance_label(instance_id),
                 )
-                row.append(escape(label))
-            row.extend([detector, title, detected])
+                row.append(themed_text(
+                    self.app, cut(label, 16 if getattr(self, "_narrow_columns", False) else 22),
+                ))
+            row.extend([title, detected] if getattr(self, "_narrow_columns", False) else [detector, title, detected])
             table.add_row(*row)
         self._update_pill()
         self._update_filter_line()
@@ -552,13 +608,15 @@ class FindingsScreen(Screen):
             sev = str(finding.get("severity") or "unknown")
             counts[sev] = counts.get(sev, 0) + 1
         parts = [
-            f"{_severity_markup(sev)} {counts[sev]}"
+            Content.assemble(_severity_markup(sev), f" {counts[sev]}")
             for sev in _SEVERITY_ORDER if sev in counts
         ]
         for sev in counts:
             if sev not in FINDING_SEVERITIES:
-                parts.append(f"{escape(sev)} {counts[sev]}")
-        pill.update("  ".join(parts) + f"  [dim]· {self._total} total[/dim]")
+                parts.append(Content.assemble(literal(sev), f" {counts[sev]}"))
+        pill.update(Content.assemble(
+            Content("  ").join(parts), literal(f"  · {self._total} total", "dim"),
+        ))
 
     def _update_filter_line(self) -> None:
         line = self.query_one("#findings_filter_line", Static)
@@ -616,7 +674,7 @@ class FindingsScreen(Screen):
             exclusive=True,
         )
 
-    def _set_progress(self, markup: Optional[str]) -> None:
+    def _set_progress(self, markup: Union[str, Content, None]) -> None:
         progress = self.query_one("#findings_progress", Static)
         if markup is None:
             progress.update("")
@@ -692,8 +750,10 @@ class FindingsScreen(Screen):
             if name == "scan.started":
                 self._set_progress("[$text-accent]Scan started…[/$text-accent]")
             elif name == "probe.started":
-                detector = escape(str(data.get("detector") or ""))
-                self._set_progress(f"[$text-accent]Probing:[/$text-accent] {detector}…")
+                detector = str(data.get("detector") or "")
+                self._set_progress(Content.assemble(
+                    literal("Probing:", "$text-accent"), " ", literal(detector), "…",
+                ))
             elif name == "probe.completed":
                 if data.get("ok") is False:
                     probes_failed += 1
@@ -803,7 +863,7 @@ class FindingsScreen(Screen):
         self.app.switch_screen(LoginScreen())
 
 
-class FindingDetailScreen(Screen[bool]):
+class FindingDetailScreen(WorkspaceScreen):
     """One finding, full detail + triage + guarded remediation.
 
     Dismisses with ``True`` when a triage or remediation changed the
@@ -815,6 +875,10 @@ class FindingDetailScreen(Screen[bool]):
     command client-side.
     """
 
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 80
+    CONTENT_NARROW_WIDTH = 96
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("a", "ack", "Acknowledge", show=True),
@@ -823,6 +887,8 @@ class FindingDetailScreen(Screen[bool]):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, finding: Dict[str, Any]) -> None:
@@ -845,24 +911,28 @@ class FindingDetailScreen(Screen[bool]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("", id="finding_detail_title"),
-                Static("", id="finding_detail_pill"),
-                VerticalScroll(id="finding_detail_body"),
-                Horizontal(
-                    Button("a. Acknowledge", id="btn_finding_ack", variant="primary"),
-                    Button("r. Resolve", id="btn_finding_resolve", variant="success"),
-                    Button("x. Suppress", id="btn_finding_suppress"),
-                    Button("esc. Back", id="btn_finding_back"),
-                    id="finding_detail_actions",
-                ),
-                id="finding_detail_container",
-            )
+        yield WorkspaceControls("Finding detail")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="finding_detail_container", classes="workspace-content"):
+                yield Vertical(
+                    Static("", id="finding_detail_title"),
+                    Static("", id="finding_detail_pill"),
+                    id="finding_detail_context",
+                )
+                with Horizontal(id="finding_detail_workspace"):
+                    yield ActionRow(
+                        ActionButton("Acknowledge", "a", short="Ack", role="primary", id="btn_finding_ack"),
+                        ActionButton("Resolve", "r", id="btn_finding_resolve"),
+                        ActionButton("Suppress", "x", id="btn_finding_suppress"),
+                        ActionButton("Back", "esc", id="btn_finding_back"),
+                        id="finding_detail_actions",
+                    )
+                    yield VerticalScroll(id="finding_detail_body")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#finding_detail_body").border_title = "Evidence and remediation"
         self._render_finding()
 
     def _card(self, title: str, *children, warning: bool = False) -> Container:
@@ -885,27 +955,25 @@ class FindingDetailScreen(Screen[bool]):
         # re-render with no remediations can't leave a stale mapping.
         self._remediation_buttons = {}
 
-        safe_title = escape(redact_demo_text(
-            self.app, str(f.get("title") or "(untitled)"),
-        ))
-        title.update(f"🛡 [bold]{safe_title}[/bold]")
+        shown_title = redact_demo_text(self.app, str(f.get("title") or "(untitled)"))
+        title.update(Content.assemble("🛡 ", literal(shown_title, "bold")))
         severity = str(f.get("severity") or "")
         status = str(f.get("status") or "")
         scope = "team" if f.get("team_scoped") else "personal"
-        pill.update(
-            f"{_severity_markup(severity)} · {_status_markup(status)} · "
-            f"[dim]{scope}[/dim]"
-        )
+        pill.update(Content.assemble(
+            _severity_markup(severity), " · ", _status_markup(status), " · ",
+            literal(scope, "dim"),
+        ))
 
         rows = [
-            ("Instance", escape(redact_demo_instance(
+            ("Instance", literal(redact_demo_instance(
                 self.app, str(f.get("instance_id") or "—"),
             ))),
-            ("Detector", escape(str(f.get("detector") or "—"))),
-            ("Rule", escape(str(f.get("rule") or "—"))),
-            ("Detected", escape(str(f.get("detected_at") or "—"))),
-            ("Last seen", escape(str(f.get("last_seen_at") or "—"))),
-            ("Finding id", f"[dim]{escape(str(f.get('id') or '—'))}[/dim]"),
+            ("Detector", literal(str(f.get("detector") or "—"))),
+            ("Rule", literal(str(f.get("rule") or "—"))),
+            ("Detected", literal(str(f.get("detected_at") or "—"))),
+            ("Last seen", literal(str(f.get("last_seen_at") or "—"))),
+            ("Finding id", literal(str(f.get("id") or "—"), "dim")),
         ]
         body.mount(self._card(
             "Details",
@@ -926,7 +994,7 @@ class FindingDetailScreen(Screen[bool]):
         if description:
             body.mount(self._card(
                 "Description",
-                Static(escape(redact_demo_text(self.app, description))),
+                Static(literal(redact_demo_text(self.app, description))),
             ))
 
         lines = evidence_lines(f.get("evidence"))
@@ -935,9 +1003,7 @@ class FindingDetailScreen(Screen[bool]):
                 "Evidence",
                 *[
                     Static(
-                        "[dim]"
-                        + escape(redact_demo_text(self.app, line))
-                        + "[/dim]",
+                        literal(redact_demo_text(self.app, line), "dim"),
                         classes="finding_evidence_line",
                     )
                     for line in lines
@@ -955,23 +1021,26 @@ class FindingDetailScreen(Screen[bool]):
             for index, rem in enumerate(remediations):
                 if not isinstance(rem, dict):
                     continue
-                label = escape(str(rem.get("label") or "(unnamed)"))
-                desc = escape(str(rem.get("description") or ""))
+                label = str(rem.get("label") or "(unnamed)")
+                desc = str(rem.get("description") or "")
                 action = str(rem.get("action") or "")
-                risk = escape(str(rem.get("risk_tier") or "unknown"))
+                risk = str(rem.get("risk_tier") or "unknown")
                 reversible = "reversible" if rem.get("reversible") else "not reversible"
                 children.append(Static(
-                    f"[bold]{label}[/bold]  "
-                    f"[dim]({risk} risk · {reversible})[/dim]",
+                    Content.assemble(
+                        literal(label, "bold"), "  ",
+                        literal(f"({risk} risk · {reversible})", "dim"),
+                    ),
                     classes="finding_remediation_label",
                 ))
                 if desc:
                     children.append(Static(
-                        f"  {desc}", classes="finding_remediation_desc",
+                        Content.assemble("  ", literal(desc)),
+                        classes="finding_remediation_desc",
                     ))
                 if action:
                     children.append(Static(
-                        f"  [dim]{escape(action)}[/dim]",
+                        Content.assemble("  ", literal(action, "dim")),
                         classes="finding_remediation_action",
                     ))
                 # "investigate" is advisory prose — there is nothing to
@@ -996,15 +1065,14 @@ class FindingDetailScreen(Screen[bool]):
                         and is_automatable):
                     button_id = f"btn_finding_remediate_{index}"
                     self._remediation_buttons[button_id] = dict(rem)
-                    # Button labels are Rich-markup parsed — escape the
-                    # server-authored label (slice first so escape can't
-                    # be split mid-tag).
-                    run_label = escape(str(rem.get("label") or action)[:40])
-                    children.append(Button(
+                    # ActionButton labels are literal, so the server-authored
+                    # text needs no escaping.
+                    run_label = str(rem.get("label") or action)[:40]
+                    children.append(ActionButton(
                         f"Run: {run_label}…",
                         id=button_id,
                         classes="finding_remediation_run",
-                        variant="warning",
+                        role="warning",
                     ))
                     any_runnable = True
             if any_runnable:
@@ -1032,11 +1100,11 @@ class FindingDetailScreen(Screen[bool]):
                     "This finding's remediation can be reverted.",
                     classes="finding_revert_desc",
                 ),
-                Button(
+                ActionButton(
                     "Undo remediation…",
                     id="btn_finding_revert",
                     classes="finding_remediation_run",
-                    variant="warning",
+                    role="warning",
                 ),
                 Static(
                     "[dim]Undo… fetches a server-signed preview of the exact "
@@ -1245,13 +1313,13 @@ class FindingDetailScreen(Screen[bool]):
             if not methods and account:
                 return None, (
                     f"No IP-ban configuration acts in AWS account "
-                    f"{account!r} — add one for it under Settings ▸ IP Ban "
+                    f"{account!r} — add one for it under Settings ▸ IP ban "
                     "before blocking an address."
                 )
             if not methods:
                 return None, (
                     "No IP-ban configuration found — add one under "
-                    "Settings ▸ IP Ban before blocking an address."
+                    "Settings ▸ IP ban before blocking an address."
                 )
             return methods[0], None
 

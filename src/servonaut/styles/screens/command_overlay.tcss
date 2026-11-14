@@ -1,47 +1,92 @@
-/* ===================================================================
-   COMMAND OVERLAY MODAL
-   =================================================================== */
+/* A remote command console with persistent native reading and input regions. */
 
 CommandOverlay {
     align: center middle;
+    background: $background 60%;
 }
 
-#command_overlay_container {
-    width: 90%;
+CommandOverlay:ansi {
+    background: transparent;
+}
+
+CommandOverlay #command_overlay_container {
+    width: 94%;
     height: 90%;
+    padding: 0 1;
     background: $surface;
-    border: round $accent;
-    layout: vertical;
-}
-
-#command_header {
-    dock: top;
-    padding: 1 2;
-    background: $primary;
-    color: $text;
-    border-bottom: thick $accent;
-    text-style: bold;
-}
-
-#command_output {
-    height: 1fr;
-    background: $panel;
-    padding: 1;
-    border: round $primary-background;
-    margin: 1 1 0 1;
+    border: round $foreground-muted;
     overflow-y: auto;
 }
 
-#command_hints {
-    height: 1;
-    padding: 0 2;
-    margin: 0 1;
-    color: $text-muted;
-    background: $boost;
+CommandOverlay #command_context {
+    height: auto;
+    max-height: 5;
+    margin-bottom: 1;
+    border-left: heavy $accent;
+    background: $panel;
+    overflow-y: auto;
 }
 
-#command_input {
-    margin: 0 1 0 1;
+CommandOverlay #command_header {
+    height: auto;
+    padding: 0 1;
+    color: $text;
+    text-style: bold;
+}
+
+CommandOverlay #command_tools {
+    layout: grid;
+    grid-size: 6;
+    grid-columns: 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: auto;
+    margin-bottom: 1;
+}
+
+CommandOverlay #command_tools Button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+CommandOverlay.-narrow #command_tools {
+    grid-size: 3;
+}
+
+CommandOverlay #command_output {
+    height: 1fr;
+    min-height: 7;
+    background: transparent;
+    padding: 0 1;
+    border: round $border-blurred;
+    overflow-y: auto;
+}
+
+CommandOverlay #command_output:focus {
+    border: round $accent;
+}
+
+CommandOverlay #command_composer {
+    height: auto;
+    margin-top: 1;
+    padding: 0 1;
+    background: $panel;
+}
+
+CommandOverlay #command_input_label {
+    height: 1;
+    color: $text-muted;
+}
+
+CommandOverlay #command_input {
+    height: 3;
+    margin: 0;
+}
+
+CommandOverlay #command_hints {
+    height: auto;
+    color: $text-muted;
 }
 
 RichLog {
@@ -49,4 +94,3 @@ RichLog {
     color: $text;
     border: none;
 }
-

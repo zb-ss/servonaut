@@ -11,6 +11,8 @@ from servonaut.services.vault.errors import VaultKeyInUse
 from tests._async_bounds import wait_until
 from tests.test_vault_key_names_tui import VAULT, _Host, _Service, _loaded
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _keys() -> _Service:
     return _Service(

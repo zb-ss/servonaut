@@ -15,6 +15,8 @@ from tests._async_bounds import wait_until
 from tests.test_vault_bulk_delete import _keys, _open, _review
 from tests.test_vault_key_names_tui import VAULT, _Host, _Service, _loaded
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SERVER = {"id": "i-0123456789abcdef0", "name": "private-web", "public_ip": "8.8.8.8"}
 
 

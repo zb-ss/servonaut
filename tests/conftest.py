@@ -138,24 +138,42 @@ def _chat_panel_class():
     return module.ChatPanel if module is not None else None
 
 
-@pytest.fixture(autouse=True)
-def _restore_chat_panel_app():
-    """Undo a test pointing ``ChatPanel.app`` at a mock app for the whole class.
+_CHAT_PANEL_APP = pytest.StashKey[object]()
 
-    Several unmounted-panel tests set ``type(panel).app`` to reach a mock app.
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item: pytest.Item):
+    """Remember ``ChatPanel.app`` before any fixture of the test is set up.
+
+    Several unmounted-panel tests point ``type(panel).app`` at a mock app.
     Left in place, it makes every later mounted chat panel render from that
     mock, so it is put back after each test.
     """
     panel_class = _chat_panel_class()
-    saved = panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
-    yield
-    panel_class = _chat_panel_class()
-    if panel_class is None:
-        return
-    if saved is not _NO_CLASS_APP:
-        panel_class.app = saved
-    elif "app" in panel_class.__dict__:
-        delattr(panel_class, "app")
+    item.stash[_CHAT_PANEL_APP] = (
+        panel_class.__dict__.get("app", _NO_CLASS_APP) if panel_class else _NO_CLASS_APP
+    )
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem):
+    """Put ``ChatPanel.app`` back once every fixture is finalised.
+
+    The restore runs after ``yield``, that is after every fixture has been torn
+    down (``monkeypatch`` undoes its own patch of the attribute first), so it
+    never depends on how fixtures are ordered.
+    """
+    try:
+        return (yield)
+    finally:
+        panel_class = _chat_panel_class()
+        saved = item.stash.get(_CHAT_PANEL_APP, _NO_CLASS_APP)
+        if panel_class is not None:
+            if saved is not _NO_CLASS_APP:
+                panel_class.app = saved
+            elif "app" in panel_class.__dict__:
+                delattr(panel_class, "app")
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +193,39 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     if basetemp:
         allowed.append(Path(basetemp).expanduser())
     _home_isolation.arm(_HOME_ISOLATION, allowed)
+
+
+class _ChoiceInEveryWidthClass(str):
+    """An explicit navigation choice that counts as made in whichever width class applies."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+@pytest.fixture
+def navigation_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every workspace session with the navigation as the test's state says.
+
+    Below 110 columns the navigation hides by itself. Layout tests that set the
+    navigation (open or hidden) and expect it to stay that way at any width use
+    this (``pytestmark = pytest.mark.usefixtures("navigation_open")``): it makes
+    the explicit choice a user makes, held in every width class, instead of
+    patching the rule.
+    """
+    from servonaut.widgets.workspace.state import WorkspaceState
+
+    original = WorkspaceState.__init__
+
+    def init(self, *args, **kwargs) -> None:
+        original(self, *args, **kwargs)
+        self.navigation_choice_class = _ChoiceInEveryWidthClass("any")
+
+    monkeypatch.setattr(WorkspaceState, "__init__", init)
 
 
 @pytest.fixture(autouse=True)

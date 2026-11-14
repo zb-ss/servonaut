@@ -24,6 +24,10 @@ class VaultUserError(RuntimeError):
     """A fixed, secret-free message that is safe to show the user as-is."""
 
 
+class VaultRecoveryNotConfirmed(VaultUserError):
+    """Initial setup did not receive valid recovery-key confirmation."""
+
+
 class HostKeysNeeded(VaultUserError):
     """A first vault binding has no host keys to pin.
 

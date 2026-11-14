@@ -33,6 +33,8 @@ from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.memory_prompt import MemoryPrompt
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 HOSTILE = [
     "[ @click=app.bell]x",
     "x [/",
@@ -387,7 +389,7 @@ async def test_keyword_matches_and_copy_toast_are_literal() -> None:
 
     class KeywordOnly(InstanceListScreen):
         def compose(self):
-            yield Label("Keyword Matches:", id="keyword_matches_label")
+            yield Label("Keyword matches:", id="keyword_matches_label")
             yield VerticalScroll(id="keyword_matches_container")
 
         def on_mount(self, event):

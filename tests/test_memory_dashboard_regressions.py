@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from servonaut.widgets.action_button import ActionButton
 from textual.app import App
 from textual.widgets import Button, DataTable, Static
 
@@ -150,8 +152,9 @@ async def test_sync_this_server_backfills_and_drains_only_that_server() -> None:
 
     async with app.run_test(headless=True, size=(160, 50)) as pilot:
         await pilot.pause(0.2)
-        button = app.screen.query_one("#btn_sync_now", Button)
-        assert str(button.label) == "S. Sync This Server"
+        button = app.screen.query_one("#btn_sync_now", ActionButton)
+        assert button.words == "Sync this server"
+        assert str(button.label) == "Sync this server \u2590S\u258c"
 
         await pilot.click("#btn_sync_now")
         for _ in range(20):

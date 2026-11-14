@@ -6,9 +6,7 @@ configured state so a Free user gets a friendly explainer (not a modal),
 a Solo user gets a "Set up" button, and a configured user gets a status
 dashboard with rotate / disable actions.
 
-Visual language matches the IP Ban screen — rounded `$primary` cards on a
-`$surface` background, `bold cyan` title, `text-muted` subtitle. The
-primary CTA card uses `$accent` for emphasis.
+The context header stays above the scrollable setup or status workspace.
 """
 
 from __future__ import annotations
@@ -20,13 +18,12 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +50,12 @@ _BENEFITS_FREE = [
 ]
 
 
-class MemorySyncSetupScreen(Screen):
+class MemorySyncSetupScreen(WorkspaceScreen):
     """Setup + status hub for the Memory Sync feature."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -62,24 +63,33 @@ class MemorySyncSetupScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Memory sync")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
-                Static(
-                    "[dim]Encrypted, AI-queryable backup of every server's "
-                    "memory across your devices.[/dim]",
-                    id="msync_subtitle",
+                Container(
+                    Horizontal(
+                        Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
+                        Static("", id="msync_status"),
+                        id="msync_heading_row",
+                    ),
+                    Static(
+                        "[dim]Encrypted, AI-queryable backup of every server's "
+                        "memory across your devices.[/dim]",
+                        id="msync_subtitle",
+                    ),
+                    id="msync_context",
                 ),
-                # Status pill — set in on_mount based on state
-                Static("", id="msync_status"),
                 # The body card swaps between explain / setup / locked / ready
                 VerticalScroll(id="msync_body"),
                 id="msync_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -165,7 +175,7 @@ class MemorySyncSetupScreen(Screen):
                 classes="msync_card_body",
             ),
             Horizontal(
-                Button("Open Login →", variant="primary", id="msync_btn_login"),
+                Button("Open login →", variant="primary", id="msync_btn_login"),
                 classes="msync_card_actions",
             ),
             classes="msync_card msync_card_primary",
@@ -204,7 +214,7 @@ class MemorySyncSetupScreen(Screen):
                     classes="msync_card_body",
                 ),
                 Horizontal(
-                    Button("Open Billing →", variant="primary", id="msync_btn_billing"),
+                    Button("Open billing →", variant="primary", id="msync_btn_billing"),
                     Button("Compare plans", id="msync_btn_compare"),
                     classes="msync_card_actions",
                 ),
@@ -339,7 +349,7 @@ class MemorySyncSetupScreen(Screen):
 
         return Container(
             Container(
-                Static("[bold]Status[/bold]", classes="msync_card_title"),
+                Static("[bold]Device and encrypted store[/bold]", classes="msync_card_title"),
                 Vertical(
                     self._kv_row(
                         "Last sync",
@@ -363,10 +373,10 @@ class MemorySyncSetupScreen(Screen):
                 classes="msync_card msync_card_primary",
             ),
             Container(
-                Static("[bold]Actions[/bold]", classes="msync_card_title"),
+                Static("[bold]Sync and key controls[/bold]", classes="msync_card_title"),
                 Horizontal(
                     *actions_children,
-                    classes="msync_card_actions",
+                    classes="msync_card_actions msync_configured_actions",
                 ),
                 Static(
                     "[dim]Disabling stops the background sync loop on this "
@@ -693,7 +703,7 @@ class MemorySyncSetupScreen(Screen):
         else:
             self.app.notify(
                 "Nothing to sync — local memory cache is empty. Probe a "
-                "server first from the Fleet Memory screen.",
+                "server first from the Fleet memory screen.",
                 severity="information",
             )
 

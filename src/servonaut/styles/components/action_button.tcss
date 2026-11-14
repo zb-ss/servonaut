@@ -1,0 +1,226 @@
+/* ===================================================================
+   ACTION BUTTON
+   Transparent, rounded, theme colours only. The compact form (set by a
+   screen when its layout is narrow) is a single row without a border.
+   =================================================================== */
+
+ActionButton {
+    width: auto;
+    min-width: 0;
+    height: auto;
+    margin: 0 1 0 0;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+    text-style: none;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+ActionButton:hover {
+    border: round $accent;
+    color: $text-accent;
+    background: transparent;
+}
+
+ActionButton:focus {
+    border: round $accent;
+    color: $text;
+    background: transparent;
+    text-style: bold;
+}
+
+ActionButton.-primary {
+    border: round $primary;
+    color: $text-accent;
+    text-style: bold;
+}
+
+ActionButton.-warning {
+    border: round $warning;
+    color: $text-warning;
+}
+
+ActionButton.-error {
+    border: round $error;
+    color: $text-error;
+}
+
+ActionButton.-primary:hover {
+    border: round $accent;
+}
+
+ActionButton.-primary:focus,
+ActionButton.-warning:focus,
+ActionButton.-error:focus {
+    border: round $accent;
+}
+
+ActionButton.-textual-compact {
+    border: none !important;
+    height: 1;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+
+/* A key cap's right edge is half a cell wide, so the button needs no right padding. */
+ActionButton.-keycap,
+ActionButton.-keycap.-textual-compact {
+    padding: 0 0 0 1;
+}
+
+ActionButton.-textual-compact:hover,
+ActionButton.-textual-compact:focus {
+    background: $foreground 8%;
+}
+
+ActionButton.-textual-compact.-primary {
+    background: $primary;
+    color: $background;
+}
+
+ActionButton.-textual-compact.-primary:hover,
+ActionButton.-textual-compact.-primary:focus {
+    background: $accent;
+    color: $background;
+}
+
+ActionButton:ansi {
+    color: $foreground;
+}
+
+ActionButton:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    border: heavy $accent;
+    text-style: none;
+}
+
+/* A compact action has no frame; in a terminal-colour theme its hover is shown reversed. */
+ActionButton.-textual-compact:ansi:hover {
+    text-style: reverse;
+}
+
+ActionButton:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+ActionButton.-textual-compact.-primary:ansi {
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+}
+
+/* Declared after the idle rule above: it is more specific than the plain
+   :ansi:hover / :ansi:focus rules, so without these the compact primary
+   would look the same focused, hovered and idle. */
+ActionButton.-textual-compact.-primary:ansi:hover {
+    background: $surface;
+    text-style: reverse;
+}
+
+ActionButton.-textual-compact.-primary:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: not bold;
+}
+
+/* The plain-Button rules for #btn_back (a muted label) also match an
+   ActionButton with that id, which would dim the words while the key hint
+   stays bright. An id selector out-ranks the ActionButton rules above, so the
+   Back action restates them: the same look as every other action. */
+ActionButton#btn_back {
+    border: round $border-blurred;
+    color: $text;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton#btn_back:hover {
+    border: round $accent;
+    color: $text-accent;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton#btn_back:focus {
+    border: round $accent;
+    color: $text;
+    background: transparent;
+    text-style: bold;
+}
+
+ActionButton#btn_back:ansi {
+    color: $foreground;
+}
+
+ActionButton#btn_back:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    border: heavy $accent;
+    text-style: none;
+}
+
+ActionButton#btn_back:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+ActionButton#btn_back.-textual-compact {
+    border: none !important;
+}
+
+ActionButton#btn_back.-textual-compact:hover,
+ActionButton#btn_back.-textual-compact:focus {
+    background: $foreground 8%;
+}
+
+/* No room: the actions wrap onto further lines instead of being cut off. The
+   row sets its own column count and column widths when it wraps. */
+ActionRow.-wrap {
+    layout: grid;
+    grid-size: 2;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+}
+
+/* A disabled action looks the same in every role: a role colour on the border
+   would make a disabled primary or error action read as available. Declared
+   after the role and hover rules so it wins their ties. */
+ActionButton:disabled,
+ActionButton.-primary:disabled,
+ActionButton.-warning:disabled,
+ActionButton.-error:disabled,
+ActionButton:disabled:hover,
+ActionButton.-primary:disabled:hover,
+ActionButton.-warning:disabled:hover,
+ActionButton.-error:disabled:hover {
+    border: round $border-blurred;
+    color: $text-muted;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton.-textual-compact:disabled {
+    border: none !important;
+}
+
+/* Terminal-colour themes have no muted colour, so a disabled action is dimmed
+   instead, and neither hover nor a compact primary's bold changes that. */
+ActionButton:ansi:disabled,
+ActionButton:ansi:disabled:hover,
+ActionButton.-primary:ansi:disabled,
+ActionButton.-primary:ansi:disabled:hover,
+ActionButton.-textual-compact.-primary:ansi:disabled,
+ActionButton.-textual-compact.-primary:ansi:disabled:hover,
+ActionButton.-textual-compact:ansi:disabled:hover {
+    background: transparent;
+    color: $foreground;
+    text-style: dim not bold not underline;
+}

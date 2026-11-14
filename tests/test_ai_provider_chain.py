@@ -28,7 +28,7 @@ from servonaut.services.ai_provider_preference import (
 )
 
 
-def _make_panel(*, app: MagicMock):
+def _make_panel(*, app: MagicMock, monkeypatch: pytest.MonkeyPatch):
     """Build a minimally-instantiated ChatPanel without mounting it."""
     from servonaut.widgets.chat_panel import ChatPanel
     panel = ChatPanel.__new__(ChatPanel)
@@ -56,9 +56,8 @@ def _make_panel(*, app: MagicMock):
     )
     panel._update_quota_footer = lambda: None
     panel._update_provider_indicator = lambda: None
-    # Patch the parent-class .app to return our mock (Widget exposes
-    # ``app`` as a Reactive property — overriding via __dict__ wins).
-    type(panel).app = property(lambda _self: app)
+    # Keep the app descriptor scoped to this test, including on assertion failure.
+    monkeypatch.setattr(type(panel), "app", property(lambda _self: app))
     return panel
 
 
@@ -84,7 +83,9 @@ def _config_with(
 # ---------------------------------------------------------------------------
 
 
-def test_fallback_used_badge_state_set_from_usage_event():
+def test_fallback_used_badge_state_set_from_usage_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A usage event with ``fallback_used: true`` flips the panel flag.
 
     The actual `_update_stats` render passes through Textual widget
@@ -95,7 +96,7 @@ def test_fallback_used_badge_state_set_from_usage_event():
     app.config_manager.get.return_value = _config_with()
     app.auth_service = MagicMock()
     app.auth_service.is_authenticated = False
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
 
     # Simulate a usage event with fallback_used=True.
     panel._consume_usage_event({
@@ -116,13 +117,15 @@ def test_fallback_used_badge_state_set_from_usage_event():
     assert panel._model == "gemini-2-flash-002"
 
 
-def test_fallback_used_false_does_not_persist_after_reset():
+def test_fallback_used_false_does_not_persist_after_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A subsequent usage event with fallback_used=False clears the flag."""
     app = MagicMock()
     app.config_manager.get.return_value = _config_with()
     app.auth_service = MagicMock()
     app.auth_service.is_authenticated = False
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_quota_footer = lambda: None
     panel._update_provider_indicator = lambda: None
     panel.query_one = lambda *args, **kwargs: SimpleNamespace(update=lambda _x: None)
@@ -138,10 +141,12 @@ def test_fallback_used_false_does_not_persist_after_reset():
 # ---------------------------------------------------------------------------
 
 
-def test_first_upstream_unavailable_does_not_offer_prompt():
+def test_first_upstream_unavailable_does_not_offer_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = MagicMock()
     app.config_manager.get.return_value = _config_with(ollama_url="http://localhost:11434")
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
 
     panel._record_upstream_failure()
     panel._maybe_offer_fallback()
@@ -156,7 +161,9 @@ def test_first_upstream_unavailable_does_not_offer_prompt():
 # ---------------------------------------------------------------------------
 
 
-def test_second_upstream_unavailable_with_local_fallback_auto_switches():
+def test_second_upstream_unavailable_with_local_fallback_auto_switches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = MagicMock()
     app.config_manager.get.return_value = _config_with(
         local_fallback="ollama", ollama_url="http://localhost:11434",
@@ -168,7 +175,7 @@ def test_second_upstream_unavailable_with_local_fallback_auto_switches():
     )
     app.provider_preference_resolver = resolver
 
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_stats = lambda: None
 
     # Two failures in quick succession.
@@ -188,7 +195,9 @@ def test_second_upstream_unavailable_with_local_fallback_auto_switches():
 # ---------------------------------------------------------------------------
 
 
-def test_second_upstream_unavailable_offers_prompt_when_provider_configured():
+def test_second_upstream_unavailable_offers_prompt_when_provider_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = MagicMock()
     app.config_manager.get.return_value = _config_with(
         local_fallback=None, ollama_url="http://localhost:11434",
@@ -199,7 +208,7 @@ def test_second_upstream_unavailable_offers_prompt_when_provider_configured():
     )
     app.provider_preference_resolver = resolver
 
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_stats = lambda: None
 
     panel._record_upstream_failure()
@@ -221,7 +230,9 @@ def test_second_upstream_unavailable_offers_prompt_when_provider_configured():
 # ---------------------------------------------------------------------------
 
 
-def test_failure_outside_60s_window_does_not_trigger_prompt():
+def test_failure_outside_60s_window_does_not_trigger_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = MagicMock()
     app.config_manager.get.return_value = _config_with(
         local_fallback="ollama", ollama_url="http://localhost:11434",
@@ -231,7 +242,7 @@ def test_failure_outside_60s_window_does_not_trigger_prompt():
         config_manager=app.config_manager,
     )
     app.provider_preference_resolver = resolver
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_stats = lambda: None
 
     # Synthesise an old failure (>60s ago) by reaching into the list.
@@ -254,7 +265,9 @@ def test_failure_outside_60s_window_does_not_trigger_prompt():
 # ---------------------------------------------------------------------------
 
 
-def test_accepted_fallback_prompt_does_not_mutate_config():
+def test_accepted_fallback_prompt_does_not_mutate_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Plan §T10 invariant: 'session-scoped override; provider_preference is NOT changed.'
 
     We don't actually push the modal here (no Textual loop) — we
@@ -263,7 +276,7 @@ def test_accepted_fallback_prompt_does_not_mutate_config():
     cfg = _config_with(ollama_url="http://localhost:11434")
     app = MagicMock()
     app.config_manager.get.return_value = cfg
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_stats = lambda: None
 
     # Simulate the modal returning "ollama" as the user's pick. Mirrors
@@ -284,7 +297,9 @@ def test_accepted_fallback_prompt_does_not_mutate_config():
 # ---------------------------------------------------------------------------
 
 
-def test_no_provider_configured_means_no_prompt():
+def test_no_provider_configured_means_no_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = _config_with()  # nothing configured
     app = MagicMock()
     app.config_manager.get.return_value = cfg
@@ -293,7 +308,7 @@ def test_no_provider_configured_means_no_prompt():
         config_manager=app.config_manager,
     )
     app.provider_preference_resolver = resolver
-    panel = _make_panel(app=app)
+    panel = _make_panel(app=app, monkeypatch=monkeypatch)
     panel._update_stats = lambda: None
 
     panel._record_upstream_failure()

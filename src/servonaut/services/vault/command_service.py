@@ -47,6 +47,7 @@ from .errors import (
     VAULT_ROTATION_NOT_PERMITTED,
     HostKeysNeeded,
     VaultKeyInUse,
+    VaultRecoveryNotConfirmed,
     VaultUserError,
     vault_failure_reason,
 )
@@ -602,7 +603,7 @@ class VaultCommandService:
             raise
         if not confirmed:
             self.store.wipe()
-            raise VaultUserError("recovery key was not confirmed")
+            raise VaultRecoveryNotConfirmed("recovery key was not confirmed")
         # Persist before the remote mutation so a successful enrolment cannot
         # leave the only device without durable encrypted custody.
         try:

@@ -15,19 +15,22 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from rich.markup import escape
 from rich.text import Text
 from textual.content import Content
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.utils.text_fit import cut
 from servonaut.utils.markup import cell, literal as literal_text
+from servonaut.utils.theme_text import themed_text
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
-from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Input, Static
+from textual.css.query import NoMatches
+from textual.screen import ModalScreen
+from textual.widget import Widget
+from textual.widgets import Button, DataTable, Footer, Input, Static, TextArea
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
@@ -63,8 +66,16 @@ from servonaut.services.memory.status import (
     STATUS_STALE,
     compute_memory_status,
 )
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.editor import editor_argv
 
@@ -185,6 +196,9 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
 # ---------------------------------------------------------------------------
 
 
+# Cells of an observed or declared value in the memory table.
+_VALUE_CELL_WIDTH = 48
+
 class PinKeyModal(ModalScreen[Optional[str]]):
     """Modal for pinning a declared value for a memory field.
 
@@ -197,24 +211,9 @@ class PinKeyModal(ModalScreen[Optional[str]]):
         The user-entered value string, or ``None`` on cancel.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    PinKeyModal {
-        align: center middle;
-    }
-
-    PinKeyModal #pin_modal_container {
-        width: 60;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    PinKeyModal #pin_modal_title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
     PinKeyModal #pin_modal_field {
         margin-bottom: 1;
     }
@@ -223,14 +222,6 @@ class PinKeyModal(ModalScreen[Optional[str]]):
         margin-bottom: 1;
     }
 
-    PinKeyModal #pin_btn_row {
-        height: auto;
-        align: right middle;
-    }
-
-    PinKeyModal #pin_btn_cancel {
-        margin-right: 1;
-    }
     """
 
     BINDINGS = [
@@ -244,35 +235,44 @@ class PinKeyModal(ModalScreen[Optional[str]]):
         self._current_value = current_value
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        current_display = (
+            literal_text(str(self._current_value))
+            if self._current_value else Content.styled("(none)", "dim")
+        )
+        yield DialogFrame(
+            heading=Static(
                 Content.assemble(
-                    ("Pin value for ", "bold $text-accent"),
-                    literal_text(self._module, "bold $text-warning"),
-                    (".", "bold $text-accent"),
-                    literal_text(self._key, "bold $text-warning"),
+                    literal_text("Pin value for ", "bold $text-accent"),
+                    literal_text(str(self._module), "bold $text-warning"),
+                    literal_text(".", "bold $text-accent"),
+                    literal_text(str(self._key), "bold $text-warning"),
                 ),
                 id="pin_modal_title",
             ),
-            Static(
-                Content.assemble(
-                    ("Current observed value:", "dim"), " ",
-                    literal_text(self._current_value) if self._current_value else ("(none)", "dim"),
+            body=DialogBody(
+                Static(
+                    Content.assemble(
+                        Content.styled("Current observed value:", "dim"), " ", current_display,
+                    ),
+                    id="pin_modal_field",
                 ),
-                id="pin_modal_field",
             ),
-            Input(
+            status=Input(
                 placeholder="Enter pinned value…",
                 value="",
                 id="pin_value_input",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="pin_btn_cancel"),
                 Button("Pin", variant="primary", id="pin_btn_confirm"),
                 id="pin_btn_row",
             ),
             id="pin_modal_container",
+            size="compact",
         )
+        yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#pin_value_input", Input).focus()
@@ -303,51 +303,43 @@ class SimpleConfirmModal(ModalScreen[bool]):
         ``True`` if confirmed, ``False`` on cancel.
     """
 
-    DEFAULT_CSS = """
-    SimpleConfirmModal {
-        align: center middle;
-    }
+    DEFAULT_CLASSES = "dialog-screen"
 
-    SimpleConfirmModal #confirm_container {
-        width: 55;
-        height: auto;
-        border: round $warning;
-        background: $surface;
-        padding: 1 2;
+    DEFAULT_CSS = """
+    SimpleConfirmModal #confirm_heading {
+        display: none;
     }
 
     SimpleConfirmModal #confirm_message {
         margin-bottom: 1;
     }
 
-    SimpleConfirmModal #confirm_btn_row {
-        height: auto;
-        align: right middle;
-    }
-
-    SimpleConfirmModal #confirm_no_btn {
-        margin-right: 1;
-    }
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str | Text | Content) -> None:
         super().__init__()
         self._message = message
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(self._message, id="confirm_message"),
-            Horizontal(
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("", id="confirm_heading"),
+            body=DialogBody(Static(self._message, id="confirm_message")),
+            actions=DialogActions(
                 Button("No", variant="default", id="confirm_no_btn"),
                 Button("Yes", variant="warning", id="confirm_yes_btn"),
                 id="confirm_btn_row",
             ),
             id="confirm_container",
+            size="compact",
+            severity="warning",
         )
+        yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm_yes_btn":
@@ -386,7 +378,7 @@ async def _keep_busy_draft(
     )
 
 
-class MemoryScreen(Screen):
+class MemoryScreen(WorkspaceScreen):
     """Screen for viewing and managing server memory modules.
 
     Displays observed + declared data per module, supports in-place probing
@@ -399,8 +391,11 @@ class MemoryScreen(Screen):
 
     CSS_PATH = [*_APP_CSS_FILES, Path(__file__).parent.parent / "memory_screen.tcss"]
 
-    # Below 120 columns the action buttons wrap onto a grid and each status
-    # line sits above its buttons (see the ``-narrow`` rules in the styles).
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 69
+    CONTENT_NARROW_WIDTH = 95
+
+    # Content-width rules wrap actions independently of the terminal width.
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
 
     # Initial focus is set in ``_focus_initial_control``. Left to the
@@ -410,16 +405,16 @@ class MemoryScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh_all", "Refresh All", show=True),
-        Binding("m", "refresh_module", "Refresh Module", show=True),
+        Binding("r", "refresh_all", "Refresh all", show=True),
+        Binding("m", "refresh_module", "Refresh module", show=True),
         Binding("p", "pin_key", "Pin", show=True),
         Binding("c", "clear_module", "Clear", show=True),
         Binding("a", "annotate", "Annotate", show=True),
         Binding("e", "export", "Export", show=True),
-        Binding("v", "view_summary", "View Summary", show=True),
-        Binding("S", "sync_now", "Sync Server", show=True),
-        Binding("A", "enhance_with_ai", "Enhance Local", show=True),
-        Binding("H", "build_ai_summary", "Generate Hosted", show=True),
+        Binding("v", "view_summary", "View summary", show=True),
+        Binding("S", "sync_now", "Sync server", show=True),
+        Binding("A", "enhance_with_ai", "Enhance local", show=True),
+        Binding("H", "build_ai_summary", "Generate hosted", show=True),
         Binding("f", "toggle_superseded", "Superseded", show=False),
     ]
 
@@ -451,6 +446,8 @@ class MemoryScreen(Screen):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._read_only and action in self._HOST_ACTIONS:
             return False
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: dict, grant_candidates: Any = None) -> None:
@@ -467,6 +464,7 @@ class MemoryScreen(Screen):
         # record so the app can keep redacting that record in place.
         self._grant_candidates = list(grant_candidates or [])
         self._has_local_memory = False
+        self._record_details: Dict[str, str] = {}
 
     @property
     def _target(self) -> dict:
@@ -492,38 +490,29 @@ class MemoryScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the memory screen layout."""
-        from rich.markup import escape
-
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = display_name(self._instance) or instance_id
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Server memory")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(
-                    f"[bold $text-accent]Server Memory: {escape(str(instance_name))}[/bold $text-accent]",
-                    id="memory-title",
+                Container(
+                    Static(
+                        self._title_content(instance_name),
+                        id="memory-title",
+                    ),
+                    Static(
+                        "[dim]Memory scan: checking…[/dim]",
+                        id="memory-local-status",
+                    ),
+                    Static("", id="memory-shared-source", classes="hidden"),
+                    Static("", id="memory-share-state", classes="hidden"),
+                    id="memory-context",
                 ),
-                Static(
-                    "[dim]Memory scan: checking…[/dim]",
-                    id="memory-local-status",
-                ),
-                Static("", id="memory-shared-source", classes="hidden"),
-                Static("", id="memory-share-state", classes="hidden"),
                 Static(
                     "[$text-warning]Memory disabled for this server.[/$text-warning]",
                     id="memory-opt-out-banner",
-                    classes="hidden",
-                ),
-                # Inline informational banner — shown when Memory Sync is
-                # not configured (Free tier or Solo not yet enrolled). Routes
-                # to MemorySyncSetupScreen which adapts to the user's tier.
-                Container(
-                    Static("", id="memory-cloud-banner-text"),
-                    Button(
-                        "Set up →", variant="primary", id="btn_open_memory_sync_setup"
-                    ),
-                    id="memory-cloud-banner",
                     classes="hidden",
                 ),
                 # T11 empty-state CTA — shown when the DataTable has no rows
@@ -535,20 +524,42 @@ class MemoryScreen(Screen):
                         "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
                         id="memory-empty-state-label",
                     ),
-                    Button(
-                        "r. Probe server now", variant="primary", id="btn_empty_probe"
+                    ActionButton(
+                        "Probe server now", "r", role="primary", id="btn_empty_probe"
                     ),
                     id="memory-empty-state",
                     classes="hidden",
                 ),
-                DataTable(id="memory-table"),
+                Container(
+                    Static("Manage memory", classes="memory-panel-heading"),
+                    ActionRow(
+                        ActionButton("Refresh all", "r", id="btn_refresh_all"),
+                        ActionButton("Refresh module", "m", id="btn_refresh_module"),
+                        ActionButton("Pin key", "p", id="btn_pin_key"),
+                        ActionButton("Clear module", "c", short="Clear", id="btn_clear_module"),
+                        ActionButton("Annotate", "a", id="btn_annotate"),
+                        id="memory-actions",
+                    ),
+                    id="memory-manage-panel",
+                ),
                 Horizontal(
-                    Button("r. Refresh All", id="btn_refresh_all"),
-                    Button("m. Refresh Module", id="btn_refresh_module"),
-                    Button("p. Pin Key", id="btn_pin_key"),
-                    Button("c. Clear Module", id="btn_clear_module"),
-                    Button("a. Annotate", id="btn_annotate"),
-                    id="memory-actions",
+                    Container(
+                        Static("Observed and declared memory", classes="memory-panel-heading"),
+                        DataTable(id="memory-table"),
+                        id="memory-records",
+                    ),
+                    Container(
+                        Static("Selected record", classes="memory-panel-heading"),
+                        TextArea(
+                            "Select a memory record to read its full values.",
+                            read_only=True,
+                            show_line_numbers=False,
+                            soft_wrap=True,
+                            id="memory-record-detail",
+                        ),
+                        id="memory-record-reader",
+                    ),
+                    id="memory-workbench",
                 ),
                 # Authored text: the operator's notes and agents' findings.
                 Container(
@@ -561,47 +572,62 @@ class MemoryScreen(Screen):
                     Static("", id="memory-findings-empty", classes="hidden"),
                     id="memory-authored",
                 ),
-                Horizontal(
-                    Static(
-                        "[bold]Local summary[/bold]  [dim]Built on this device; "
-                        "available without an AI plan.[/dim]",
-                        id="memory-summary-status",
-                    ),
-                    # Each row's buttons are grouped so a narrow screen can
-                    # move them, together, under the status text.
+                Container(
                     Horizontal(
-                        Button("v. View Summary", variant="primary", id="btn_view_summary"),
-                        Button("e. Export", id="btn_export"),
-                        classes="memory-row-buttons",
-                    ),
-                    id="memory-summary-row",
-                ),
-                Horizontal(
-                    Static(
-                        "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
+                        Static(
+                            "[bold]Local summary[/bold]  [dim]Built on this device; "
+                            "available without an AI plan.[/dim]",
+                            id="memory-summary-status",
+                        ),
+                        ActionRow(
+                            ActionButton("View summary", "v", role="primary", id="btn_view_summary"),
+                            ActionButton("Export", "e", id="btn_export"),
+                            classes="memory-row-buttons",
+                        ),
+                        id="memory-summary-row",
                     ),
                     Horizontal(
-                        Button("S. Sync This Server", id="btn_sync_now"),
-                        classes="memory-row-buttons",
-                    ),
-                    id="memory-sync-row",
-                ),
-                Horizontal(
-                    Static(
-                        "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
+                        Static(
+                            "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
+                        ),
+                        ActionRow(
+                            ActionButton("Sync this server", "S", short="Sync", id="btn_sync_now"),
+                            classes="memory-row-buttons",
+                        ),
+                        # Kept beside sync tools; setup preserves its tier-aware copy.
+                        Container(
+                            Static("", id="memory-cloud-banner-text"),
+                            ActionButton(
+                                "Set up", role="primary", id="btn_open_memory_sync_setup"
+                            ),
+                            id="memory-cloud-banner",
+                            classes="hidden",
+                        ),
+                        id="memory-sync-row",
                     ),
                     Horizontal(
-                        Button("A. Enhance Local Summary", id="btn_enhance_ai"),
-                        Button("H. Generate from Memory Sync", id="btn_build_ai"),
-                        classes="memory-row-buttons",
+                        Static(
+                            "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
+                        ),
+                        ActionRow(
+                            ActionButton(
+                                "Enhance local summary", "A", short="Enhance", id="btn_enhance_ai"
+                            ),
+                            ActionButton(
+                                "Generate from Memory Sync", "H", short="Generate", id="btn_build_ai"
+                            ),
+                            classes="memory-row-buttons",
+                        ),
+                        id="memory-ai-row",
                     ),
-                    id="memory-ai-row",
+                    id="memory-tools",
                 ),
                 Static(
                     "[dim]● Hosted summary · Idle[/dim]",
                     id="memory-hosted-status",
                 ),
                 id="memory-container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -609,8 +635,13 @@ class MemoryScreen(Screen):
     # Mount
     # ------------------------------------------------------------------
 
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        self.call_after_refresh(self._render_modules)
+
     def on_mount(self) -> None:
         """Set up DataTable columns and populate data on mount."""
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
         table = self.query_one("#memory-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Module", key="module")
@@ -645,6 +676,24 @@ class MemoryScreen(Screen):
         else:
             self.query_one("#btn_empty_probe", Button).focus(scroll_visible=False)
 
+    def _restore_chat_content_focus(self, previous: Widget | None) -> None:
+        """Return from a retired empty-state probe to the newly populated table."""
+        if (self.is_attached and previous is self.query_one("#btn_empty_probe")
+                and self.query_one("#memory-empty-state").has_class("hidden")):
+            previous = self.query_one("#memory-table", DataTable)
+        if (
+            self.is_attached and self.app.screen_stack and self.app.screen is self
+            and isinstance(previous, DataTable) and previous.id == "memory-table"
+            and previous.is_attached and previous.screen is self
+            and previous.focusable and Sidebar._in_layout(previous)
+            and not any(rail.navigation_mode for rail in self.query(Sidebar))
+        ):
+            # Returning to the record must retain the page's reading position,
+            # just as initial table focus does; row selection is unchanged.
+            previous.focus(scroll_visible=False)
+            return
+        super()._restore_chat_content_focus(previous)
+
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the title and the observed/declared values for the new mode.
 
@@ -656,13 +705,17 @@ class MemoryScreen(Screen):
         self._render_title()
         self._render_table()
 
-    def _render_title(self) -> None:
-        from rich.markup import escape
-
-        name = display_name(self._instance) or self._instance.get("id") or "unknown"
-        self.query_one("#memory-title", Static).update(
-            f"[bold $text-accent]Server Memory: {escape(str(name))}[/bold $text-accent]"
+    @staticmethod
+    def _title_content(name: object) -> Content:
+        """The heading; the server name is outside text and stays literal."""
+        return Content.assemble(
+            literal_text("Server memory: ", "bold $text-accent"),
+            literal_text(str(name), "bold $text-accent"),
         )
+
+    def _render_title(self) -> None:
+        name = display_name(self._instance) or self._instance.get("id") or "unknown"
+        self.query_one("#memory-title", Static).update(self._title_content(name))
 
     # ------------------------------------------------------------------
     # Table rendering
@@ -683,6 +736,9 @@ class MemoryScreen(Screen):
         self._refresh_local_memory_status()
         table = self.query_one("#memory-table", DataTable)
         banner = self.query_one("#memory-opt-out-banner", Static)
+        selected = "::".join(self._get_cursor_module_key())
+        scroll = table.scroll_offset
+        self._record_details = {}
 
         instance_id = self._target.get("id") or self._target.get("name", "")
         provider = instance_provider(self._target)
@@ -696,6 +752,7 @@ class MemoryScreen(Screen):
             table.clear()
             self._set_empty_state_visible(False)
             self._set_summary_actions_enabled(False)
+            self._update_record_detail()
             return
 
         banner.add_class("hidden")
@@ -704,6 +761,7 @@ class MemoryScreen(Screen):
         if memory_service is None:
             self._set_empty_state_visible(False)
             self._set_summary_actions_enabled(False)
+            self._update_record_detail()
             return
 
         # Load all stored modules
@@ -715,6 +773,7 @@ class MemoryScreen(Screen):
             logger.warning("Could not load memory modules for %s: %s", instance_id, exc)
             self._set_empty_state_visible(False)
             self._set_summary_actions_enabled(False)
+            self._update_record_detail()
             return
 
         local_modules = all_modules
@@ -737,6 +796,7 @@ class MemoryScreen(Screen):
             # read-only row cannot be probed, so it gets none).
             self._set_empty_state_visible(not self._read_only)
             self._set_summary_actions_enabled(False)
+            self._update_record_detail()
             return
         self._set_empty_state_visible(False)
         # The summary is built from this device's own memory only.
@@ -761,10 +821,14 @@ class MemoryScreen(Screen):
             is_stale = module_name in stale_names
 
             if is_stale:
-                age_display = f"[yellow]{age_display}[/yellow]"
+                age_display = themed_text(self.app, age_display, "$text-warning")
 
             if not observed:
                 # Show a placeholder row for modules with no observed keys
+                self._record_details[f"{module_name}::__empty__"] = (
+                    f"{module_name}\n\nNo observed keys in this module.\n\n"
+                    f"Last probed\n{probed_at_str or '—'}"
+                )
                 table.add_row(
                     module_name,
                     "",
@@ -792,15 +856,51 @@ class MemoryScreen(Screen):
                     obs_str = self.app.redaction_service.scrub_stream(obs_str)
                     decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
+                literal = module_name in shared_names
+                self._record_details[f"{module_name}::{key}"] = (
+                    f"{module_name} / {key}\n\n"
+                    f"Observed\n{obs_str}\n\n"
+                    f"Declared\n{decl_str}\n\n"
+                    f"Last probed\n{probed_at_str or '—'}\n\n"
+                    f"Source\n{'Team-shared memory' if literal else 'This device'}"
+                )
+                # The table shows one line of each value, ended with an ellipsis
+                # when cut; the detail pane below has the whole value.
+                obs_cell = cut(" ".join(obs_str.split()), _VALUE_CELL_WIDTH)
+                decl_cell = cut(" ".join(decl_str.split()), _VALUE_CELL_WIDTH)
                 table.add_row(
                     cell(module_name),
                     cell(key),
-                    cell(obs_str),
-                    cell(decl_str),
+                    cell(obs_cell),
+                    cell(decl_cell),
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",
                 )
+
+        if selected in self._record_details:
+            table.move_cursor(row=table.get_row_index(selected), scroll=False)
+        table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
+        self._update_record_detail()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Read the displayed row without another service call or changing focus."""
+        if event.data_table.id == "memory-table":
+            self._update_record_detail()
+
+    def _update_record_detail(self) -> None:
+        """Keep full values literal, using the same demo-scrubbed data as the table."""
+        readers = self.query("#memory-record-detail")
+        if not readers:
+            return
+        detail = readers.first(TextArea)
+        module, key = self._get_cursor_module_key()
+        document = self._record_details.get(
+            f"{module}::{key}",
+            "Select a memory record to read its full values.",
+        )
+        if detail.text != document:
+            detail.load_text(document)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1006,9 +1106,13 @@ class MemoryScreen(Screen):
 
     def _show_own_shares(self, listings: List[Any]) -> None:
         """Say which teams the user shares this server with (nothing when none)."""
-        if not self.is_mounted:
-            return  # closed while the lists were read
-        label = self.query_one("#memory-share-state", Static)
+        # Cached team lists can answer before the screen's own mount finishes
+        # (so "mounted" is not the test) or while it is being torn down, with
+        # the line already removed; either way a missing line means closed.
+        try:
+            label = self.query_one("#memory-share-state", Static)
+        except NoMatches:
+            return
         redaction = getattr(self.app, "redaction_service", None)
         demo = getattr(self.app, "demo_mode", False) and redaction is not None
         text = shared_with_text(listings, redaction.redact_name if demo else (lambda name: name))
@@ -1016,7 +1120,7 @@ class MemoryScreen(Screen):
             label.add_class("hidden")
             return
         label.update(Text.assemble(
-            (text, "blue"), ("\nTo change it, select the server in Fleet Memory and press S.", "dim"),
+            (text, ""), ("\nTo change it, select the server in Fleet memory and press S.", "dim"),
         ))
         label.remove_class("hidden")
 
@@ -1063,6 +1167,7 @@ class MemoryScreen(Screen):
             cta.remove_class("hidden")
         else:
             cta.add_class("hidden")
+        self.query_one("#memory-workbench").set_class(visible, "hidden")
 
     def _set_summary_actions_enabled(self, enabled: bool) -> None:
         """Enable summary actions only when local memory exists."""
@@ -1394,7 +1499,7 @@ class MemoryScreen(Screen):
                 self.app.notify(f"Clear failed: {exc}", severity="error", markup=False)
 
         self.app.push_screen(
-            SimpleConfirmModal(f"Clear module [bold]{module_name}[/bold]?"),
+            SimpleConfirmModal(Text.assemble("Clear module ", (module_name, "bold"), "?")),
             _on_confirmed,
         )
 
@@ -1828,7 +1933,7 @@ class MemoryScreen(Screen):
             )
             self.app.push_screen(
                 MemorySummaryScreen(
-                    title=f"Memory Summary: {instance_name}",
+                    title=f"Memory summary: {instance_name}",
                     summary=summary,
                     source_label=(
                         "Local · deterministic · built on this device · "
@@ -2091,7 +2196,7 @@ class MemoryScreen(Screen):
             message = redaction.scrub_stream(message)
         try:
             self.query_one("#memory-sync-status", Static).update(
-                f"[$text-accent]Cloud sync: {escape(message)}[/$text-accent]"
+                literal_text(f"Cloud sync: {message}", "$text-accent")
             )
         except Exception:
             pass
@@ -2324,12 +2429,12 @@ class MemoryScreen(Screen):
         # Step 2: show provider disclosure verbatim and ask for confirmation.
         # We push a confirm modal on the main thread; run the rest from its callback.
         from servonaut.screens.memory import SimpleConfirmModal
-        from rich.markup import escape as rich_escape
 
-        disclosure_text = (
-            f"[bold]AI Provider:[/bold] {rich_escape(provider_info.provider_name)}\n\n"
-            f"{rich_escape(provider_info.retention_text)}\n\n"
-            "Do you consent to submitting server memory data to this provider?"
+        disclosure_text = Content.assemble(
+            Content.styled("AI Provider:", "bold"), " ",
+            literal_text(provider_info.provider_name), "\n\n",
+            literal_text(provider_info.retention_text), "\n\n",
+            "Do you consent to submitting server memory data to this provider?",
         )
 
         async def _after_consent(confirmed: bool) -> None:

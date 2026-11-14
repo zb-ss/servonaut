@@ -21,6 +21,10 @@ from textual.widgets import Button, Input, Select, Static, Switch
 
 from servonaut.styles import CSS_FILES
 
+from tests._native_actions import click_action
+
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -757,7 +761,8 @@ class TestSettingsScreenMemorySync:
 
     Gate: the form section is visible ONLY for authenticated users with the
     ``memory_sync`` entitlement. Non-entitled users get the discovery
-    affordance via the sidebar, not via an upsell in the settings panel.
+    affordance via the sidebar, and the panel itself says why the form is missing, in the same words as the
+    Memory screen's banner.
     """
 
     @pytest.mark.asyncio
@@ -768,6 +773,9 @@ class TestSettingsScreenMemorySync:
             await _open_memory_sync_panel(app, pilot)
             section = app.screen.query_one("#settings_msync_section")
             assert section.display is False
+            note = app.screen.query_one("#settings_msync_gate_note")
+            assert note.display is True
+            assert "available with the Solo plan" in note.render().plain
 
     @pytest.mark.asyncio
     async def test_section_visible_but_disabled_when_entitled_not_configured(self):
@@ -875,7 +883,7 @@ class TestSettingsScreenMemorySync:
             auto_sync_sw = app.screen.query_one("#settings_msync_auto_sync", Switch)
             auto_sync_sw.value = True
             # Click Save.
-            await pilot.click("#btn_msync_save")
+            await click_action(pilot, "#btn_msync_save")
             await pilot.pause()
             await pilot.pause()
 
@@ -942,6 +950,8 @@ class TestSettingsScreenMemorySync:
 class _ShareApp(App):
     """Host that mounts ShareInstanceModal."""
 
+    CSS_PATH = CSS_FILES
+
     def __init__(self, has_share_feature: bool = True) -> None:
         super().__init__()
         self.auth_service = _auth_with_feature(
@@ -995,7 +1005,7 @@ class TestShareInstanceScreen:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             stack_depth_before = len(app.screen_stack)
-            await pilot.click("#share-btn-cancel")
+            await click_action(pilot, "#share-btn-cancel")
             await pilot.pause()
             assert len(app.screen_stack) == stack_depth_before - 1
 

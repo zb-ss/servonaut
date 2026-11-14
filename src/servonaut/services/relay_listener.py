@@ -1376,7 +1376,7 @@ class RelayListener:
         region = str(payload.get("region") or "") or region_hint
         config, refusal = self._ban_config(
             instance, method, region, "block_ip_config_missing",
-            "add one under IP Ban settings first",
+            "add one under IP ban settings first",
         )
         if config is None:
             return "error", "", refusal

@@ -1,33 +1,64 @@
-/* ===================================================================
-   LOG VIEWER SCREEN
-   =================================================================== */
+/* Remote log stream: source context, a dominant reading pane, and actions. */
 
 #log_viewer_container {
     width: 1fr;
     height: 100%;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+#log_title {
+    height: 1;
+    color: $text-accent;
+    margin-bottom: 1;
 }
 
 #log_header {
-    dock: top;
-    padding: 1 2;
-    background: $primary;
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: heavy $accent;
+    background: $panel;
     color: $text;
-    text-style: bold;
 }
 
 #log_output {
     height: 1fr;
-    background: $panel;
-    padding: 1;
-    margin: 0 1;
-    border: round $primary;
+    min-height: 7;
+    background: transparent;
+    padding: 0 1;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    margin-bottom: 1;
+}
+
+#log_output:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+#log_actions {
+    layout: grid;
+    grid-size: 6;
+    grid-columns: 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: auto;
+}
+
+#log_actions Button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+LogViewerScreen.-content-narrow #log_actions {
+    grid-size: 3;
 }
 
 #log_hints {
-    dock: bottom;
     height: 1;
-    padding: 0 2;
-    background: $boost;
     color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
-

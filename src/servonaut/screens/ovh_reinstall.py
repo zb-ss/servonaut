@@ -8,20 +8,21 @@ from typing import List
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.utils.markup import with_bold_values
 from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
+class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
     """Screen for reinstalling a VPS with a new OS image.
 
     Fetches available images from OVHcloud, shows them in a DataTable,
@@ -29,9 +30,21 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     calling OVHVPSService.reinstall().
     """
 
+    DEFAULT_CSS = """
+    OVHReinstallScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    AUTO_FOCUS = "#reinstall_container"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 84
 
     def __init__(self, instance: dict) -> None:
         """Initialize the reinstall screen.
@@ -40,6 +53,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             instance: Instance dictionary from the instance list.
         """
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._instance = instance
         self._images: List[dict] = []
 
@@ -47,36 +61,64 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         """Compose the reinstall UI."""
         name = self._instance.get('name') or self._instance.get('id', 'VPS')
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with ScrollableContainer(id="reinstall_container"):
-                yield Static(
-                    f"[bold $text-accent]Reinstall VPS: {escape(str(name))}[/bold $text-accent]",
-                    id="reinstall_title",
-                )
-                yield Static(
-                    "Choose an OS image to install on this VPS. "
-                    "All existing data will be permanently destroyed.",
-                    id="reinstall_description",
-                )
-                yield DataTable(id="images_table")
-                yield Static(
-                    "[dim]Select an image and click Reinstall[/dim]",
-                    id="reinstall_hint",
-                )
-                with Horizontal(id="reinstall_actions"):
-                    yield Button(
-                        "Reinstall Selected",
-                        variant="error",
-                        id="btn_reinstall",
-                    )
-                    yield Button("Back", variant="default", id="btn_back")
+        yield WorkspaceControls("Reinstall")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield ScrollableContainer(
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Vertical(
+                    Static(
+                        f"[bold $text-accent]Reinstall VPS: {escape(str(name))}[/bold $text-accent]",
+                        id="reinstall_title",
+                    ),
+                    Static(
+                        "Choose an OS image to install on this VPS. "
+                        "All existing data will be permanently destroyed.",
+                        id="reinstall_description",
+                    ),
+                    classes="provider-lifecycle-heading",
+                ),
+                Horizontal(
+                    Container(
+                        Static("[bold]Available OS images[/bold]", classes="provider_catalog_heading"),
+                        DataTable(id="images_table"),
+                        classes="provider_maintenance_catalog",
+                    ),
+                    Vertical(
+                        Static(
+                            "[bold]Current instance[/bold]\n" + "\n".join(
+                                f"[dim]{label}:[/dim] {escape(str(self._instance[key]))}"
+                                for key, label in (("id", "ID"), ("os", "OS"), ("type", "Plan"), ("region", "Region"), ("account", "Account"))
+                                if self._instance.get(key)
+                            ),
+                            id="reinstall_context", classes="provider_instance_context",
+                        ),
+                        Static(
+                            "[dim]Select an image and click Reinstall[/dim]",
+                            id="reinstall_hint",
+                        ),
+                        Horizontal(
+                            Button(
+                                "Reinstall selected",
+                                variant="error",
+                                id="btn_reinstall",
+                            ),
+                            Button("Back", variant="default", id="btn_back"),
+                            id="reinstall_actions",
+                        ),
+                        classes="provider-lifecycle-operations",
+                    ),
+                    classes="provider-lifecycle-body",
+                ),
+                id="reinstall_container",
+                classes="workspace-content provider-lifecycle-workspace",
+            )
         yield Footer()
 
     def on_mount(self) -> None:
         """Set up the DataTable and start loading images."""
         table = self.query_one("#images_table", DataTable)
-        table.add_columns("Name", "OS Type")
+        table.add_columns("Name", "OS type")
         table.cursor_type = "row"
         self.run_worker(self._load_images(), exclusive=True)
 
@@ -93,7 +135,8 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             return
 
         try:
-            self._images = await ovh_vps_service.list_images(vps_name)
+            with self._read_loading.running('Loading images…'):
+                self._images = await ovh_vps_service.list_images(vps_name)
         except Exception as e:
             logger.error("Error loading VPS images: %s", e)
             self.notify(f"Failed to load images: {e}", severity="error", markup=False)
@@ -174,7 +217,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
                     "SSH keys will need to be re-applied",
                 ],
                 confirm_text=instance_name,
-                action_label="Reinstall Now",
+                action_label="Reinstall now",
                 severity="danger",
             )
         )

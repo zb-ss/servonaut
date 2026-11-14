@@ -36,6 +36,10 @@ class _SettingsBootApp(App):
         self.auth_service = MagicMock()
         self.auth_service.is_authenticated = False
         self.auth_service.has_feature = MagicMock(return_value=False)
+        # The Appearance panel lists the app's user themes, and the theme files
+        # it could not load, next to the built-in themes.
+        self.user_themes = {}
+        self.user_theme_errors = ()
 
     def on_mount(self) -> None:
         from servonaut.screens.settings import SettingsScreen
@@ -181,15 +185,15 @@ async def test_nav_sections_collapsible_and_search_aware():
         # Switching to a panel in another group expands that group only.
         screen._switch_to("aws")
         await pilot.pause()
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].collapsed is True
 
         # Search must surface a match even though its group could be collapsed:
         # the group is shown + expanded, non-matching groups are hidden.
         screen._apply_filter("hetzner")
         await pilot.pause()
-        assert sections["Cloud Providers"].display is True
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].display is True
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].display is False
         assert screen.query_one("#navbtn_hetzner").display is True
 
@@ -197,7 +201,7 @@ async def test_nav_sections_collapsible_and_search_aware():
         screen._apply_filter("")
         await pilot.pause()
         assert all(s.display for s in sections.values())
-        assert sections["Cloud Providers"].collapsed is False
+        assert sections["Cloud providers"].collapsed is False
         assert sections["General"].collapsed is True
 
 

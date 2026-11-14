@@ -23,18 +23,32 @@ def test_volume_table_keeps_raw_targets_behind_display(is_demo: bool, attachment
               **attachments}
     service = SimpleNamespace(list_volumes=AsyncMock(return_value=[volume]))
     app = SimpleNamespace(demo_mode=is_demo, redaction_service=RedactionService())
-    table = MagicMock()
+    # One loaded row keeps the native cursor at its initial numeric index.
+    table = MagicMock(cursor_row=0, row_count=1)
+    selected = MagicMock()
+    widgets = {"#volumes_table": table, "#storage_selected_resource": selected,
+               "#read_loading": MagicMock()}
     with (
         patch.object(OVHStorageScreen, "app", new_callable=PropertyMock, return_value=app),
         patch.object(screen, "_get_storage_service", return_value=service),
         patch.object(screen, "_get_project_ids", return_value=["project-id"]),
-        patch.object(screen, "query_one", return_value=table),
+        patch.object(screen, "query_one", side_effect=lambda selector, *_: widgets[selector]),
     ):
         asyncio.run(screen._load_volumes())
+        assert screen._get_selected_volume() is volume
     row = table.add_row.call_args.args
     assert (str(row[0]) != "private-volume") is is_demo
     assert (str(row[4]) != "12345") is is_demo
     assert screen._attachment_instance_ids(screen._volumes[0]) == ["12345"]
+    assert screen._volumes[0]["id"] == "volume-id"
+    assert screen._volumes[0]["name"] == "private-volume"
+    assert screen._volumes[0]["_project_id"] == "project-id"
+    service.list_volumes.assert_awaited_once_with("project-id")
+    selected.update.assert_called_once()
+    display_id = app.redaction_service.redact_name("volume-id") if is_demo else "volume-id"
+    assert selected.update.call_args.args[0].plain == (
+        f"{row[0]}\n{display_id}\nAttached to: {row[4]}"
+    )
 
 
 @pytest.mark.parametrize("operation", ["attach", "detach", "delete"])

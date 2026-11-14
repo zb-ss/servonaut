@@ -77,12 +77,19 @@ def test_revoked_session_ends_the_foreground_listener(journey, fake_cloud, accou
     listener = relay(home).start()
     wait_until_connected(fake_cloud, listener)
 
+    before = len(fake_cloud.requests())
     fake_cloud.revoke_session()
-    # The next heartbeat is refused, and so is the refresh that follows.
+    # The first authenticated call to reach the service is refused (the heartbeat
+    # or, as often, the subscriber-token or stream call), and so is the refresh
+    # that follows; which call sees the revocation first is not the point.
     wait_for(
         lambda: 400 in fake_cloud.statuses("/api/oauth/refresh"), desc="the refused refresh"
     )
-    assert 401 in fake_cloud.statuses("/api/cli/heartbeat")
+    refused = [
+        entry["path"] for entry in fake_cloud.requests()[before:]
+        if entry["status"] == 401 and entry["path"] != "/api/oauth/refresh"
+    ]
+    assert refused, "no authenticated call was refused before the refresh"
 
     if holds_for(lambda: not listener.running, 5.0):
         raise KnownGap("the listener is still running 5 s after its session was revoked")

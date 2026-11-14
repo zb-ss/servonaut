@@ -7,15 +7,18 @@ import importlib
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
-from servonaut.styles import CSS_FILES
+from servonaut.styles import CSS_FILES, widen_parse_cache
+from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
+from servonaut.styles.user_themes import LoadResult, ThemeError, UserTheme, load_user_themes
 from servonaut.styles.themes import (
     SERVONAUT_ANSI_DARK,
     SERVONAUT_ANSI_LIGHT,
@@ -113,12 +116,16 @@ class ServonautApp(App):
     TITLE = "Servonaut"
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
-        Binding("q", "quit", "Quit", show=True, tooltip="Quit Servonaut"),
+        Binding("q", "quit_from_content", "Quit", show=True, tooltip="Quit Servonaut"),
         Binding("question_mark", "show_help", "Help", show=True,
                 tooltip="This help screen"),
         Binding("f2", "toggle_chat", "Chat", show=True, tooltip="Show or hide the chat panel"),
         # Fallback for terminals/multiplexers that swallow F-keys.
         Binding("ctrl+g", "toggle_chat", "Chat", show=False),
+        Binding("f3", "end_chat", "End chat", show=False,
+                tooltip="End chat and stop its reply, including while collapsed"),
+        Binding("shift+f6", "focus_navigation", "Navigation", show=False,
+                tooltip="Focus navigation; press again or Esc to return to content"),
         Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False,
                 tooltip="Demo mode: stand-ins for every identifier on screen"),
         # Fallback: many terminals (xterm.js/ttyd, some multiplexers) cannot
@@ -275,10 +282,17 @@ class ServonautApp(App):
         install_terminal_output_filter()
         install_markup_backstop()
         super().__init__(**kwargs)
+        widen_parse_cache(self.stylesheet)
+        from servonaut import get_version
+        self.sub_title = f"v{get_version()}"
         for theme in SERVONAUT_THEMES:
             self.register_theme(theme)
         self._textual_ansi_themes = (self.ansi_theme_dark, self.ansi_theme_light)
+        self.user_themes: Dict[str, UserTheme] = {}
+        self.user_theme_errors: Tuple[ThemeError, ...] = ()
+        self._register_user_themes()
         self.instances = []
+        self.workspace_state = WorkspaceState()
         self.memory_first_connect_seen = set()
         self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
@@ -2569,7 +2583,7 @@ class ServonautApp(App):
             label = self.redaction_service.redact_name(label)
         self.notify(
             f"A team member's memory key changed, so {label} is not shared with "
-            "them yet. Confirm it in Fleet Memory: select the server, then S.",
+            "them yet. Confirm it in Fleet memory: select the server, then S.",
             severity="warning",
             markup=False,
         )
@@ -2683,26 +2697,16 @@ class ServonautApp(App):
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
 
-        Checks both Screen-level selection (for Static widgets) and
-        TextArea.selected_text (for TextArea widgets, which have their
-        own selection mechanism).
+        Prefer the screen selection, otherwise use only the focused
+        TextArea. Other editors may retain selections from older gestures.
         """
         import re
         from textual.widgets import TextArea
 
-        # 1. Try Screen-level selection (works on Static, Label, etc.)
         text = self.screen.get_selected_text()
-
-        # 2. If nothing, check TextArea selections on the current screen
-        if not text or not text.strip():
-            try:
-                for ta in self.screen.query(TextArea):
-                    sel = ta.selected_text
-                    if sel and sel.strip():
-                        text = sel
-                        break
-            except Exception:
-                pass
+        if not text:
+            focused = self.focused
+            text = focused.selected_text if isinstance(focused, TextArea) else None
 
         if not text or not text.strip():
             return
@@ -2727,16 +2731,75 @@ class ServonautApp(App):
         self.push_screen(HelpScreen())
 
     def action_toggle_chat(self) -> None:
-        """Toggle the chat panel on the current screen."""
+        """Collapse or restore this screen's chat without ending its text turn."""
         from textual.css.query import NoMatches
         from servonaut.widgets.chat_panel import ChatPanel
+        if not self.screen_stack or isinstance(self.screen, ModalScreen):
+            return
         try:
             panel = self.screen.query_one("#chat-panel", ChatPanel)
-            panel.close_panel()
+            if panel._collapsed:
+                panel.restore_panel()
+            else:
+                panel.collapse_panel()
         except NoMatches:
             panel = ChatPanel()
-            self.screen.mount(panel)
+            panel._content_focus = self.focused
+            host = (
+                self.screen.chat_host()
+                if isinstance(self.screen, WorkspaceScreen) else self.screen
+            )
+            host.mount(panel)
             panel.focus_input()
+        if isinstance(self.screen, WorkspaceScreen):
+            self.screen.call_after_refresh(self.screen.sync_workspace_controls)
+
+    def action_end_chat(self) -> None:
+        """End only the active screen's chat, respecting operation holds."""
+        from servonaut.widgets.chat_panel import ChatPanel
+
+        if (not self.screen_stack or isinstance(self.screen, ModalScreen)
+                or self._navigation_hold_reason()):
+            return
+        panel = next(iter(self.screen.query(ChatPanel)), None)
+        if panel is not None:
+            panel.close_panel()
+
+    def _active_workspace(self) -> WorkspaceScreen | None:
+        """Workspace actions only target an active pilot, never a modal."""
+        if not self.screen_stack:
+            return None
+        if isinstance(self.screen, WorkspaceScreen) and not self._navigation_hold_reason():
+            return self.screen
+        return None
+
+    def action_toggle_navigation(self) -> None:
+        """Choose navigation visibility for this application session."""
+        from servonaut.widgets.sidebar import Sidebar
+
+        screen = self._active_workspace()
+        if screen is None:
+            return
+        sidebar = screen.query_one(Sidebar)
+        navigation_visible = not sidebar.display
+        sidebar.exit_navigation_mode()
+        self.workspace_state.navigation_visible = navigation_visible
+        self.workspace_state.navigation_choice_class = screen.navigation_width_class()
+        screen.apply_workspace_state()
+
+    def action_focus_navigation(self) -> None:
+        """Enter the rail explicitly, or return to the previous content widget."""
+        from servonaut.widgets.sidebar import Sidebar
+
+        screen = self._active_workspace()
+        if screen is None:
+            return
+        sidebar = screen.query_one(Sidebar)
+        if sidebar.navigation_mode:
+            sidebar.exit_navigation_mode()
+        else:
+            sidebar.enter_navigation_mode()
+        screen.call_after_refresh(screen.sync_workspace_controls)
 
     def action_toggle_demo(self) -> None:
         """Toggle demo mode at runtime (ctrl+shift+d).
@@ -2873,39 +2936,38 @@ class ServonautApp(App):
         other_instances = [i for i in self.instances if i.get("is_custom")]
         return resolve_instance_from_lists(id_or_name, aws_instances, other_instances)
 
-    # Sidebar targets reachable from the command palette (ctrl+p). The sidebar
-    # itself is mouse-only, so keyboard-only sessions and terminal recorders
-    # need a way to switch sections. Order mirrors the sidebar.
+    # Destinations remain available from the palette on every screen, including
+    # those whose sidebar has not adopted explicit keyboard navigation yet.
     _PALETTE_NAVIGATION = (
         ("Instances", "nav_list", "Fleet table: every server across providers"),
-        ("Custom Servers", "nav_custom_servers", "Add, edit and remove non-cloud servers"),
-        ("SSH Keys", "nav_keys", "SSH keys and agent configuration"),
-        ("Fleet Memory", "nav_memory", "Fleet-wide server memory"),
-        ("Sync Config", "nav_sync_config", "Push or pull your config across devices"),
+        ("Custom servers", "nav_custom_servers", "Add, edit and remove non-cloud servers"),
+        ("SSH keys", "nav_keys", "SSH keys and agent configuration"),
+        ("Fleet memory", "nav_memory", "Fleet-wide server memory"),
+        ("Sync config", "nav_sync_config", "Push or pull your config across devices"),
         ("Memory Sync", "nav_memory_sync", "Encrypted server-memory backup across devices"),
         ("Secrets", "nav_secrets", "Secrets provider and DB-credential vault"),
         ("Vault", "nav_vault", "Encrypted vault identities, SSH keys and secrets"),
-        ("SSH Certificates", "nav_ca", "Team SSH certificate authority and audit"),
-        ("BW SSH Vault", "nav_bw_vault", "Bitwarden SSH-key items and the servers using them"),
+        ("SSH certificates", "nav_ca", "Team SSH certificate authority and audit"),
+        ("BW SSH vault", "nav_bw_vault", "Bitwarden SSH-key items and the servers using them"),
         ("Findings", "nav_findings", "Proactive monitoring findings across the fleet"),
-        ("Drift Events", "nav_drift", "Configuration drift and anomaly events"),
-        ("Memory Export", "nav_memory_export", "Signed compliance export of server memory"),
+        ("Drift events", "nav_drift", "Configuration drift and anomaly events"),
+        ("Memory export", "nav_memory_export", "Signed compliance export of server memory"),
         ("Settings", "nav_settings", "Configuration, scan rules and AI provider"),
-        ("AWS Manage", "nav_aws_manage", "Create, start, stop, reboot and terminate EC2 instances"),
-        ("AWS Object Storage", "nav_aws_s3", "S3 buckets and objects"),
+        ("AWS manage", "nav_aws_manage", "Create, start, stop, reboot and terminate EC2 instances"),
+        ("AWS object storage", "nav_aws_s3", "S3 buckets and objects"),
         ("CloudWatch", "nav_cloudwatch", "CloudWatch log groups and events"),
-        ("IP Ban Manager", "nav_ip_ban", "Ban IPs via WAF, security groups or NACLs"),
+        ("IP ban manager", "nav_ip_ban", "Ban IPs via WAF, security groups or NACLs"),
         ("CloudTrail", "nav_cloudtrail", "AWS API activity and events"),
-        ("OVH Manage", "nav_ovh_manage", "Create, start, stop, reboot and delete OVH instances"),
-        ("OVH DNS Zones", "nav_ovh_dns", "OVH DNS zones and records"),
-        ("OVH IP Management", "nav_ovh_ips", "OVH IP blocks and failover IPs"),
-        ("OVH Block Storage", "nav_ovh_storage", "OVH block storage volumes"),
-        ("OVH Billing", "nav_ovh_billing", "OVH invoices and consumption"),
-        ("OVH SSH Keys", "nav_ovh_ssh_keys", "SSH keys on OVH cloud projects"),
-        ("OVH Object Storage", "nav_ovh_s3", "OVH Object Storage buckets"),
-        ("Hetzner Manage", "nav_hetzner_manage", "Create, start, stop, reboot and delete Hetzner servers"),
-        ("Hetzner SSH Keys", "nav_hetzner_ssh_keys", "Hetzner project SSH keys"),
-        ("Hetzner Object Storage", "nav_hetzner_s3", "Hetzner Object Storage buckets"),
+        ("OVH manage", "nav_ovh_manage", "Create, start, stop, reboot and delete OVH instances"),
+        ("OVH DNS zones", "nav_ovh_dns", "OVH DNS zones and records"),
+        ("OVH IP management", "nav_ovh_ips", "OVH IP blocks and failover IPs"),
+        ("OVH block storage", "nav_ovh_storage", "OVH block storage volumes"),
+        ("OVH billing", "nav_ovh_billing", "OVH invoices and consumption"),
+        ("OVH SSH keys", "nav_ovh_ssh_keys", "SSH keys on OVH cloud projects"),
+        ("OVH object storage", "nav_ovh_s3", "OVH Object Storage buckets"),
+        ("Hetzner manage", "nav_hetzner_manage", "Create, start, stop, reboot and delete Hetzner servers"),
+        ("Hetzner SSH keys", "nav_hetzner_ssh_keys", "Hetzner project SSH keys"),
+        ("Hetzner object storage", "nav_hetzner_s3", "Hetzner Object Storage buckets"),
         ("Account", "nav_login", "Sign in to your Servonaut account"),
         ("Teams", "nav_teams", "Team members and shared access"),
         ("Report a bug", "nav_bug_report", "Send a bug report after reviewing what it contains"),
@@ -2918,6 +2980,21 @@ class ServonautApp(App):
         from servonaut.widgets.sidebar import Sidebar
 
         yield from super().get_system_commands(screen)
+        if (not isinstance(screen, ModalScreen) and not self._navigation_hold_reason()
+                and screen.query("#chat-panel")):
+            yield SystemCommand(
+                "End chat", "End this chat and stop its reply, even when collapsed (F3)",
+                self.action_end_chat,
+            )
+        if isinstance(screen, WorkspaceScreen) and not self._navigation_hold_reason():
+            yield SystemCommand(
+                "Toggle navigation", "Show or hide the navigation pane",
+                self.action_toggle_navigation,
+            )
+            yield SystemCommand(
+                "Focus navigation", "Move to navigation; Esc returns to content",
+                self.action_focus_navigation,
+            )
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
             if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
@@ -2939,6 +3016,59 @@ class ServonautApp(App):
             "MCP relay connection: its state, restart and stop",
             lambda: open_relay_status(self),
         )
+
+    def reload_user_themes(self) -> LoadResult:
+        """Scan the themes folder again and show the active theme as it now reads.
+
+        An edited file replaces its old version and a deleted one disappears;
+        if the active theme's file is gone the default takes over.
+        """
+        previous = set(self.user_themes)
+        result = self._register_user_themes()
+        self._reapply_theme_after_reload(previous)
+        return result
+
+    def reserved_theme_names(self) -> Set[str]:
+        """Names a user theme may not take: every registered theme that is not a user's."""
+        return set(self.available_themes) - set(self.user_themes)
+
+    def _register_user_themes(self) -> LoadResult:
+        """Scan the themes folder and register what it holds."""
+        try:
+            result = load_user_themes(reserved=self.reserved_theme_names())
+        except Exception:  # noqa: BLE001 - a theme file must never stop the app
+            logger.exception("Scanning the themes folder failed")
+            result = LoadResult()
+        self.apply_user_themes(result)
+        return result
+
+    def apply_user_themes(self, result: LoadResult) -> None:
+        """Register the valid themes of a scan; the rest are listed in ``user_theme_errors``.
+
+        The scan itself (:func:`load_user_themes`) can run off the main thread;
+        only this registration has to happen on it.
+        """
+        for name in self.user_themes:
+            self.unregister_theme(name)
+        for loaded in result.themes:
+            self.register_theme(loaded.theme)
+        self.user_themes = {loaded.theme.name: loaded for loaded in result.themes}
+        self.user_theme_errors = result.errors
+
+    def finish_theme_reload(self, previous: Set[str]) -> None:
+        """Show the active theme as its file now says, after :meth:`apply_user_themes`."""
+        self._reapply_theme_after_reload(previous)
+
+    def _reapply_theme_after_reload(self, previous: Set[str]) -> None:
+        """Show the active theme as its file now says, or the default if it is gone."""
+        active = self.theme
+        if active in self.available_themes:
+            if active in previous or active in self.user_themes:
+                self._match_ansi_palette(active)
+                self._watch_theme(active)  # Textual's own re-apply of the registered colours
+            return
+        if active in previous:
+            self.theme = resolve_theme_name(active, self.available_themes)
 
     def _apply_configured_theme(self, configured: str) -> None:
         """Switch to the saved theme; TEXTUAL_THEME still wins for one run."""
@@ -2962,7 +3092,10 @@ class ServonautApp(App):
 
     def _match_ansi_palette(self, theme_name: str) -> None:
         """Draw ANSI colours (Rich text, command output) in the theme's own hues."""
-        if is_servonaut_theme(theme_name):
+        user_theme = self.user_themes.get(theme_name)
+        if user_theme is not None:
+            self.ansi_theme_dark = self.ansi_theme_light = user_theme.ansi
+        elif is_servonaut_theme(theme_name):
             self.ansi_theme_dark, self.ansi_theme_light = SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
         else:
             self.ansi_theme_dark, self.ansi_theme_light = self._textual_ansi_themes
@@ -3018,11 +3151,30 @@ class ServonautApp(App):
         return True
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action in {"quit", "command_palette"} and self._navigation_hold_reason():
+        if action == "quit_from_content":
+            workspace = self._active_workspace()
+            if workspace is not None and workspace.navigation_focused:
+                return False
+        if action == "end_chat":
+            return bool(
+                self.screen_stack and not isinstance(self.screen, ModalScreen)
+                and not self._navigation_hold_reason()
+                and self.screen.query("#chat-panel")
+            )
+        if action in {"toggle_navigation", "focus_navigation"}:
+            return self._active_workspace() is not None
+        if (
+            action in {"quit", "quit_from_content", "command_palette"}
+            and self._navigation_hold_reason()
+        ):
             return False
         if _is_generic_framework_action(action, parameters):
             return False
         return super().check_action(action, parameters)
+
+    async def action_quit_from_content(self) -> None:
+        """Use the ordinary quit path for the unmodified content shortcut."""
+        await self.action_quit()
 
     async def _broker_event(self, event_name: str, event: Any, default_namespace: Any) -> bool:
         """Run a click action from drawn text only when its widget draws that action.
@@ -3117,6 +3269,9 @@ class ServonautApp(App):
         target_id = message.target_id
         if not target_id:
             return
+        if isinstance(self.screen, WorkspaceScreen):
+            for sidebar in self.screen.query("Sidebar"):
+                sidebar.exit_navigation_mode()
             
         if target_id == "nav_list":
             from servonaut.screens.instance_list import InstanceListScreen
@@ -3374,7 +3529,7 @@ class ServonautApp(App):
         from textual.widgets import Button
         try:
             btn = self.screen.query_one("#nav_update", Button)
-            btn.label = f"📥 Update to v{version}"
+            btn.label = f"Update to v{version}"
             btn.remove_class("hidden")
         except Exception:
             pass

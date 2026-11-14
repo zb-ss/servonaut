@@ -11,13 +11,13 @@ from typing import List, Optional, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from rich.text import Text
 from textual.content import Content
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import keep_cursor
@@ -30,8 +30,9 @@ from servonaut.screens._provider_accounts import (
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -39,8 +40,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHDNSScreen(Screen):
+class OVHDNSScreen(WorkspaceScreen):
     """OVH DNS Management — browse zones and manage DNS records."""
+
+    DEFAULT_CSS = """
+    OVHDNSScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the zone and record columns beside
+    # the chat column (as the provider managers).
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # Keep the full action row only where labels, spacing and scrollbar fit.
+    CONTENT_NARROW_WIDTH = 92
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -51,6 +66,8 @@ class OVHDNSScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -77,77 +94,98 @@ class OVHDNSScreen(Screen):
     # Compose
     # ------------------------------------------------------------------
 
+    def __init__(
+        self, name: str | None = None, id: str | None = None,
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(name=name, id=id, classes=classes)
+        self._read_loading = BusyWork(self, "#read_loading")
+
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("OVH DNS")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static("[bold $text-accent]OVH DNS Management[/bold $text-accent]", id="dns_title"),
-                # Hidden unless several OVH accounts are configured.
-                AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh", id="dns_account",
-                ),
-
-                Static(
-                    "[bold]Domains[/bold]", classes="section_header",
-                    id="domains_section_header",
-                ),
-                DataTable(id="domains_table"),
-
-                Static("[bold]DNS Records[/bold]", classes="section_header", id="records_section_header"),
-                Static("", id="selected_zone"),
-                DataTable(id="records_table"),
-
+                BusyIndicator(id="read_loading", classes="read-loading"),
                 Horizontal(
-                    Button("Add Record", variant="primary", id="btn_add"),
-                    Button("Edit Record", variant="default", id="btn_edit"),
-                    Button("Delete Record", variant="error", id="btn_delete"),
-                    Button("Refresh Zone", variant="default", id="btn_refresh_zone"),
-                    Button("Back", variant="default", id="btn_back"),
-                    id="dns_actions",
-                ),
-
-                # Add / Edit form — hidden by default
-                Container(
-                    Static("[bold]Record Details[/bold]", classes="section_header"),
-                    Input(placeholder="A, AAAA, CNAME, MX, TXT, SRV", id="input_type"),
-                    Input(placeholder="www, mail, @", id="input_subdomain"),
-                    Input(placeholder="192.0.2.1 or hostname", id="input_target"),
-                    Input(placeholder="3600", id="input_ttl"),
-                    Horizontal(
-                        Button("Save Record", variant="primary", id="btn_save"),
-                        Button("Cancel", variant="default", id="btn_cancel_form"),
-                        classes="add_row",
+                    Vertical(
+                        Static("OVH DNS management", id="dns_title", classes="screen-title"),
+                        Static(
+                            "Select a domain to manage its zone records; reverse DNS "
+                            "is listed separately.",
+                            classes="resource-context",
+                        ),
+                        classes="provider-aux-heading",
                     ),
-                    id="record_form",
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh", id="dns_account",
+                    ),
+                    classes="provider-aux-heading-row",
                 ),
-
-                # Reverse DNS section
-                Static("[bold $text-accent]Reverse DNS[/bold $text-accent]", classes="section_header", id="rdns_section_header"),
-                Static("[dim]PTR records for all IPs on this account[/dim]"),
-                DataTable(id="rdns_table"),
-
                 Horizontal(
-                    Button("Edit rDNS", variant="default", id="btn_rdns_edit"),
-                    Button("Delete rDNS", variant="error", id="btn_rdns_delete"),
-                    Button("Reload rDNS", variant="default", id="btn_rdns_reload"),
-                    id="rdns_actions",
-                ),
-
-                # rDNS edit form — hidden by default
-                Container(
-                    Static("[bold]Reverse DNS Details[/bold]", classes="section_header"),
-                    Static("", id="rdns_form_ip_label"),
-                    Input(placeholder="server.example.com", id="input_rdns_hostname"),
-                    Horizontal(
-                        Button("Save rDNS", variant="primary", id="btn_rdns_save"),
-                        Button("Cancel", variant="default", id="btn_rdns_cancel"),
-                        classes="add_row",
+                    Vertical(
+                        Static(
+                            "[bold]Domains[/bold]", classes="section_header",
+                            id="domains_section_header",
+                        ),
+                        DataTable(id="domains_table"),
+                        classes="resource-panel provider-dns-domains",
                     ),
-                    id="rdns_form",
+                    Vertical(
+                        Static("[bold]DNS records[/bold]", classes="section_header", id="records_section_header"),
+                        Static("", id="selected_zone"),
+                        DataTable(id="records_table"),
+                        Horizontal(
+                            Button("Add record", variant="primary", id="btn_add"),
+                            Button("Edit record", variant="default", id="btn_edit"),
+                            Button("Delete record", variant="error", id="btn_delete"),
+                            Button("Refresh zone", variant="default", id="btn_refresh_zone"),
+                            Button("Back", variant="default", id="btn_back"),
+                            id="dns_actions",
+                        ),
+                        Container(
+                            Static("[bold]Record details[/bold]", classes="section_header"),
+                            Input(placeholder="A, AAAA, CNAME, MX, TXT, SRV", id="input_type"),
+                            Input(placeholder="www, mail, @", id="input_subdomain"),
+                            Input(placeholder="192.0.2.1 or hostname", id="input_target"),
+                            Input(placeholder="3600", id="input_ttl"),
+                            Horizontal(
+                                Button("Save record", variant="primary", id="btn_save"),
+                                Button("Cancel", variant="default", id="btn_cancel_form"),
+                                classes="add_row",
+                            ),
+                            id="record_form",
+                        ),
+                        classes="resource-panel provider-dns-records",
+                    ),
+                    classes="provider-dns-zones",
                 ),
-
+                Vertical(
+                    Static("[bold $text-accent]Reverse DNS[/bold $text-accent]", classes="section_header", id="rdns_section_header"),
+                    Static("[dim]PTR records for all IPs on this account[/dim]"),
+                    DataTable(id="rdns_table"),
+                    Horizontal(
+                        Button("Edit rDNS", variant="default", id="btn_rdns_edit"),
+                        Button("Delete rDNS", variant="error", id="btn_rdns_delete"),
+                        Button("Reload rDNS", variant="default", id="btn_rdns_reload"),
+                        id="rdns_actions",
+                    ),
+                    Container(
+                        Static("[bold]Reverse DNS details[/bold]", classes="section_header"),
+                        Static("", id="rdns_form_ip_label"),
+                        Input(placeholder="server.example.com", id="input_rdns_hostname"),
+                        Horizontal(
+                            Button("Save rDNS", variant="primary", id="btn_rdns_save"),
+                            Button("Cancel", variant="default", id="btn_rdns_cancel"),
+                            classes="add_row",
+                        ),
+                        id="rdns_form",
+                    ),
+                    classes="resource-panel provider-dns-reverse",
+                ),
                 id="dns_container",
+                classes="workspace-content resource-workspace-content provider-aux-workspace",
             )
         yield Footer()
 
@@ -210,7 +248,7 @@ class OVHDNSScreen(Screen):
 
         rdns_tbl = self.query_one("#rdns_table", DataTable)
         rdns_tbl.cursor_type = "row"
-        rdns_tbl.add_columns("IP Address", "Hostname", "IP Block")
+        rdns_tbl.add_columns("IP address", "Hostname", "IP block")
 
     # ------------------------------------------------------------------
     # Form visibility helpers
@@ -366,30 +404,31 @@ class OVHDNSScreen(Screen):
             self.notify("OVH DNS service not available", severity="error")
             return
 
-        try:
-            domains = await svc.list_domains()
-            if not self._still_showing(account):
-                return
-            self._domains = domains
-            self._render_domains()
-            if domains:
-                self._set_domains_status(None)
-            else:
-                # list_domains() swallows API errors and returns [] — an
-                # empty result might be a revoked credential, not zero zones.
-                services = self._services()
-                ovh_svc = services.ovh if services is not None else None
-                cred_error = (
-                    await ovh_svc.check_credentials() if ovh_svc else None
+        with self._read_loading.running('Loading domains…'):
+            try:
+                domains = await svc.list_domains()
+                if not self._still_showing(account):
+                    return
+                self._domains = domains
+                self._render_domains()
+                if domains:
+                    self._set_domains_status(None)
+                else:
+                    # list_domains() swallows API errors and returns [] — an
+                    # empty result might be a revoked credential, not zero zones.
+                    services = self._services()
+                    ovh_svc = services.ovh if services is not None else None
+                    cred_error = (
+                        await ovh_svc.check_credentials() if ovh_svc else None
+                    )
+                    if self._still_showing(account):
+                        self._set_domains_status(cred_error)
+            except Exception as exc:
+                logger.error("_load_domains failed: %s", exc)
+                self.notify(
+                    f"Error loading domains: {self._provider_error(exc)}",
+                    severity="error", markup=False,
                 )
-                if self._still_showing(account):
-                    self._set_domains_status(cred_error)
-        except Exception as exc:
-            logger.error("_load_domains failed: %s", exc)
-            self.notify(
-                f"Error loading domains: {self._provider_error(exc)}",
-                severity="error", markup=False,
-            )
 
     def _render_domains(self) -> None:
         tbl = self.query_one("#domains_table", DataTable)
@@ -427,15 +466,16 @@ class OVHDNSScreen(Screen):
             return
 
         self._render_records(zone_name)
-        try:
-            records = await svc.list_records(zone_name)
-            if not self._still_showing(account):
-                return
-            self._records = records
-            self._render_records(zone_name)
-        except Exception as exc:
-            logger.error("_load_records(%r) failed: %s", zone_name, exc)
-            self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error", markup=False)
+        with self._read_loading.running('Loading DNS records…'):
+            try:
+                records = await svc.list_records(zone_name)
+                if not self._still_showing(account):
+                    return
+                self._records = records
+                self._render_records(zone_name)
+            except Exception as exc:
+                logger.error("_load_records(%r) failed: %s", zone_name, exc)
+                self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error", markup=False)
 
     def _render_records(self, zone_name: str) -> None:
         self.query_one("#selected_zone", Static).update(
@@ -462,35 +502,36 @@ class OVHDNSScreen(Screen):
         if ip_svc is None:
             return
 
-        try:
-            ip_blocks = await ip_svc.list_ips()
-        except Exception as exc:
-            logger.error("_load_rdns: list_ips failed: %s", exc)
-            return
-
-        entries_found: List[dict] = []
-        for ip_info in ip_blocks:
-            ip_block = ip_info.get("ip", "")
-            if not ip_block:
-                continue
+        with self._read_loading.running('Loading reverse DNS…'):
             try:
-                entries = await ip_svc.list_reverse_dns(ip_block)
-                for entry in entries:
-                    ip_addr = entry.get("ipReverse", "")
-                    if ip_addr:
-                        entries_found.append({
-                            "ip": ip_addr,
-                            "hostname": entry.get("reverse", ""),
-                            "ip_block": ip_block,
-                        })
+                ip_blocks = await ip_svc.list_ips()
             except Exception as exc:
-                logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
+                logger.error("_load_rdns: list_ips failed: %s", exc)
+                return
 
-        if not self._still_showing(account):
-            return
-        self._rdns_entries = entries_found
-        self._rdns_loaded = True
-        self._render_rdns()
+            entries_found: List[dict] = []
+            for ip_info in ip_blocks:
+                ip_block = ip_info.get("ip", "")
+                if not ip_block:
+                    continue
+                try:
+                    entries = await ip_svc.list_reverse_dns(ip_block)
+                    for entry in entries:
+                        ip_addr = entry.get("ipReverse", "")
+                        if ip_addr:
+                            entries_found.append({
+                                "ip": ip_addr,
+                                "hostname": entry.get("reverse", ""),
+                                "ip_block": ip_block,
+                            })
+                except Exception as exc:
+                    logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
+
+            if not self._still_showing(account):
+                return
+            self._rdns_entries = entries_found
+            self._rdns_loaded = True
+            self._render_rdns()
 
     def _render_rdns(self) -> None:
         tbl = self.query_one("#rdns_table", DataTable)
@@ -718,7 +759,7 @@ class OVHDNSScreen(Screen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete DNS Record",
+                    title="Delete DNS record",
                     description=with_bold_values(
                         "Permanently delete {} record {} pointing to {}.",
                         record.get('fieldType', ''), display_subdomain, confirm_text,
@@ -728,7 +769,7 @@ class OVHDNSScreen(Screen):
                         "DNS propagation may take time depending on upstream TTL caching",
                     ],
                     confirm_text=confirm_text,
-                    action_label="Delete Record",
+                    action_label="Delete record",
                     severity="warning",
                 )
             )
@@ -861,7 +902,7 @@ class OVHDNSScreen(Screen):
         async def _confirm_and_delete_rdns() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Reverse DNS",
+                    title="Delete reverse DNS",
                     description=with_bold_values(
                         "Remove reverse DNS for {} (currently {}).",
                         display_ip, display_hostname or 'not set',

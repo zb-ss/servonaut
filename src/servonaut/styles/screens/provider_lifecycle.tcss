@@ -1,0 +1,170 @@
+/* Recovery and maintenance keep the catalog beside the current instance
+   and its guarded operation, then stack the same content at narrow widths. */
+.provider-lifecycle-workspace .provider-lifecycle-heading {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #reinstall_title,
+OVHResizeScreen .provider-lifecycle-workspace #resize_title {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-accent;
+    text-style: bold;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #reinstall_description {
+    height: auto;
+    padding: 0 1;
+    border: round $error;
+    color: $text;
+    background: transparent;
+}
+
+OVHResizeScreen .provider-lifecycle-workspace #resize_description {
+    height: auto;
+    color: $text-muted;
+}
+
+.provider-lifecycle-workspace .provider-lifecycle-body {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace .provider_maintenance_catalog,
+OVHResizeScreen .provider-lifecycle-workspace .provider_maintenance_catalog,
+OVHSnapshotsScreen .provider-lifecycle-workspace .provider-lifecycle-inventory {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.provider-lifecycle-workspace .provider_catalog_heading,
+.provider-lifecycle-workspace .provider-lifecycle-section-title {
+    height: auto;
+    color: $text-accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #images_table,
+OVHResizeScreen .provider-lifecycle-workspace #models_table,
+OVHSnapshotsScreen .provider-lifecycle-workspace #snapshots_table {
+    height: auto;
+    min-height: 6;
+    max-height: 22;
+    border: none;
+}
+
+.provider-lifecycle-workspace .provider-lifecycle-operations {
+    width: 38;
+    height: auto;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace .provider_instance_context,
+OVHResizeScreen .provider-lifecycle-workspace .provider_instance_context {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    border: none;
+    background: transparent;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #reinstall_hint,
+OVHResizeScreen .provider-lifecycle-workspace #resize_hint,
+.provider-lifecycle-workspace .provider-lifecycle-selection {
+    height: auto;
+    margin-bottom: 1;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #reinstall_actions,
+OVHResizeScreen .provider-lifecycle-workspace #resize_actions,
+OVHSnapshotsScreen .provider-lifecycle-workspace #snapshots_actions {
+    dock: none;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+OVHReinstallScreen .provider-lifecycle-workspace #reinstall_actions Button,
+OVHResizeScreen .provider-lifecycle-workspace #resize_actions Button,
+OVHSnapshotsScreen .provider-lifecycle-workspace #snapshots_actions Button,
+OVHSnapshotsScreen .provider-lifecycle-workspace #btn_configure_backup {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    margin: 0;
+}
+
+OVHSnapshotsScreen .provider-lifecycle-workspace .provider-lifecycle-backup {
+    width: 1fr;
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 1 0 0 0;
+    border: none;
+    border-top: solid $border-blurred;
+    background: transparent;
+}
+
+OVHSnapshotsScreen .provider-lifecycle-workspace > BusyIndicator.read-loading {
+    dock: top;
+    height: 1;
+}
+
+OVHReinstallScreen.-content-narrow .provider-lifecycle-body,
+OVHResizeScreen.-content-narrow .provider-lifecycle-body,
+OVHSnapshotsScreen.-content-narrow .provider-lifecycle-body {
+    layout: vertical;
+}
+
+OVHReinstallScreen.-content-narrow .provider-lifecycle-operations,
+OVHResizeScreen.-content-narrow .provider-lifecycle-operations,
+OVHSnapshotsScreen.-content-narrow .provider-lifecycle-operations {
+    width: 1fr;
+    margin-left: 0;
+}
+
+/* A successful empty inventory leaves room for creating the first recovery
+   point. The mounted table returns for loading and populated results. */
+OVHSnapshotsScreen #snapshot_empty_state {
+    display: none;
+    height: auto;
+    color: $text-muted;
+}
+
+OVHSnapshotsScreen #snapshots_container.-snapshots-empty #snapshot_empty_state {
+    display: block;
+}
+
+OVHSnapshotsScreen #snapshots_container.-snapshots-empty #snapshots_table,
+OVHSnapshotsScreen #snapshots_container.-snapshots-empty .provider-lifecycle-section-title,
+OVHSnapshotsScreen #snapshots_container.-snapshots-empty .provider-lifecycle-selection {
+    display: none;
+}
+
+OVHSnapshotsScreen #snapshots_container.-snapshots-empty .provider-lifecycle-inventory .resource-section-title {
+    margin-bottom: 0;
+}
+
+OVHSnapshotsScreen.-content-narrow #snapshots_container.-snapshots-empty #snapshots_actions {
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+}

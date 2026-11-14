@@ -5,17 +5,17 @@ from typing import List, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
-from textual.screen import Screen
-from textual.widgets import Footer, Static
+from textual.containers import Container, Horizontal, VerticalScroll
+from textual.widgets import Footer, Static, Tree
 
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.utils.match_utils import matches_conditions
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, display_text as redact_display_text
 from servonaut.services.shared_servers import shared_login
+from servonaut.services.vault.display import markup_literal, terminal_safe
 
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> Remo
     )
 
 
-class FileBrowserScreen(Screen):
+class FileBrowserScreen(WorkspaceScreen):
     """Screen for browsing remote server filesystem via SSH.
 
     Displays a RemoteTree widget populated with configured scan paths.
@@ -82,6 +82,11 @@ class FileBrowserScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    AUTO_FOCUS = "#remote_tree"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
 
     def __init__(self, instance: dict) -> None:
         """Initialize file browser screen.
@@ -96,12 +101,29 @@ class FileBrowserScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the file browser UI."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Files")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(self._build_header_text(), id="browser_header"),
-                self._create_remote_tree(),
-                id="file_browser_container"
+                VerticalScroll(
+                    Static(self._build_header_text(), id="browser_header"),
+                    id="browser_header_scroll",
+                ),
+                Container(
+                    Container(
+                        Static("Selected entry", id="browser_selection_heading"),
+                        VerticalScroll(
+                            Static("Path · Select a directory", id="browser_path", markup=False),
+                            id="browser_path_scroll",
+                        ),
+                        id="browser_selection",
+                    ),
+                    self._create_remote_tree(),
+                    id="browser_workspace",
+                ),
+                Static("Expand folders to load.  r Refresh · Esc Back", id="browser_help", markup=False),
+                id="file_browser_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -111,18 +133,50 @@ class FileBrowserScreen(Screen):
         Returns:
             Rich-formatted header string.
         """
-        name = self._instance.get('name') or self._instance.get('id', 'Unknown')
+        name = markup_literal(terminal_safe(redact_display_text(
+            self.app, self._instance.get('name') or self._instance.get('id', 'Unknown')
+        )))
         profile = self.app.connection_service.resolve_profile(self._instance)
 
         if profile and profile.bastion_host:
-            conn_text = f"via {profile.bastion_host}"
+            bastion = redact_display_text(self.app, profile.bastion_host)
+            conn_text = f"via {markup_literal(terminal_safe(bastion))}"
         else:
             conn_text = "Direct"
 
         return (
-            f"[bold $text-accent]File Browser:[/bold $text-accent] {name}\n"
-            f"[dim]Connection:[/dim] {conn_text}"
+            f"[bold]File Browser:[/bold] {name}\n"
+            f"Connection: {conn_text}"
         )
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Keep the full cursor path visible without changing native navigation."""
+        if event.control is not self._remote_tree:
+            return
+        self._render_path_context()
+
+    def _render_path_context(self) -> None:
+        """Scrub only the displayed path; the operational tree data stays intact."""
+        node = self._remote_tree.cursor_node if self._remote_tree else None
+        data = (node.data if node else None) or {}
+        path = data.get("path")
+        shown = terminal_safe(redact_display_text(self.app, str(path or "")))
+        self.query_one("#browser_path", Static).update(
+            f"Path · {shown}" if path else "Path · Select a directory"
+        )
+        kind = data.get("type")
+        self.query_one("#browser_selection_heading", Static).update(
+            "Selected file" if kind == "file" else
+            "Selected directory" if kind == "directory" else
+            "Selected entry"
+        )
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Refresh visible context without rebuilding the tree or moving its cursor."""
+        self.query_one("#browser_header", Static).update(
+            redact_display_text(self.app, self._build_header_text())
+        )
+        self._render_path_context()
 
     def _create_remote_tree(self) -> RemoteTree:
         """Create RemoteTree widget with configured scan paths.

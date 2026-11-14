@@ -14,6 +14,10 @@ from tests.test_cloud_screens_multi_account import (  # noqa: F401  (fixtures)
     Host, _wait_for, accounts, config,
 )
 
+# The width rule hides the navigation below 110 columns; the 100x30 case keeps
+# its layout expectations by holding the user's choice.
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _price(value: float) -> dict:
     return {"serviceId": 1, "elements": [], "price": {"value": value, "currencyCode": "EUR"}}
@@ -311,3 +315,43 @@ async def test_after_the_invoice_table_fails_a_demo_mode_toggle_does_not_leave_t
             "cards after the toggle",
         )
         assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
+
+
+MALFORMED_USAGE = {
+    "text value": {"current_spend": [{"price": {"value": "abc", "currencyCode": "EUR"}}], "forecast": []},
+    "null currency": {"current_spend": [{"price": {"value": 1.0, "currencyCode": None}}], "forecast": []},
+    "list for a dict": {"current_spend": [{"price": [1.0]}], "forecast": []},
+    "payload that is not a mapping": {"current_spend": "n/a", "forecast": 3},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(MALFORMED_USAGE))
+async def test_unreadable_usage_ends_on_the_card_and_the_app_keeps_running(shape, accounts, config) -> None:
+    app = Host(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value=MALFORMED_USAGE[shape])
+    billing.get_invoices = AsyncMock(return_value=_bills())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await app.push_screen(OVHBillingScreen())
+        await _wait_for(pilot, lambda: "Loading" not in str(app.screen.query_one("#current_usage").render()), "card")
+        assert isinstance(app.screen, OVHBillingScreen) and app._exception is None
+
+
+# The usage payload itself can be a list or a string, not only a mapping.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [[{"price": {"value": 1}}], "unavailable"], ids=["list", "string"])
+async def test_a_usage_payload_that_is_not_a_mapping_ends_on_the_card(payload, accounts, config) -> None:
+    app = Host(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value=payload)
+    billing.get_invoices = AsyncMock(return_value=_bills())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await app.push_screen(OVHBillingScreen())
+        await _wait_for(
+            pilot,
+            lambda: "Could not read the bill data for the current month"
+            in str(app.screen.query_one("#current_usage").render()),
+            "card",
+        )
+        assert isinstance(app.screen, OVHBillingScreen) and app._exception is None

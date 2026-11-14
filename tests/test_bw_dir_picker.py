@@ -290,6 +290,10 @@ async def test_pilot_renders_prefilled_and_centered():
         dir_input = app.screen.query_one("#bw_dir_input", Input)
         assert dir_input.value == str(Path.home() / ".ssh")
 
-        region = app.screen.query_one("#bw_dir_picker_container").region
-        assert abs(region.x - (120 - region.width) // 2) <= 1
-        assert abs(region.y - (40 - region.height) // 2) <= 1
+        frame = app.screen.query_one("#bw_dir_picker_container")
+        region = frame.region
+        # Center within the native layout area left by docked notifications.
+        available = app.screen.scrollable_content_region.shrink(frame.dock_gutter)
+        assert available.contains_region(region)
+        assert abs(region.x - available.x - (available.width - region.width) // 2) <= 1
+        assert abs(region.y - available.y - (available.height - region.height) // 2) <= 1

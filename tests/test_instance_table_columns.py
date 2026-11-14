@@ -64,19 +64,16 @@ async def test_columns_fit_their_values_up_to_a_maximum() -> None:
     app = _Host()
     async with app.run_test(size=(220, 16)) as pilot:
         table = app.query_one(InstanceTable)
-        long_id = "0e0e0000000000000000000000000001/batch-0001"
         table.populate([
             _server("app-1"),
             _server("mail-1", id=OVH_VPS_ID, type=OVH_TYPE, provider="OVH"),
-            _server("batch-1", id=long_id, provider="OVH"),
+            _server("n" * 40, provider="OVH"),
         ])
         await _settle(pilot)
 
-        ids = _cells(table, "id")
-        assert OVH_VPS_ID in ids, "a typical OVH service name is shown in full"
         assert OVH_TYPE in _cells(table, "type")
-        cut = next(cell for cell in ids if cell.startswith("0e0e"))
-        assert cut.endswith("…") and len(cut) == 25
+        cut = next(cell for cell in _cells(table, "name") if cell.startswith("n" * 10))
+        assert cut.endswith("…") and len(cut) == 32
         # State holds a short word: its column stays narrow.
         state = next(c for c in table.columns.values() if str(c.key.value) == "state")
         assert state.get_render_width(table) == len("running") + 2 * table.cell_padding
@@ -94,17 +91,15 @@ async def test_cells_are_plain_text_not_markup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_key_file_is_listed_by_its_file_name() -> None:
+async def test_the_default_columns_are_the_seven() -> None:
     app = _Host()
     async with app.run_test(size=(220, 16)) as pilot:
         table = app.query_one(InstanceTable)
-        table.populate([
-            _server("web-1", key_name="~/.ssh/web1_ed25519"),
-            _server("app-1"),
-            _server("db-1", key_name=""),
-        ])
+        table.populate([_server("app-1")])
         await _settle(pilot)
-        assert _cells(table, "key") == ["web1_ed25519", "deploy-key", "-"]
+        assert _column_keys(table) == [
+            "index", "name", "state", "provider", "public_ip", "type", "region",
+        ]
 
 
 @pytest.mark.asyncio
@@ -120,7 +115,7 @@ async def test_the_ssh_column_appears_once_a_server_has_a_result() -> None:
         table.populate([_server("app-1"), verified])
         await _settle(pilot)
         keys = _column_keys(table)
-        assert keys.index("key") < keys.index("ssh") < keys.index("memory")
+        assert keys.index("region") < keys.index("ssh")
 
         # Filtering to servers without a result keeps the column in place.
         table.filter("app-1")

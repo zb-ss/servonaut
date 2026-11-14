@@ -13,18 +13,22 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
 from servonaut.widgets.secret_input import SecretInput
+from servonaut.widgets.dialogs import (
+    DIALOG_VERTICAL_BREAKPOINTS,
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 logger = logging.getLogger(__name__)
 
-# Strength labels and their CSS colours.  Index == score (0–4).
+# Strength labels. Index == score (0–4).
 _STRENGTH_LABEL = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
-_STRENGTH_COLOR = [
-    "$text-error", "$text-error", "$text-warning", "$text-success", "$text-success",
-]
 
 
 @dataclass
@@ -58,52 +62,16 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         cancellation.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+    # on_mount focuses the first field itself; the automatic focus would
+    # animate a scroll against the first, not yet final, layout.
+    AUTO_FOCUS = ""
+
+    # Enrol shows rules, two fields and feedback, so on shorter terminals the
+    # shared frame gives its padding to the content (see dialogs.tcss).
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
+
     DEFAULT_CSS = """
-    PassphraseEnrolModal {
-        align: center middle;
-    }
-
-    #enrol-container {
-        width: 66;
-        max-width: 95%;
-        height: auto;
-        max-height: 100%;
-        background: $surface;
-        border: round $accent;
-        padding: 0 2;
-    }
-
-    #enrol-container.enrol-mode {
-        height: 28;
-    }
-
-    #enrol-body {
-        height: auto;
-        max-height: 100%;
-        min-height: 0;
-    }
-
-    #enrol-container.enrol-mode #enrol-body {
-        height: 1fr;
-    }
-
-    PassphraseEnrolModal ToastRack {
-        layer: default;
-        margin: 0;
-    }
-
-    PassphraseEnrolModal Toast {
-        width: auto;
-        max-width: 100%;
-        margin: 0;
-        padding: 0 1;
-    }
-
-    #enrol-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
     #enrol-blurb {
         margin-bottom: 1;
         color: $text-muted;
@@ -121,6 +89,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     #enrol-rules,
     #enrol-strength {
+        padding: 0;
         height: auto;
         color: $text-muted;
     }
@@ -130,7 +99,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     }
 
     #enrol-mismatch {
-        margin-bottom: 1;
+        padding: 0;
         height: auto;
         color: $text-error;
     }
@@ -160,18 +129,6 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         height: 0;
     }
 
-    #enrol-btn-row {
-        dock: bottom;
-        layout: horizontal;
-        height: auto;
-        align: right middle;
-        margin-top: 1;
-    }
-
-    #enrol-btn-row Button {
-        margin-left: 1;
-        min-width: 12;
-    }
     """
 
     BINDINGS = [
@@ -204,16 +161,17 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             else "[bold $text-accent]Unlock Memory Encryption Keypair[/bold $text-accent]"
         )
         blurb = (
-            "[$text-warning]Warning: this passphrase cannot be recovered. "
-            "If lost, your synced memory data will be permanently inaccessible.[/$text-warning]"
+            "[bold]Warning: this passphrase cannot be recovered. "
+            "If lost, your synced memory data will be permanently inaccessible.[/bold]"
             if is_enrol
-            else "[dim]Enter your passphrase to decrypt the stored keypair.[/dim]"
+            else "Enter your passphrase to decrypt the stored keypair."
         )
         btn_label = "Enrol" if is_enrol else "Unlock"
         remember_classes = "" if self._remember_available else "hidden"
-        yield Container(
-            VerticalScroll(
-                Static(title, id="enrol-title"),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(title, id="enrol-title"),
+            body=DialogBody(
                 Static(blurb, id="enrol-blurb"),
                 Static("", id="enrol-rules", markup=False, classes="" if is_enrol else "hidden"),
                 SecretInput(placeholder="Passphrase", id="enrol-pass1"),
@@ -235,18 +193,18 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
                 ),
                 id="enrol-body",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="enrol-btn-cancel"),
                 Button(btn_label, variant="primary", id="enrol-btn-confirm", disabled=True),
                 id="enrol-btn-row",
             ),
             id="enrol-container",
-            classes="enrol-mode" if is_enrol else "",
+            size="standard",
         )
 
     def on_mount(self) -> None:
         self._update_validation()
-        self.query_one("#enrol-pass1", Input).focus()
+        self.query_one("#enrol-pass1", Input).focus(scroll_visible=False)
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._show_focused_control)
@@ -262,6 +220,17 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._update_validation()
+        if self._mode == "enrol":
+            self.call_after_refresh(self._show_feedback)
+
+    def _show_feedback(self) -> None:
+        """Keep the reason Enrol is disabled in view while the user types.
+
+        The field being typed in always stays in view, even when the reason
+        and the field cannot both fit.
+        """
+        self.query_one("#enrol-mismatch", Static).scroll_visible(animate=False, immediate=True)
+        self._show_focused_control()
 
     def _update_validation(self) -> None:
         pass1 = self.query_one("#enrol-pass1", Input).value
@@ -275,9 +244,8 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
                 for rule, met in zip(assessment.requirements, assessment.requirements_met, strict=True)
             ))
             score = assessment.score
-            color = _STRENGTH_COLOR[score]
             strength = (
-                f"[{color}]{_STRENGTH_LABEL[score]} ({score}/4)[/{color}]"
+                f"[bold]{_STRENGTH_LABEL[score]} ({score}/4)[/bold]"
                 if assessment.checked else "unavailable"
             )
             self.query_one("#enrol-strength", Static).update(

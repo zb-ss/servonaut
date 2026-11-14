@@ -18,14 +18,13 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.utils.instance_resolver import display_name
 from servonaut.services.shared_servers import shared_login
@@ -37,8 +36,15 @@ logger = logging.getLogger(__name__)
 _BROWSE_ROOTS = ["/home", "/var/www", "/srv", "/opt", "/usr/share/nginx", "/"]
 
 
-class DbScanRootsScreen(Screen):
+class DbScanRootsScreen(WorkspaceScreen):
     """Add / remove per-instance root paths for the DB-credential scan."""
+
+    AUTO_FOCUS = "#db_roots_list"
+    CHAT_REFLOW = True
+    # Body padding plus the Add selected directory / Remove selected /
+    # Save / Cancel row at the global button minimum.
+    CHAT_MIN_CONTENT_WIDTH = 72
+    CONTENT_NARROW_WIDTH = 88
 
     BINDINGS = [
         Binding("escape", "cancel", "Back", show=True),
@@ -57,35 +63,56 @@ class DbScanRootsScreen(Screen):
     def compose(self) -> ComposeResult:
         yield SafeHeader()
         name = escape(str(display_name(self._instance) or self._instance.get("id") or "?"))
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("DB scan roots")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static(f"📁 DB scan roots — {name}", id="db_roots_title"),
-                Static(
-                    "Extra directories to scan for app DB config. Empty = the "
-                    "built-in web roots. Browse the server below or type a path.",
-                    id="db_roots_subtitle",
-                ),
-                Static("", id="db_roots_current"),
-                OptionList(id="db_roots_list"),
-                Horizontal(
-                    Input(
-                        placeholder="/absolute/path/to/app  (Enter or 'a' to add)",
-                        id="db_roots_input",
+                Container(
+                    Static("Database scan roots", id="db_roots_title"),
+                    Static(
+                        f"Choose extra directories on [b]{name}[/b]. "
+                        "Leave the list empty to use the built-in web roots. "
+                        "Changes apply when you save.",
+                        id="db_roots_subtitle",
                     ),
-                    Button("Add", id="db_roots_add_typed", variant="primary"),
-                    id="db_roots_add_row",
+                    classes="db-view-heading",
                 ),
-                Static("[dim]Browse the server — select a directory, then 'b':[/dim]"),
-                self._build_tree(),
+                VerticalScroll(
+                    Horizontal(
+                        Vertical(
+                            Static("Directories to scan", classes="db-section-title"),
+                            Static("", id="db_roots_current"),
+                            Horizontal(
+                                Input(
+                                    placeholder="/absolute/path/to/app",
+                                    id="db_roots_input",
+                                ),
+                                Button("Add", id="db_roots_add_typed", variant="primary"),
+                                id="db_roots_add_row",
+                            ),
+                            OptionList(id="db_roots_list"),
+                            Button("Remove selected", id="db_roots_remove", variant="warning"),
+                            id="db_roots_editor",
+                        ),
+                        Vertical(
+                            Static("Browse this server", classes="db-section-title"),
+                            Static("Select a directory to add it to the scan.", classes="db-action-hint"),
+                            self._build_tree(),
+                            Button("Add selected directory", id="db_roots_add_browsed"),
+                            id="db_roots_browser",
+                        ),
+                        id="db_roots_workspace",
+                    ),
+                    id="db_roots_body",
+                ),
                 Horizontal(
-                    Button("Add selected directory", id="db_roots_add_browsed"),
-                    Button("Remove selected", id="db_roots_remove", variant="warning"),
                     Button("Save", id="db_roots_save", variant="success"),
                     Button("Cancel", id="db_roots_cancel"),
                     id="db_roots_buttons",
+                    classes="db-action-row",
                 ),
                 id="db_roots_container",
+                classes="workspace-content",
             )
         yield Footer()
 

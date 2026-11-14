@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from textual.app import App
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Static
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -166,3 +166,49 @@ class TestConfirmActionSeverity:
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
             assert app.screen.query_one("#modal_container") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirm_text", ["a[/b]c", "x[red]y"])
+async def test_confirmation_identifier_is_rendered_literally(confirm_text: str) -> None:
+    """Markup-looking identifiers stay readable and require their exact raw value."""
+    screen = _make_screen(confirm_text=confirm_text)
+    app = _WrapperApp(screen)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = screen.query_one("#confirm_prompt", Static).render()
+        field = screen.query_one("#confirm_input", Input)
+        confirm = screen.query_one("#btn_confirm", Button)
+        assert prompt.plain == f'Type "{confirm_text}" to confirm:'
+        assert field.placeholder == confirm_text
+        for value in (f" {confirm_text}", f"{confirm_text} ", confirm_text[:-1]):
+            field.value = value
+            await pilot.pause()
+            assert confirm.disabled
+        field.value = confirm_text
+        await pilot.pause()
+        assert not confirm.disabled
+
+
+@pytest.mark.asyncio
+async def test_description_and_consequences_keep_trusted_markup() -> None:
+    """Escaping the identifier does not flatten callers' formatted explanations."""
+    screen = _make_screen(
+        description="Review [bold]web-1[/bold].",
+        consequences=["Remove [italic]stored files[/italic]."],
+    )
+    app = _WrapperApp(screen)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        description = screen.query_one("#modal_description", Static).render()
+        consequence = screen.query_one(".consequence_item", Static).render()
+        assert description.plain == "Review web-1."
+        assert consequence.plain.strip() == "• Remove stored files."
+        assert any(
+            str(span.style) == "bold" and description.plain[span.start:span.end] == "web-1"
+            for span in description.spans
+        )
+        assert any(
+            str(span.style) == "italic" and consequence.plain[span.start:span.end] == "stored files"
+            for span in consequence.spans
+        )

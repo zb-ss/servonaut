@@ -3,8 +3,20 @@
    =================================================================== */
 
 ScrollableContainer {
-    background: $surface;
+    background: transparent;
     overflow-y: auto;
+}
+
+/* Page scrollers blend into the screen, but the widgets that scroll their own
+   content are type subclasses of ScrollableContainer too. Keep them on the
+   surface so a tree, a log, a text area or an open Select list still reads as
+   a field. Tables are left transparent on purpose (see DataTable in base). */
+Tree,
+RichLog,
+Log,
+TextArea,
+OptionList {
+    background: $surface;
 }
 
 /* ===================================================================

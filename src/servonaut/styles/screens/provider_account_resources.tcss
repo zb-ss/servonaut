@@ -1,0 +1,230 @@
+/* Account context stays close to inventory and its operations. */
+.provider-account-workspace .provider-account-heading-row {
+    height: auto;
+    width: 1fr;
+    margin-bottom: 1;
+    align: left top;
+}
+
+.provider-account-workspace .provider-account-heading {
+    width: 1fr;
+    height: auto;
+}
+
+.provider-account-workspace .provider-account-heading .resource-context {
+    margin: 0;
+}
+
+.provider-account-workspace .provider-account-heading-row AccountPicker {
+    width: 26;
+    height: auto;
+    margin: 0 0 0 1;
+}
+
+.provider-account-workspace .provider-account-body {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+.provider-account-workspace .provider-account-inventory {
+    width: 1fr;
+    height: auto;
+    border: round $border-blurred;
+}
+
+OVHIPManagementScreen #ip_mgmt_container .provider-account-inventory #ip_table,
+OVHFirewallScreen #firewall_container .provider-account-inventory #rules_table {
+    height: auto;
+    min-height: 6;
+    max-height: 22;
+}
+
+.provider-account-workspace .provider-account-operations {
+    width: 38;
+    height: auto;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.provider-account-workspace .provider-account-selection {
+    height: auto;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+OVHIPManagementScreen .provider-account-workspace #ip_actions,
+OVHIPManagementScreen .provider-account-workspace #rdns_btn_row,
+OVHFirewallScreen .provider-account-workspace #firewall_actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+OVHIPManagementScreen .provider-account-workspace #ip_actions Button,
+OVHIPManagementScreen .provider-account-workspace #rdns_btn_row Button,
+OVHIPManagementScreen .provider-account-workspace #move_form_panel Button,
+OVHFirewallScreen .provider-account-workspace #firewall_actions Button,
+OVHFirewallScreen .provider-account-workspace #btn_save_rule {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    margin: 0;
+}
+
+OVHIPManagementScreen .provider-account-workspace .ip_form_panel {
+    height: auto;
+    width: 1fr;
+    padding: 0;
+    margin: 1 0 0 0;
+    border: none;
+    background: transparent;
+}
+
+OVHIPManagementScreen .provider-account-workspace #move_form_title,
+OVHIPManagementScreen .provider-account-workspace #rdns_form_title,
+OVHFirewallScreen .provider-account-workspace #add_rule_title {
+    height: auto;
+    margin: 1 0;
+    color: $text-accent;
+    text-style: bold;
+}
+
+OVHFirewallScreen .provider-account-heading {
+    margin-bottom: 1;
+}
+
+OVHFirewallScreen .provider-account-workspace .provider-firewall-state {
+    height: auto;
+    width: 1fr;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    align: left middle;
+}
+
+OVHFirewallScreen .provider-firewall-status {
+    height: auto;
+    width: 1fr;
+}
+
+OVHFirewallScreen .provider-firewall-status .resource-section-title {
+    margin-bottom: 0;
+}
+
+OVHFirewallScreen .provider-firewall-state #btn_toggle {
+    width: 24;
+    height: auto;
+    min-height: 3;
+    margin-left: 1;
+}
+
+/* Usage is a summary; the two ledgers have independent native tables. */
+OVHBillingScreen .provider-billing-summary,
+OVHBillingScreen .provider-billing-ledgers {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+OVHBillingScreen .provider-account-workspace .resource-panel {
+    border: round $border-blurred;
+}
+
+OVHBillingScreen .provider-account-workspace .provider-billing-summary .provider-billing-current {
+    width: 34;
+    margin-right: 1;
+    background: transparent;
+}
+
+OVHBillingScreen .provider-account-workspace .provider-billing-summary .provider-billing-history {
+    width: 1fr;
+    margin-right: 0;
+}
+
+OVHBillingScreen .provider-account-workspace .provider-billing-invoices {
+    width: 2fr;
+    margin-right: 1;
+}
+
+OVHBillingScreen .provider-account-workspace .provider-billing-services {
+    width: 1fr;
+}
+
+OVHBillingScreen #billing_container .provider-billing-invoices #invoices_table {
+    height: auto;
+    min-height: 6;
+    max-height: 18;
+}
+
+OVHBillingScreen #billing_container .provider-billing-services #services_table {
+    height: auto;
+    min-height: 6;
+    max-height: 18;
+}
+
+OVHBillingScreen .provider-account-workspace #invoices_page_info {
+    height: auto;
+    margin-bottom: 1;
+}
+
+OVHBillingScreen .provider-account-workspace #invoice_pagination {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+}
+
+OVHBillingScreen .provider-account-workspace #invoice_pagination Button,
+OVHBillingScreen .provider-account-workspace .resource-back-actions Button {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0;
+}
+
+OVHBillingScreen .provider-account-workspace .resource-back-actions {
+    width: 22;
+}
+
+OVHIPManagementScreen.-content-narrow .provider-account-heading-row,
+OVHBillingScreen.-content-narrow .provider-account-heading-row,
+OVHIPManagementScreen.-content-narrow .provider-account-body,
+OVHFirewallScreen.-content-narrow .provider-account-body,
+OVHBillingScreen.-content-narrow .provider-billing-summary,
+OVHBillingScreen.-content-narrow .provider-billing-ledgers {
+    layout: vertical;
+}
+
+OVHIPManagementScreen.-content-narrow .provider-account-heading-row AccountPicker,
+OVHBillingScreen.-content-narrow .provider-account-heading-row AccountPicker {
+    width: 1fr;
+    margin: 1 0 0 0;
+}
+
+OVHIPManagementScreen.-content-narrow .provider-account-operations,
+OVHFirewallScreen.-content-narrow .provider-account-operations {
+    width: 1fr;
+    margin-left: 0;
+}
+
+OVHBillingScreen.-content-narrow .provider-account-workspace .provider-billing-current,
+OVHBillingScreen.-content-narrow .provider-account-workspace .provider-billing-history,
+OVHBillingScreen.-content-narrow .provider-account-workspace .provider-billing-invoices,
+OVHBillingScreen.-content-narrow .provider-account-workspace .provider-billing-services {
+    width: 1fr;
+    margin-right: 0;
+}

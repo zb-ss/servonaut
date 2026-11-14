@@ -89,10 +89,15 @@ def _line(lines: list[Strip], text: str) -> Strip:
 
 
 def _is_red(strip: Strip) -> bool:
-    return any(
-        segment.style is not None and segment.style.color is not None and segment.style.color.name == "red"
-        for segment in strip if segment.text.strip()
-    )
+    """Whether some text is drawn in the theme's error colour (a reddish hue)."""
+    for segment in strip:
+        colour = segment.style.color if segment.style is not None else None
+        if colour is None or colour.triplet is None or not segment.text.strip():
+            continue
+        red, green, blue = colour.triplet
+        if red > green and red > blue:
+            return True
+    return False
 
 
 def _is_dim(strip: Strip) -> bool:

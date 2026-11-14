@@ -1,41 +1,56 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import dataclasses
+import time
+from datetime import timedelta
 import logging
-from typing import Optional, List
+from typing import Dict, Optional, List
 
+from rich.cells import cell_len
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.content import Content
-from textual.screen import Screen
+from textual.css.query import NoMatches
+from textual.containers import Container, Grid, Vertical, VerticalScroll, Horizontal
 from textual.timer import Timer
-from textual.widgets import Footer, Input, Label, Static, TextArea
+from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
-from servonaut.utils.markup import literal
 from servonaut.utils.ssh_names import SSHRefusal
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._fleet_filter import (
+    provider_label,
+    ALL, PROVIDERS, PROVIDER_LABELS, STATES, STATE_LABELS, STATE_OTHER,
+    FleetFacets, FleetFilter, facets, next_choice, row_provider, row_state, summary,
+)
+from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
-from servonaut.widgets.instance_table import InstanceTable
+from servonaut.widgets.action_button import ActionButton, ActionRole, action_label
+from servonaut.widgets.fleet_skeleton import FleetSkeleton
+from servonaut.widgets.fleet_values import FleetValueLine, FleetValues, ValueRow, instance_values
+from servonaut.widgets.link_button import LinkButton
+from servonaut.widgets.instance_table import MARK_NEW, MARK_WAS, InstanceTable
 from servonaut.widgets.status_bar import StatusBar
-from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import (
     connection_instance,
+    display_text,
     fleet_rows,
     real_instance_id,
     reconcile_team_memory,
     refuse_unresolved,
     replace_instances,
+    row_source,
     team_rows,
 )
 from servonaut.services.memory.provider import instance_provider
-from servonaut.utils.instance_resolver import display_name, is_aws_row
+from servonaut.utils.instance_resolver import display_name, is_aws_row, row_identity
+from servonaut.utils.markup import literal
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -65,7 +80,44 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
-class InstanceListScreen(Screen):
+class FleetSummaryLine(Static):
+    """The summary under the table: the key reminder goes first when the line is too narrow."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._texts = ("", "")
+
+    def set_texts(self, full: str, short: str) -> None:
+        """Set the full wording and the shorter one used when the line is too narrow."""
+        self._texts = (full, short)
+        self._draw()
+
+    def on_resize(self) -> None:
+        """Choose the wording again for the new width."""
+        self._draw()
+
+    def _draw(self) -> None:
+        """Show the full wording when it fits, the short one otherwise."""
+        full, short = self._texts
+        width = self.size.width
+        self.update(full if width == 0 or cell_len(full) <= width else short)
+
+
+class FleetChip(Button):
+    """A quick-filter chip: one state or provider choice, with its live count."""
+
+    def __init__(self, group: str, value: str, label: str) -> None:
+        key = "f" if group == "state" else "p"
+        super().__init__(
+            label, id=f"chip_{group}_{value}", classes="fleet-chip", compact=True,
+            tooltip=f"Filter the list; press {key} to cycle these choices",
+        )
+        self.group = group
+        self.value = value
+        self.base_label = label
+
+
+class InstanceListScreen(WorkspaceScreen):
     """Screen displaying list of EC2 instances with search/filter."""
 
     @property
@@ -79,6 +131,10 @@ class InstanceListScreen(Screen):
                 tooltip="Fetch the fleet again from every provider"),
         Binding("/", "focus_search", "Search", show=True,
                 tooltip="Search instances and keyword scan results"),
+        Binding("f", "filter_state", "State", show=True,
+                tooltip="Cycle the state filter: all, running, stopped, other"),
+        Binding("p", "filter_provider", "Provider", show=True,
+                tooltip="Cycle the provider filter: all, then each provider in the list"),
         Binding("enter", "select_instance", "Actions", show=True,
                 tooltip="Open the selected server's actions"),
         # Explicit footer-visible alternative — DataTable consumes Enter for
@@ -101,53 +157,173 @@ class InstanceListScreen(Screen):
                 tooltip="Analyse the selected server's logs with AI"),
         Binding("m", "open_memory", "Memory", show=True,
                 tooltip="Open the selected server's memory (cached facts)"),
-        Binding("D", "fleet_db_scan", "DB Vault", show=True,
+        Binding("D", "fleet_db_scan", "DB vault", show=True,
                 tooltip="Scan the fleet for database credentials"),
-        Binding("k", "manage_ssh_ref", "SSH Ref", show=True,
+        Binding("k", "manage_ssh_ref", "SSH ref", show=True,
                 tooltip="Set the Bitwarden SSH key reference of the selected server"),
         Binding("v", "verify_ssh", "Verify", show=True,
                 tooltip="Check that the selected server's SSH key works"),
-        Binding("y", "copy_row", "Copy", show=True,
+        Binding("y", "copy_row", "Copy row", show=True,
                 tooltip="Copy the selected server's details"),
+        Binding("Y", "copy_value", "Copy value", show=True,
+                tooltip="Pick one value of the selected server to copy"),
+        # Only while providers are answering (see check_action); otherwise the
+        # key goes on to the focused widget as before.
+        Binding("escape", "cancel_slow_providers", "Cancel slow", show=False,
+                tooltip="Stop waiting for the providers that have not answered"),
     ]
 
     # The screen opens on the fleet table, so the arrow keys and every
     # shortcut above work straight away; "/" moves to the search box.
     AUTO_FOCUS = "InstanceTable"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 105
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (130, "-wide")]
+    # Tall enough that outlined chips (three rows) do not starve the table.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (44, "-tall")]
 
     # The footer lists as many shortcuts as fit on one line, in this order
     # of usefulness; the rest stay bound, and the help screen lists them all.
     FOOTER_PRIORITY = (
-        "select_instance",
+        "refresh",
         "focus_search",
+        "filter_state",
+        "filter_provider",
         "ssh_connect",
+        "select_instance",
         "run_command",
         "browse_files",
         "view_logs",
         "open_memory",
         "scp_transfer",
-        "refresh",
         "ai_analysis",
         "copy_row",
         "verify_ssh",
         "manage_ssh_ref",
         "fleet_db_scan",
+        "copy_value",
     )
 
     # Debounce delay for search input (seconds)
     _SEARCH_DEBOUNCE = 0.15
 
+    # How long a refresh marks the servers it added or changed (seconds).
+    _MARK_SECONDS = 6.0
+
+    # How often the spinner turns and the providers' progress is read (seconds).
+    _SPINNER_SECONDS = 0.15
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "cancel_slow_providers":
+            # While typing, Esc keeps its usual meaning.
+            return self._load.active and not isinstance(self.focused, (Input, TextArea))
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     @property
     def active_bindings(self):
         """Active bindings, with the footer kept to the shortcuts that fit."""
-        return fit_footer(super().active_bindings, self, self.FOOTER_PRIORITY)
+        return fit_footer(
+            self._without_inspector_keys(super().active_bindings), self, self.FOOTER_PRIORITY,
+        )
+
+    # Actions the inspector's buttons already show with their keys.
+    _INSPECTOR_ACTIONS = frozenset({
+        "browse_files", "scp_transfer", "run_command", "view_logs", "open_memory", "ai_analysis",
+    })
+
+    def _without_inspector_keys(self, bindings: dict) -> dict:
+        """*bindings* without the footer entries the visible inspector repeats."""
+        try:
+            if not self.query_one("#fleet_inspector").display:
+                return bindings
+        except NoMatches:
+            return bindings
+        return {
+            key: (
+                active._replace(binding=dataclasses.replace(active.binding, show=False))
+                if active.node is self and active.binding.action in self._INSPECTOR_ACTIONS
+                else active
+            )
+            for key, active in bindings.items()
+        }
 
     def on_resize(self) -> None:
         """Re-fit the footer to the new width."""
         self.refresh_bindings()
+        self.call_after_refresh(self._sync_roomy)
+
+    def on_mouse_up(self) -> None:
+        """A drag that began in a value may end anywhere: the value hands the focus back."""
+        self.app.call_later(self._values_give_focus_back)
+
+    def _values_give_focus_back(self) -> None:
+        for row in self.query(ValueRow):
+            row.give_focus_back()
+
+    def _set_layout_class(self, name: str, enabled: bool) -> None:
+        super()._set_layout_class(name, enabled)
+        self._sync_roomy()
+
+    def _sync_roomy(self) -> None:
+        """Mark a terminal with room for outlined chips: wide, tall, nothing beside the table."""
+        roomy = (
+            self.has_class("-wide") and self.has_class("-tall")
+            and not self.has_class("-content-narrow") and not self.has_class("-chat-open")
+        )
+        if self.has_class("-roomy") != roomy:
+            self.set_class(roomy, "-roomy")
+        # A compact chip keeps its border off in every theme, hovered or not;
+        # the outlined pill is the non-compact one.
+        for chip in self.query(FleetChip):
+            chip.compact = not roomy
+        self._sync_table_room()
+        self.call_after_refresh(self._sync_fresh_layout)
+        self.call_after_refresh(self._sync_memory_note)
+
+    def _sync_table_room(self) -> None:
+        """Tell the table whether the inspector sits beside it (its Details then cover Region and Type)."""
+        beside = not (
+            self.has_class("-narrow") or self.has_class("-content-narrow")
+            or self.has_class("-chat-open")
+        )
+        try:
+            table = self.query_one(InstanceTable)
+        except NoMatches:
+            return
+        if table.inspector_beside != beside:
+            table.inspector_beside = beside
+            table.replan()
+
+    def _sync_fresh_layout(self) -> None:
+        """Put the freshness on the chip row only when it fits there, whole.
+
+        Measured, not guessed from the width class: the chips take what they
+        take, and the age and the Refresh link need their own cells. When they
+        do not fit, they sit right-aligned on a row of their own.
+        """
+        try:
+            filters = self.query_one("#fleet_filters")
+            # The last chip's one-cell margin sits outside the row's own width.
+            chips = self.query_one("#fleet_chip_row").outer_size.width + 1
+            refresh = self.query_one("#fleet_refresh").outer_size.width
+        except NoMatches:
+            return
+        stacked = (
+            self.has_class("-narrow") or self.has_class("-content-narrow")
+            or self.has_class("-chat-open")
+        )
+        inline_age = self._inline_age(self._updated_text())
+        age = cell_len(f"{inline_age} ·") if inline_age else 0
+        inline = not stacked and 0 < chips and chips + age + refresh <= filters.size.width
+        if filters.has_class("-fresh-inline") != inline:
+            filters.set_class(inline, "-fresh-inline")
+        if inline != self._fresh_inline:
+            self._fresh_inline = inline
+            self._updated_shown = None
+        self._sync_updated()
 
     def __init__(self, initial_search: str = "") -> None:
         """Initialize instance list screen.
@@ -164,16 +340,33 @@ class InstanceListScreen(Screen):
         self._initial_search = initial_search
         # (provider, account) pairs already reported as configured twice.
         self._reported_duplicate_accounts: set = set()
+        self._filter = FleetFilter()
+        self._load = FleetLoad()
+        # What the last refreshes did to each server, shown for a few seconds.
+        self._marks: Dict[str, str] = {}
+        self._marks_timer: Optional[Timer] = None
+        self._load_timer: Optional[Timer] = None
+        # The worker each provider's current load runs in: a worker replaced by
+        # a newer refresh reports "cancelled" for a load that is still going.
+        self._load_workers: Dict[str, Worker] = {}
+        self._last_updated: Optional[float] = None
+        self._refresh_failed = False
+        self._cache_written_at: Optional[float] = None
+        self._updated_shown: Optional[str] = None
+        self._fresh_inline = False
+        self._updated_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Vertical(id="instance_list_container"):
+        yield WorkspaceControls("Servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Vertical(id="instance_list_container", classes="workspace-content"):
+                yield Static("Search", id="fleet_search_label", markup=False)
                 yield FleetSearchInput(
                     self._shortcut_characters(),
-                    placeholder="Search instances and keywords...",
+                    placeholder="Search servers, IPs and keywords…",
                     id="search_input",
                 )
                 # Memory discoverability banner — only visible when no
@@ -182,7 +375,7 @@ class InstanceListScreen(Screen):
                 # short terminal every row it takes is a row of servers less.
                 banner = Static(
                     "[bold]🧠 New:[/bold] press [b]m[/b] on a row, or open "
-                    "[b]Fleet Memory[/b] in the sidebar, to cache each server's "
+                    "[b]Fleet memory[/b] in the sidebar, to cache each server's "
                     "facts for the chat panel and MCP clients.",
                     id="memory_discover_banner",
                     classes="hidden",
@@ -193,13 +386,85 @@ class InstanceListScreen(Screen):
                     "without an SSH round-trip."
                 )
                 yield banner
-                yield ProgressIndicator()
-                yield InstanceTable()
-                yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
-                yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
+                yield Static("", id="fleet_load_status", markup=False)
+                yield from self._compose_filters()
+                with Horizontal(id="fleet_workspace_row", classes="fleet-workspace-row"):
+                    with Vertical(id="fleet_table_column"):
+                        yield InstanceTable()
+                        yield FleetSkeleton(id="fleet_skeleton")
+                        yield FleetSummaryLine("", id="fleet_summary", markup=False)
+                    with Vertical(id="fleet_inspector", classes="fleet-inspector"):
+                        yield Static(
+                            "[bold]Selected server[/bold]\n[dim]No server selected[/dim]",
+                            id="fleet_inspector_header",
+                            classes="fleet-inspector-header",
+                        )
+                        yield self._inspector_button(
+                            "SSH connect", "s", "fleet_btn_ssh", role="primary",
+                        )
+                        with Container(id="fleet_inspector_grid", classes="fleet-inspector-grid"):
+                            yield self._inspector_button("Browse", "b", "fleet_btn_browse")
+                            yield self._inspector_button("Transfer", "t", "fleet_btn_scp")
+                            yield self._inspector_button("Command", "c", "fleet_btn_command")
+                            yield self._inspector_button("Logs", "l", "fleet_btn_logs")
+                            yield self._inspector_button("Memory", "m", "fleet_btn_memory")
+                            yield self._inspector_button("AI", "a", "fleet_btn_ai")
+                        yield self._inspector_button("All actions", "enter", "fleet_btn_actions")
+                        with Horizontal(id="fleet_values_heading"):
+                            yield Static("Details", id="fleet_values_title", markup=False)
+                            yield self._copy_row_button("fleet_copy_row")
+                        yield FleetValues(id="fleet_values", classes="fleet-values")
+                        yield Static(
+                            "Click a value to copy it", id="fleet_values_hint", markup=False,
+                        )
+                yield Label("[bold]Keyword matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
+        with Vertical(id="fleet-bottom"):
+            with Horizontal(id="fleet_value_bar"):
+                yield self._copy_row_button("fleet_copy_row_line")
+                yield FleetValueLine(id="fleet_value_line", classes="fleet-values")
             yield StatusBar()
-        yield Footer()
+            yield Footer()
+
+    def _compose_filters(self) -> ComposeResult:
+        """The chip rows and the summary line under the search box."""
+        with Grid(id="fleet_filters"):
+            with Horizontal(id="fleet_chip_row"):
+                with Horizontal(id="fleet_state_chips"):
+                    yield FleetChip("state", ALL, "All")
+                    for state in STATES:
+                        yield FleetChip("state", state, STATE_LABELS[state])
+                with Horizontal(id="fleet_provider_chips"):
+                    yield Static("│", classes="fleet-chip-divider", markup=False)
+                    for provider in PROVIDERS:
+                        yield FleetChip("provider", provider, PROVIDER_LABELS[provider])
+            with Horizontal(id="fleet_fresh"):
+                yield Static("", id="fleet_updated", markup=False)
+                refresh = LinkButton(
+                    "Refresh", key="r", id="fleet_refresh",
+                    tooltip="Fetch the fleet again from every provider",
+                )
+                refresh.can_focus = False
+                yield refresh
+
+    @staticmethod
+    def _copy_row_button(button_id: str) -> Button:
+        """The "Copy row" link beside the values (it keeps the Tab order)."""
+        button = LinkButton(
+            "Copy row", key="y", id=button_id, classes="fleet-copy-row",
+            disabled=True, tooltip="Copy the selected server's details",
+        )
+        button.can_focus = False
+        return button
+
+    @staticmethod
+    def _inspector_button(
+        text: str, key: str, button_id: str, role: ActionRole = "default",
+    ) -> ActionButton:
+        """A quick-action button with its key as a quiet hint; it keeps the Tab order."""
+        button = ActionButton(text, key, role=role, id=button_id)
+        button.can_focus = False
+        return button
 
     @classmethod
     def _shortcut_characters(cls) -> frozenset[str]:
@@ -225,6 +490,11 @@ class InstanceListScreen(Screen):
                 settle("startup")
             self._release_team_memory_hold()
 
+    def on_screen_resume(self) -> None:
+        """Keep "Updated 12 s ago" current without waiting for a refresh."""
+        if self._updated_timer is None:
+            self._updated_timer = self.set_interval(1.0, self._sync_updated)
+
     def _load_on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
 
@@ -238,6 +508,7 @@ class InstanceListScreen(Screen):
         # Hide keyword panel until a search is performed
         self.query_one("#keyword_matches_label").display = False
         self.query_one("#keyword_matches_container").display = False
+        self._restore_session_state()
 
         # Pre-fill search if requested by the caller (e.g. sidebar
         # "Hetzner Servers" button passes initial_search="hetzner").
@@ -301,11 +572,9 @@ class InstanceListScreen(Screen):
         inventory = self.app.provider_inventory("aws")
         if inventory is None:
             return
-        progress = self.query_one(ProgressIndicator)
-        progress.start("Loading instances...")
-
+        self._begin_load("aws")
         self._expect_team_memory_load("aws")
-        self.run_worker(
+        self._run_load("aws",
             inventory.fetch_instances_cached(force_refresh=force_refresh),
             name="fetch_instances",
             exclusive=True,
@@ -326,8 +595,9 @@ class InstanceListScreen(Screen):
 
         inventory = self.app.provider_inventory("aws")
         if inventory is not None:
+            self._begin_load("aws")
             self._expect_team_memory_load("aws")
-            self.run_worker(
+            self._run_load("aws",
                 inventory.fetch_instances_cached(force_refresh=True),
                 name="background_refresh",
                 exclusive=True,
@@ -345,8 +615,9 @@ class InstanceListScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting OVH instance refresh")
+        self._begin_load("ovh")
         self._expect_team_memory_load("ovh")
-        self.run_worker(
+        self._run_load("ovh",
             inventory.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
             exclusive=False,
@@ -366,8 +637,9 @@ class InstanceListScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting Hetzner instance refresh")
+        self._begin_load("hetzner")
         self._expect_team_memory_load("hetzner")
-        self.run_worker(
+        self._run_load("hetzner",
             inventory.fetch_instances_cached(force_refresh=True),
             name="hetzner_refresh",
             exclusive=False,
@@ -390,12 +662,13 @@ class InstanceListScreen(Screen):
         if team_service is None or auth is None or not auth.is_authenticated:
             self._release_team_memory_hold()
             if any(row.get("is_shared") is True for row in self.app.instances or []):
-                self._instances = replace_instances(self.app, "shared", [])
+                self._replace_fleet("shared", [])
                 self._update_table()
                 self._update_status_bar()
             return
+        self._begin_load("shared")
         self._expect_team_memory_load("shared")
-        self.run_worker(
+        self._run_load("shared",
             load_shared_servers(team_service),
             name="shared_refresh",
             group="shared_servers",
@@ -462,7 +735,7 @@ class InstanceListScreen(Screen):
         refresh_rules = getattr(self.app, "refresh_team_policies", None)
         if callable(refresh_rules):
             refresh_rules(found.teams)
-        self._instances = replace_instances(self.app, "shared", found.rows)
+        self._replace_fleet("shared", found.rows)
         self._update_table()
         self._update_status_bar()
         if not self._reconcile_team_memory():
@@ -475,12 +748,18 @@ class InstanceListScreen(Screen):
             )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Handle worker state changes.
+        """Handle worker state changes: list the rows, then report the provider's outcome.
 
         Args:
             event: Worker state changed event.
         """
         self._settle_team_memory_load(event)
+        self._handle_worker_state(event)
+        self._record_load_outcome(event)
+        self._forget_finished_load_worker(event)
+
+    def _handle_worker_state(self, event: Worker.StateChanged) -> None:
+        """List what a finished inventory worker found (or report why it failed)."""
         if event.state == WorkerState.CANCELLED:
             # A cancelled worker counts as finished but has no result.
             # Pressing R cancels the refreshes still running and starts new
@@ -504,7 +783,7 @@ class InstanceListScreen(Screen):
             else:
                 new_ovh = event.worker.result or []
                 # Keeps the real rows aside; lists them redacted in demo mode.
-                self._instances = replace_instances(self.app, "ovh", new_ovh)
+                self._replace_fleet("ovh", new_ovh)
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("ovh")
@@ -540,7 +819,7 @@ class InstanceListScreen(Screen):
             else:
                 new_hetzner = event.worker.result or []
                 # Keeps the real rows aside; lists them redacted in demo mode.
-                self._instances = replace_instances(self.app, "hetzner", new_hetzner)
+                self._replace_fleet("hetzner", new_hetzner)
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("hetzner")
@@ -570,11 +849,6 @@ class InstanceListScreen(Screen):
             if event.worker.is_finished:
                 is_background = event.worker.name == "background_refresh"
 
-                # Stop progress indicator for foreground fetches
-                if not is_background:
-                    progress = self.query_one(ProgressIndicator)
-                    progress.stop()
-
                 if event.worker.error:
                     self._release_team_memory_hold()
                     self._handle_fetch_error(event.worker.error, is_background)
@@ -593,9 +867,8 @@ class InstanceListScreen(Screen):
                         hetzner.get_cached_instances() if hetzner is not None else []
                     )
                     # Keeps the real rows aside; lists them redacted in demo mode.
-                    self._instances = replace_instances(
-                        self.app, None,
-                        new_instances + custom + ovh_instances + hetzner_instances,
+                    self._replace_fleet(
+                        None, new_instances + custom + ovh_instances + hetzner_instances,
                     )
                     self._update_table()
                     self._update_status_bar()
@@ -711,18 +984,16 @@ class InstanceListScreen(Screen):
             self._update_status_bar()
 
     def refresh_memory_status(self) -> None:
-        """Refresh the instance table's memory column after a fleet auto-scan.
+        """Redraw the memory line of the inspector after a fleet auto-scan.
 
         Called duck-typed by ``app._refresh_fleet_panels_after_scan`` when a
         background auto-scan cycle completes while this screen is mounted, so
-        the "Mem" status column reflects freshly-probed servers in real time.
-        Exception-safe: a no-op if the table isn't mounted yet.
+        the status reflects freshly-probed servers in real time.
         """
         try:
-            table = self.query_one(InstanceTable)
-        except Exception:
+            self._update_detail_panel()
+        except NoMatches:
             return
-        table.refresh_memory_status()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fleet, status bar and detail pane after a demo toggle."""
@@ -730,17 +1001,20 @@ class InstanceListScreen(Screen):
         self._update_table()
         self._update_status_bar()
         self._update_detail_panel()
+        self._render_load()
 
     def _update_table(self) -> None:
         """Update instance table with current data, preserving active filter."""
         table = self.query_one(InstanceTable)
+        # The search text and the chips stay applied through a refresh, and
+        # the table keeps the cursor on its server.
+        table.configure_filters(
+            self.query_one("#search_input", Input).value, self._filter.matches,
+        )
+        table.set_marks(self._marks, redraw=False)
         table.populate(self._instances)
-        # Re-apply the current search filter so a background refresh
-        # doesn't wipe the user's active query.
-        current_query = self.query_one("#search_input", Input).value
-        if current_query:
-            table.filter(current_query)
         self._sync_memory_banner()
+        self._update_detail_panel()
 
     def _sync_memory_banner(self) -> None:
         """Show the memory-discoverability banner only when no server has memory.
@@ -764,19 +1038,343 @@ class InstanceListScreen(Screen):
         banner.display = not has_any
 
     def _update_status_bar(self) -> None:
-        """Update status bar with current counts and cache age."""
-        status_bar = self.query_one(StatusBar)
+        """Refresh the cache age and the filter-driven parts of the screen."""
+        # The cache age is shown once, next to the summary (see _updated_text);
+        # reading it here also keeps the file off the once-a-second path.
+        self._note_cache_age(self.app.cache_service.get_age())
+        self._sync_filter_ui()
+
+    def _note_cache_age(self, age: object) -> None:
+        """Remember when the cache was written, to count its age without reading it again."""
+        self._cache_written_at = (
+            time.time() - age.total_seconds() if isinstance(age, timedelta) else None
+        )
+
+    def _restore_session_state(self) -> None:
+        """Bring back the filters and the refresh time this session left behind."""
+        state = getattr(self.app, "workspace_state", None)
+        state_filter = getattr(state, "fleet_state_filter", None)
+        provider_filter = getattr(state, "fleet_provider_filter", None)
+        if isinstance(state_filter, str) and isinstance(provider_filter, str):
+            self._filter = FleetFilter().with_state(state_filter).with_provider(provider_filter)
+        updated = getattr(state, "fleet_updated_at", None)
+        if isinstance(updated, float):
+            self._last_updated = updated
+        self._sync_filter_ui()
+
+    def _remember_filter(self) -> None:
+        state = getattr(self.app, "workspace_state", None)
+        if state is not None:
+            state.fleet_state_filter = self._filter.state
+            state.fleet_provider_filter = self._filter.provider
+
+    def _sync_filter_ui(self) -> None:
+        """Show the chips, their counts and the summary line for what the table lists."""
+        try:
+            table = self.query_one(InstanceTable)
+            counts = facets(table.searched_rows(), self._filter)
+            self._sync_chips(counts, table._all_instances)
+            self._sync_summary(len(table._filtered_instances), len(table._all_instances))
+        except NoMatches:
+            return
+        self._sync_updated()
+
+    def _sync_chips(self, counts: FleetFacets, fleet: List[dict]) -> None:
+        """Label each chip with its count; show only the choices the fleet offers."""
+        present = {row_provider(row) for row in fleet} | {row_state(row) for row in fleet}
+        for chip in self.query(FleetChip):
+            if chip.value == ALL:
+                number, shown = counts.total, True
+                active = not self._filter.is_active
+            elif chip.group == "state":
+                number = counts.states[chip.value]
+                active = self._filter.state == chip.value
+                shown = chip.value != STATE_OTHER or chip.value in present or active
+            else:
+                number = counts.providers[chip.value]
+                active = self._filter.provider == chip.value
+                shown = chip.value in present or active
+            label = self._chip_label(chip, number)
+            if label != chip.label:
+                chip.label = label
+                # The chip is as wide as its words: measure them again.
+                chip.refresh(layout=True)
+                self.call_after_refresh(self._sync_fresh_layout)
+            chip.set_class(active, "--chosen")
+            chip.display = shown
+
+    @staticmethod
+    def _chip_label(chip: FleetChip, number: int) -> Content:
+        glyphs = {"running": ("●", "$text-success"), "stopped": ("●", "$text-error"),
+                  STATE_OTHER: ("○", "$text-muted")}
+        glyph = glyphs.get(chip.value) if chip.group == "state" else None
+        text = f"{chip.base_label} {number}"
+        if glyph is None:
+            return Content(text)
+        return Content.assemble(literal(glyph[0], glyph[1]), " ", text)
+
+    def _sync_summary(self, shown: int, total: int) -> None:
+        query = self.query_one("#search_input", Input).value.strip()
+        self.query_one("#fleet_summary", FleetSummaryLine).set_texts(
+            summary(shown, total, self._filter, query),
+            summary(shown, total, self._filter, query, hint=False),
+        )
+
+    def _sync_updated(self) -> None:
+        """Say how fresh the list is, redrawing only when the words change.
+
+        On the chip row only the age fits; on its own row the full words show.
+        """
+        full = self._updated_text()
+        text = self._inline_age(full) if self._fresh_inline else full
+        if text == self._updated_shown:
+            return
+        try:
+            label = self.query_one("#fleet_updated", Static)
+            label.update(f"{text} ·" if text else "")
+            label.tooltip = full or None
+        except NoMatches:
+            return
+        self._updated_shown = text
+        self.call_after_refresh(self._sync_fresh_layout)
+
+    @staticmethod
+    def _inline_age(full: str) -> str:
+        """*full* cut down to the age alone: "5 min ago", or "Refresh failed"."""
+        if full.startswith("Refresh failed"):
+            return "Refresh failed"
+        for prefix in ("Updated ", "Cached ", "cached "):
+            if full.startswith(prefix):
+                return full[len(prefix):]
+        return full
+
+    def _cache_ago(self) -> str:
+        if self._cache_written_at is None or not self._instances:
+            return ""
+        return format_ago(time.time() - self._cache_written_at)
+
+    def _updated_text(self) -> str:
+        """The freshness label; empty while the refresh line already says it."""
+        if self._load.active and not self._load.first_run:
+            return ""
+        cached = f"cached {self._cache_ago()}" if self._cache_ago() else ""
+        if self._refresh_failed:
+            return f"Refresh failed · {cached}" if cached else "Refresh failed"
+        if self._last_updated is not None:
+            return f"Updated {format_ago(time.time() - self._last_updated)}"
+        return cached.capitalize()
+
+    def _set_filter(self, new_filter: FleetFilter) -> None:
+        """Apply a new chip selection to the table, the inspector and the chips."""
+        if new_filter == self._filter:
+            return
+        self._filter = new_filter
+        self._remember_filter()
         table = self.query_one(InstanceTable)
+        table.filter(self.query_one("#search_input", Input).value, self._filter.matches)
+        self._update_status_bar()
+        self._update_detail_panel()
 
-        # Update counts: the servers listed (a shared server that is also
-        # one of the user's own is listed once).
-        total = len(table._all_instances)
-        filtered = len(table._filtered_instances)
-        status_bar.update_instance_count(total, filtered)
+    def _present_in_fleet(self, value: str) -> bool:
+        rows = self.query_one(InstanceTable)._all_instances
+        if value in STATES:
+            return value != STATE_OTHER or any(row_state(r) == value for r in rows)
+        return any(row_provider(r) == value for r in rows)
 
-        # Update cache age
-        cache_age = self.app.cache_service.get_age()
-        status_bar.update_cache_age(cache_age)
+    def action_filter_state(self) -> None:
+        """Cycle the state filter: all, running, stopped, other."""
+        choice = next_choice(self._filter.state, STATES, self._present_in_fleet)
+        self._set_filter(self._filter.with_state(choice))
+
+    def action_filter_provider(self) -> None:
+        """Cycle the provider filter through the providers in the list."""
+        choice = next_choice(self._filter.provider, PROVIDERS, self._present_in_fleet)
+        self._set_filter(self._filter.with_provider(choice))
+
+    def _press_chip(self, chip: FleetChip) -> None:
+        if chip.value == ALL:
+            self._set_filter(FleetFilter())
+        elif chip.group == "state":
+            self._set_filter(self._filter.with_state(chip.value))
+        else:
+            self._set_filter(self._filter.with_provider(chip.value))
+
+    # ------------------------------------------------------------------
+    # Loading and refresh reporting
+    # ------------------------------------------------------------------
+
+    def _replace_fleet(self, source: Optional[str], rows: List[dict]) -> None:
+        """List *rows* as *source*'s servers and remember what changed on screen."""
+        before = {
+            identity: (row_source(row), str(row.get("state") or ""))
+            for row in self._instances
+            if (identity := row_identity(row))
+        }
+        self._instances = replace_instances(self.app, source, rows)
+        self._mark_changes(before)
+
+    def _mark_changes(self, before: Dict[str, tuple]) -> None:
+        """Mark servers that are new, or changed state, since *before*.
+
+        A provider that listed nothing before is loading for the first time:
+        everything it brings would be new, which says nothing, so none of it
+        is marked.
+        """
+        had_rows = {source for source, _state in before.values()}
+        marks: Dict[str, str] = {}
+        for row in self._instances:
+            identity = row_identity(row)
+            if identity is None:
+                continue
+            known = before.get(identity)
+            if known is None:
+                if row_source(row) in had_rows:
+                    marks[identity] = MARK_NEW
+            elif known[1] and known[1] != str(row.get("state") or ""):
+                marks[identity] = MARK_WAS.format(state=known[1])
+        if not marks:
+            return
+        self._marks.update(marks)
+        if self._marks_timer is not None:
+            self._marks_timer.stop()
+        self._marks_timer = self.set_timer(self._MARK_SECONDS, self._clear_marks)
+
+    def _clear_marks(self) -> None:
+        self._marks = {}
+        self._marks_timer = None
+        try:
+            self.query_one(InstanceTable).set_marks({})
+        except NoMatches:
+            return
+
+    def _begin_load(self, key: str) -> None:
+        """A provider started answering: say so (see ``_fleet_load``)."""
+        inventory = self.app.provider_inventory(key) if key != "shared" else None
+        accounts = len(getattr(inventory, "bindings", None) or ())
+        self._load.start(
+            key, accounts=accounts, has_rows=bool(self._instances),
+            cached_age=self._cached_age_text(),
+        )
+        self._render_load()
+
+    def _cached_age_text(self) -> str:
+        return self._cache_ago()
+
+    def _run_load(self, key: str, work, **kwargs) -> None:
+        """Start *key*'s load in a worker and remember it as the one that owns the load."""
+        self._load_workers[key] = self.run_worker(work, **kwargs)
+
+    def _forget_finished_load_worker(self, event: Worker.StateChanged) -> None:
+        """A load's worker ended: it no longer owns the provider's load."""
+        key = self._LOAD_NAMES.get(event.worker.name)
+        if key is not None and event.worker.is_finished and self._load_workers.get(key) is event.worker:
+            del self._load_workers[key]
+
+    def _record_load_outcome(self, event: Worker.StateChanged) -> None:
+        """A provider's worker ended: record its count, or why its rows are stale."""
+        key = self._LOAD_NAMES.get(event.worker.name)
+        if key is None:
+            return
+        if event.state == WorkerState.CANCELLED:
+            if self._load_workers.get(key) is event.worker:
+                self._record_cancelled(key)
+            return
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
+            return
+        if key == "shared":
+            self._load.drop("shared")
+        else:
+            error = self._load_error(key, event.worker)
+            count = sum(1 for row in self._instances if row_source(row) == key)
+            self._load.finish(key, count=count, error=error)
+        if not self._load.active:
+            self._cycle_ended()
+        self._render_load()
+
+    def _record_cancelled(self, key: str) -> None:
+        """A provider's worker was cancelled: its cached rows stay, marked stale."""
+        if key == "shared":
+            self._load.drop("shared")
+        else:
+            count = sum(1 for row in self._instances if row_source(row) == key)
+            self._load.cancel(key, count=count)
+        if not self._load.active:
+            self._cycle_ended()
+        self._render_load()
+
+    def action_cancel_slow_providers(self) -> None:
+        """Stop waiting for the providers that have not answered; the others keep their rows."""
+        pending = {load.key for load in self._load.pending}
+        for worker in list(self.workers):
+            if self._LOAD_NAMES.get(worker.name) in pending and not worker.is_finished:
+                worker.cancel()
+
+    def _cycle_ended(self) -> None:
+        """Claim "Updated" only if some provider really answered with fresh rows."""
+        if self._load.delivered:
+            self._last_updated = time.time()
+            self._refresh_failed = False
+            state = getattr(self.app, "workspace_state", None)
+            if state is not None:
+                state.fleet_updated_at = self._last_updated
+        elif self._load.problems:
+            self._refresh_failed = True
+        self._sync_updated()
+
+    def _load_error(self, key: str, worker: Worker) -> str:
+        """Why a provider's rows are not fresh, or "" when they are."""
+        if worker.error:
+            reason = str(worker.error) or type(worker.error).__name__
+        else:
+            reported = getattr(self.app.provider_inventory(key), "last_fetch_error", None)
+            reason = reported if isinstance(reported, str) else ""
+        if reason and key == "ovh" and self.app.demo_mode:
+            # Like the refresh toast: OVH details name Public Cloud project ids.
+            return "could not refresh"
+        return reason
+
+    def _render_load(self) -> None:
+        """Show the load report above the list, or hide it when there is none."""
+        try:
+            status = self.query_one("#fleet_load_status", Static)
+        except NoMatches:
+            return
+        content = render_load(self._load, lambda text: display_text(self.app, text))
+        status.display = content is not None
+        if content is not None:
+            status.update(content)
+        self._sync_load_timer()
+        self._sync_skeleton()
+        self._sync_updated()
+
+    def _sync_load_timer(self) -> None:
+        """Turn the spinner while a provider is answering, and only then."""
+        if self._load.active and self._load_timer is None:
+            self._load_timer = self.set_interval(self._SPINNER_SECONDS, self._tick_load)
+        elif not self._load.active and self._load_timer is not None:
+            self._load_timer.stop()
+            self._load_timer = None
+
+    def _tick_load(self) -> None:
+        """Turn the spinner one step and read where each provider's listing is."""
+        moved = self.app.animation_level != "none"
+        if moved:
+            self._load.frame += 1
+        for load in self._load.pending:
+            inventory = self.app.provider_inventory(load.key) if load.key != "shared" else None
+            progress = getattr(inventory, "load_progress", None)
+            moved = self._load.note_progress(load.key, progress) or moved
+        if moved:
+            self._render_load()
+
+    def _sync_skeleton(self) -> None:
+        """Show placeholder rows below the servers while the first listing fills."""
+        waiting = self._load.active and self._load.first_run
+        try:
+            self.query_one(FleetSkeleton).display = waiting
+            self.query_one(InstanceTable).set_class(waiting, "--loading")
+        except NoMatches:
+            return
 
     def on_data_table_row_highlighted(self, event) -> None:
         """Update detail panel when table cursor moves."""
@@ -797,40 +1395,79 @@ class InstanceListScreen(Screen):
         self.action_select_instance()
 
     def _update_detail_panel(self) -> None:
-        """Show selected instance metadata in the detail panel."""
+        """Show selected instance metadata in the detail panel and inspector."""
         table = self.query_one(InstanceTable)
         instance = table.get_selected_instance()
-        detail = self.query_one("#instance_detail", TextArea)
+        for copy_row in self.query(".fleet-copy-row"):
+            copy_row.disabled = not instance
+        for values in self.query(".fleet-values"):
+            values.set_instance(instance)
+        self._update_inspector_panel(instance)
+        self._sync_memory_note()
 
-        if not instance:
-            detail.load_text("")
+    def _update_inspector_panel(self, instance: Optional[dict]) -> None:
+        """Update the right-hand Selected server quick-action inspector."""
+        try:
+            header = self.query_one("#fleet_inspector_header", Static)
+        except NoMatches:
             return
+        for btn in self.query("#fleet_inspector Button"):
+            btn.disabled = not instance
+        if not instance:
+            header.update("[bold]Selected server[/bold]\n[dim]No server selected[/dim]")
+            return
+        name = display_name(instance) or str(instance.get("id") or "Unnamed")
+        provider = provider_label(instance)
+        address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
+        # Server-sourced text is content, never markup: a name written like a
+        # markup link must neither crash the screen nor run an action.
+        header.update(Content.assemble(
+            literal(name, "bold $text-accent"),
+            "  ",
+            self._inspector_state_badge(instance),
+            "\n",
+            literal(f"{provider} · {address}", "dim"),
+            "\n",
+            self._memory_line(instance),
+        ))
 
-        parts = []
-        if instance.get("account_qualified") and instance.get("account"):
-            # Several accounts of this provider: say which one the server is in.
-            parts.append(f"Account: {instance['account']}")
-            if instance.get("account_id"):
-                parts.append(f"Account ID: {instance['account_id']}")
-        for key, label in [
-            ("name", "Name"),
-            ("id", "ID"),
-            ("type", "Type"),
-            ("state", "State"),
-            ("public_ip", "Public IP"),
-            ("private_ip", "Private IP"),
-            ("region", "Region"),
-            ("provider", "Provider"),
-            ("group", "Group"),
-            ("key_name", "Key"),
-            ("username", "Username"),
-            ("port", "Port"),
-        ]:
-            val = instance.get(key)
-            if val:
-                parts.append(f"{label}: {val}")
+    def _sync_memory_note(self) -> None:
+        """Say the selected server's memory status in the status bar while the inspector is hidden."""
+        try:
+            hidden = not self.query_one("#fleet_inspector").display
+            instance = self.query_one(InstanceTable).get_selected_instance()
+            bar = self.query_one(StatusBar)
+        except NoMatches:
+            return
+        bar.set_note(self._memory_line(instance).plain if hidden and instance else "")
 
-        detail.load_text("  |  ".join(parts))
+    def _memory_line(self, instance: dict) -> Content:
+        """Whether the server's memory (cached facts) is fresh, stale, off or missing."""
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return literal("Memory unavailable", "dim")
+        from servonaut.screens.fleet_memory import (
+            STATUS_FRESH, STATUS_OPT_OUT, STATUS_STALE, compute_memory_status,
+        )
+        try:
+            status = compute_memory_status(instance, memory_service)
+        except Exception:  # noqa: BLE001 - a broken memory store must not hide the server
+            return literal("Memory unavailable", "dim")
+        words = {
+            STATUS_FRESH: ("● Memory fresh", "$text-success"),
+            STATUS_STALE: ("● Memory stale", "$text-warning"),
+            STATUS_OPT_OUT: ("⛔ Memory off", "$text-error"),
+        }
+        text, style = words.get(status, ("○ No memory yet", "dim"))
+        return literal(text, style)
+
+    @staticmethod
+    def _inspector_state_badge(instance: dict) -> Content:
+        """The state marker; a server without a state reads as unknown, not running."""
+        state = str(instance.get("state") or "").strip() or "unknown"
+        if state == "running":
+            return literal(f"● {state}", "$text-success")
+        return literal(f"○ {state}", "dim")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
@@ -846,8 +1483,9 @@ class InstanceListScreen(Screen):
     def _apply_search_filter(self, value: str) -> None:
         """Apply search filter and keyword search (called after debounce)."""
         table = self.query_one(InstanceTable)
-        table.filter(value)
+        table.filter(value, self._filter.matches)
         self._update_status_bar()
+        self._update_detail_panel()
 
         query = value.strip()
         if len(query) >= 2:
@@ -897,15 +1535,15 @@ class InstanceListScreen(Screen):
             if len(content) > 200:
                 content = content[:200] + "..."
 
-            result_text = Content.assemble(
+            # Scan output is raw text from the server: content, not markup.
+            container.mount(Static(Content.assemble(
                 literal(f"Server: {server_id}", "bold"),
                 "\n  ",
                 literal(f"Source: {source}"),
                 "\n  ",
                 literal(content, "dim"),
                 "\n",
-            )
-            container.mount(Static(result_text))
+            )))
 
     def _clear_keyword_results(self) -> None:
         """Hide and clear keyword results panel."""
@@ -1337,9 +1975,56 @@ class InstanceListScreen(Screen):
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(instance))
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id
+        if isinstance(event.button, FleetChip):
+            event.stop()
+            self._press_chip(event.button)
+        elif btn_id == "fleet_refresh":
+            event.stop()
+            self.action_refresh()
+        elif btn_id in ("fleet_copy_row", "fleet_copy_row_line"):
+            event.stop()
+            self.action_copy_row()
+        elif btn_id == "fleet_btn_ssh":
+            event.stop()
+            self.action_ssh_connect()
+        elif btn_id == "fleet_btn_browse":
+            event.stop()
+            self.action_browse_files()
+        elif btn_id == "fleet_btn_scp":
+            event.stop()
+            self.action_scp_transfer()
+        elif btn_id == "fleet_btn_command":
+            event.stop()
+            self.action_run_command()
+        elif btn_id == "fleet_btn_logs":
+            event.stop()
+            self.action_view_logs()
+        elif btn_id == "fleet_btn_memory":
+            event.stop()
+            self.action_open_memory()
+        elif btn_id == "fleet_btn_ai":
+            event.stop()
+            self.action_ai_analysis()
+        elif btn_id == "fleet_btn_actions":
+            event.stop()
+            self.action_select_instance()
+
+    def action_copy_value(self) -> None:
+        """Move onto the selected server's values to copy one of them."""
+        if not self.query_one(InstanceTable).get_selected_instance():
+            self.app.notify("No instance selected", severity="warning")
+            return
+        values = self.query_one(
+            "#fleet_values" if self.query_one("#fleet_inspector").display
+            else "#fleet_value_line",
+        )
+        values.begin_walk()
+
     def action_copy_row(self) -> None:
         """Copy full selected instance row data to clipboard."""
-        from servonaut.utils.platform_utils import copy_to_clipboard
+        from servonaut.utils.platform_utils import CopyOutcome, copy_text
 
         table = self.query_one(InstanceTable)
         instance = table.get_selected_instance()
@@ -1348,22 +2033,15 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return
 
-        fields = [
-            ("Name", display_name(instance)),
-            ("ID", instance.get('id', '')),
-            ("Type", instance.get('type', '')),
-            ("State", instance.get('state', '')),
-            ("Public IP", instance.get('public_ip', '')),
-            ("Private IP", instance.get('private_ip', '')),
-            ("Region", instance.get('region', '')),
-            ("Provider", instance.get('provider', '')),
-            ("Key", instance.get('key_name', '')),
-        ]
-        text = "  ".join(f"{v}" for _, v in fields if v)
+        # The same values, in the same order, as the inspector lists them.
+        text = "  ".join(instance_values(instance).values())
 
-        if copy_to_clipboard(text):
-            name = instance.get('name') or instance.get('id', '')
+        name = instance.get('name') or instance.get('id', '')
+        outcome = copy_text(self.app, text)
+        if outcome is CopyOutcome.COPIED:
             self.app.notify(f"Copied: {name}", markup=False)
+        elif outcome is CopyOutcome.SENT_TO_TERMINAL:
+            self.app.notify(f"Sent to the terminal clipboard: {name}", markup=False)
         else:
             self.app.notify("Clipboard not available", severity="warning")
 

@@ -23,7 +23,6 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.content import Content
 from textual.css.query import NoMatches
-from textual.screen import Screen
 from textual.widgets import Button, Checkbox, Footer, Label, Select, SelectionList, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -39,7 +38,8 @@ from servonaut.services.memory.interfaces import MemoryBackendError
 from servonaut.services.retry_after import wait_text
 from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.styles import CSS_FILES
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def headline(report: bulk.BulkShareReport) -> str:
     return ", ".join(parts) or "nothing to share"
 
 
-class BulkShareScreen(Screen[bool]):
+class BulkShareScreen(WorkspaceScreen):
     """Share the memory of several marked servers with one team.
 
     Args:
@@ -109,83 +109,11 @@ class BulkShareScreen(Screen[bool]):
     the form is closed without sending anything.
     """
 
-    DEFAULT_CSS = """
-    BulkShareScreen #bulk_outer {
-        width: 1fr;
-        height: 100%;
-        padding: 0 1;
-        align: center middle;
-        background: $surface;
-    }
-    /* As tall as what it shows, never taller than the screen: a short
-       summary must not leave a screen-high empty box. */
-    BulkShareScreen #bulk-container {
-        width: 100%;
-        max-width: 100;
-        height: auto;
-        max-height: 100%;
-        border: round $primary;
-        background: $surface;
-        padding: 0 2;
-    }
-    BulkShareScreen #bulk-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    BulkShareScreen #bulk-status {
-        height: auto;
-        min-height: 1;
-    }
-    BulkShareScreen #bulk-form-scroll {
-        height: auto;
-        max-height: 100%;
-        min-height: 0;
-    }
-    BulkShareScreen #bulk-form {
-        height: auto;
-    }
-    BulkShareScreen #bulk-form.-done {
-        display: none;
-    }
-    BulkShareScreen .bulk-field-row {
-        height: auto;
-        margin-bottom: 1;
-    }
-    BulkShareScreen #bulk-servers,
-    BulkShareScreen #bulk-readers {
-        height: auto;
-        margin-bottom: 1;
-    }
-    BulkShareScreen #bulk-update-existing {
-        margin-bottom: 1;
-    }
-    BulkShareScreen #bulk-summary {
-        height: auto;
-    }
-    BulkShareScreen #bulk-progress {
-        height: auto;
-        display: none;
-    }
-    BulkShareScreen #bulk-progress.-shown {
-        display: block;
-    }
-    BulkShareScreen #bulk-btn-row {
-        dock: bottom;
-        height: auto;
-        align: center middle;
-        margin-top: 1;
-    }
-    BulkShareScreen #bulk-btn-row Button {
-        margin: 0 1;
-        min-width: 16;
-    }
-    BulkShareScreen #bulk-btn-stop {
-        display: none;
-    }
-    BulkShareScreen #bulk-btn-stop.-shown {
-        display: block;
-    }
-    """
+    CSS_PATH = CSS_FILES
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 76
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
@@ -224,43 +152,50 @@ class BulkShareScreen(Screen[bool]):
         count = len(self._targets)
         servers = f"{count} server" if count == 1 else f"{count} servers"
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Container(id="bulk_outer"):
+        yield WorkspaceControls("Share memory")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="bulk_outer", classes="workspace-content"):
                 with Container(id="bulk-container"):
                     yield Static(
                         Content.from_markup(
-                            "[bold $text-accent]Share Memory: $servers[/bold $text-accent]",
+                            "[bold]Share memory: $servers[/bold]",
                             servers=servers,
                         ),
                         id="bulk-title",
+                        classes="screen-title",
                     )
-                    yield Static("", id="bulk-status")
+                    with VerticalScroll(id="bulk-state"):
+                        yield Static("", id="bulk-status")
+                        yield Static("", id="bulk-progress")
                     with VerticalScroll(id="bulk-form-scroll"):
                         with Container(id="bulk-form"):
-                            yield Static("", id="bulk-servers")
-                            with Container(classes="bulk-field-row"):
-                                yield Label("Team")
-                                yield Select(
-                                    options=[("Loading...", "__loading__")],
-                                    value="__loading__",
-                                    id="bulk-team-select",
-                                )
-                            with Container(classes="bulk-field-row"):
-                                yield Label("Lowest role that may read")
-                                yield Select(options=_ROLE_OPTIONS, value="viewer",
-                                             id="bulk-role-select")
-                            yield Static("", id="bulk-readers")
+                            with Container(id="bulk-selection-panel"):
+                                yield Static("", id="bulk-servers")
+                            with Horizontal(id="bulk-settings"):
+                                with Container(id="bulk-access-panel"):
+                                    yield Static("Team access", classes="bulk-section-heading")
+                                    with Container(classes="bulk-field-row"):
+                                        yield Label("Team")
+                                        yield Select(
+                                            options=[("Loading...", "__loading__")],
+                                            value="__loading__",
+                                            id="bulk-team-select",
+                                        )
+                                    with Container(classes="bulk-field-row"):
+                                        yield Label("Lowest role that may read")
+                                        yield Select(options=_ROLE_OPTIONS, value="viewer",
+                                                     id="bulk-role-select")
+                                    yield Static("", id="bulk-readers")
+                                with Container(id="bulk-modules-panel"):
+                                    yield Label("Modules to share", classes="bulk-section-heading")
+                                    yield SelectionList(*_module_options(), id="bulk-modules-list")
                             yield Checkbox(
                                 "Update existing shares to these settings",
                                 value=False,
                                 id="bulk-update-existing",
                             )
-                            with Container(classes="bulk-field-row"):
-                                yield Label("Modules to share")
-                                yield SelectionList(*_module_options(), id="bulk-modules-list")
                         yield Static("", id="bulk-summary")
-                    yield Static("", id="bulk-progress")
                     with Horizontal(id="bulk-btn-row"):
                         yield Button("Cancel", variant="default", id="bulk-btn-cancel")
                         yield Button("Stop after this server", variant="warning", id="bulk-btn-stop")
@@ -532,7 +467,7 @@ class BulkShareScreen(Screen[bool]):
             return "Nothing was shared"
         return (
             f"Sharing ended early after {self._changed} of {len(self._targets)} servers "
-            "were changed (open Fleet Memory to see what is shared)"
+            "were changed (open Fleet memory to see what is shared)"
         )
 
     def _set_sending(self, sending: bool) -> None:

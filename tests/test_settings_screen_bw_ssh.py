@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -150,6 +150,13 @@ class _FakePanel:
     def _snapshot_now(self) -> None:
         # Base-class hook used by _show_form; no-op for the fake.
         pass
+
+    def call_after_refresh(
+        self, callback: Callable[..., Any], *args: Any, **kwargs: Any,
+    ) -> bool:
+        # This fake checks data only; mounted tests cover native scheduling.
+        callback(*args, **kwargs)
+        return True
 
     def _finish_save(self, message: str = "Saved") -> None:
         # Base-class hook; record the success notify the real one emits.

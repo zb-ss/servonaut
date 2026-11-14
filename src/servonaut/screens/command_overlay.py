@@ -7,11 +7,13 @@ import threading
 from typing import List, Optional
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Label, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.ssh_host_keys import (
@@ -26,6 +28,7 @@ from servonaut.utils.ssh_utils import (
     is_known_hosts_notice,
     track_background_process,
 )
+from servonaut.utils.markup import inert_text, literal
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
@@ -43,6 +46,8 @@ class CommandOverlay(ModalScreen):
     Maintains command history for navigation with up/down arrows.
     """
 
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (128, "-wide")]
+
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
         Binding("escape", "close_overlay", "Close", show=True, tooltip="Close the overlay"),
@@ -50,16 +55,16 @@ class CommandOverlay(ModalScreen):
                 tooltip="Stop the running command, or close the overlay"),
         Binding("ctrl+r", "show_command_picker", "Picker", show=True,
                 tooltip="Pick a saved or recent command"),
-        Binding("ctrl+s", "save_command", "Save Cmd", show=True,
+        Binding("ctrl+s", "save_command", "Save command", show=True,
                 tooltip="Save the current command to favourites"),
         Binding("up", "history_prev", "Previous", show=False,
                 tooltip="Previous command in the history"),
         Binding("down", "history_next", "Next", show=False,
                 tooltip="Next command in the history"),
-        Binding("y", "copy_output", "Copy All", show=True,
+        Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy all output to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
-                tooltip="Copy Mode: the output in a text area you can select from"),
+                tooltip="Copy mode: the output in a text area you can select from"),
     ]
 
     def __init__(self, instance: dict) -> None:
@@ -92,25 +97,35 @@ class CommandOverlay(ModalScreen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        """Compose the command overlay UI."""
-        yield Container(
-            Static(self._build_header_text(), id="command_header"),
-            CommandOutput(id="command_output"),
-            Static(
-                "[dim]Ctrl+R[/dim] Picker  "
-                "[dim]Ctrl+S[/dim] Save  "
-                "[dim]↑↓[/dim] History  "
-                "[dim]Ctrl+C[/dim] Stop  "
-                "[dim]Y[/dim] Copy  "
-                "[dim]Esc[/dim] Close",
-                id="command_hints",
-            ),
-            Input(
-                placeholder="Enter command to execute...",
-                id="command_input"
-            ),
-            id="command_overlay_container"
-        )
+        """Compose the native output reader and remote-command controls."""
+        with Container(id="command_overlay_container"):
+            yield VerticalScroll(
+                Static(self._build_header_text(), id="command_header"),
+                id="command_context",
+            )
+            with Container(id="command_tools"):
+                yield Button("Saved / recent", id="command_pick")
+                yield Button("Save command", id="command_save")
+                yield Button("Select output", id="command_select")
+                yield Button("Copy all", id="command_copy")
+                yield Button("Stop / close", id="command_stop", variant="warning")
+                yield Button("Close", id="command_close")
+            yield CommandOutput(id="command_output")
+            with Vertical(id="command_composer"):
+                yield Label("Remote command", id="command_input_label")
+                yield Input(
+                    placeholder="Enter command to execute...",
+                    id="command_input",
+                )
+                yield Static(
+                    "[dim]Ctrl+R[/dim] Picker  "
+                    "[dim]Ctrl+S[/dim] Save  "
+                    "[dim]↑↓[/dim] History  "
+                    "[dim]Ctrl+C[/dim] Stop  "
+                    "[dim]Y[/dim] Copy  "
+                    "[dim]Esc[/dim] Close",
+                    id="command_hints",
+                )
 
     def on_mount(self) -> None:
         """Initialize connection details and focus input on mount."""
@@ -163,7 +178,7 @@ class CommandOverlay(ModalScreen):
         # Show welcome message
         output = self.query_one("#command_output", CommandOutput)
         welcome = f"Connected to {self._instance.get('name') or self._instance.get('id')}"
-        output.append_output(f"[dim]{welcome}[/dim]")
+        output.append_notice(Text(inert_text(welcome)))
         self._output_lines.append(welcome)
         if self._missing_profile:
             warning = (
@@ -171,12 +186,7 @@ class CommandOverlay(ModalScreen):
                 f"Connecting directly (no bastion). Add the profile in Settings if "
                 f"this server requires a jump host."
             )
-            output.append_error(
-                f"[bold yellow]Warning:[/bold yellow] Connection profile "
-                f"'{self._missing_profile}' not found. Connecting directly "
-                f"(no bastion). Add the profile in Settings if this server "
-                f"requires a jump host."
-            )
+            output.append_error(Text(inert_text(warning)))
             self._output_lines.append(warning)
         hint = "Type commands below. Ctrl+C stops a running command, Escape closes."
         output.append_output(f"[dim]{hint}[/dim]\n")
@@ -184,6 +194,20 @@ class CommandOverlay(ModalScreen):
 
         # Focus input
         self.query_one("#command_input", Input).focus()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "command_pick": "show_command_picker",
+            "command_save": "save_command",
+            "command_select": "copy_mode",
+            "command_copy": "copy_output",
+            "command_stop": "stop_or_close",
+            "command_close": "close_overlay",
+        }
+        action = actions.get(event.button.id)
+        if action:
+            event.stop()
+            await self.run_action(action)
 
     def _detect_missing_profile(self) -> Optional[str]:
         """Check if a connection rule matched but its profile is missing.
@@ -204,14 +228,14 @@ class CommandOverlay(ModalScreen):
                 return None
         return None
 
-    def _build_header_text(self) -> str:
+    def _build_header_text(self) -> Content:
         """Build header text with server name and prompt.
 
         Returns:
             Rich-formatted header string.
         """
         name = self._instance.get('name') or self._instance.get('id', 'unknown')
-        return f"[bold $text-accent]Command Execution:[/bold $text-accent] {name}"
+        return Content.assemble(("Command execution:", "bold $text-accent"), " ", literal(str(name)))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle command input submission.
@@ -283,10 +307,10 @@ class CommandOverlay(ModalScreen):
 
         # Block interactive/TUI commands that need a real terminal
         if self._is_interactive_command(command):
-            output_widget.append_error(
-                f"[bold yellow]{command.split()[0]}[/bold yellow] requires an "
-                f"interactive terminal and cannot run here."
-            )
+            output_widget.append_error(Text.assemble(
+                (inert_text(command.split()[0]), "bold"),
+                " requires an interactive terminal and cannot run here.",
+            ))
             output_widget.append_output(
                 "[dim]Press Escape to close, then press s to open an SSH terminal.[/dim]\n"
             )
@@ -570,7 +594,7 @@ class CommandOverlay(ModalScreen):
         from servonaut.screens.copy_mode import CopyModeScreen
 
         text = "\n".join(self._output_lines)
-        self.app.push_screen(CopyModeScreen(text, title="Command Output — Copy Mode"))
+        self.app.push_screen(CopyModeScreen(text, title="Command output — copy mode"))
 
     def action_close_overlay(self) -> None:
         """Close the command overlay modal, terminating any running process."""

@@ -156,6 +156,7 @@ class TestMaybeSpeakReply:
         panel._do_speak.assert_called_once_with(
             app.voice_output_service, "Hello",
             epoch=app.voice_output_service.current_epoch.return_value,
+            generation=panel._voice_generation,
         )
         kwargs = panel.run_worker.call_args.kwargs
         assert kwargs["group"] == "voice_speak"
@@ -175,7 +176,7 @@ class TestMaybeSpeakReply:
             panel._maybe_speak_reply("Hello")
         assert order == ["stop", "epoch"]
         panel._do_speak.assert_called_once_with(
-            app.voice_output_service, "Hello", epoch=7,
+            app.voice_output_service, "Hello", epoch=7, generation=panel._voice_generation,
         )
 
     def test_a_service_without_current_epoch_gets_none(self):
@@ -190,7 +191,7 @@ class TestMaybeSpeakReply:
         with _app_property(app):
             panel._maybe_speak_reply("Hello")
         panel._do_speak.assert_called_once_with(
-            app.voice_output_service, "Hello", epoch=None,
+            app.voice_output_service, "Hello", epoch=None, generation=panel._voice_generation,
         )
 
     def test_new_reply_stops_the_previous_utterance_first(self):
@@ -227,6 +228,7 @@ class TestMaybeSpeakReply:
         panel._do_speak.assert_called_once_with(
             app.voice_output_service, "scrubbed",
             epoch=app.voice_output_service.current_epoch.return_value,
+            generation=panel._voice_generation,
         )
 
     def test_a_failing_stop_does_not_block_the_new_utterance(self):

@@ -16,12 +16,17 @@ from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from servonaut.utils.markup import literal
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,7 @@ class PowerActionConfirmModal(ModalScreen[bool]):
             provider: Provider label, e.g. ``"Hetzner Cloud"``.
             consequence: One sentence on what the user will notice.
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._action = action
         self._server_name = server_name
         self._provider = provider
@@ -105,16 +110,21 @@ class PowerActionConfirmModal(ModalScreen[bool]):
         )
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(literal(f"{self._action} server", "bold $text-warning"),
-                   id="power_confirm_title"),
-            Static(self.message, id="power_confirm_message"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                literal(f"{self._action} server", "bold $text-warning"),
+                id="power_confirm_title",
+            ),
+            body=DialogBody(Static(self.message, id="power_confirm_message")),
+            actions=DialogActions(
                 Button("No", id="btn_power_confirm_no"),
                 Button(self._action, variant="warning", id="btn_power_confirm_yes"),
                 id="power_confirm_buttons",
             ),
             id="power_confirm_container",
+            size="compact",
+            severity="warning",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

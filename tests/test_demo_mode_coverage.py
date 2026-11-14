@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 
@@ -36,6 +37,7 @@ def _make_mock_app(demo: bool = True) -> MagicMock:
     app = MagicMock()
     app.demo_mode = demo
     app.redaction_service = RedactionService() if demo else None
+    app.get_css_variables.return_value = {"text-error": "#d17e92", "text-accent": "#ffc473"}
     return app
 
 
@@ -85,7 +87,7 @@ class TestCommandOutputDemoMode:
                 assert "1.2.3.4" in written
 
     def test_append_error_scrubs_before_markup(self) -> None:
-        """Error text must be scrubbed BEFORE embedding in [bold red]...[/bold red]."""
+        """Error text must be scrubbed BEFORE styling it as an error."""
         from servonaut.widgets.command_output import CommandOutput
 
         mock_app = _make_mock_app(demo=True)
@@ -96,9 +98,9 @@ class TestCommandOutputDemoMode:
                 CommandOutput.append_error(widget, "error from 9.9.9.9")
                 mock_write.assert_called_once()
                 written = mock_write.call_args[0][0]
-                assert "9.9.9.9" not in written
-                # Must still be wrapped in bold red markup
-                assert "[bold red]" in written
+                assert "9.9.9.9" not in written.plain
+                # Must still be shown bold in the theme's error colour
+                assert written.style.lower() == "bold #d17e92"
 
     def test_append_error_scrubs_aws_key(self) -> None:
         from servonaut.widgets.command_output import CommandOutput
@@ -110,8 +112,8 @@ class TestCommandOutputDemoMode:
             with patch.object(type(widget), "app", new_callable=lambda: property(lambda self: mock_app)):
                 CommandOutput.append_error(widget, "AKIAIOSFODNN7EXAMPLE from 1.2.3.4")
                 written = mock_write.call_args[0][0]
-                assert "AKIAIOSFODNN7EXAMPLE" not in written
-                assert "1.2.3.4" not in written
+                assert "AKIAIOSFODNN7EXAMPLE" not in written.plain
+                assert "1.2.3.4" not in written.plain
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +243,7 @@ class TestIPBanDemoMode:
         from servonaut.screens.ip_ban import IPBanScreen
 
         screen = object.__new__(IPBanScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         mock_app = _make_mock_app(demo=True)
         screen._selected_config = "ufw"
 
@@ -355,8 +358,8 @@ class TestMemoryScreenDemoMode:
         """
         from servonaut.screens.memory import MemoryScreen
 
-        screen = object.__new__(MemoryScreen)
-        screen._instance = {"id": "i-abc123", "name": "test", "provider": "custom"}
+        # This table-only fixture has no reader child; keep its native DOM initialized.
+        screen = MemoryScreen({"id": "i-abc123", "name": "test", "provider": "custom"})
 
         mock_app = _make_mock_app(demo=True)
         mock_app.memory_service = MagicMock()
@@ -405,8 +408,8 @@ class TestMemoryScreenDemoMode:
     def test_render_table_no_scrub_without_demo(self, tmp_path) -> None:
         from servonaut.screens.memory import MemoryScreen
 
-        screen = object.__new__(MemoryScreen)
-        screen._instance = {"id": "i-abc123", "name": "test", "provider": "custom"}
+        # This table-only fixture has no reader child; keep its native DOM initialized.
+        screen = MemoryScreen({"id": "i-abc123", "name": "test", "provider": "custom"})
 
         mock_app = _make_mock_app(demo=False)
         mock_app.memory_service = MagicMock()
@@ -567,7 +570,7 @@ class TestChatPanelDemoMode:
 
         session = MagicMock()
         session.messages = []
-        session.title = "New Chat"
+        session.title = "New chat"
         panel._session = session
         panel._turn_tool_calls = 0
 
@@ -1914,6 +1917,8 @@ class TestMemoryDriftDemoMode:
 
         rows: list = []
         mock_table = MagicMock()
+        # The unfiltered fixture has one rendered event, as a native table would.
+        mock_table.row_count = len(screen._events)
         mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(tuple(str(a) for a in args))
         mock_label = MagicMock()
 
@@ -2417,7 +2422,10 @@ class TestServerActionsRdnsDemoMode:
             with patch.object(screen, "query_one", return_value=info_widget):
                 asyncio.run(screen._fetch_rdns())
         assert rendered, "server info was never redrawn"
-        return asked, rendered[-1], shown
+        # Server info is built as Content; `str in Content` is not a text
+        # search, so every assertion below reads the plain text.
+        last = rendered[-1]
+        return asked, getattr(last, "plain", last), shown
 
     def test_lookup_names_the_real_vps_in_demo_mode(self) -> None:
         asked, _, shown = self._run(demo=True)
@@ -2426,17 +2434,16 @@ class TestServerActionsRdnsDemoMode:
 
     def test_rdns_hostname_scrubbed_in_demo_mode(self) -> None:
         _, rendered, shown = self._run(demo=True)
-        text = rendered.plain
-        assert self.RDNS not in text
-        assert "Reverse DNS" in text
+        assert self.RDNS not in rendered
+        assert "Reverse DNS" in rendered
         for real in (self.REAL["id"], self.REAL["public_ip"], self.REAL["name"]):
-            assert real not in text
-        assert shown["public_ip"] in text
+            assert real not in rendered
+        assert shown["public_ip"] in rendered
 
     def test_rdns_hostname_not_scrubbed_without_demo(self) -> None:
         asked, rendered, _ = self._run(demo=False)
         assert asked == [(self.REAL["id"], self.REAL["public_ip"])]
-        assert f"Reverse DNS: {self.RDNS}" in rendered.plain
+        assert f"Reverse DNS: {self.RDNS}" in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -2459,10 +2466,13 @@ class TestInstanceListProviderRefreshDemoMode:
     @staticmethod
     def _make_screen(demo: bool) -> Any:
         """Return a bare InstanceListScreen with mocked app and widgets."""
+        from servonaut.screens._fleet_filter import FleetFilter
         from servonaut.screens.instance_list import InstanceListScreen
 
         screen = object.__new__(InstanceListScreen)
         screen._instances = []
+        screen._filter = FleetFilter()
+        screen._marks = {}
 
         mock_app = _make_mock_app(demo=demo)
         # _update_table also queries for the search input and memory banner;
@@ -2489,6 +2499,8 @@ class TestInstanceListProviderRefreshDemoMode:
             return MagicMock()
 
         screen.query_one = _query_one
+        # The inspector also looks its quick-action buttons up by selector.
+        screen.query = lambda *_args, **_kwargs: []
 
         # Stub _sync_memory_banner and _update_status_bar (not under test here)
         screen._sync_memory_banner = lambda: None
@@ -3209,6 +3221,7 @@ class TestHetznerCreateWizardDemoMode:
         from servonaut.screens.hetzner_create import HetznerCreateScreen
 
         screen = object.__new__(HetznerCreateScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._ssh_keys = []
 
         async def _list_ssh_keys():
@@ -3373,6 +3386,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_dns import OVHDNSScreen
 
         screen = object.__new__(OVHDNSScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._domains = []
         mock_app = _make_mock_app(demo=True)
         svc = MagicMock()
@@ -3399,6 +3413,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_dns import OVHDNSScreen
 
         screen = object.__new__(OVHDNSScreen)
+        screen._read_loading = BusyWork(screen, "#read_loading")
         screen._records = []
         mock_app = _make_mock_app(demo=True)
         svc = MagicMock()
@@ -3426,6 +3441,7 @@ class TestOvhHostColumnsDemoMode:
         from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
 
         screen = object.__new__(OVHIPManagementScreen)
+        screen._selected_ip = None  # Same unselected state as the screen constructor.
         screen._ips = [{
             "ip": "9.9.9.9/32", "type": "failover",
             "routedTo": {"serviceName": "ns1234.ip-9-9-9-9.eu"},
@@ -3619,6 +3635,7 @@ class TestSshKeyLabelsDemoMode:
         wire_service(mock_app, _list)
         rows: list = []
         table = MagicMock()
+        table.cursor_row = 0  # Native DataTable starts on its first row.
         table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
 
         async def _run():

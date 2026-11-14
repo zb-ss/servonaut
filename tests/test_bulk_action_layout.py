@@ -6,6 +6,7 @@ from textual.app import App
 from textual.widgets import Button, Input, SelectionList
 
 from servonaut.screens.bulk_action import BulkActionModal
+from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
 
 
 class _Host(App):
@@ -27,8 +28,18 @@ async def test_the_list_shows_several_records_and_keeps_the_confirmation_in_view
         await pilot.pause()
         modal = app.screen
         listing = modal.query_one("#bulk_action_list", SelectionList)
-        body = modal.query_one("#bulk_action_body")
+        body = modal.query_one("#bulk_action_body", DialogBody)
+        frame = modal.query_one("#bulk_action_modal", DialogFrame)
+        status = modal.query_one(".dialog-status")
+        actions = modal.query_one(DialogActions)
+        confirmation = modal.query_one("#bulk_action_confirm_input", Input)
+        submit = modal.query_one("#bulk_action_submit", Button)
         assert listing.content_region.height >= rows
-        for widget in (modal.query_one("#bulk_action_confirm_input", Input), modal.query_one("#bulk_action_submit", Button)):
-            assert modal.query_one("#bulk_action_modal").region.contains_region(widget.region)
-        assert body.region.contains_region(modal.query_one("#bulk_action_confirm_input", Input).region)
+        for widget in (confirmation, submit):
+            assert frame.content_region.contains_region(widget.region)
+            assert modal.region.contains_region(widget.region)
+            assert app.get_widget_at(*widget.region.center)[0] is widget
+        assert status.region.contains_region(confirmation.region)
+        assert actions.region.contains_region(submit.region)
+        assert body.region.bottom <= status.region.y
+        assert status.region.bottom <= actions.region.y

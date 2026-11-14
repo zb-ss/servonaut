@@ -46,10 +46,10 @@ def test_every_binding_is_listed(owner, help_text: str) -> None:
 
 
 def test_the_fleet_keys_are_listed_in_the_case_they_are_bound(help_text: str) -> None:
-    fleet = help_text.split("## Instance List", 1)[1].split("\n## ", 1)[0]
-    for key in ("s", "b", "c", "t", "l", "a", "r", "y", "o", "m", "k", "v", "D"):
+    fleet = help_text.split("## Instance list", 1)[1].split("\n## ", 1)[0]
+    for key in ("s", "b", "c", "t", "l", "a", "r", "y", "Y", "o", "m", "k", "v", "D"):
         assert f"| `{key}` |" in fleet or f"/ `{key}` |" in fleet, key
-    for wrong in ("`S`", "`B`", "`R`", "`Y`", "`d`"):
+    for wrong in ("`S`", "`B`", "`R`", "`d`"):
         assert wrong not in fleet, wrong
 
 
@@ -69,6 +69,7 @@ def test_every_single_key_the_help_mentions_is_bound(help_text: str) -> None:
         ("escape", "Esc"),
         ("enter", "Enter"),
         ("f2", "F2"),
+        ("shift+f6", "Shift+F6"),
         ("ctrl+r", "Ctrl+R"),
         ("ctrl+shift+d", "Ctrl+Shift+D"),
     ],

@@ -14,6 +14,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from textual.screen import Screen
 from unittest.mock import MagicMock, patch
 
 from servonaut.app import ServonautApp
@@ -343,11 +344,11 @@ class TestPaletteNavigation:
         posted = []
         app.post_message = lambda message: posted.append(message)
         with patch("textual.app.App.get_system_commands", return_value=iter(())):
-            commands = list(ServonautApp.get_system_commands(app, None))
+            commands = list(ServonautApp.get_system_commands(app, Screen()))
         titles = [c.title for c in commands]
-        assert "Go to Custom Servers" in titles
+        assert "Go to Custom servers" in titles
         assert not any(t.startswith("Go to OVH") or t.startswith("Go to Hetzner") for t in titles)
-        next(c for c in commands if c.title == "Go to Custom Servers").callback()
+        next(c for c in commands if c.title == "Go to Custom servers").callback()
         assert isinstance(posted[0], Sidebar.NavigationRequested)
         assert posted[0].target_id == "nav_custom_servers"
 
@@ -359,9 +360,9 @@ class TestPaletteNavigation:
         app.vault_available = available
         app.post_message = MagicMock()
         with patch("textual.app.App.get_system_commands", return_value=iter(())):
-            titles = [command.title for command in ServonautApp.get_system_commands(app, None)]
+            titles = [command.title for command in ServonautApp.get_system_commands(app, Screen())]
         assert ("Go to Vault" in titles) is available
-        assert ("Go to SSH Certificates" in titles) is available
+        assert ("Go to SSH certificates" in titles) is available
 
 
 class TestCustomServersRemoveToast:

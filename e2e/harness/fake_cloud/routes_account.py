@@ -49,7 +49,7 @@ from e2e.harness.fake_cloud.users import current_account
 VERIFY_STATUSES = frozenset({"verified", "not_found", "auth_failed"})
 
 _DEFAULT_TEAMS: tuple[dict[str, Any], ...] = (
-    {"slug": "ops", "name": "Ops", "role": "owner", "member_count": 2},
+    {"id": "team-ops", "slug": "ops", "name": "Ops", "role": "owner", "member_count": 2},
 )
 
 _VAULT_SHARED_SERVER = {

@@ -28,10 +28,11 @@ from typing import Any, Dict, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Select, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,16 @@ _AI_CONSENT_OPTIONS: list[tuple[str, str]] = [
     ("Server-side, 60s window", "server_60s"),
 ]
 
-_SELECT_BLANK = Select.BLANK  # sentinel for un-set Select values
+_SELECT_BLANK = Select.NULL  # sentinel for un-set Select values
+
+
+# Shown instead of the form when the account has no Memory Sync. Same wording as
+# the Memory screen's banner and the feature prompt.
+_NOT_AVAILABLE_NOTE = (
+    "Memory Sync is off. It is available with the Solo plan: encrypted backup, "
+    "drift detection and AI-queryable history, so server memory can be reached "
+    "from other devices. Upgrade your plan to enable it."
+)
 
 
 class MemorySyncPanel(SettingsPanel):
@@ -63,6 +73,7 @@ class MemorySyncPanel(SettingsPanel):
 
     PANEL_ID = "memory_sync"
     TITLE = "Memory Sync"
+    DESCRIPTION = 'Account delivery and AI consent preferences for encrypted memory.'
 
     DEFAULT_CSS = """
     MemorySyncPanel #msync_info_note {
@@ -98,8 +109,11 @@ class MemorySyncPanel(SettingsPanel):
         because they must be disabled together with the form when the device
         is not enrolled.
         """
-        yield Static(escape(self.TITLE), classes="panel-title")
-        yield from self.form_rows()
+        with Vertical(classes="panel-context"):
+            yield Static(escape(self.TITLE), classes="panel-title screen-title")
+            yield Static(self.DESCRIPTION, classes="panel-description screen-description", markup=False)
+        with VerticalScroll(classes="panel-body"):
+            yield from self.form_rows()
         yield Static("", id=f"status_{self.PANEL_ID}", classes="panel-status")
 
     def form_rows(self) -> ComposeResult:
@@ -109,49 +123,64 @@ class MemorySyncPanel(SettingsPanel):
         entitlement gate can hide it independently of the panel's root
         ``display`` (which the shell owns for active/inactive switching).
         """
+        gate_note = Static(
+            _NOT_AVAILABLE_NOTE,
+            id="settings_msync_gate_note",
+            classes="note",
+            markup=False,
+        )
+        gate_note.display = False
+        yield gate_note
         yield Container(
-            Static(
-                "These settings are stored on your servonaut.dev account, "
-                "not in config.json. Set up the encryption keypair via "
-                "☁ Memory Sync in the sidebar before editing here.",
-                id="msync_info_note",
-                classes="note",
-            ),
-            Static("", id="settings_msync_status", classes="msync-disabled-note"),
-            Horizontal(
-                Static("Digest Frequency", classes="label"),
-                Select(
-                    _DIGEST_OPTIONS,
-                    prompt="Choose digest cadence",
-                    allow_blank=True,
-                    id="settings_msync_digest",
+            Container(
+                Static(
+                    "These settings are stored on your servonaut.dev account, "
+                    "not in config.json. Set up the encryption keypair via "
+                    "☁ Memory Sync in the sidebar before editing here.",
+                    id="msync_info_note",
+                    classes="note",
                 ),
-                classes="setting_row",
+                Static("", id="settings_msync_status", classes="msync-disabled-note"),
+                classes="settings-operations-context",
             ),
-            Horizontal(
-                Static("Mercure Push", classes="label"),
-                Switch(value=False, id="settings_msync_mercure"),
-                classes="setting_row",
-            ),
-            Horizontal(
-                Static("Auto-sync (60s, app open)", classes="label"),
-                Switch(value=False, id="settings_msync_auto_sync"),
-                classes="setting_row",
-            ),
-            Horizontal(
-                Static("AI Consent Mode", classes="label"),
-                Select(
-                    _AI_CONSENT_OPTIONS,
-                    prompt="Choose AI consent mode",
-                    allow_blank=True,
-                    id="settings_msync_ai_mode",
+            Container(
+                Static("Delivery preferences", classes="settings-group-title", markup=False),
+                setting_row(
+                    "Digest Frequency",
+                    Select(
+                        _DIGEST_OPTIONS,
+                        prompt="Choose digest cadence",
+                        allow_blank=True,
+                        id="settings_msync_digest",
+                    ),
                 ),
-                classes="setting_row",
+                setting_row(
+                    "Mercure Push",
+                    Switch(value=False, id="settings_msync_mercure"),
+                ),
+                setting_row(
+                    "Auto-sync (60s, app open)",
+                    Switch(value=False, id="settings_msync_auto_sync"),
+                ),
+                classes="settings-form-section settings-operations-section",
+            ),
+            Container(
+                Static("AI consent", classes="settings-group-title", markup=False),
+                setting_row(
+                    "AI Consent Mode",
+                    Select(
+                        _AI_CONSENT_OPTIONS,
+                        prompt="Choose AI consent mode",
+                        allow_blank=True,
+                        id="settings_msync_ai_mode",
+                    ),
+                ),
+                classes="settings-form-section settings-operations-section",
             ),
             Horizontal(
-                Button("Save", id="btn_msync_save", variant="primary"),
+                Button("Save", id="btn_msync_save", variant="primary", disabled=True),
                 Button("Reload", id="btn_msync_reload", variant="default"),
-                classes="setting_row",
+                classes="setting_row settings-operations-remote-actions",
             ),
             id="settings_msync_section",
         )
@@ -213,6 +242,9 @@ class MemorySyncPanel(SettingsPanel):
     def persist(self) -> None:
         """Compute diff and patch settings via async worker."""
         if not self._is_entitled() or not self._is_enrolled():
+            return
+        if self._original_settings is None:
+            self._set_status("[$text-warning]Reload settings before saving.[/$text-warning]")
             return
         self.run_worker(
             self._do_save(),
@@ -330,6 +362,7 @@ class MemorySyncPanel(SettingsPanel):
         """
         try:
             self.query_one("#settings_msync_section").display = visible
+            self.query_one("#settings_msync_gate_note").display = not visible
         except Exception:
             pass
 
@@ -344,7 +377,10 @@ class MemorySyncPanel(SettingsPanel):
             "#btn_msync_reload",
         ):
             try:
-                self.query_one(widget_id).disabled = not enabled
+                self.query_one(widget_id).disabled = (
+                    not enabled
+                    or (widget_id == "#btn_msync_save" and self._original_settings is None)
+                )
             except Exception:
                 pass
 
@@ -380,6 +416,8 @@ class MemorySyncPanel(SettingsPanel):
         if svc is None:
             self._set_status("[$text-error]Memory settings service unavailable.[/$text-error]")
             return
+        if not force:
+            self._set_status("[dim]Loading…[/dim]")
         try:
             settings = await svc.get_settings(force_refresh=force)
         except Exception as exc:
@@ -404,6 +442,11 @@ class MemorySyncPanel(SettingsPanel):
             )
             self.query_one("#settings_msync_ai_mode", Select).value = (
                 getattr(settings, "ai_consent_mode", "off") or "off"
+            )
+            self.query_one("#btn_msync_save", Button).disabled = not (
+                self._original_settings is not None
+                and self._is_entitled()
+                and self._is_enrolled()
             )
         except Exception as exc:
             logger.warning("Memory Sync widget population: %s", exc)

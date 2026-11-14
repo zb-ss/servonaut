@@ -36,12 +36,15 @@ import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from rich.markup import escape as markup_escape
+from rich.text import Text
 from textual.app import ComposeResult
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.utils.markup import with_bold_values
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Select, Static,
 )
@@ -58,8 +61,9 @@ from servonaut.screens._provider_accounts import (
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.services.interfaces import BucketListing
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -85,7 +89,7 @@ _VIEW_OBJECTS = "objects"
 _PRESIGNED_EXPIRES_IN = 3600
 
 
-class ObjectStorageScreen(Screen):
+class ObjectStorageScreen(WorkspaceScreen):
     """S3-compatible object storage file-manager (provider-parameterised).
 
     Args:
@@ -93,6 +97,13 @@ class ObjectStorageScreen(Screen):
             provider's object storage the screen manages; the account
             picker chooses among that provider's accounts.
     """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the leading table columns beside
+    # the chat column (as the provider managers).
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # Keep the full action row only where labels, spacing and scrollbar fit.
+    CONTENT_NARROW_WIDTH = 103
 
     BINDINGS = [
         Binding("escape", "back", "Back",    show=True),
@@ -110,6 +121,8 @@ class ObjectStorageScreen(Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -140,37 +153,63 @@ class ObjectStorageScreen(Screen):
     def compose(self) -> ComposeResult:
         label = _PROVIDER_LABELS.get(self._provider, self._provider.upper())
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    f"[bold $text-accent]{label}[/bold $text-accent]",
-                    id="s3_title",
-                ),
-                # Shown only when the provider has several accounts.
-                AccountPicker(
-                    object_storage_accounts(self.app, self._provider), id="s3_account",
-                ),
+        yield WorkspaceControls(label)
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            inventory_panel = Vertical(
                 Static("", id="s3_breadcrumb"),
-                DataTable(id="s3_table", cursor_type="row", zebra_stripes=True),
                 Static("", id="s3_status"),
+                DataTable(id="s3_table", cursor_type="row", zebra_stripes=True),
+                classes="resource-panel provider-aux-inventory",
+            )
+            actions = Vertical(
                 Horizontal(
-                    Button("Refresh (r)",      id="btn_s3_refresh",    variant="default"),
-                    Button("New Bucket",       id="btn_s3_new_bucket", variant="primary"),
-                    Button("Up (u)",           id="btn_s3_up",         variant="default"),
-                    Button("Open (o)",         id="btn_s3_open",       variant="default"),
-                    Button("Upload",           id="btn_s3_upload",     variant="default"),
-                    Button("Download",         id="btn_s3_download",   variant="default"),
-                    Button("Delete (d)",       id="btn_s3_delete",     variant="error"),
-                    Button("Copy",             id="btn_s3_copy",       variant="default"),
-                    Button("Move",             id="btn_s3_move",       variant="default"),
-                    Button("Share URL",        id="btn_s3_share",      variant="default"),
-                    Button("Back",             id="btn_s3_back",       variant="default"),
-                    id="s3_actions",
+                    Static("Browse", classes="resource-action-label"),
+                    ActionRow(
+                        ActionButton("Refresh", "r", id="btn_s3_refresh"),
+                        ActionButton("New bucket", role="primary", id="btn_s3_new_bucket"),
+                        ActionButton("Up", "u", id="btn_s3_up"),
+                        ActionButton("Open", "o", id="btn_s3_open"),
+                        keep_hints=True,
+                        classes="resource-action-buttons",
+                    ),
+                    classes="resource-action-group",
                 ),
-                # ---- New Bucket form (hidden by default) ----
+                Horizontal(
+                    Static("Transfer", classes="resource-action-label"),
+                    ActionRow(
+                        ActionButton("Upload", id="btn_s3_upload"),
+                        ActionButton("Download", id="btn_s3_download"),
+                        keep_hints=True,
+                        classes="resource-action-buttons",
+                    ),
+                    classes="resource-action-group",
+                ),
+                Horizontal(
+                    Static("Selected", classes="resource-action-label"),
+                    ActionRow(
+                        ActionButton("Delete", "d", role="error", id="btn_s3_delete"),
+                        ActionButton("Copy", id="btn_s3_copy"),
+                        ActionButton("Move", id="btn_s3_move"),
+                        ActionButton("Share URL", id="btn_s3_share"),
+                        ActionButton("Back", "esc", id="btn_s3_back"),
+                        keep_hints=True,
+                        classes="resource-action-buttons",
+                    ),
+                    classes="resource-action-group",
+                ),
+                id="s3_actions",
+                classes="resource-grouped-actions",
+            )
+            operations = Vertical(
+                Static("Selected resource", classes="provider-aux-section-heading"),
+                Static(
+                    "Select a bucket, folder or object.", id="s3_selected_resource",
+                    classes="provider-aux-selection", markup=False,
+                ),
+                actions,
                 Container(
-                    Static("[bold]Create Bucket[/bold]", classes="section_header"),
+                    Static("[bold]Create bucket[/bold]", classes="section_header"),
                     Label("Bucket name:"),
                     Input(placeholder="my-bucket", id="s3_input_bucket_name"),
                     # Region row is AWS-only: Hetzner/OVH derive the region
@@ -192,9 +231,8 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_new_bucket_form",
                 ),
-                # ---- Upload form (hidden by default) ----
                 Container(
-                    Static("[bold]Upload File[/bold]", classes="section_header"),
+                    Static("[bold]Upload file[/bold]", classes="section_header"),
                     Label("Local file path:"),
                     Input(placeholder="/home/user/file.txt", id="s3_input_upload_path"),
                     Label("Object key (destination):"),
@@ -206,9 +244,8 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_upload_form",
                 ),
-                # ---- Download form (hidden by default) ----
                 Container(
-                    Static("[bold]Download File[/bold]", classes="section_header"),
+                    Static("[bold]Download file[/bold]", classes="section_header"),
                     Label("Local destination path:"),
                     Input(placeholder="~/Downloads/file.txt", id="s3_input_download_path"),
                     Horizontal(
@@ -218,9 +255,8 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_download_form",
                 ),
-                # ---- Copy form (hidden by default) ----
                 Container(
-                    Static("[bold]Copy Object[/bold]", classes="section_header"),
+                    Static("[bold]Copy object[/bold]", classes="section_header"),
                     Label("Destination bucket:"),
                     Input(placeholder="target-bucket", id="s3_input_copy_dst_bucket"),
                     Label("Destination key:"),
@@ -232,9 +268,8 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_copy_form",
                 ),
-                # ---- Move form (hidden by default) ----
                 Container(
-                    Static("[bold]Move Object[/bold]", classes="section_header"),
+                    Static("[bold]Move object[/bold]", classes="section_header"),
                     Label("Destination bucket:"),
                     Input(placeholder="target-bucket", id="s3_input_move_dst_bucket"),
                     Label("Destination key:"),
@@ -246,7 +281,6 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_move_form",
                 ),
-                # ---- Presigned-URL display (hidden by default) ----
                 Container(
                     Static("[bold]Presigned URL[/bold]", classes="section_header"),
                     Static("", id="s3_presigned_url_display"),
@@ -256,7 +290,34 @@ class ObjectStorageScreen(Screen):
                     ),
                     id="s3_url_display",
                 ),
+                classes="provider-aux-operations",
+            )
+            operations.border_title = "Object operations"
+            yield ScrollableContainer(
+                Horizontal(
+                    Vertical(
+                        Static(
+                            f"{label}",
+                            id="s3_title",
+                            classes="screen-title",
+                        ),
+                        Static(
+                            "Open a bucket or folder to browse objects, then select an "
+                            "object for file actions.",
+                            classes="resource-context",
+                        ),
+                        classes="provider-aux-heading",
+                    ),
+                    AccountPicker(
+                        object_storage_accounts(self.app, self._provider), id="s3_account",
+                    ),
+                    classes="provider-aux-heading-row",
+                ),
+                Horizontal(
+                    inventory_panel, operations, classes="provider-aux-body",
+                ),
                 id="s3_container",
+                classes="workspace-content resource-workspace-content provider-aux-workspace",
             )
         yield Footer()
 
@@ -264,7 +325,13 @@ class ObjectStorageScreen(Screen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        follow_theme(self, "#s3_table", self._redraw_objects)
+        sync_compact_buttons(self)
         picker = self.query_one("#s3_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
@@ -275,7 +342,7 @@ class ObjectStorageScreen(Screen):
     def _setup_table(self) -> None:
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last Modified")
+        table.add_columns("Type", "Name / key", "Size", "Last modified")
 
     def _hide_all_forms(self) -> None:
         for form_id in (
@@ -474,9 +541,9 @@ class ObjectStorageScreen(Screen):
         table.clear(columns=True)
         with_region = any(b.get("region") for b in buckets)
         if with_region:
-            table.add_columns("Type", "Bucket Name", "Region", "Created", "")
+            table.add_columns("Type", "Bucket name", "Region", "Created", "")
         else:
-            table.add_columns("Type", "Bucket Name", "Created", "")
+            table.add_columns("Type", "Bucket name", "Created", "")
         self._bucket_rows = {}
         for b in buckets:
             name = b.get("name", "")
@@ -491,6 +558,7 @@ class ObjectStorageScreen(Screen):
                 cells.append(escape_cell(region))
             cells += [escape_cell(created), ""]
             table.add_row(*cells, key=row_key)
+        self._update_selected_resource()
 
     async def _load_objects(self) -> None:
         """Load objects + folders for the current bucket/prefix."""
@@ -530,11 +598,16 @@ class ObjectStorageScreen(Screen):
             f"[dim]{len(self._folders)} folder(s), {len(self._objects)} object(s){suffix}[/dim]"
         )
 
+    def _redraw_objects(self) -> None:
+        """Draw the object rows again (their folder cells carry theme colours)."""
+        if self._view == _VIEW_OBJECTS:
+            self._render_objects_table()
+
     def _render_objects_table(self) -> None:
         """Populate the DataTable with folder and object rows."""
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Name / Key", "Size", "Last Modified")
+        table.add_columns("Type", "Name / key", "Size", "Last modified")
 
         for folder in self._folders:
             # Strip the current prefix so only the segment is shown.
@@ -543,7 +616,7 @@ class ObjectStorageScreen(Screen):
                 self.scrub_key(folder.removeprefix(self._prefix))
             )
             table.add_row(
-                "[bold blue]folder[/bold blue]",
+                themed_text(self.app, "folder", "bold $text-accent"),
                 display_name,
                 "",
                 "",
@@ -564,6 +637,7 @@ class ObjectStorageScreen(Screen):
                 escape_cell(last_modified),
                 key=f"object:{key}",
             )
+        self._update_selected_resource()
 
     # ------------------------------------------------------------------
     # Breadcrumb
@@ -597,6 +671,28 @@ class ObjectStorageScreen(Screen):
     # ------------------------------------------------------------------
     # Table selection helpers
     # ------------------------------------------------------------------
+
+    def _update_selected_resource(self) -> None:
+        """Show the complete cursor identity beside its available operations."""
+        try:
+            selected = self.query_one("#s3_selected_resource", Static)
+        except NoMatches:
+            return
+        if self._view == _VIEW_BUCKETS:
+            bucket = self._get_selected_bucket()
+            value = self.scrub_name(str(bucket.get("name", ""))) if bucket else ""
+            kind = "Bucket"
+        else:
+            item = self._get_selected_object_info()
+            value = self.scrub_key(str(item["key"])) if item else ""
+            kind = str(item["type"]).capitalize() if item else "Resource"
+        content = Text(f"{kind}\n", style="bold") if value else Text()
+        content.append(value or "Select a bucket, folder or object.", style="")
+        selected.update(content)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "s3_table":
+            self._update_selected_resource()
 
     def _get_selected_bucket(self) -> Optional[Dict]:
         """Return the cursor row's bucket (raw, un-redacted name and region)."""
@@ -950,14 +1046,14 @@ class ObjectStorageScreen(Screen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Bucket",
+                    title="Delete bucket",
                     description=with_bold_values("Permanently delete bucket {}.", display_name),
                     consequences=[
                         "The bucket must be empty before it can be deleted",
                         "This operation is irreversible",
                     ],
                     confirm_text=display_name,
-                    action_label="Delete Bucket",
+                    action_label="Delete bucket",
                     severity="danger",
                 )
             )
@@ -1003,14 +1099,14 @@ class ObjectStorageScreen(Screen):
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Delete Object",
+                    title="Delete object",
                     description=with_bold_values("Permanently delete {}.", display_key),
                     consequences=[
                         "The object will be permanently removed from the bucket",
                         "This operation is irreversible",
                     ],
                     confirm_text=display_key,
-                    action_label="Delete Object",
+                    action_label="Delete object",
                     severity="danger",
                 )
             )

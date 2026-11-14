@@ -14,7 +14,6 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, Footer, Static
 
 from servonaut.services.memory.notes import notes_for_display
@@ -22,7 +21,7 @@ from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 #: Memory modules that hold authored text rather than probe results. The
 #: Memory screen shows them in their own panels, not in the module table.
@@ -250,8 +249,13 @@ def supersede_chain(
 # ---------------------------------------------------------------------------
 
 
-class MemoryFindingScreen(Screen):
+class MemoryFindingScreen(WorkspaceScreen):
     """One agent finding in full: body, tags and what it replaced (read-only)."""
+
+    AUTO_FOCUS = "#memory-finding-scroll"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
 
     CSS_PATH = [*_APP_CSS_FILES]
 
@@ -276,17 +280,27 @@ class MemoryFindingScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Container(id="memory-finding-container"):
-                yield Static("", id="memory-finding-server")
-                yield Static(FINDINGS_READER_NOTICE, id="memory-finding-notice", markup=False)
-                with VerticalScroll(id="memory-finding-scroll"):
-                    yield Static("", id="memory-finding-title")
-                    yield Static("", id="memory-finding-meta")
-                    yield Static("", id="memory-finding-body")
-                    yield Static("", id="memory-finding-chain")
+        yield WorkspaceControls("Memory finding")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="memory-finding-container", classes="workspace-content"):
+                with Horizontal(id="memory-finding-workspace"):
+                    with Container(id="memory-finding-context"):
+                        with VerticalScroll(id="memory-finding-context-scroll"):
+                            yield Static("", id="memory-finding-server", markup=False)
+                            yield Static(
+                                FINDINGS_READER_NOTICE,
+                                id="memory-finding-notice",
+                                markup=False,
+                            )
+                            yield Static("Record context", classes="memory-finding-heading")
+                            yield Static("", id="memory-finding-meta", markup=False)
+                    with VerticalScroll(id="memory-finding-scroll"):
+                        yield Static("", id="memory-finding-title", markup=False)
+                        yield Static("", id="memory-finding-body", markup=False)
+                        yield Static("", id="memory-finding-chain", markup=False)
                 with Horizontal(id="memory-finding-actions"):
+                    yield Static("Read-only finding", classes="memory-finding-action-note")
                     yield Button("Back", id="btn_memory_finding_back")
         yield Footer()
 

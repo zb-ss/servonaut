@@ -20,8 +20,7 @@ import logging
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Footer,
@@ -31,14 +30,16 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from servonaut.screens._busy_work import BusyWork
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.services import bws_onboarding as bws
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class SecretsSetupScreen(Screen):
+class SecretsSetupScreen(WorkspaceScreen):
     """Guided bws onboarding wizard.
 
     Stateful only in the sense that it remembers the token env-var name
@@ -46,12 +47,27 @@ class SecretsSetupScreen(Screen):
     work happens in background workers over the shared service layer.
     """
 
+    DEFAULT_CSS = """
+    SecretsSetupScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    # Body padding and scrollbar plus the List projects / Test connection /
+    # Save row at the global button minimum with its margins.
+    CHAT_MIN_CONTENT_WIDTH = 62
+    # Readiness and the project picker stack before either becomes cramped.
+    CONTENT_NARROW_WIDTH = 92
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
 
     def __init__(self) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._selected_project_id: str = ""
 
     # ------------------------------------------------------------------
@@ -60,37 +76,45 @@ class SecretsSetupScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static("🔐 Guided Bitwarden setup", id="secrets_setup_title"),
-                Static(
-                    "Pick a project by name, test the connection, then save "
-                    "it as your personal secret store. Your access token stays "
-                    "in your environment — only its name and the project id are "
-                    "stored.",
-                    id="secrets_setup_subtitle",
-                ),
-                VerticalScroll(
-                    Static("", id="setup_preflight"),
-                    Static("Token env var:", classes="setup_label"),
-                    Input(
-                        value=bws.DEFAULT_TOKEN_ENV_VAR,
-                        id="token_env",
-                        placeholder=bws.DEFAULT_TOKEN_ENV_VAR,
-                    ),
-                    Horizontal(
-                        Button("List projects", id="list_projects", variant="primary"),
-                        Button("Test connection", id="test_conn"),
-                        Button("Save", id="save", variant="success"),
-                        id="setup_buttons",
-                    ),
-                    OptionList(id="project_list"),
-                    Static("", id="setup_status"),
-                    id="secrets_setup_body",
-                ),
-                id="secrets_setup_container",
-            )
+        yield WorkspaceControls("Secrets setup")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="secrets_setup_container", classes="workspace-content"):
+                yield BusyIndicator(id="read_loading", classes="read-loading")
+                with Vertical(classes="secrets_setup_heading"):
+                    yield Static("Connect Bitwarden", id="secrets_setup_title", classes="screen-title")
+                    yield Static(
+                        "Choose a project, verify access, then save your personal store. "
+                        "Your access token stays in your environment.",
+                        id="secrets_setup_subtitle",
+                        classes="screen-description",
+                    )
+                with VerticalScroll(id="secrets_setup_body"):
+                    with Horizontal(id="secrets_setup_workspace"):
+                        with Vertical(id="secrets_setup_readiness"):
+                            yield Static("Before you connect", classes="secrets_section_title")
+                            yield Static("", id="setup_preflight")
+                        with Vertical(id="secrets_setup_project"):
+                            yield Static("Personal secret store", classes="secrets_section_title")
+                            yield Static("Token environment variable name", classes="setup_label")
+                            yield Input(
+                                value=bws.DEFAULT_TOKEN_ENV_VAR,
+                                id="token_env",
+                                placeholder=bws.DEFAULT_TOKEN_ENV_VAR,
+                            )
+                            yield Static(
+                                "Enter the variable name, not the token value.",
+                                classes="secrets_setup_note",
+                            )
+                            yield Static("Choose a project", classes="secrets_section_title")
+                            yield OptionList(id="project_list")
+                with Vertical(id="secrets_setup_actions"):
+                    with VerticalScroll(id="secrets_setup_feedback"):
+                        yield Static("", id="setup_status")
+                    with Horizontal(id="setup_buttons"):
+                        yield Button("List projects", id="list_projects", variant="primary")
+                        yield Button("Test connection", id="test_conn")
+                        yield Button("Save", id="save", variant="success")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -208,24 +232,25 @@ class SecretsSetupScreen(Screen):
         option_list = self.query_one("#project_list", OptionList)
         option_list.clear_options()
         self._selected_project_id = ""
-        try:
-            projects = await bws.list_bws_projects(token_env)
-        except bws.BwsOnboardingError as exc:
-            self._set_status(str(exc), error=True)
-            return
-        if not projects:
+        with self._read_loading.running('Loading projects…'):
+            try:
+                projects = await bws.list_bws_projects(token_env)
+            except bws.BwsOnboardingError as exc:
+                self._set_status(str(exc), error=True)
+                return
+            if not projects:
+                self._set_status(
+                    "No projects visible to this token — create one and grant "
+                    "the machine account access.",
+                    error=True,
+                )
+                return
+            for p in projects:
+                label = f"{p.name or '(unnamed)'}  [{p.id}]"
+                option_list.add_option(Option(escape(label), id=p.id))
             self._set_status(
-                "No projects visible to this token — create one and grant "
-                "the machine account access.",
-                error=True,
+                f"Found {len(projects)} project(s). Select one, then Test connection."
             )
-            return
-        for p in projects:
-            label = f"{p.name or '(unnamed)'}  [{p.id}]"
-            option_list.add_option(Option(escape(label), id=p.id))
-        self._set_status(
-            f"Found {len(projects)} project(s). Select one, then Test connection."
-        )
 
     async def _test_connection_worker(self) -> None:
         if not self._selected_project_id:

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import Button, Input, Static
 
 from servonaut.widgets.secret_input import SecretInput
@@ -171,6 +172,17 @@ class StringListEditor(Vertical):
     scan-paths add/remove UX so list-backed panels stay DRY.
     """
 
+    class Changed(Message):
+        """A user added or removed a value row after the DOM change settled."""
+
+        def __init__(self, editor: "StringListEditor") -> None:
+            super().__init__()
+            self.editor = editor
+
+        @property
+        def control(self) -> "StringListEditor":
+            return self.editor
+
     DEFAULT_CSS = """
     StringListEditor { height: auto; }
     /* The rows container must size to its content, not grab a 1fr share
@@ -237,6 +249,12 @@ class StringListEditor(Vertical):
             row.entry_tag = tag
             self._rows.mount(row)
 
+    def focus(self, scroll_visible: bool = True) -> "StringListEditor":
+        """Direct validation focus to an editable value in the list."""
+        target = next(iter(self._rows.query(Input)), self._new)
+        target.focus(scroll_visible=scroll_visible)
+        return self
+
     def get_entries(self) -> List[tuple]:
         """``(value, tag)`` per non-empty row, in order (tag None if untagged)."""
         if self._pending is not None:
@@ -279,19 +297,24 @@ class StringListEditor(Vertical):
             classes="list-row",
         )
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle the add and per-row remove buttons."""
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Consume row buttons and report only completed user mutations."""
         if "list-add" in event.button.classes:
             event.stop()
             value = self._new.value.strip()
             if value:
-                self._rows.mount(self._make_row(value))
                 self._new.value = ""
+                await self._rows.mount(self._make_row(value))
+                self.post_message(self.Changed(self))
         elif "list-remove" in event.button.classes:
             event.stop()
             row = event.button.parent
             if row is not None:
-                row.remove()
+                # Keep the focus here: left alone, it falls back to a control
+                # far above and scrolls the panel away from the change.
+                self._new.focus(scroll_visible=False)
+                await row.remove()
+                self.post_message(self.Changed(self))
 
 
 class KeyValueEditor(Vertical):

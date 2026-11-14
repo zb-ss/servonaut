@@ -13,12 +13,18 @@ from typing import List, Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, SelectionList, Static
 from textual.widgets.selection_list import Selection
 from servonaut.services.team_sharing import SHARE_ADDRESS, share_address
 from servonaut.services.vault.display import terminal_safe
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 def _server_name(server: dict) -> str:
@@ -41,27 +47,18 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
 
     # Shorter terminals get a shorter list, so Cancel and Share stay on screen.
     VERTICAL_BREAKPOINTS = [(0, "-short"), (30, "-medium"), (40, "-tall")]
+    DEFAULT_CLASSES = "dialog-screen"
 
     DEFAULT_CSS = """
-    ShareServersConfirmModal { align: center middle; }
-    ShareServersConfirmModal #share_confirm_modal {
-        width: 84;
-        max-width: 94%;
-        height: 90%;
-        max-height: 40;
-        padding: 1 2;
-        border: round $warning;
-        background: $surface;
-    }
     ShareServersConfirmModal #share_confirm_title { text-style: bold; color: $text-warning; }
     ShareServersConfirmModal #share_confirm_intro { margin: 1 0 0 0; }
-    ShareServersConfirmModal #share_confirm_body { height: 1fr; }
     ShareServersConfirmModal #share_confirm_pick { height: auto; margin: 1 0 0 0; }
     ShareServersConfirmModal #share_confirm_pick Button { min-width: 14; margin: 0 1 0 0; }
     ShareServersConfirmModal #share_confirm_list { height: auto; max-height: 14; margin: 1 0 0 0; }
+    ShareServersConfirmModal #share_confirm_list > .option-list--option-highlighted { background: $surface; color: auto 100%; text-style: bold underline; }
+    ShareServersConfirmModal #share_confirm_list:ansi > .option-list--option-highlighted { background: $block-cursor-blurred-background; color: $block-cursor-blurred-foreground; }
+    ShareServersConfirmModal #share_confirm_list:ansi:focus > .option-list--option-highlighted { background: $block-cursor-background; color: $block-cursor-foreground; }
     ShareServersConfirmModal #share_confirm_skipped { color: $text-muted; margin: 1 0 0 0; }
-    ShareServersConfirmModal #share_confirm_actions { height: auto; margin: 1 0 0 0; align: right middle; }
-    ShareServersConfirmModal #share_confirm_cancel { margin: 0 1 0 0; }
     ShareServersConfirmModal #share_confirm_connection { height: 3; }
     ShareServersConfirmModal #share_confirm_username { width: 2fr; margin-right: 1; }
     ShareServersConfirmModal #share_confirm_port { width: 1fr; }
@@ -70,8 +67,7 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
     ShareServersConfirmModal.-medium #share_confirm_list { max-height: 4; }
     ShareServersConfirmModal.-short #share_confirm_intro,
     ShareServersConfirmModal.-short #share_confirm_pick,
-    ShareServersConfirmModal.-short #share_confirm_skipped,
-    ShareServersConfirmModal.-short #share_confirm_actions { margin: 0; }
+    ShareServersConfirmModal.-short #share_confirm_skipped { margin: 0; }
     ShareServersConfirmModal.-short #share_confirm_list { max-height: 4; margin: 0; }
     """
 
@@ -97,13 +93,14 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
         self._editor_display: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("", id="share_confirm_title"),
-            Static("", id="share_confirm_intro"),
-            VerticalScroll(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("", id="share_confirm_title"),
+            body=DialogBody(
+                Static("", id="share_confirm_intro"),
                 Horizontal(
-                    Button("Select All", id="share_confirm_all"),
-                    Button("Select None", id="share_confirm_none"),
+                    Button("Select all", id="share_confirm_all"),
+                    Button("Select none", id="share_confirm_none"),
                     id="share_confirm_pick",
                 ),
                 SelectionList(id="share_confirm_list"),
@@ -114,15 +111,17 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
                     Input(placeholder="SSH port", type="integer", id="share_confirm_port"),
                     id="share_confirm_connection",
                 ),
-                Static(self._skipped_text(), id="share_confirm_skipped"),
+                Static(self._skipped_text(), id="share_confirm_skipped", classes="dialog-muted"),
                 id="share_confirm_body",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", id="share_confirm_cancel"),
                 Button("", variant="primary", id="share_confirm_share"),
                 id="share_confirm_actions",
             ),
             id="share_confirm_modal",
+            size="large",
+            severity="warning",
         )
 
     def on_mount(self) -> None:
@@ -183,7 +182,7 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
         address = self._display(share_address(server), field="host")
         if server.get(SHARE_ADDRESS):
             address += " (private address)"
-        return Text.assemble(name, "  ", (address, "dim"))
+        return Text.assemble(name, "  ", address)
 
     def _display(self, value: str, *, field: str) -> str:
         value = terminal_safe(value)

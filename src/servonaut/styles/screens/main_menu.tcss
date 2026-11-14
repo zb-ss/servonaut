@@ -1,10 +1,118 @@
-/* ===================================================================
-   MAIN MENU SCREEN
-   =================================================================== */
-
-MainMenuScreen {
-    align: center middle;
+/* Dashboard: server access first, inventory alongside, inspection below. */
+MainMenuScreen { align: left top; }
+MainMenuScreen #dashboard-content {
+    width: 1fr;
+    height: 100%;
+    padding: 0 2 1 2;
+    background: transparent;
+    overflow-y: auto;
 }
+MainMenuScreen #dashboard-header {
+    height: auto;
+    margin: 0 0 1 0;
+}
+MainMenuScreen #dashboard-title,
+MainMenuScreen #dashboard-subtitle {
+    height: auto;
+    text-align: left;
+}
+MainMenuScreen #dashboard-title { text-style: bold; color: $text; }
+MainMenuScreen #dashboard-subtitle,
+MainMenuScreen #dashboard-inventory-note { color: $text-muted; }
+MainMenuScreen #dashboard-overview { height: auto; margin-bottom: 1; }
+MainMenuScreen #dashboard-servers { width: 2fr; height: auto; margin-right: 2; }
+MainMenuScreen #dashboard-inventory { width: 1fr; min-width: 25; height: auto; }
+MainMenuScreen .dashboard-section-title {
+    height: auto;
+    margin: 0 0 1 0;
+    text-style: bold;
+    color: $text;
+}
+MainMenuScreen #dashboard-primary-actions { height: auto; }
+MainMenuScreen #dashboard-secondary-actions { height: auto; margin-top: 1; }
+MainMenuScreen #dashboard-content .action-card {
+    width: 1fr;
+    min-width: 0;
+    height: auto;
+    min-height: 4;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+    content-align: left middle;
+    text-align: left;
+}
+MainMenuScreen #dashboard-content #card_list {
+    width: 100%;
+    min-height: 5;
+    margin: 0;
+    padding: 0 2;
+    border: round $primary;
+    text-style: bold;
+}
+MainMenuScreen #dashboard-secondary-actions .action-card {
+    /* Preserve one text cell after native Button line padding during resize. */
+    min-width: 7;
+    min-height: 3;
+    margin-right: 1;
+}
+MainMenuScreen #dashboard-secondary-actions #card_custom_servers { width: 2fr; }
+MainMenuScreen #dashboard-secondary-actions #card_settings { margin-right: 0; }
+MainMenuScreen #stats-row {
+    layout: vertical;
+    height: auto;
+    margin: 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+MainMenuScreen #dashboard-content .stat-card {
+    width: 100%;
+    height: 3;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+    border-bottom: solid $border-blurred;
+    background: transparent;
+    text-align: left;
+    content-align: left middle;
+}
+MainMenuScreen #dashboard-content .stat-card:last-child { border-bottom: none; }
+MainMenuScreen #dashboard-inventory-note {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0;
+}
+MainMenuScreen #dashboard-tools { height: auto; }
+MainMenuScreen #actions-grid {
+    grid-size: 2;
+    grid-rows: auto;
+    grid-columns: 1fr;
+    grid-gutter: 1;
+    height: auto;
+}
+MainMenuScreen #dashboard-content .action-card:hover,
+MainMenuScreen #dashboard-content .action-card:focus {
+    background: transparent;
+    border: round $primary;
+    color: $text;
+}
+MainMenuScreen #dashboard-content .action-card:focus { text-style: bold; }
+MainMenuScreen.-content-narrow #dashboard-content { padding: 0 1 1 1; }
+MainMenuScreen.-content-narrow #dashboard-overview { layout: vertical; }
+MainMenuScreen.-content-narrow #dashboard-servers,
+MainMenuScreen.-content-narrow #dashboard-inventory {
+    width: 100%;
+    min-width: 0;
+    margin: 0 0 1 0;
+}
+MainMenuScreen.-content-narrow #stats-row { layout: horizontal; height: 5; }
+MainMenuScreen.-content-narrow #dashboard-content .stat-card {
+    width: 1fr;
+    height: 100%;
+    border-bottom: none;
+    border-right: solid $border-blurred;
+}
+MainMenuScreen.-content-narrow #dashboard-content .stat-card:last-child { border-right: none; }
 
 .nav-button.hidden {
     display: none;

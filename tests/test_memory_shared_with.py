@@ -122,7 +122,7 @@ async def test_a_share_someone_else_made_is_not_shared_with(tmp_path):
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count
                         and app.screen._rows[0].get("grant_candidates"))
-        assert _shared_with(app) == "[dim]—[/dim]"
+        assert _shared_with(app) == "—"
 
 
 async def test_an_unshared_server_shows_a_dash(tmp_path):
@@ -131,7 +131,7 @@ async def test_an_unshared_server_shows_a_dash(tmp_path):
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count and team.calls)
         await pilot.pause(0.1)
-        assert _shared_with(app) == "[dim]—[/dim]"
+        assert _shared_with(app) == "—"
 
 
 async def test_demo_mode_shows_a_stand_in_team_name(tmp_path):
@@ -190,7 +190,7 @@ async def test_the_memory_screen_says_whom_an_own_server_is_shared_with(tmp_path
         await _wait_for(pilot, lambda: not _share_line(app).has_class("hidden"))
         text = str(_share_line(app).render())
         assert text.startswith("Shared with Team A (viewer and above); Team B (admin and above).")
-        assert "Fleet Memory and press S" in text
+        assert "Fleet memory and press S" in text
 
 
 async def test_the_memory_screen_says_nothing_when_it_is_not_shared(tmp_path):
@@ -227,3 +227,13 @@ def test_the_text_names_each_team_with_its_lowest_role():
     ]
     assert shared_with_text(listings, str.upper) == "Shared with TEAM A (viewer and above); TEAM-B."
     assert shared_with_text([], str) == ""
+
+
+async def test_closing_the_memory_screen_while_team_lists_load_does_not_crash(tmp_path):
+    """A late answer that finds the line already removed is ignored."""
+    app = _app(tmp_path, _Team({"team-a": [_grant("i-own-1", ME)]}), screen="memory")
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: not _share_line(app).has_class("hidden"))
+        screen = app.screen
+        await _share_line(app).remove()
+        screen._show_own_shares([])

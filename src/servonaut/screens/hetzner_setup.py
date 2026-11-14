@@ -15,7 +15,7 @@ populates without a relaunch.
 
 Besides the primary project (the ``hetzner`` block itself) the wizard adds
 and edits EXTRA projects (``hetzner.accounts``): a label, the project's own
-token and SSH defaults, and its own Object Storage keys. An extra project's
+token and SSH defaults, and its own object storage keys. An extra project's
 token is tested before it is saved.
 """
 
@@ -30,8 +30,7 @@ from typing import List, Optional, TYPE_CHECKING, Tuple
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Select, Static
 
@@ -47,7 +46,7 @@ from servonaut.services.object_storage_regions import (
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.widgets.secret_input import SecretInput
 
 if TYPE_CHECKING:
@@ -56,13 +55,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class HetznerSetupScreen(Screen):
+class HetznerSetupScreen(WorkspaceScreen):
     """Guided setup wizard for Hetzner Cloud — token + defaults.
 
     Opened with no arguments it sets up the primary project. ``add_extra``
     adds another project and ``extra`` edits extra project number *extra*;
     ``show_label`` also offers the primary project's label for editing.
     """
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the labelled credential inputs
+    # beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -77,6 +82,30 @@ class HetznerSetupScreen(Screen):
     }
     HetznerSetupScreen #btn_hetzner_add_project {
         margin: 0 1 0 0;
+    }
+
+    HetznerSetupScreen .provider_setup_context {
+        height: auto;
+        padding: 0 1 1 1;
+    }
+    HetznerSetupScreen #hetzner_setup_header {
+        height: auto;
+        margin-bottom: 1;
+    }
+    HetznerSetupScreen .provider_setup_grid {
+        height: auto;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: auto;
+        grid-gutter: 1 2;
+    }
+    HetznerSetupScreen.-content-narrow .provider_setup_context {
+        padding: 0 0 1 0;
+    }
+    HetznerSetupScreen.-content-narrow .provider_setup_grid {
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-gutter: 1 0;
     }
     """
 
@@ -111,18 +140,29 @@ class HetznerSetupScreen(Screen):
             self._account_mode or self._show_label or bool(h.accounts) or bool(h.label)
         )
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Hetzner setup")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                *self._intro_rows(),
-                *self._token_rows(),
-                *self._ssh_rows(),
-                *([] if self._account_mode else self._create_default_rows()),
-                *self._object_storage_rows(),
-                # Test + Save row
-                Static("", id="hetzner_test_result"),
-                Horizontal(*self._action_buttons(), classes="hetzner_action_row"),
+                Container(*self._intro_rows(), classes="provider_setup_context"),
+                Grid(
+                    Container(*self._token_rows(), classes="provider_form_section"),
+                    Container(*self._ssh_rows(), classes="provider_form_section"),
+                    *(
+                        [] if self._account_mode else [
+                            Container(*self._create_default_rows(), classes="provider_form_section")
+                        ]
+                    ),
+                    Container(*self._object_storage_rows(), classes="provider_form_section"),
+                    classes="provider_setup_grid",
+                ),
+                Vertical(
+                    Static("", id="hetzner_test_result"),
+                    Horizontal(*self._action_buttons(), classes="hetzner_action_row"),
+                    classes="provider_setup_actions",
+                ),
                 id="hetzner_setup_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -145,7 +185,7 @@ class HetznerSetupScreen(Screen):
         else:
             rows = [
                 Static(
-                    "[bold $text-accent]Hetzner Cloud Setup[/bold $text-accent]",
+                    "[bold $text-accent]Hetzner Cloud setup[/bold $text-accent]",
                     id="hetzner_setup_header",
                 ),
                 Static(
@@ -158,7 +198,7 @@ class HetznerSetupScreen(Screen):
         if self._label_shown:
             rows.append(
                 Horizontal(
-                    Static("Project Label:", classes="label"),
+                    Static("Project label:", classes="label"),
                     Input(placeholder=placeholder, id="hetzner_input_label"),
                     classes="setting_row",
                     id="hetzner_label_row",
@@ -179,7 +219,7 @@ class HetznerSetupScreen(Screen):
             )
         return [
             # Step 1 — API token
-            Static("[bold]Step 1: API Token[/bold]", classes="section_header"),
+            Static("[bold]Step 1: API token[/bold]", classes="section_header"),
             Static(
                 "[dim]Create a token at https://console.hetzner.cloud → "
                 "Project → Security → API Tokens. Use a [b]Read & Write[/b] "
@@ -187,7 +227,7 @@ class HetznerSetupScreen(Screen):
                 classes="note",
             ),
             Horizontal(
-                Static("API Token:", classes="label"),
+                Static("API token:", classes="label"),
                 SecretInput(
                     placeholder="Hetzner API token, $ENV_VAR, or file:/path",
                     id="hetzner_input_token",
@@ -199,27 +239,27 @@ class HetznerSetupScreen(Screen):
     def _ssh_rows(self) -> List[Widget]:
         return [
             # Step 2 — SSH defaults
-            Static("[bold]Step 2: SSH Defaults[/bold]", classes="section_header"),
+            Static("[bold]Step 2: SSH defaults[/bold]", classes="section_header"),
             Static(
                 "[dim][b]Hetzner-side SSH Key[/b] is the [i]name[/i] (or numeric ID) "
                 "of an SSH key already registered on your Hetzner Cloud project — "
                 "used at server-creation time so newly-created servers accept your "
-                "key. [b]Local SSH Key[/b] is the on-disk private-key path used by "
+                "key. [b]Local SSH key[/b] is the on-disk private-key path used by "
                 "[b]ssh -i[/b] when connecting to those servers.[/dim]",
                 classes="note",
             ),
             Horizontal(
-                Static("Hetzner SSH Key:", classes="label"),
+                Static("Hetzner SSH key:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_remote_ssh_key",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Local SSH Key:", classes="label"),
+                Static("Local SSH key:", classes="label"),
                 Input(
                     placeholder="~/.ssh/id_rsa or ~/.ssh/hetzner_key",
                     id="hetzner_input_local_ssh_key",
@@ -227,7 +267,7 @@ class HetznerSetupScreen(Screen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Username:", classes="label"),
+                Static("Default username:", classes="label"),
                 Input(
                     placeholder="root",
                     id="hetzner_input_username",
@@ -241,43 +281,43 @@ class HetznerSetupScreen(Screen):
         return [
             # Step 3 — Create-time defaults
             Static(
-                "[bold]Step 3: hetzner create Defaults[/bold]",
+                "[bold]Step 3: hetzner create defaults[/bold]",
                 classes="section_header",
             ),
             Static(
                 "[dim]Used when [b]servonaut hetzner create <name>[/b] (or the "
                 "TUI's [b]+ New[/b] action) is called without explicit flags. "
-                "Until you click [b]Test Connection[/b] each dropdown shows only "
+                "Until you click [b]Test connection[/b] each dropdown shows only "
                 "your currently-saved value; a successful connection refreshes "
                 "the list from the Hetzner API.[/dim]",
                 classes="note",
             ),
             Horizontal(
-                Static("Default Image:", classes="label"),
+                Static("Default image:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_image",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Server Type:", classes="label"),
+                Static("Default server type:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_server_type",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Default Location:", classes="label"),
+                Static("Default location:", classes="label"),
                 Select(
                     options=[],
                     id="hetzner_select_location",
-                    prompt="Test Connection to load options",
+                    prompt="Test connection to load options",
                     allow_blank=True,
                 ),
                 classes="setting_row",
@@ -289,7 +329,7 @@ class HetznerSetupScreen(Screen):
         return [
             # Object Storage (S3-compatible) credentials
             Static(
-                f"[bold]Step {step}: Object Storage (S3-compatible)[/bold]",
+                f"[bold]Step {step}: Object storage (S3-compatible)[/bold]",
                 classes="section_header",
             ),
             Static(
@@ -302,7 +342,7 @@ class HetznerSetupScreen(Screen):
                 classes="note",
             ),
             Horizontal(
-                Static("Access Key:", classes="label"),
+                Static("Access key:", classes="label"),
                 SecretInput(
                     placeholder="your-key or $HETZNER_S3_ACCESS_KEY or file:/path",
                     id="hetzner_input_s3_access_key",
@@ -310,7 +350,7 @@ class HetznerSetupScreen(Screen):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Secret Key:", classes="label"),
+                Static("Secret key:", classes="label"),
                 SecretInput(
                     placeholder="your-secret or $HETZNER_S3_SECRET_KEY or file:/path",
                     id="hetzner_input_s3_secret_key",
@@ -341,11 +381,11 @@ class HetznerSetupScreen(Screen):
         ]
 
     def _action_buttons(self) -> List[Widget]:
-        test = Button("Test Connection", id="btn_hetzner_test", variant="default")
+        test = Button("Test connection", id="btn_hetzner_test", variant="default")
         back = Button("Back", id="btn_hetzner_back")
         if self._account_mode:
-            return [test, Button("Test & Save", id="btn_hetzner_save", variant="primary"), back]
-        save = Button("Save & Enable", id="btn_hetzner_save", variant="primary")
+            return [test, Button("Test & save", id="btn_hetzner_save", variant="primary"), back]
+        save = Button("Save & enable", id="btn_hetzner_save", variant="primary")
         keep_off = Button("Save", id="btn_hetzner_disable")
         self._label_save_buttons(
             save, keep_off, self.app.config_manager.get().hetzner.enabled
@@ -354,7 +394,7 @@ class HetznerSetupScreen(Screen):
             test,
             save,
             keep_off,
-            Button("Add Another Project", id="btn_hetzner_add_project"),
+            Button("Add another project", id="btn_hetzner_add_project"),
             back,
         ]
 
@@ -366,7 +406,7 @@ class HetznerSetupScreen(Screen):
         "Disable Hetzner" while it is on, a plain "Save" while it is off (an
         Object-Storage-only setup saves its keys without listing servers).
         """
-        save.label = "Save" if enabled else "Save & Enable"
+        save.label = "Save" if enabled else "Save & enable"
         keep_off.label = "Disable Hetzner" if enabled else "Save"
         keep_off.variant = "error" if enabled else "default"
 
@@ -405,8 +445,8 @@ class HetznerSetupScreen(Screen):
         self.query_one("#hetzner_input_s3_endpoint_url", Input).value = s3.endpoint_url
 
         # Seed each dropdown with just the user's current saved value so
-        # they can save without first clicking Test Connection (e.g.
-        # tweaking only the username). Test Connection later swaps in
+        # they can save without first clicking Test connection (e.g.
+        # tweaking only the username). Test connection later swaps in
         # the full API list and preserves whichever value is selected.
         self._seed_select(
             "#hetzner_select_remote_ssh_key", h.default_hetzner_ssh_key or "",
@@ -456,7 +496,7 @@ class HetznerSetupScreen(Screen):
         """Pre-populate a Select with one option (the saved config value).
 
         Empty strings collapse to BLANK so the placeholder prompt
-        ("Test Connection to load options") is shown — better signal
+        ("Test connection to load options") is shown — better signal
         than a row that just says "''".
         """
         sel = self.query_one(selector, Select)

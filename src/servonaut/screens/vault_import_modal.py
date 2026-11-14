@@ -18,6 +18,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.screen import ModalScreen
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogFrame, DialogNotificationSpace,
+)
 from textual.widgets import Button, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
@@ -62,27 +66,17 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     separate, explicit binding confirmation.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     VaultImportModal { align: center middle; }
-    VaultImportModal #vault_import_modal {
-        width: 76;
-        max-width: 92%;
-        height: 86%;
-        max-height: 32;
-        padding: 1 2;
-        border: round $accent;
-        overflow: hidden;
-    }
     VaultImportModal #vault_import_choices { height: auto; margin-top: 1; }
-    VaultImportModal #vault_import_actions { height: 3; min-height: 3; margin-top: 1; }
     VaultImportModal #vault_import_title { color: $accent; text-style: bold; }
     VaultImportModal #vault_import_intro { color: $text-muted; }
     VaultImportModal #vault_import_local,
-    VaultImportModal #vault_import_bitwarden,
-    VaultImportModal #vault_import_cancel,
-    VaultImportModal #vault_import_confirm { width: 1fr; }
+    VaultImportModal #vault_import_bitwarden { width: 1fr; }
     VaultImportModal #vault_import_list { height: 1fr; min-height: 3; margin-top: 1; }
     VaultImportModal #vault_import_status { height: auto; min-height: 1; margin-top: 1; }
     VaultImportModal #vault_import_busy { margin: 0; }
@@ -147,25 +141,31 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         return Content.assemble(title, "\n", literal(f"Vault: {self._vault_name}"))
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static(self._title_content(), id="vault_import_title"),
-            Static(
-                "Choose a source. Existing files and Bitwarden items are never deleted.",
-                id="vault_import_intro",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(self._title_content(), id="vault_import_title"),
+                Static(
+                    "Choose a source. Existing files and Bitwarden items are never deleted.",
+                    id="vault_import_intro",
+                ),
+                Horizontal(
+                    Button("Local SSH files", id="vault_import_local"),
+                    Button("Bitwarden", id="vault_import_bitwarden"),
+                    id="vault_import_choices",
+                ),
             ),
-            Horizontal(
-                Button("Local SSH files", id="vault_import_local"),
-                Button("Bitwarden", id="vault_import_bitwarden"),
-                id="vault_import_choices",
+            body=SelectionList(id="vault_import_list"),
+            status=Vertical(
+                Static("Choose a source to begin.", id="vault_import_status"),
+                BusyIndicator(id="vault_import_busy"),
             ),
-            SelectionList(id="vault_import_list"),
-            Static("Choose a source to begin.", id="vault_import_status"),
-            BusyIndicator(id="vault_import_busy"),
-            Horizontal(
+            actions=DialogActions(
                 Button("Cancel", id="vault_import_cancel"),
                 Button("Import selected", variant="primary", id="vault_import_confirm", disabled=True),
                 id="vault_import_actions",
             ),
+            size="large",
             id="vault_import_modal",
         )
 

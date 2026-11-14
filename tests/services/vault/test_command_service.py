@@ -1091,6 +1091,9 @@ def test_native_known_hosts_requires_private_real_directory_and_formats_port(tmp
 
     insecure = tmp_path / "insecure-known-hosts"
     insecure.mkdir(mode=0o755)
+    # mkdir's requested mode is filtered by a restrictive process umask.
+    insecure.chmod(0o755)
+    assert insecure.stat().st_mode & 0o777 == 0o755
     service._vault_known_hosts_directory = lambda: insecure  # type: ignore[method-assign]
     with pytest.raises(Exception, match="unsafe ownership or permissions"):
         service._write_known_hosts("server.example.test", ["ssh-ed25519 AAAA"])
@@ -2078,7 +2081,7 @@ def test_file_key_storage_setting_applies_without_a_restart() -> None:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), config)
     assert service.store.allow_file_key_store is False
 
-    config.vault.allow_file_key_store = True  # Settings > Team Vault saved in the running app
+    config.vault.allow_file_key_store = True  # Settings > Team vault saved in the running app
     service.unlock_existing_identity()
 
     assert service.store.allow_file_key_store is True

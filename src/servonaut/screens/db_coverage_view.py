@@ -14,7 +14,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Checkbox, DataTable, Footer, Input, Static,
 )
@@ -26,8 +26,14 @@ from servonaut.services.db_coverage import (
     coverage_summary,
     filter_coverage,
 )
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +46,7 @@ class ConfirmDbRemoveModal(ModalScreen[Optional[bool]]):
     because the vault-delete is a second, independently-consequential choice.
     """
 
-    DEFAULT_CSS = """
-    ConfirmDbRemoveModal { align: center middle; }
-    ConfirmDbRemoveModal #db_remove_modal_container {
-        width: 66; height: auto; max-width: 90%;
-        padding: 1 2; border: round $error; background: $surface;
-    }
-    ConfirmDbRemoveModal #db_remove_buttons { height: auto; margin-top: 1; }
-    ConfirmDbRemoveModal Button { margin-right: 1; }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
@@ -63,22 +61,26 @@ class ConfirmDbRemoveModal(ModalScreen[Optional[bool]]):
             "This deletes the connection profile from your config so "
             "db_processlist / db_top_queries can no longer resolve it by name."
         )
-        yield Container(
-            Static("[bold]Remove DB credential[/bold]", id="db_remove_modal_title"),
-            Static(body, id="db_remove_modal_body"),
-            Checkbox(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Remove DB credential[/bold]", id="db_remove_modal_title"),
+            body=DialogBody(Static(body, id="db_remove_modal_body")),
+            # The second, independent choice stays beside the actions.
+            status=Checkbox(
                 "Also delete the secret from the vault",
                 value=self._has_secret,
                 id="db_remove_delete_secret",
                 # No secret in the store → nothing to delete; disable the toggle.
                 disabled=not self._has_secret,
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Remove", variant="error", id="btn_db_remove_confirm"),
                 Button("Cancel", id="btn_db_remove_cancel"),
                 id="db_remove_buttons",
             ),
             id="db_remove_modal_container",
+            size="compact",
+            severity="danger",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -94,8 +96,15 @@ class ConfirmDbRemoveModal(ModalScreen[Optional[bool]]):
         self.dismiss(None)
 
 
-class DbCoverageScreen(Screen):
+class DbCoverageScreen(WorkspaceScreen):
     """Coverage table: which instances have a vaulted DB credential, which don't."""
+
+    AUTO_FOCUS = "#db_cov_filter"
+    CHAT_REFLOW = True
+    # Body padding and scrollbar plus the server / secret coverage
+    # table columns beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 80
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -108,30 +117,58 @@ class DbCoverageScreen(Screen):
         self._rows: List[DbCoverageRow] = []
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("DB coverage")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield Container(
-                Static("🔐 DB-vault coverage", id="db_cov_title"),
-                Static(
-                    "Which instances have a stored DB credential, and which "
-                    "are gaps. Names only — values are never shown.",
-                    id="db_cov_subtitle",
+                Container(
+                    Static("Database coverage", id="db_cov_title"),
+                    Static(
+                        "Find stored credentials and gaps across your servers. "
+                        "Only names are shown; secret values stay hidden.",
+                        id="db_cov_subtitle",
+                    ),
+                    classes="db-view-heading",
                 ),
-                Input(placeholder="Filter by server or secret…", id="db_cov_filter"),
-                Static("", id="db_cov_summary"),
-                VerticalScroll(
-                    DataTable(id="db_cov_table", cursor_type="row"),
-                    id="db_cov_body",
+                Horizontal(
+                    VerticalScroll(
+                        Static("Find and manage", classes="db-section-title"),
+                        Horizontal(
+                            Input(placeholder="Filter by server or secret…", id="db_cov_filter"),
+                            Button("Refresh", id="db_cov_refresh"),
+                            classes="db-filter-row",
+                        ),
+                        Static("", id="db_cov_summary", classes="db-status-band"),
+                        Horizontal(
+                            Static("Select a stored credential to remove its profile.", classes="db-action-hint"),
+                            Button("Remove selected", id="db_cov_remove", variant="error"),
+                            classes="db-action-row",
+                        ),
+                        id="db_cov_review",
+                        classes="db-review-tools",
+                    ),
+                    Container(
+                        Static("Loading credential coverage…", id="db_cov_empty"),
+                        DataTable(id="db_cov_table", cursor_type="row", zebra_stripes=True),
+                        id="db_cov_body",
+                        classes="db-records",
+                    ),
+                    id="db_cov_workspace",
+                    classes="db-review-workspace",
                 ),
                 id="db_cov_container",
+                classes="workspace-content",
             )
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#db_cov_body", Container).border_title = "Stored credentials and gaps"
         table = self.query_one("#db_cov_table", DataTable)
         table.add_columns("Server", "Site", "Profile", "Secret", "In store", "Status")
         self._set_summary("[dim]Loading…[/dim]")
@@ -146,6 +183,8 @@ class DbCoverageScreen(Screen):
             text = self.app.redaction_service.scrub_stream(text)
         try:
             self.query_one("#db_cov_summary", Static).update(text)
+            if not self._rows:
+                self.query_one("#db_cov_empty", Static).update(text)
         except Exception:  # noqa: BLE001
             pass
 
@@ -161,6 +200,12 @@ class DbCoverageScreen(Screen):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "db_cov_filter":
             self._repaint()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "db_cov_refresh":
+            self.action_refresh()
+        elif event.button.id == "db_cov_remove":
+            self.action_remove()
 
     # ------------------------------------------------------------------
     # Remove a stored credential
@@ -299,4 +344,11 @@ class DbCoverageScreen(Screen):
         self._set_summary(
             f"[bold]{s['covered']}[/bold] covered · "
             f"[bold]{s['gap']}[/bold] gap · {s['total']} total{suffix}"
+        )
+        empty = self.query_one("#db_cov_empty", Static)
+        empty.display = not rows
+        empty.update(
+            "No servers or credentials match this filter."
+            if self._current_filter()
+            else "No servers are available for credential coverage."
         )

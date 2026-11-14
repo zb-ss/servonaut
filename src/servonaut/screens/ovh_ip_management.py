@@ -11,11 +11,12 @@ from typing import List, Optional, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
-from servonaut.utils.markup import cell, with_bold_values
+from servonaut.screens._busy_work import BusyWork
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -25,8 +26,9 @@ from servonaut.screens._provider_accounts import (
     with_account,
 )
 from servonaut.widgets.account_picker import AccountPicker
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -34,8 +36,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHIPManagementScreen(Screen):
+class OVHIPManagementScreen(WorkspaceScreen):
     """IP management — list IPs, move failover IPs, configure reverse DNS."""
+
+    DEFAULT_CSS = """
+    OVHIPManagementScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 104
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -51,6 +64,8 @@ class OVHIPManagementScreen(Screen):
         return super().app  # type: ignore
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     # ------------------------------------------------------------------
@@ -59,6 +74,7 @@ class OVHIPManagementScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._ips: List[dict] = []
         self._selected_ip: Optional[dict] = None
 
@@ -68,65 +84,96 @@ class OVHIPManagementScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with ScrollableContainer(id="ip_mgmt_container"):
-                yield Static(
-                    "[bold $text-accent]OVH IP Management[/bold $text-accent]",
-                    id="ip_mgmt_title",
-                )
-                # Hidden unless several OVH accounts are configured.
-                yield AccountPicker.for_provider(
-                    registry_for(self.app, "ovh"), "ovh", id="ip_mgmt_account",
-                )
-                yield DataTable(id="ip_table")
-                with Horizontal(id="ip_actions"):
-                    yield Button("Move IP", variant="default", id="btn_move")
-                    yield Button(
-                        "Set Reverse DNS", variant="default", id="btn_rdns"
-                    )
-                    yield Button("Back", variant="default", id="btn_back")
-
-                # Move-IP form panel — single Container so show/hide is
-                # atomic via ``.hidden`` (the global rule sets
-                # ``display: none``). Pre-restructure each child carried
-                # its own ``classes="hidden"`` and the screen kept the
-                # widgets stacked even when the toggle methods ran.
-                with Container(
-                    id="move_form_panel", classes="ip_form_panel hidden",
-                ):
-                    yield Static(
-                        "[bold]Move Failover IP[/bold]",
-                        id="move_form_title",
-                    )
-                    yield Input(
-                        placeholder="Target service (e.g. vps-abc123.ovh.net)",
-                        id="input_move_target",
-                    )
-                    yield Button(
-                        "Confirm Move",
-                        variant="warning",
-                        id="btn_move_confirm",
-                    )
-
-                with Container(
-                    id="rdns_form_panel", classes="ip_form_panel hidden",
-                ):
-                    yield Static(
-                        "[bold]Reverse DNS[/bold]",
-                        id="rdns_form_title",
-                    )
-                    yield Input(
-                        placeholder="server.example.com",
-                        id="input_rdns",
-                    )
-                    with Horizontal(id="rdns_btn_row"):
-                        yield Button(
-                            "Set", variant="default", id="btn_rdns_set"
-                        )
-                        yield Button(
-                            "Delete", variant="error", id="btn_rdns_delete"
-                        )
+        yield WorkspaceControls("IP management")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield ScrollableContainer(
+                BusyIndicator(id="read_loading", classes="read-loading"),
+                Horizontal(
+                    Vertical(
+                        Static(
+                            "OVH IP management",
+                            id="ip_mgmt_title",
+                            classes="screen-title",
+                        ),
+                        Static(
+                            "Select an IP to move its routing or manage its reverse DNS.",
+                            classes="resource-context",
+                        ),
+                        classes="provider-account-heading",
+                    ),
+                    AccountPicker.for_provider(
+                        registry_for(self.app, "ovh"), "ovh", id="ip_mgmt_account",
+                    ),
+                    classes="provider-account-heading-row",
+                ),
+                Horizontal(
+                    Vertical(
+                        Static("IP inventory", classes="resource-section-title"),
+                        DataTable(id="ip_table"),
+                        classes="resource-panel provider-account-inventory",
+                    ),
+                    Vertical(
+                        Static("IP operations", classes="resource-section-title"),
+                        Static(
+                            "Choose a row with Enter or a row click before applying a change.",
+                            classes="resource-context",
+                        ),
+                        Static(
+                            "No IP selected.", id="ip_selected_context",
+                            classes="provider-account-selection", markup=False,
+                        ),
+                        Horizontal(
+                            Button("Move IP", variant="default", id="btn_move"),
+                            Button(
+                                "Set reverse DNS", variant="default", id="btn_rdns"
+                            ),
+                            Button("Back", variant="default", id="btn_back"),
+                            id="ip_actions",
+                        ),
+                        Container(
+                            Static(
+                                "[bold]Move failover IP[/bold]",
+                                id="move_form_title",
+                            ),
+                            Input(
+                                placeholder="Target service (e.g. vps-abc123.ovh.net)",
+                                id="input_move_target",
+                            ),
+                            Button(
+                                "Confirm move",
+                                variant="warning",
+                                id="btn_move_confirm",
+                            ),
+                            id="move_form_panel", classes="ip_form_panel hidden",
+                        ),
+                        Container(
+                            Static(
+                                "[bold]Reverse DNS[/bold]",
+                                id="rdns_form_title",
+                            ),
+                            Input(
+                                placeholder="server.example.com",
+                                id="input_rdns",
+                            ),
+                            Horizontal(
+                                Button(
+                                    "Set", variant="default", id="btn_rdns_set"
+                                ),
+                                Button(
+                                    "Delete", variant="error", id="btn_rdns_delete"
+                                ),
+                                id="rdns_btn_row",
+                            ),
+                            id="rdns_form_panel", classes="ip_form_panel hidden",
+                        ),
+                        classes="provider-account-operations",
+                    ),
+                    classes="provider-account-body",
+                ),
+                id="ip_mgmt_container",
+                classes="workspace-content resource-workspace-content provider-account-workspace",
+            )
         yield Footer()
 
     # ------------------------------------------------------------------
@@ -135,7 +182,7 @@ class OVHIPManagementScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#ip_table", DataTable)
-        table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
+        table.add_columns("IP", "Type", "Routed to", "Reverse DNS")
         table.cursor_type = "row"
         picker = self.query_one("#ip_mgmt_account", AccountPicker)
         self._account = picker.account
@@ -147,6 +194,7 @@ class OVHIPManagementScreen(Screen):
         self._account = event.account
         self._ips = []
         self._selected_ip = None
+        self._update_selected_context()
         self._hide_move_form()
         self._hide_rdns_form()
         self.query_one("#ip_table", DataTable).clear()
@@ -204,6 +252,22 @@ class OVHIPManagementScreen(Screen):
         row_index = event.cursor_row
         if 0 <= row_index < len(self._ips):
             self._selected_ip = self._ips[row_index]
+            self._update_selected_context()
+
+    def _update_selected_context(self) -> None:
+        """Show the operation target without changing the chosen IP."""
+        try:
+            context = self.query_one("#ip_selected_context", Static)
+        except NoMatches:
+            return
+        if self._selected_ip is None:
+            context.update("No IP selected.")
+            return
+        address = str(self._selected_ip.get("ip") or "—")
+        if self.app.demo_mode:
+            redactor = self.app.redaction_service
+            address = redactor.redact_host(address) if redactor else "Hidden"
+        context.update(literal(f"Selected IP\n{address}"))
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -244,17 +308,18 @@ class OVHIPManagementScreen(Screen):
         # older load still running must not draw over it.
         self._loads += 1
         load = self._loads
-        try:
-            ips = await svc.list_ips()
-        except Exception as exc:
-            logger.error("Error loading OVH IPs: %s", exc)
-            if load == self._loads:
-                self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
-            return
-        if load != self._loads:
-            return
-        self._ips = ips
-        self._populate_table()
+        with self._read_loading.running('Loading IPs…'):
+            try:
+                ips = await svc.list_ips()
+            except Exception as exc:
+                logger.error("Error loading OVH IPs: %s", exc)
+                if load == self._loads:
+                    self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
+                return
+            if load != self._loads:
+                return
+            self._ips = ips
+            self._populate_table()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched IP blocks for the new demo-mode state."""
@@ -265,6 +330,7 @@ class OVHIPManagementScreen(Screen):
     def _populate_table(self) -> None:
         table = self.query_one("#ip_table", DataTable)
         table.clear()
+        self._update_selected_context()
 
         if not self._ips:
             self.notify("No IPs found on this account.", severity="information")
@@ -317,7 +383,7 @@ class OVHIPManagementScreen(Screen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Move Failover IP",
+                title="Move failover IP",
                 description=with_bold_values("Move {} to {}.", ip_addr, target),
                 consequences=[
                     "The IP will be detached from its current service",
@@ -434,7 +500,7 @@ class OVHIPManagementScreen(Screen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Reverse DNS",
+                title="Delete reverse DNS",
                 description=with_bold_values("Remove the reverse DNS record for {}.", ip),
                 consequences=[
                     "The existing PTR record will be deleted",

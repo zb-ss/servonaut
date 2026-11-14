@@ -28,16 +28,21 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING, Union
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.content import Content
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
 
-from servonaut.utils.markup import cell, literal, with_bold_values
+from servonaut.utils.markup import inert_text, literal, with_bold_values
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_actions import (
+    ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
+)
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
     display_text,
@@ -54,12 +59,14 @@ from servonaut.screens._provider_accounts import (
     row_service,
     with_account,
 )
+from servonaut.screens._ovh_columns import COLUMNS, cut, plan_columns
 from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -113,8 +120,17 @@ _POWER_TEXT = {
 }
 
 
-class OVHManagerScreen(DemoRowsMixin, Screen):
+class OVHManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     """OVHcloud instance manager — list + lifecycle toolbar."""
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the leading table columns and the
+    # first toolbar buttons beside the chat column (as the Hetzner manager).
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # Keep the full action row only where labels, spacing and scrollbar fit.
+    CONTENT_NARROW_WIDTH = 105
+    # Short terminals get a compact action rail, so the title and table fit.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -131,6 +147,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -146,59 +164,84 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]OVHcloud Manager[/bold $text-accent]",
-                    id="ovh_mgr_header",
-                ),
-                Static(
-                    "[dim]Click a row, then use the keys below or the action "
-                    "buttons. State-aware: Start/Stop/Reboot only enable on "
-                    "VPS and Cloud rows; Reboot also works on dedicated. "
-                    "Create is Cloud-only and starts new billing immediately.[/dim]",
-                    id="ovh_mgr_hint",
-                ),
-                DataTable(
+        yield WorkspaceControls("OVH servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            inventory_panel = Vertical(
+                Static("", id="ovh_mgr_status"),
+                PlannedTable(
                     id="ovh_mgr_table",
                     zebra_stripes=True,
                     cursor_type="row",
                 ),
-                Static("", id="ovh_mgr_status"),
+                classes="provider-manager-inventory",
+            )
+            inventory_panel.border_title = "VPS, Public Cloud and dedicated inventory"
+            selection = Vertical(
+                Static("Selected resource", classes="provider-manager-selection-label"),
+                Static(
+                    "No server selected", id="ovh_mgr_selection",
+                    classes="provider-manager-selection-name", markup=False,
+                ),
+                Static(
+                    "Choose a row to see its full ID and address.",
+                    id="ovh_mgr_identity",
+                    classes="provider-manager-selection-identity", markup=False,
+                ),
+                classes="provider-manager-selection",
+            )
+            actions = action_rail(
+                "ovh_mgr_actions",
+                inventory=(
+                    ActionSpec("btn_ovh_mgr_refresh", "Refresh", "f5", disabled=False),
+                    ActionSpec("btn_ovh_mgr_new", "+ New cloud", "n", role="primary", short="+ New", disabled=False),
+                ),
+                selection=selection,
+                power=(
+                    ActionSpec("btn_ovh_mgr_start", "Start", "s", role="primary"),
+                    ActionSpec("btn_ovh_mgr_stop", "Stop", "t"),
+                    ActionSpec("btn_ovh_mgr_reboot", "Reboot", "b"),
+                ),
+                danger=(
+                    ActionSpec("btn_ovh_mgr_delete", "Delete", "d", role="error"),
+                ),
+            )
+            actions.border_title = "Resource actions"
+            rail = Vertical(actions, classes="provider-manager-rail")
+            rail.border_title = "Resource workspace"
+            yield ScrollableContainer(
+                Vertical(
+                    Horizontal(
+                        Static("OVHcloud servers", id="ovh_mgr_header", classes="screen-title"),
+                        Static(
+                            "Inventory", id="ovh_mgr_overview",
+                            classes="provider-manager-overview", markup=False,
+                        ),
+                        classes="provider-manager-heading-row",
+                    ),
+                    Static(
+                        "Select a VPS or Public Cloud server for power actions; "
+                        "dedicated servers support Reboot. New and Delete apply "
+                        "to Public Cloud only. Creating a server starts billing immediately.",
+                        id="ovh_mgr_hint",
+                    ),
+                    classes="provider-manager-heading",
+                ),
                 Horizontal(
-                    Button("Refresh (F5)", id="btn_ovh_mgr_refresh"),
-                    Button(
-                        "+ New Cloud (n)", variant="primary",
-                        id="btn_ovh_mgr_new",
-                    ),
-                    Button(
-                        "Start (s)", id="btn_ovh_mgr_start", disabled=True,
-                    ),
-                    Button(
-                        "Stop (t)", id="btn_ovh_mgr_stop", disabled=True,
-                    ),
-                    Button(
-                        "Reboot (b)", id="btn_ovh_mgr_reboot",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Delete (d)", variant="error",
-                        id="btn_ovh_mgr_delete",
-                        disabled=True,
-                    ),
-                    id="ovh_mgr_actions",
+                    inventory_panel, rail, classes="provider-manager-body",
                 ),
                 id="ovh_mgr_container",
+                classes="workspace-content provider-manager-content",
             )
         yield Footer()
 
     def on_mount(self) -> None:
+        follow_theme(self, "#ovh_mgr_table", self._render_table)
         table = self.query_one("#ovh_mgr_table", DataTable)
-        # Keep state and addressing visible when a cloud composite ID is long.
-        for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
-                             ("State", 10), ("Public IP", 15), ("Region", 9), ("ID", 70)):
-            table.add_column(label, width=width)
+        self._table_width = 0
+        # The columns follow the room the table itself has.
+        table.set_plan_handler(self._render_table)
+        self.sync_compact_actions()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -301,42 +344,90 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
+        self._table_width = plannable_width(table)
+        cells = [
+            (
+                str(idx),
+                display_name(inst),
+                str(inst.get("type", "")),
+                str(inst.get("provider_type", "—")),
+                str(inst.get("state", "")),
+                str(inst.get("public_ip", "") or "—"),
+                str(inst.get("region", "")),
+            )
+            for idx, inst in enumerate(self._instances, start=1)
+        ]
+        # The full ID is in the resource panel, so the table keeps state and
+        # addressing whole instead of a long composite ID.
+        widths = plan_columns(cells, self._table_width)
         # The next action must reach the server the user picked, not row 1.
         with keep_selected_row(table):
-            table.clear()
-            for idx, inst in enumerate(self._instances, start=1):
+            table.clear(columns=True)
+            for label, width in widths.items():
+                table.add_column(label, width=width)
+            for inst, row in zip(self._instances, cells):
+                shown = dict(zip(COLUMNS, row))
                 table.add_row(
-                    str(idx),
-                    cell(display_name(inst)),
-                    cell(inst.get("type", "")),
-                    cell(inst.get("provider_type", "—")),
-                    self._colorize_state(str(inst.get("state", ""))),
-                    cell(inst.get("public_ip", "") or "—"),
-                    cell(inst.get("region", "")),
-                    cell(inst.get("id", "")),
-                    key=str(inst.get("id", idx)),
+                    *(
+                        self._colorize_state(shown[label])
+                        if label == "State"
+                        else Text(inert_text(cut(shown[label], width)))
+                        for label, width in widths.items()
+                    ),
+                    key=str(inst.get("id", row[0])),
                 )
         self._sync_action_buttons()
+        self._update_resource_context()
 
-    @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(self, state: str) -> Text:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return themed_text(self.app, state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return themed_text(self.app, state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding", "building"}:
-            return f"[blue]{state}[/blue]"
+            return themed_text(self.app, state, "$text-accent")
         if s == "error":
-            return f"[red]{state}[/red]"
-        return state
+            return themed_text(self.app, state, "$text-error")
+        return Text(inert_text(state))
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
     # ------------------------------------------------------------------
 
+    def _update_resource_context(self) -> None:
+        """Show the drawn row's identity beside its existing resource actions."""
+        try:
+            selection = self.query_one("#ovh_mgr_selection", Static)
+            identity = self.query_one("#ovh_mgr_identity", Static)
+            overview = self.query_one("#ovh_mgr_overview", Static)
+        except NoMatches:
+            return
+        count = len(self._instances)
+        accounts = {str(row.get("account") or "") for row in self._instances}
+        summary = f"{count} instance{'s' if count != 1 else ''}"
+        if len(accounts) > 1:
+            summary += f" across {len(accounts)} accounts"
+        overview.update(summary)
+        instance = self._selected_instance()
+        if instance is None:
+            selection.update("No server selected")
+            identity.update("Choose a row to see its full ID and address.")
+            return
+        selection.update(Text(self._row_label(instance), style="bold"))
+        details = Text()
+        for index, (label, key) in enumerate((
+            ("State", "state"), ("ID", "id"), ("Address", "public_ip"),
+        )):
+            if index:
+                details.append("\n")
+            details.append(f"{label}: ", style="dim")
+            details.append(str(instance.get(key) or "—"))
+        identity.update(details)
+
     def on_data_table_row_highlighted(self, event) -> None:
         self._sync_action_buttons()
+        self._update_resource_context()
 
     def _selected_instance(self) -> Optional[dict]:
         table = self.query_one("#ovh_mgr_table", DataTable)
@@ -374,36 +465,44 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return None
 
     def _sync_action_buttons(self) -> None:
-        """Toggle button enabled state per row's provider_type + state.
+        self.sync_action_buttons()
 
-        Per-type rules (matches what OVHService routes through):
-        * cloud:     start (when stopped), stop / reboot / delete (when running)
-        * vps:       start (when stopped), stop / reboot (when running)
-        * dedicated: reboot only — start/stop don't apply
-        * other:     all disabled
+    def unavailable_actions(self) -> dict[str, str | None]:
+        """Why each action cannot run on the selected row, per product type and state.
+
+        * cloud:     start (stopped), stop / reboot (running), delete
+        * vps:       start (stopped), stop / reboot (running)
+        * dedicated: reboot only
+        * other:     nothing
         """
         inst = self._selected_instance()
         ptype = (inst.get("provider_type", "") if inst else "").lower()
         state = (inst.get("state", "") if inst else "").lower()
-
-        is_running = state in _RUNNING
-        is_stopped = state in _STOPPED
-
-        for btn_id, enable in (
-            ("btn_ovh_mgr_start",
-             inst is not None and ptype in _SUPPORTS_START_STOP and is_stopped),
-            ("btn_ovh_mgr_stop",
-             inst is not None and ptype in _SUPPORTS_START_STOP and is_running),
-            ("btn_ovh_mgr_reboot",
-             inst is not None and ptype in _SUPPORTS_REBOOT
-             and (is_running or ptype == "dedicated")),
-            ("btn_ovh_mgr_delete",
-             inst is not None and ptype in _SUPPORTS_DELETE),
-        ):
-            try:
-                self.query_one(f"#{btn_id}", Button).disabled = not enable
-            except Exception:  # pragma: no cover - defensive
-                pass
+        has_row = inst is not None
+        start_stop = ptype in _SUPPORTS_START_STOP
+        if ptype in _SUPPORTS_REBOOT:
+            reboot_reason = "Reboot needs a running server."
+        else:
+            reboot_reason = "Reboot is not available for this server type."
+        return {
+            "btn_ovh_mgr_start": action_unavailable(
+                has_row, start_stop and state in _STOPPED,
+                "Start needs a stopped VPS or cloud instance.",
+            ),
+            "btn_ovh_mgr_stop": action_unavailable(
+                has_row, start_stop and state in _RUNNING,
+                "Stop needs a running VPS or cloud instance.",
+            ),
+            "btn_ovh_mgr_reboot": action_unavailable(
+                has_row,
+                ptype in _SUPPORTS_REBOOT and (state in _RUNNING or ptype == "dedicated"),
+                reboot_reason,
+            ),
+            "btn_ovh_mgr_delete": action_unavailable(
+                has_row, ptype in _SUPPORTS_DELETE,
+                "Only cloud instances can be deleted here.",
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Actions
@@ -455,13 +554,16 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             self._refresh()
 
     def action_start(self) -> None:
-        self._run_lifecycle("start_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_start"):
+            self._run_lifecycle("start_instance")
 
     def action_stop(self) -> None:
-        self._run_lifecycle("stop_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_stop"):
+            self._run_lifecycle("stop_instance")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot_instance")
+        if not self.refuse_unavailable("btn_ovh_mgr_reboot"):
+            self._run_lifecycle("reboot_instance")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()
@@ -588,7 +690,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete OVH Cloud Instance",
+                title="Delete OVH Public Cloud instance",
                 description=with_bold_values(
                     "Delete {} ({}) in project {}?",
                     label, inst.get('type', ''), project_label,
@@ -600,7 +702,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                     "Billing for this instance stops immediately",
                 ],
                 confirm_text="delete",
-                action_label="Delete Instance",
+                action_label="Delete instance",
                 severity="danger",
             )
         )

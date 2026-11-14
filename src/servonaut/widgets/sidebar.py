@@ -2,8 +2,7 @@
 
 Layout:
 
-* Top (fixed): logo + subtitle.
-* Middle (scrollable): a stack of :class:`SidebarSection` collapsibles
+* A rounded Navigate panel contains :class:`SidebarSection` collapsibles
   grouping nav buttons by purpose. Sections auto-expand when the
   active screen lives inside them, and collapse otherwise. The middle
   region scrolls if content exceeds the available height.
@@ -22,15 +21,16 @@ follow the same shape.
 
 from __future__ import annotations
 
-from servonaut import get_version
-
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Button, Static
+from textual.widgets import Button
 
+from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.sidebar_section import SidebarSection
 
 
@@ -90,23 +90,36 @@ def _aws_switched_on(app) -> bool:
         return True
 
 
+class _NavigationButton(Button):
+    """Extend native active styling through the row's trailing cells."""
+
+    def render(self) -> Content:
+        label = self.label
+        if self.has_class("--active"):
+            return label.pad_right(max(0, self.content_size.width - label.cell_length))
+        return label
+
+
 class Sidebar(Widget):
     """Top-level navigation widget mounted on every screen."""
+
+    BINDINGS = [Binding("escape", "leave_navigation", "Return to content", show=False)]
 
     DEFAULT_CSS = """
     Sidebar {
         width: 25;
         height: 100%;
-        background: $panel;
+        background: transparent;
         layout: vertical;
         padding: 1 0 0 0;
     }
     Sidebar > #sidebar-scroll {
         height: 1fr;
+        background: transparent;
         overflow-y: auto;
         overflow-x: hidden;
         scrollbar-size: 0 1;
-        scrollbar-background: $panel;
+        scrollbar-background: transparent;
         scrollbar-color: $panel;
     }
     Sidebar > #sidebar-bottom {
@@ -114,7 +127,7 @@ class Sidebar(Widget):
         height: auto;
         layout: vertical;
         padding: 1 0 1 0;
-        background: $panel;
+        background: transparent;
     }
     """
 
@@ -126,123 +139,105 @@ class Sidebar(Widget):
             super().__init__()
 
     def compose(self) -> ComposeResult:
-        # ----- top: logo, subtitle, relay indicator -----
-        # The relay indicator sits with the brand block (under the
-        # subtitle) rather than with the dock-bottom Quit/Update row.
-        # Bottom placement felt detached — the indicator is signal
-        # ABOUT the app's connection, not a navigation action, so it
-        # belongs with the identity header.
-        yield Static(
-            f"  [bold $text-accent]Servonaut[/bold $text-accent] [dim]v{get_version()}[/dim]",
-            id="sidebar-logo",
-        )
-        yield Static(
-            "  [dim italic]Server Manager[/dim italic]",
-            id="sidebar-subtitle",
-        )
-        from servonaut.widgets.relay_indicator import RelayIndicator
-        yield RelayIndicator(id="relay_indicator")
-
         # ----- middle: scrollable sections -----
-        # Nothing in the sidebar takes keyboard focus: a screen opens with
-        # focus on its own content. Set at construction, not on mount, so
-        # a screen's first auto-focus pass can never land here.
+        # Start outside the tab order so content keeps initial focus.
+        # Explicit navigation mode enables the visible buttons temporarily.
         with VerticalScroll(id="sidebar-scroll", can_focus=False):
             yield SidebarSection(
                 "Core",
-                self._nav("📋 Instances", "nav_list",
+                self._nav("Instances", "nav_list",
                           tooltip="View, connect, and manage all servers"),
-                self._nav("💻 Custom Servers", "nav_custom_servers",
+                self._nav("Custom servers", "nav_custom_servers",
                           tooltip="Manage non-AWS servers (DigitalOcean, Hetzner, etc.)"),
-                self._nav("🔑 SSH Keys", "nav_keys",
+                self._nav("SSH keys", "nav_keys",
                           tooltip="Configure SSH keys and agent"),
                 section_id="section_core",
             )
             yield SidebarSection(
                 "Tools",
-                self._nav("🧠 Fleet Memory", "nav_memory",
+                self._nav("Fleet memory", "nav_memory",
                           tooltip="Fleet-wide server memory — scan, refresh, and inspect "
                                   "the AI-queryable fact cache for every server"),
-                self._nav("🔄 Sync Config", "nav_sync_config",
+                self._nav("Sync config", "nav_sync_config",
                           tooltip="Push or pull your servonaut config across devices via "
                                   "the cloud — encrypted with your passphrase"),
-                self._nav("☁ Memory Sync", "nav_memory_sync",
+                self._nav("Memory Sync", "nav_memory_sync",
                           tooltip="Set up encrypted Memory Sync — back up server memory "
                                   "across devices, with drift detection and AI-queryable history"),
-                self._nav("🔐 Secrets", "nav_secrets",
+                self._nav("Secrets", "nav_secrets",
                           tooltip="Manage secrets-management backend — Bitwarden / "
                                   "local store / install bws / refresh team config"),
                 self._nav("Vault", "nav_vault",
                           tooltip="Encrypted vault identities, SSH keys and secrets"),
-                self._nav("SSH Certificates", "nav_ca",
+                self._nav("SSH certificates", "nav_ca",
                           tooltip="Team SSH certificate authority and audit"),
-                self._nav("🗝 BW SSH Vault", "nav_bw_vault",
+                self._nav("BW SSH vault", "nav_bw_vault",
                           tooltip="Browse your Bitwarden SSH-key items joined with the "
                                   "servers that reference them (local-only; Solo/Teams)"),
-                self._nav("🛡 Findings", "nav_findings",
+                self._nav("Findings", "nav_findings",
                           tooltip="Proactive monitoring findings across your fleet — "
                                   "scan, review, and triage server-detected issues"),
-                self._nav("📉 Drift Events", "nav_drift",
+                self._nav("Drift events", "nav_drift",
                           tooltip="View configuration drift and anomaly events across the fleet"),
-                self._nav("📤 Memory Export", "nav_memory_export",
+                self._nav("Memory export", "nav_memory_export",
                           tooltip="Export a compliance-grade signed archive of server memory"),
-                self._nav("🔧 Settings", "nav_settings",
+                self._nav("Settings", "nav_settings",
                           tooltip="Edit configuration, scan rules, and AI provider"),
                 section_id="section_tools",
                 collapsed=True,
             )
             yield SidebarSection(
                 "AWS",
-                self._nav("⚙ Manage", "nav_aws_manage",
+                self._nav("Manage", "nav_aws_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, terminate EC2 instances"),
-                self._nav("📦 Object Storage", "nav_aws_s3",
+                self._nav("Object storage", "nav_aws_s3",
                           tooltip="Browse and manage S3 buckets and objects"),
-                self._nav("📊 CloudWatch", "nav_cloudwatch",
+                self._nav("CloudWatch", "nav_cloudwatch",
                           tooltip="Browse CloudWatch log groups and events"),
-                self._nav("🔒 IP Ban Manager", "nav_ip_ban",
-                          tooltip="Ban/unban IPs via WAF, Security Groups, or NACLs"),
-                self._nav("🔍 CloudTrail", "nav_cloudtrail",
+                self._nav("IP ban manager", "nav_ip_ban",
+                          tooltip="Ban/unban IPs via WAF, security groups or NACLs"),
+                self._nav("CloudTrail", "nav_cloudtrail",
                           tooltip="Audit AWS API activity and events"),
                 section_id="section_aws",
                 collapsed=True,
             )
             yield SidebarSection(
                 "OVH",
-                self._nav("⚙ Manage", "nav_ovh_manage",
+                self._nav("Manage", "nav_ovh_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, delete OVH instances"),
-                self._nav("🌐 DNS Zones", "nav_ovh_dns",
+                self._nav("DNS zones", "nav_ovh_dns",
                           tooltip="Manage OVH DNS zones and records"),
-                self._nav("📡 IP Management", "nav_ovh_ips",
+                self._nav("IP management", "nav_ovh_ips",
                           tooltip="Manage OVH IP blocks and failover IPs"),
-                self._nav("💾 Block Storage", "nav_ovh_storage",
+                self._nav("Block storage", "nav_ovh_storage",
                           tooltip="Manage OVH block storage volumes"),
-                self._nav("🧾 Billing", "nav_ovh_billing",
+                self._nav("Billing", "nav_ovh_billing",
                           tooltip="View OVH invoices and consumption"),
-                self._nav("🔑 SSH Keys", "nav_ovh_ssh_keys",
+                self._nav("SSH keys", "nav_ovh_ssh_keys",
                           tooltip="Manage SSH keys on OVH cloud projects"),
-                self._nav("📦 Object Storage", "nav_ovh_s3",
+                self._nav("Object storage", "nav_ovh_s3",
                           tooltip="Browse and manage OVH Object Storage (S3-compatible) buckets"),
                 section_id="section_ovh",
                 collapsed=True,
             )
             yield SidebarSection(
                 "Hetzner",
-                self._nav("⚙ Manage", "nav_hetzner_manage",
+                self._nav("Manage", "nav_hetzner_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, delete Hetzner servers"),
-                self._nav("🔑 SSH Keys", "nav_hetzner_ssh_keys",
+                self._nav("SSH keys", "nav_hetzner_ssh_keys",
                           tooltip="Manage Hetzner project SSH keys (the registry the create wizard injects from)"),
-                self._nav("📦 Object Storage", "nav_hetzner_s3",
+                self._nav("Object storage", "nav_hetzner_s3",
                           tooltip="Browse and manage Hetzner Object Storage (S3-compatible) buckets"),
                 section_id="section_hetzner",
                 collapsed=True,
             )
             yield SidebarSection(
                 "Account",
-                self._nav("👤 Account / Login", "nav_login",
+                self._nav("Account / login", "nav_login",
                           tooltip="Sign in to your Servonaut account"),
-                self._nav("👥 Teams", "nav_teams",
+                self._nav("Teams", "nav_teams",
                           tooltip="Manage team members and shared access"),
-                self._nav("🐛 Report a bug", "nav_bug_report",
+                self._nav("Report a bug", "nav_bug_report",
                           tooltip="Send a bug report — review exactly what's "
                                   "included before anything leaves your machine"),
                 section_id="section_account",
@@ -251,28 +246,123 @@ class Sidebar(Widget):
 
         # ----- bottom: docked, always visible -----
         with Vertical(id="sidebar-bottom"):
-            update = Button(
-                "📥  Update Available",
+            from servonaut.widgets.relay_indicator import RelayIndicator
+            yield RelayIndicator(id="relay_indicator")
+            update = LinkButton(
+                "Update available",
                 id="nav_update",
-                classes="nav-button hidden",
+                classes="hidden",
             )
             update.can_focus = False
             yield update
-            quit_button = Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
+            quit_button = Button("Quit", id="nav_quit", classes="nav-button error-button")
             quit_button.can_focus = False
             yield quit_button
 
     can_focus = False
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.navigation_mode = False
+        self._navigation_previous_focus: Widget | None = None
+        self._navigation_previous_display = True
+
+    def enter_navigation_mode(self) -> None:
+        """Temporarily make the visible rail usable from the keyboard."""
+        if self.navigation_mode:
+            return
+        self._navigation_previous_focus = self.screen.focused
+        self._navigation_previous_display = self.display
+        self.navigation_mode = True
+        self.display = True
+        self.add_class("--navigation-mode")
+        self.call_after_refresh(self._focus_navigation)
+
+    def _focus_navigation(self) -> None:
+        if not self.navigation_mode or self.screen is not self.app.screen:
+            return
+        self._sync_navigation_focusable()
+        buttons = [button for button in self.query(Button) if button.can_focus]
+        target = next((button for button in buttons if button.has_class("--active")), None)
+        if target is None:
+            target = next(iter(buttons), None)
+        if target is not None:
+            target.focus()
+            target.scroll_visible(animate=False)
+        self.screen.refresh_bindings()
+
+    @staticmethod
+    def _in_layout(widget: Widget) -> bool:
+        return widget.visible and widget.display and all(node.display for node in widget.ancestors)
+
+    def _sync_navigation_focusable(self) -> None:
+        for button in self.query(Button):
+            button.can_focus = self.navigation_mode and self._in_layout(button)
+
+    def exit_navigation_mode(self, *, restore_focus: bool = True) -> None:
+        """Restore content focus and the visibility chosen before entering."""
+        if not self.navigation_mode:
+            return
+        previous = self._navigation_previous_focus
+        self._navigation_previous_focus = None
+        self.navigation_mode = False
+        self.remove_class("--navigation-mode")
+        self._sync_navigation_focusable()
+        self.display = self._navigation_previous_display
+        # The terminal may have changed width class while the rail was open.
+        apply_workspace_state = getattr(self.screen, "apply_workspace_state", None)
+        if apply_workspace_state is not None:
+            apply_workspace_state()
+        if restore_focus:
+            restore = getattr(self.screen, "restore_navigation_focus", None)
+            if restore is not None and restore(previous):
+                pass  # The reflow shell restores focus after its layout settles.
+            elif (previous is not None and previous.is_attached
+                    and previous.screen is self.screen and previous.focusable
+                    and self._in_layout(previous)):
+                previous.focus()
+            else:
+                self._focus_primary_content()
+        self.screen.refresh_bindings()
+
+    def _focus_primary_content(self) -> None:
+        """A removed origin falls back to the screen's initial content target."""
+        selector = self.screen.AUTO_FOCUS
+        if selector:
+            for widget in self.screen.query(selector):
+                if widget.focusable and self._in_layout(widget):
+                    widget.focus()
+                    return
+        self.screen.focus_next()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "leave_navigation":
+            return self.navigation_mode
+        return super().check_action(action, parameters)
+
+    def action_leave_navigation(self) -> None:
+        self.exit_navigation_mode()
+
+    def on_descendant_blur(self) -> None:
+        self.call_after_refresh(self._leave_if_focus_outside)
+
+    def _leave_if_focus_outside(self) -> None:
+        if self.is_attached and self.navigation_mode and not self.has_focus_within:
+            self.exit_navigation_mode(restore_focus=False)
+
+    def on_sidebar_section_section_toggled(self) -> None:
+        self.call_after_refresh(self._sync_navigation_focusable)
+
     def _nav(self, label: str, button_id: str, *, tooltip: str) -> Button:
         """Helper — build a nav button with the standard class + tooltip."""
-        btn = Button(label, id=button_id, classes="nav-button")
+        btn = _NavigationButton(label, id=button_id, classes="nav-button")
         btn.tooltip = tooltip
         btn.can_focus = False
         return btn
 
     def on_mount(self) -> None:
         """Apply gating, sync update + relay state, then expand the active section."""
+        self.border_title = "Navigate"
         # ----- Provider section gating -----
         # OVH and Hetzner sections have TWO independent auth surfaces:
         # compute (API token / app+consumer keys) and S3 object storage
@@ -379,6 +469,7 @@ class Sidebar(Widget):
                 self.query_one(f"#{button_id}", Button).display = bool(available)
             except NoMatches:
                 pass
+        self.call_after_refresh(self._sync_navigation_focusable)
 
     def _hide_button(self, button_id: str) -> None:
         try:
@@ -435,7 +526,7 @@ class Sidebar(Widget):
         if latest:
             try:
                 btn = self.query_one("#nav_update", Button)
-                btn.label = f"📥 Update to v{latest}"
+                btn.label = f"Update to v{latest}"
                 btn.remove_class("hidden")
             except NoMatches:
                 pass

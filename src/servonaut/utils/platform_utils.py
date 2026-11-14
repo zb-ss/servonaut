@@ -1,13 +1,17 @@
 """Platform detection and OS-specific utilities."""
 
 from __future__ import annotations
+import logging
 import platform
 import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 from typing import Final, Optional
+
+logger = logging.getLogger(__name__)
 
 # A clipboard tool returns in milliseconds. One that waits longer is waiting
 # for something it will not get (wl-copy waits for keyboard focus on GNOME),
@@ -187,6 +191,30 @@ def copy_to_clipboard(text: str) -> bool:
     return True
 
 
+class CopyOutcome(Enum):
+    """What a copy really did, so a screen never claims more than happened."""
+
+    COPIED = "copied"
+    SENT_TO_TERMINAL = "sent to terminal"
+    UNAVAILABLE = "unavailable"
+
+
+def copy_text(app, text: str) -> CopyOutcome:
+    """Copy ``text`` with the platform clipboard, else the terminal's (OSC 52).
+
+    The terminal route cannot confirm that anything arrived, so it is
+    reported as sent, not copied.
+    """
+    if copy_to_clipboard(text):
+        return CopyOutcome.COPIED
+    try:
+        app.copy_to_clipboard(text)
+    except Exception:  # noqa: BLE001 - a terminal without the escape must not crash a copy
+        logger.warning("terminal clipboard copy failed", exc_info=True)
+        return CopyOutcome.UNAVAILABLE
+    return CopyOutcome.SENT_TO_TERMINAL
+
+
 def _clipboard_command() -> Optional[list[str]]:
     """The first clipboard command this platform has, or ``None``."""
     os_type = get_os()
@@ -202,4 +230,45 @@ def _clipboard_command() -> Optional[list[str]]:
         ):
             if shutil.which(command[0]):
                 return command
+    return None
+
+
+def open_path(path: Path) -> bool:
+    """Open a file or folder with the platform's default application.
+
+    The path is used as given, never resolved: a link keeps its own name, so
+    the file it points at cannot choose the handler. Callers that open files
+    must refuse links themselves. A file is never run: on Windows it is shown
+    in Explorer, on macOS it opens as text.
+
+    Starts the opener and returns without waiting for it, so a slow file
+    manager cannot freeze the interface. Returns False when the platform has
+    no opener or it could not be started.
+    """
+    command = _open_command(path.absolute())
+    if command is None:
+        return False
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return True
+
+
+def _open_command(path: Path) -> Optional[list[str]]:
+    """The command that opens *path* here, or ``None``; *path* is absolute."""
+    os_type = get_os()
+    is_file = path.is_file()
+    if os_type == 'darwin':
+        return ['open', '-t', str(path)] if is_file else ['open', str(path)]
+    if os_type == 'windows':
+        return ['explorer', f'/select,{path}'] if is_file else ['explorer', str(path)]
+    if os_type == 'linux' and shutil.which('xdg-open'):
+        return ['xdg-open', str(path)]
     return None

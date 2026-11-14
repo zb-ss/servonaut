@@ -209,6 +209,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 ### Convenience
 
+- **Your own colour themes** — drop a small TOML file into `~/.servonaut/themes/` and pick it in Settings → Appearance, with a live readability check; `servonaut theme` lists, exports and validates themes. → [docs](docs/themes.md)
 - **Instance caching** — stale-while-revalidate for fast startup.
 - **Auto-update** — startup check + one-click update (`servonaut --update`). Stable installations are offered stable releases only; see [Release candidates](docs/release-candidates.md).
 - **Terminal shortcut** — `servonaut --install-desktop` adds a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS.

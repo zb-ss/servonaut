@@ -3,8 +3,8 @@
 The fleet screen opens on the table, so the arrow keys and the fleet
 shortcuts work at once. When the search box has focus, the footer still
 lists the fleet shortcuts, greyed out, while every letter typed goes into
-the box. Nothing in the sidebar ever takes focus, so no screen can open on
-it by accident.
+the box. The sidebar only takes focus during explicit keyboard navigation,
+so no screen can open on it by accident.
 """
 
 from __future__ import annotations
@@ -20,8 +20,12 @@ from servonaut.screens.instance_list import FleetSearchInput, InstanceListScreen
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 # The single-letter fleet shortcuts (``/`` itself moves to the search box).
-_SHORTCUT_KEYS = {"r", "o", "s", "b", "c", "t", "l", "a", "m", "D", "k", "v", "y"}
+_SHORTCUT_KEYS = {"r", "o", "s", "f", "p", "D", "k", "v", "y"}
+# The inspector's buttons show these with their keys, so the footer leaves them out.
+_INSPECTOR_KEYS = {"b", "c", "t", "l", "a", "m"}
 
 
 def _row(name: str) -> dict:
@@ -93,6 +97,17 @@ async def test_the_table_takes_the_arrow_keys_and_shortcuts_at_once() -> None:
         assert table.cursor_row == 1
         footer = _footer_keys(screen)
         assert {key for key in _SHORTCUT_KEYS if footer.get(key)} == _SHORTCUT_KEYS
+        assert not _INSPECTOR_KEYS & footer.keys()
+
+
+@pytest.mark.asyncio
+async def test_the_footer_at_160_columns_still_lists_verify_and_copy() -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(160, 40)) as pilot:
+        screen = await _open_fleet(pilot)
+        footer = _footer_keys(screen)
+        assert {"v", "y"} <= footer.keys()
+        assert {"f", "p"} <= footer.keys()
 
 
 @pytest.mark.asyncio

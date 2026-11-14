@@ -6,12 +6,15 @@ from collections.abc import Callable, Sequence
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
 from servonaut.services.vault.display import terminal_safe
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 
 
 class BulkActionModal(ModalScreen[list[str] | None]):
@@ -19,17 +22,11 @@ class BulkActionModal(ModalScreen[list[str] | None]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
     DEFAULT_CSS = """
-    BulkActionModal { align: center middle; }
-    BulkActionModal #bulk_action_modal {
-        width: 84; max-width: 94%; height: 90%; max-height: 34;
-        padding: 1 2; border: round $warning; background: $surface;
-    }
     BulkActionModal #bulk_action_title { text-style: bold; color: $text-warning; }
     BulkActionModal #bulk_action_description { height: auto; }
-    BulkActionModal #bulk_action_body { height: 1fr; }
     BulkActionModal #bulk_action_list { height: auto; max-height: 8; }
-    BulkActionModal Horizontal { height: auto; }
-    BulkActionModal Button { margin-right: 1; }
+    BulkActionModal #bulk_action_body Horizontal { height: auto; }
+    BulkActionModal #bulk_action_body Button { margin-right: 1; }
     BulkActionModal #bulk_action_status { height: auto; color: $text-warning; }
     BulkActionModal #bulk_action_acknowledge { width: 1fr; height: auto; }
     BulkActionModal #bulk_action_acknowledge_hint { height: auto; color: $text-warning; }
@@ -47,7 +44,7 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         selected: Sequence[str] = (),
         acknowledgement_keys: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._title = title
         self._description = description
         self._choices = list(choices)
@@ -62,24 +59,49 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         self.acknowledged = False
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="bulk_action_modal"):
-            yield Static(Text(self._title), id="bulk_action_title")
-            with VerticalScroll(id="bulk_action_body"):
-                yield Static(Text(self._description_text()), id="bulk_action_description")
-                yield SelectionList(id="bulk_action_list")
-                with Horizontal():
-                    yield Button("Select All", id="bulk_action_all")
-                    yield Button("Select None", id="bulk_action_none")
-                if self._acknowledgement is not None:
-                    yield Checkbox(self._acknowledgement[0], id="bulk_action_acknowledge")
-                    yield Static(Text(self._acknowledgement_hint or ""), id="bulk_action_acknowledge_hint")
-                yield Static("Choose records to continue.", id="bulk_action_prompt")
-                if self._confirm_text is not None:
-                    yield Input(id="bulk_action_confirm_input", placeholder=self._confirm_text)
-                yield Static("Nothing selected.", id="bulk_action_status")
-            with Horizontal():
-                yield Button("Cancel", id="bulk_action_cancel")
-                yield Button(self._action_label, variant="error", disabled=True, id="bulk_action_submit")
+        acknowledgement = []
+        if self._acknowledgement is not None:
+            acknowledgement = [
+                Checkbox(self._acknowledgement[0], id="bulk_action_acknowledge"),
+                Static(
+                    Text(self._acknowledgement_hint or ""),
+                    id="bulk_action_acknowledge_hint",
+                ),
+            ]
+        confirmation = []
+        if self._confirm_text is not None:
+            confirmation = [
+                Input(id="bulk_action_confirm_input", placeholder=self._confirm_text),
+            ]
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(Text(self._title), id="bulk_action_title"),
+            body=DialogBody(
+                Static(Text(self._description_text()), id="bulk_action_description"),
+                SelectionList(id="bulk_action_list"),
+                Horizontal(
+                    Button("Select all", id="bulk_action_all"),
+                    Button("Select none", id="bulk_action_none"),
+                ),
+                *acknowledgement,
+                id="bulk_action_body",
+            ),
+            status=Vertical(
+                Static("Choose records to continue.", id="bulk_action_prompt"),
+                *confirmation,
+                Static("Nothing selected.", id="bulk_action_status"),
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="bulk_action_cancel"),
+                Button(
+                    self._action_label, variant="error", disabled=True,
+                    id="bulk_action_submit",
+                ),
+            ),
+            id="bulk_action_modal",
+            size="large",
+            severity="warning",
+        )
 
     def on_mount(self) -> None:
         self.refresh_after_demo_toggle()

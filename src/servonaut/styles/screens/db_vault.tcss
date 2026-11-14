@@ -64,6 +64,16 @@
     margin: 0 1 0 0;
 }
 
+/* Keep every setup action reachable when the navigation rail narrows the form. */
+SecretsSetupScreen.-content-narrow #setup_buttons {
+    layout: vertical;
+}
+
+SecretsSetupScreen.-content-narrow #setup_buttons Button {
+    width: 100%;
+    margin: 0;
+}
+
 /* ---- Named form widgets (inherit global Input/Button, pinned here
    so CSS-ID coverage stays explicit) -------------------------------- */
 #token_env,
@@ -97,11 +107,6 @@
     height: 1fr;
 }
 
-/* ---- Server-actions rail: the new DB-scan action button ---------- */
-#btn_db_creds {
-    width: 1fr;
-}
-
 .setup_label {
     color: $text-muted;
     height: 1;
@@ -112,6 +117,7 @@
     width: 1fr;
     height: 100%;
     padding: 1 2;
+    overflow-y: auto;
 }
 #db_roots_title {
     text-align: center;
@@ -171,3 +177,365 @@
 #db_scan_roots_btn {
     margin: 0 1;
 }
+
+/* Keep short root actions at their native label width beside longer actions. */
+/* Database review desks keep masked results separate from scope and storage. */
+DbCredentialScanScreen #db_scan_container,
+DbFleetScanScreen #fleet_db_container,
+DbCoverageScreen #db_cov_container,
+DbScanRootsScreen #db_roots_container {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    background: $surface;
+    overflow-y: auto;
+}
+
+DbCredentialScanScreen .db-view-heading,
+DbFleetScanScreen .db-view-heading,
+DbCoverageScreen .db-view-heading,
+DbScanRootsScreen .db-view-heading {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+DbCredentialScanScreen #db_scan_title,
+DbFleetScanScreen #fleet_db_title,
+DbCoverageScreen #db_cov_title,
+DbScanRootsScreen #db_roots_title {
+    height: auto;
+    text-align: left;
+    color: $text;
+    text-style: bold;
+}
+
+DbCredentialScanScreen #db_scan_subtitle,
+DbFleetScanScreen #fleet_db_subtitle,
+DbCoverageScreen #db_cov_subtitle,
+DbScanRootsScreen #db_roots_subtitle {
+    height: auto;
+    text-align: left;
+    margin: 0;
+    color: $text-muted;
+}
+
+DbCredentialScanScreen .db-review-workspace,
+DbFleetScanScreen .db-review-workspace,
+DbCoverageScreen .db-review-workspace {
+    height: 1fr;
+    min-height: 14;
+}
+
+DbCredentialScanScreen .db-review-tools,
+DbFleetScanScreen .db-review-tools,
+DbCoverageScreen .db-review-tools {
+    width: 31;
+    height: 1fr;
+    margin-right: 1;
+    padding: 0 1;
+    border: round $panel;
+    background: transparent;
+}
+
+/* Records lead the narrow flow; keep scope on the left of the wide desk. */
+DbCredentialScanScreen #db_scan_review {
+    dock: left;
+}
+
+DbCredentialScanScreen #db_scan_body {
+    overflow-y: auto;
+}
+
+DbCredentialScanScreen .db-section-title,
+DbFleetScanScreen .db-section-title,
+DbCoverageScreen .db-section-title,
+DbScanRootsScreen .db-section-title {
+    height: auto;
+    min-height: 1;
+    text-style: bold;
+    color: $text;
+}
+
+DbCredentialScanScreen #db_scan_roots_line {
+    height: auto;
+    margin: 1 0;
+    color: $text-muted;
+}
+
+DbCredentialScanScreen #db_scan_status,
+DbFleetScanScreen #fleet_db_status,
+DbCoverageScreen #db_cov_summary {
+    height: auto;
+    min-height: 1;
+    margin: 1 0;
+    padding: 0;
+    border: none;
+    background: $surface;
+}
+
+DbCredentialScanScreen #db_scan_status.-error,
+DbFleetScanScreen #fleet_db_status.-error {
+    color: $text-error;
+}
+
+DbCredentialScanScreen #db_scan_body,
+DbFleetScanScreen #fleet_db_body,
+DbCoverageScreen #db_cov_body {
+    width: 1fr;
+    height: 1fr;
+    min-height: 10;
+    padding: 0;
+    border: round $panel;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+DbCredentialScanScreen #db_scan_candidates {
+    height: 1fr;
+    min-height: 6;
+    max-height: initial;
+    margin: 0;
+    border: none;
+    background: $surface;
+}
+
+DbFleetScanScreen #fleet_db_table,
+DbCoverageScreen #db_cov_table {
+    height: 1fr;
+    min-height: 6;
+}
+
+DbCredentialScanScreen #db_scan_empty,
+DbFleetScanScreen #fleet_db_empty,
+DbCoverageScreen #db_cov_empty {
+    height: auto;
+    padding: 1 2;
+    color: $text-muted;
+}
+
+DbCredentialScanScreen .db-action-row,
+DbFleetScanScreen .db-action-row,
+DbCoverageScreen .db-action-row {
+    layout: vertical;
+    height: auto;
+    margin: 0;
+}
+
+DbCredentialScanScreen .db-action-row Button,
+DbFleetScanScreen #fleet_db_buttons Button,
+DbCoverageScreen .db-action-row Button,
+DbCoverageScreen #db_cov_refresh {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+}
+
+DbCoverageScreen .db-filter-row {
+    layout: vertical;
+    height: auto;
+}
+
+DbCoverageScreen #db_cov_filter {
+    width: 1fr;
+    margin: 0;
+}
+
+DbCoverageScreen .db-action-hint,
+DbScanRootsScreen .db-action-hint {
+    height: auto;
+    color: $text-muted;
+}
+
+DbCoverageScreen .db-action-hint {
+    width: 1fr;
+    margin-bottom: 1;
+}
+
+DbCredentialScanScreen.-content-narrow .db-review-workspace,
+DbFleetScanScreen.-content-narrow .db-review-workspace,
+DbCoverageScreen.-content-narrow .db-review-workspace {
+    layout: vertical;
+    height: auto;
+}
+
+DbCredentialScanScreen.-content-narrow .db-review-tools,
+DbFleetScanScreen.-content-narrow .db-review-tools,
+DbCoverageScreen.-content-narrow .db-review-tools {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+DbCredentialScanScreen.-content-narrow #db_scan_review {
+    dock: none;
+}
+
+DbCredentialScanScreen.-content-narrow #db_scan_body,
+DbFleetScanScreen.-content-narrow #fleet_db_body,
+DbCoverageScreen.-content-narrow #db_cov_body {
+    width: 100%;
+    height: 12;
+}
+
+DbCredentialScanScreen.-content-narrow .db-action-row,
+DbFleetScanScreen.-content-narrow .db-action-row {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-gutter: 0 1;
+}
+
+DbCoverageScreen.-content-narrow .db-filter-row {
+    layout: horizontal;
+    height: 3;
+}
+
+DbCoverageScreen.-content-narrow #db_cov_refresh {
+    width: 14;
+    margin-left: 1;
+}
+
+DbCoverageScreen.-content-narrow .db-action-row {
+    layout: horizontal;
+}
+
+DbCoverageScreen.-content-narrow #db_cov_remove {
+    width: 20;
+    margin-left: 1;
+}
+
+/* Roots are a working copy, with Save and Cancel outside the scrolling body. */
+DbScanRootsScreen #db_roots_body {
+    height: 1fr;
+    min-height: 6;
+    padding: 0;
+}
+
+DbScanRootsScreen #db_roots_workspace {
+    height: 1fr;
+    min-height: 16;
+}
+
+DbScanRootsScreen #db_roots_editor,
+DbScanRootsScreen #db_roots_browser {
+    height: 1fr;
+    padding: 0 1;
+    border: round $panel;
+    background: transparent;
+}
+
+DbScanRootsScreen #db_roots_editor {
+    width: 2fr;
+    margin-right: 1;
+}
+
+DbScanRootsScreen #db_roots_browser {
+    width: 3fr;
+}
+
+DbScanRootsScreen #db_roots_current {
+    height: auto;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+DbScanRootsScreen #db_roots_list {
+    height: 1fr;
+    min-height: 3;
+    margin: 0 0 1 0;
+    border: none;
+    background: $surface;
+}
+
+DbScanRootsScreen #db_roots_add_row {
+    height: 3;
+    margin: 0 0 1 0;
+}
+
+DbScanRootsScreen #db_roots_add_typed {
+    min-width: 0;
+    margin: 0 0 0 1;
+}
+
+DbScanRootsScreen #db_roots_remove,
+DbScanRootsScreen #db_roots_add_browsed {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+DbScanRootsScreen #db_roots_tree {
+    height: 1fr;
+    min-height: 6;
+    border: none;
+    margin: 0 0 1 0;
+    background: $surface;
+}
+
+DbScanRootsScreen #db_roots_buttons {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
+    margin-top: 1;
+}
+
+DbScanRootsScreen #db_roots_buttons Button {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+DbScanRootsScreen.-content-narrow #db_roots_workspace {
+    layout: vertical;
+    height: auto;
+    min-height: 0;
+}
+
+DbScanRootsScreen.-content-narrow #db_roots_editor,
+DbScanRootsScreen.-content-narrow #db_roots_browser {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+DbScanRootsScreen.-content-narrow #db_roots_editor {
+    height: auto;
+}
+
+DbScanRootsScreen.-content-narrow #db_roots_list {
+    height: 5;
+}
+
+DbScanRootsScreen.-content-narrow #db_roots_browser {
+    height: 16;
+}
+
+
+/* Database workspaces keep scope, progress and results in separate regions. */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* Native lists and trees each scroll inside their own labelled work area. */

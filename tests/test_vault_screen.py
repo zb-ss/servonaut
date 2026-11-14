@@ -24,6 +24,7 @@ from servonaut.screens.vault import (
 from servonaut.services.api_client import APIError, FeatureDisabledError
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.action_button import ActionButton
 from tests._async_bounds import wait_until
 
 def test_vault_screen_exposes_safe_metadata_actions() -> None:
@@ -177,11 +178,15 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         await asyncio.wait_for(service.metadata_requested.wait(), timeout=2)
         service.release_metadata.set()
         table = app.screen.query_one("#vault_table", DataTable)
-        await wait_until(lambda: table.row_count == 1)
+        await wait_until(lambda: (
+            table.row_count == 1 and table.display
+            and table.region.width > 0 and table.region.height > 0
+            and not app.screen._busy_work
+        ))
 
         screen = app.screen
         assert isinstance(screen, VaultScreen)
-        assert screen.has_class("-narrow") and screen.has_class("-short")
+        assert screen.has_class("-content-narrow") and screen.has_class("-short")
         assert table.region.height >= 7
         await pilot.pause()
         screenshot = unescape(app.export_screenshot(simplify=True))
@@ -189,19 +194,21 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         assert all(fragment in screenshot for fragment in ("Narrow", "metadata", "vault"))
 
         action_scroll = screen.query_one("#vault_action_scroll", VerticalScroll)
-        assert action_scroll.region.height <= 8
-        assert str(screen.query_one("#vault_rotate_exposure", Button).label) == "Rotate exposed SSH key"
-        assert str(screen.query_one("#vault_rotate", Button).label) == "Rotate vault key"
+        assert action_scroll.region.height <= 10
+        assert screen.query_one("#vault_rotate_exposure", ActionButton).words == "Rotate exposed SSH key"
+        assert screen.query_one("#vault_rotate", ActionButton).words == "Rotate vault key"
 
         first = screen.query_one("#vault_refresh", Button)
         last = screen.query_one("#vault_rotate", Button)
         first.focus()
-        for _ in range(20):
+        for _ in range(len(screen.focus_chain) + 1):
             if last.has_focus:
                 break
             await pilot.press("tab")
         assert last.has_focus
+        await wait_until(lambda: action_scroll.region.contains_region(last.region))
         assert action_scroll.scroll_y > 0
+        assert app.get_widget_at(*last.content_region.center)[0] is last
 
 
 @pytest.mark.asyncio
@@ -395,6 +402,8 @@ class _SwitchableCaService:
 
 
 class _CaHost(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, service: _SwitchableCaService) -> None:
         super().__init__()
         self.vault_command_service = service
@@ -425,6 +434,20 @@ async def _ca_team_options_loaded(pilot, screen: Screen) -> None:
     await pilot.pause()  # a guidance line may have moved the buttons
 
 
+async def _ca_click(pilot, selector: str) -> None:
+    """Reveal and hit the actual styled CA action before waiting for its result."""
+    button = pilot.app.screen.query_one(selector, Button)
+    await wait_until(lambda: not button.has_class("-active"))
+    button.scroll_visible(animate=False, immediate=True)
+    await pilot.pause()
+    assert button.region.width > 0 and button.region.height > 0
+    assert pilot.app.screen.region.contains_region(button.region)
+    assert pilot.app.get_widget_at(*button.region.center)[0] is button
+    assert await pilot.click(
+        button, offset=(button.region.width // 2, button.region.height // 2),
+    )
+
+
 @pytest.mark.asyncio
 async def test_switched_off_certificates_are_explained_and_hold_back_ca_actions() -> None:
     service = _SwitchableCaService()
@@ -444,12 +467,12 @@ async def test_switched_off_certificates_are_explained_and_hold_back_ca_actions(
         assert screen.query_one("#ca_refresh", Button).disabled is False
         assert app.notes == []
 
-        await pilot.click("#ca_audit")
+        await _ca_click(pilot, "#ca_audit")
         await pilot.pause()
         assert service.audits == 0
 
         service.switched_off.clear()
-        await pilot.click("#ca_refresh")
+        await _ca_click(pilot, "#ca_refresh")
         await wait_until(lambda: "SSH certificates are on" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         assert _ca_actions_disabled(screen) == [False, False, False, False]
@@ -484,7 +507,7 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
         await wait_until(lambda: "SHA256:platform-user-ca" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         service.switched_off.add("platform")  # switched off after the status was read
-        await pilot.click("#ca_audit")
+        await _ca_click(pilot, "#ca_audit")
         await wait_until(lambda: bool(app.notes))
 
         assert service.audits == 1
@@ -984,3 +1007,26 @@ async def test_demo_mode_hides_the_waiting_members_name_and_address() -> None:
         assert "12345 67890 13579" in text  # the number to compare is never hidden
         await pilot.press("escape")
         await wait_until(lambda: service.decisions == [False])
+
+
+@pytest.mark.asyncio
+async def test_bound_vault_actions_show_their_key_and_headings_are_sentence_case() -> None:
+    from servonaut.widgets.action_button import ActionButton
+    from tests.test_vault_workspace_views import _Service
+
+    app = _StyledVaultHost(_Service(local=True))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        bound = {b.action: b.key for b in screen.BINDINGS}
+        buttons = {
+            "refresh": "vault_refresh", "reveal": "vault_reveal", "grants": "vault_grants",
+            "vaults": "vault_vaults", "items": "vault_items", "devices": "vault_devices",
+            "roster": "vault_roster", "exposures": "vault_exposures",
+        }
+        for action, button_id in buttons.items():
+            label = screen.query_one(f"#{button_id}", ActionButton).label.plain
+            assert label.endswith(f"\u2590{bound[action]}\u258c"), button_id
+        for heading in screen.query(".vault_group_heading"):
+            text = heading.render().plain
+            assert text[0].isupper() and text[1:] == text[1:].lower(), text

@@ -9,10 +9,11 @@ from functools import partial
 from typing import Any, List, Optional, Tuple
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
@@ -42,7 +43,7 @@ from servonaut.services.team_rules_view import (
 )
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.busy_indicator import BusyIndicator
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -71,20 +72,27 @@ def _kept_key_paths_text(count: int) -> str:
     return "1 entry keeps your own SSH key path" if count == 1 else f"{count} entries keep your own SSH key paths"
 
 
-class TeamManagementScreen(Screen):
+class TeamManagementScreen(WorkspaceScreen):
     """Team management: list teams, manage members, share servers."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
 
-    # Below 120 columns the five member buttons wrap onto a grid (see the
-    # ``-narrow`` rules in the styles); on one row the last ones were cut off.
-    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+    # Below this content width the five member buttons wrap onto a grid (see
+    # the ``-content-narrow`` rules in the styles); on one row the last ones
+    # were cut off. Measured on the content, so an open chat counts too.
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 95
+    # Short terminals get tighter cards, so a card fits above the return lane.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._server_busy:
             return False
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -103,7 +111,7 @@ class TeamManagementScreen(Screen):
         self._shared_servers: list[dict] = []
         # Cache team-shared config versions, latest first per backend ordering.
         self._team_configs: list[dict] = []
-        # Holds the parsed remote payload between "Pull Latest" and Apply confirm.
+        # Holds the parsed remote payload between "Pull latest" and Apply confirm.
         self._pending_pull_payload: Optional[dict] = None
         # Team-list rows by slug: a team's agent rules are fetched by its id.
         self._teams_by_slug: dict[str, dict] = {}
@@ -122,219 +130,247 @@ class TeamManagementScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
+        yield WorkspaceControls("Teams")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
             yield ScrollableContainer(
-                Static("[bold $text-accent]Team Management[/bold $text-accent]", id="team_mgmt_header"),
-
-                # No-auth notice (shown when not authenticated)
-                Static(
-                    "Login required to manage teams. Use the Login / Account button in the sidebar.",
-                    id="no_auth_notice",
-                ),
-
-                # --- Teams section (curved card) ---
                 Container(
-                    Static("[bold]Your Teams[/bold]", id="section_teams", classes="section_header"),
-                    DataTable(id="teams_table"),
-                    Horizontal(
-                        Button("Create Team", variant="primary", id="btn_create_team"),
-                        Button("View Team", variant="default", id="btn_view_team"),
-                        classes="add_row",
-                        id="team_actions_row",
-                    ),
-                    Container(
-                        Static("[bold]Create Team[/bold]", classes="section_header"),
-                        Input(placeholder="Team Name", id="input_team_name"),
-                        Horizontal(
-                            Button("Save Team", variant="primary", id="btn_save_team"),
-                            Button("Cancel", variant="default", id="btn_cancel_create_team"),
-                            classes="form_actions_row",
-                        ),
-                        id="create_team_form",
-                    ),
-                    id="teams_section",
-                    classes="settings_section",
-                ),
+                    Static("[bold]Team management[/bold]", id="team_mgmt_header", classes="screen-title"),
+                    Static("Choose a team to review its members, shared servers and configuration.", id="team_workspace_summary", classes="screen-description"),
 
-                # --- Active team banner (shown after View Team) ---
-                Static("", id="team_header"),
-
-                # --- Members section (curved card) ---
-                Container(
-                    Static("[bold]Members[/bold]", id="section_members", classes="section_header"),
-                    DataTable(id="members_table"),
-                    Horizontal(
-                        Button("Invite Member", variant="primary", id="btn_invite"),
-                        Button("Change Role", variant="default", id="btn_change_role"),
-                        Button("Resend Invite", variant="default", id="btn_resend"),
-                        Button("Copy Accept URL", variant="default", id="btn_copy_url"),
-                        Button("Remove Member", variant="error", id="btn_remove"),
-                        classes="add_row",
-                        id="member_actions_row",
-                    ),
-                    Container(
-                        Static("[bold]Invite Member[/bold]", classes="section_header"),
-                        Input(placeholder="Email", id="input_invite_email"),
-                        Select(
-                            options=_ROLE_OPTIONS,
-                            value="member",
-                            allow_blank=False,
-                            id="select_invite_role",
-                        ),
-                        Horizontal(
-                            Button("Send Invite", variant="primary", id="btn_send_invite"),
-                            Button("Cancel", variant="default", id="btn_cancel_invite"),
-                            classes="form_actions_row",
-                        ),
-                        id="invite_form",
-                    ),
-                    Container(
-                        Static("[bold]Change Role[/bold]", id="change_role_header", classes="section_header"),
-                        Select(
-                            options=_ROLE_OPTIONS,
-                            value="member",
-                            allow_blank=False,
-                            id="select_change_role",
-                        ),
-                        Horizontal(
-                            Button("Save Role", variant="primary", id="btn_save_role"),
-                            Button("Cancel", variant="default", id="btn_cancel_change_role"),
-                            classes="form_actions_row",
-                        ),
-                        id="change_role_form",
-                    ),
-                    id="members_section",
-                    classes="settings_section",
-                ),
-
-                # --- Shared Configs section (curved card) ---
-                Container(
-                    Static("[bold]Shared Configs[/bold]", id="section_configs", classes="section_header"),
+                    # No-auth notice (shown when not authenticated)
                     Static(
-                        "[dim]Push a sanitised snapshot of your local config "
-                        "(connection profiles, scan rules, custom servers) so "
-                        "teammates can pull it as a baseline.[/dim]",
-                        id="configs_hint",
+                        "Login required to manage teams. Use the Login / Account button in the sidebar.",
+                        id="no_auth_notice",
                     ),
-                    DataTable(id="configs_table"),
-                    Horizontal(
-                        Button("Push Current", variant="primary", id="btn_push_config"),
-                        Button("Pull Latest", variant="default", id="btn_pull_config"),
-                        classes="add_row",
-                        id="config_actions_row",
-                    ),
-                    Container(
-                        Static("[bold]Push Current Config[/bold]", classes="section_header"),
-                        Static("", id="push_config_servers_label"),
-                        SelectionList(id="push_config_servers"),
-                        Horizontal(
-                            Button("Select All", variant="default", id="btn_push_servers_all"),
-                            Button("Select None", variant="default", id="btn_push_servers_none"),
-                            classes="form_actions_row",
-                            id="push_config_server_actions",
-                        ),
-                        Static("", id="push_config_profiles"),
-                        Static("", id="push_config_preview"),
-                        Input(
-                            placeholder="Description (optional — e.g. 'Adds staging bastion')",
-                            id="input_push_description",
-                        ),
-                        Horizontal(
-                            Button("Push", variant="primary", id="btn_confirm_push_config"),
-                            Button("Cancel", variant="default", id="btn_cancel_push_config"),
-                            classes="form_actions_row",
-                        ),
-                        id="push_config_form",
-                    ),
-                    Container(
-                        Static("[bold]Pull Latest Config[/bold]", classes="section_header"),
-                        Static("", id="pull_config_preview"),
-                        Static(
-                            "[$text-warning]Pulling REPLACES your local connection profiles, "
-                            "connection rules, scan rules, and custom servers with the "
-                            "team's version. AI / cloud-provider / personal settings are "
-                            "untouched.[/$text-warning]",
-                            id="pull_config_warning",
-                        ),
-                        Horizontal(
-                            Button("Apply", variant="warning", id="btn_confirm_pull_config"),
-                            Button("Cancel", variant="default", id="btn_cancel_pull_config"),
-                            classes="form_actions_row",
-                        ),
-                        id="pull_config_form",
-                    ),
-                    id="configs_section",
-                    classes="settings_section",
-                ),
 
-                # --- Shared Servers section (curved card) ---
-                Container(
-                    Static("[bold]Shared Servers[/bold]", id="section_servers", classes="section_header"),
-                    BusyIndicator(id="team_servers_busy"),
-                    DataTable(id="servers_table"),
-                    Horizontal(
-                        Button("Connect", variant="success", id="btn_connect_shared"),
-                        Button("Share Server", variant="primary", id="btn_share"),
-                        Button("Share All", variant="default", id="btn_share_all"),
-                        classes="add_row",
-                        id="server_actions_row",
-                    ),
-                    Horizontal(
-                        Button("Remove server", variant="error", id="btn_remove_server"),
-                        Button("Remove multiple", variant="error", id="btn_remove_servers"),
-                        classes="add_row",
-                        id="server_remove_actions_row",
-                    ),
+                    # --- Teams section (curved card) ---
                     Container(
-                        Static("[bold]Share Server[/bold]", classes="section_header"),
-                        Select(
-                            options=[("(no servers available)", Select.BLANK)],
-                            value=Select.BLANK,
-                            allow_blank=True,
-                            id="select_share_instance",
-                        ),
-                        Select(
-                            [("Public address", "public"), ("Private address", "private")],
-                            value="public",
-                            allow_blank=False,
-                            id="select_share_address",
-                        ),
-                        Static("", id="share_address_note"),
-                        Input(
-                            placeholder="SSH username (optional — leave blank for cloud default)",
-                            id="input_share_username",
-                        ),
-                        Input(
-                            placeholder="SSH port (default 22)",
-                            id="input_share_port",
-                            type="integer",
-                        ),
+                        Static("[bold]Your teams[/bold]", id="section_teams", classes="section_header"),
+                        Static("Select a team, then View team to open its workspace.", classes="team_section_hint"),
+                        BusyIndicator(id="team_list_busy"),
+                        DataTable(id="teams_table"),
                         Horizontal(
-                            Button("Share", variant="primary", id="btn_confirm_share"),
-                            Button("Cancel", variant="default", id="btn_cancel_share"),
-                            classes="form_actions_row",
+                            Button("Create team", variant="primary", id="btn_create_team"),
+                            Button("View team", variant="default", id="btn_view_team"),
+                            classes="add_row",
+                            id="team_actions_row",
                         ),
-                        id="share_server_form",
+                        Container(
+                            Static("[bold]Create team[/bold]", classes="section_header"),
+                            Static("Team name", classes="team_field_label"),
+                            Input(placeholder="Team name", id="input_team_name"),
+                            Horizontal(
+                                Button("Save team", variant="primary", id="btn_save_team"),
+                                Button("Cancel", variant="default", id="btn_cancel_create_team"),
+                                classes="form_actions_row",
+                            ),
+                            id="create_team_form",
+                        ),
+                        id="teams_section",
+                        classes="settings_section",
                     ),
-                    id="servers_section",
-                    classes="settings_section",
-                ),
 
-                # --- Agent rules section (curved card, read-only) ---
-                Container(
-                    Static(
-                        f"[bold]{AGENT_RULES_TITLE}[/bold]",
-                        id="section_agent_rules", classes="section_header",
+                    # --- Active team banner (shown after View Team) ---
+                    Static("", id="team_header"),
+                    BusyIndicator(id="team_detail_busy"),
+
+                    Horizontal(
+                        # --- Members section (curved card) ---
+                        Container(
+                            Static("[bold]Members[/bold]", id="section_members", classes="section_header"),
+                            Static("Review member roles and invitation status. Owner and admin permissions govern changes.", classes="team_section_hint"),
+                            DataTable(id="members_table"),
+                            Horizontal(
+                                Button("Invite member", variant="primary", id="btn_invite"),
+                                Button("Change role", variant="default", id="btn_change_role"),
+                                Button("Resend invite", variant="default", id="btn_resend"),
+                                Button("Copy accept URL", variant="default", id="btn_copy_url"),
+                                Button("Remove member", variant="error", id="btn_remove"),
+                                classes="add_row",
+                                id="member_actions_row",
+                            ),
+                            Container(
+                                Static("[bold]Invite member[/bold]", classes="section_header"),
+                                Static("Email address", classes="team_field_label"),
+                                Input(placeholder="Email", id="input_invite_email"),
+                                Static("Team role", classes="team_field_label"),
+                                Select(
+                                    options=_ROLE_OPTIONS,
+                                    value="member",
+                                    allow_blank=False,
+                                    id="select_invite_role",
+                                ),
+                                Horizontal(
+                                    Button("Send invite", variant="primary", id="btn_send_invite"),
+                                    Button("Cancel", variant="default", id="btn_cancel_invite"),
+                                    classes="form_actions_row",
+                                ),
+                                id="invite_form",
+                            ),
+                            Container(
+                                Static("[bold]Change role[/bold]", id="change_role_header", classes="section_header"),
+                                Static("New team role", classes="team_field_label"),
+                                Select(
+                                    options=_ROLE_OPTIONS,
+                                    value="member",
+                                    allow_blank=False,
+                                    id="select_change_role",
+                                ),
+                                Horizontal(
+                                    Button("Save role", variant="primary", id="btn_save_role"),
+                                    Button("Cancel", variant="default", id="btn_cancel_change_role"),
+                                    classes="form_actions_row",
+                                ),
+                                id="change_role_form",
+                            ),
+                            id="members_section",
+                            classes="settings_section",
+                        ),
+
+                        # --- Shared Servers section (curved card) ---
+                        Container(
+                            Static("[bold]Shared servers[/bold]", id="section_servers", classes="section_header"),
+                            Static("Connect to a shared server or review the hosts available to this team.", classes="team_section_hint"),
+                            BusyIndicator(id="team_servers_busy"),
+                            DataTable(id="servers_table"),
+                            Horizontal(
+                                Button("Connect", variant="success", id="btn_connect_shared"),
+                                Button("Share server", variant="primary", id="btn_share"),
+                                Button("Share all", variant="default", id="btn_share_all"),
+                                classes="add_row",
+                                id="server_actions_row",
+                            ),
+                            Horizontal(
+                                Button("Remove server", variant="error", id="btn_remove_server"),
+                                Button("Remove multiple", variant="error", id="btn_remove_servers"),
+                                classes="add_row",
+                                id="server_remove_actions_row",
+                            ),
+                            Container(
+                                Static("[bold]Share server[/bold]", classes="section_header"),
+                                Static("Server to share", classes="team_field_label"),
+                                Select(
+                                    options=[("(no servers available)", Select.BLANK)],
+                                    value=Select.BLANK,
+                                    allow_blank=True,
+                                    id="select_share_instance",
+                                ),
+                                Select(
+                                    [("Public address", "public"), ("Private address", "private")],
+                                    value="public",
+                                    allow_blank=False,
+                                    id="select_share_address",
+                                ),
+                                Static("", id="share_address_note"),
+                                Static("SSH username", classes="team_field_label"),
+                                Input(
+                                    placeholder="SSH username (optional — leave blank for cloud default)",
+                                    id="input_share_username",
+                                ),
+                                Static("SSH port", classes="team_field_label"),
+                                Input(
+                                    placeholder="SSH port (default 22)",
+                                    id="input_share_port",
+                                    type="integer",
+                                ),
+                                Horizontal(
+                                    Button("Share", variant="primary", id="btn_confirm_share"),
+                                    Button("Cancel", variant="default", id="btn_cancel_share"),
+                                    classes="form_actions_row",
+                                ),
+                                id="share_server_form",
+                            ),
+                            id="servers_section",
+                            classes="settings_section",
+                        ),
+
+                        id="team_records",
                     ),
-                    Static("", id="agent_rules_body"),
-                    id="agent_rules_section",
-                    classes="settings_section",
-                ),
 
-                Button("Back", variant="default", id="btn_back"),
+                    Horizontal(
+                        # --- Shared Configs section (curved card) ---
+                        Container(
+                            Static("[bold]Shared configs[/bold]", id="section_configs", classes="section_header"),
+                            Static(
+                                "[dim]Push a sanitised snapshot of your local config "
+                                "(connection profiles, scan rules, custom servers) so "
+                                "teammates can pull it as a baseline.[/dim]",
+                                id="configs_hint",
+                            ),
+                            DataTable(id="configs_table"),
+                            Horizontal(
+                                Button("Push current", variant="primary", id="btn_push_config"),
+                                Button("Pull latest", variant="default", id="btn_pull_config"),
+                                classes="add_row",
+                                id="config_actions_row",
+                            ),
+                            Container(
+                                Static("[bold]Push current config[/bold]", classes="section_header"),
+                                Static("", id="push_config_servers_label"),
+                                SelectionList(id="push_config_servers"),
+                                Horizontal(
+                                    Button("Select all", variant="default", id="btn_push_servers_all"),
+                                    Button("Select none", variant="default", id="btn_push_servers_none"),
+                                    classes="form_actions_row",
+                                    id="push_config_server_actions",
+                                ),
+                                Static("", id="push_config_profiles"),
+                                Static("", id="push_config_preview"),
+                                Static("Description (optional)", classes="team_field_label"),
+                                Input(
+                                    placeholder="Description (optional — e.g. 'Adds staging bastion')",
+                                    id="input_push_description",
+                                ),
+                                Horizontal(
+                                    Button("Push", variant="primary", id="btn_confirm_push_config"),
+                                    Button("Cancel", variant="default", id="btn_cancel_push_config"),
+                                    classes="form_actions_row",
+                                ),
+                                id="push_config_form",
+                            ),
+                            Container(
+                                Static("[bold]Pull latest config[/bold]", classes="section_header"),
+                                Static("", id="pull_config_preview"),
+                                Static(
+                                    "[$text-warning]Pulling REPLACES your local connection profiles, "
+                                    "connection rules, scan rules, and custom servers with the "
+                                    "team's version. AI / cloud-provider / personal settings are "
+                                    "untouched.[/$text-warning]",
+                                    id="pull_config_warning",
+                                ),
+                                Horizontal(
+                                    Button("Apply", variant="warning", id="btn_confirm_pull_config"),
+                                    Button("Cancel", variant="default", id="btn_cancel_pull_config"),
+                                    classes="form_actions_row",
+                                ),
+                                id="pull_config_form",
+                            ),
+                            id="configs_section",
+                            classes="settings_section",
+                        ),
+
+                        # --- Agent rules section (curved card, read-only) ---
+                        Container(
+                            Static(
+                                f"[bold]{AGENT_RULES_TITLE}[/bold]",
+                                id="section_agent_rules", classes="section_header",
+                            ),
+                            Static("", id="agent_rules_body"),
+                            id="agent_rules_section",
+                            classes="settings_section",
+                        ),
+                        id="team_policy_records",
+                    ),
+                    id="team_document",
+                ),
+                Horizontal(
+                    Button("Back", variant="default", id="btn_back"),
+                    id="team_return_actions",
+                ),
 
                 id="team_management_container",
+                classes="workspace-content",
             )
         yield Footer()
 
@@ -357,6 +393,21 @@ class TeamManagementScreen(Screen):
         self._hide_no_auth_notice()
         self.run_worker(self._load_teams(), exclusive=True, name="load_teams")
 
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        """Reveal focused document controls above the fixed return row."""
+        if not self.is_attached:
+            return
+        if self.query_one("#team_document") in event.widget.ancestors:
+            self.call_after_refresh(self._reveal_document_focus, event.widget)
+
+    def _reveal_document_focus(self, widget: Widget) -> None:
+        if (not self.is_attached or self.app.screen is not self
+                or self.focused is not widget or not widget.is_attached):
+            return
+        body = self.query_one("#team_management_container", ScrollableContainer)
+        if body.display:
+            body.scroll_to_widget(widget, animate=False, immediate=True)
+
     # ------------------------------------------------------------------
     # Table setup
     # ------------------------------------------------------------------
@@ -376,13 +427,14 @@ class TeamManagementScreen(Screen):
 
         configs_tbl = self.query_one("#configs_table", DataTable)
         configs_tbl.cursor_type = "row"
-        configs_tbl.add_columns("Version", "Description", "Pushed", "Pushed By")
+        configs_tbl.add_columns("Version", "Description", "Pushed", "Pushed by")
 
     # ------------------------------------------------------------------
     # Visibility helpers
     # ------------------------------------------------------------------
 
     def _show_no_auth_state(self) -> None:
+        self.query_one("#team_workspace_summary", Static).update("Sign in to view your teams and their shared access.")
         self.query_one("#no_auth_notice").display = True
         self.query_one("#section_teams").display = False
         self.query_one("#teams_table").display = False
@@ -577,7 +629,7 @@ class TeamManagementScreen(Screen):
             else email
         )
         self.query_one("#change_role_header", Static).update(
-            Text(f"Change Role: {terminal_safe(display_email)}", style="bold")
+            Text(f"Change role: {terminal_safe(display_email)}", style="bold")
         )
         role_select = self.query_one("#select_change_role", Select)
         role_select.set_options(self._role_options_for_caller())
@@ -688,14 +740,20 @@ class TeamManagementScreen(Screen):
     async def _load_teams(self) -> None:
         team_svc = getattr(self.app, "team_service", None)
         if team_svc is None:
+            self.query_one("#team_workspace_summary", Static).update("Team service is unavailable.")
             self.notify("Team service not available.", severity="warning")
             return
+        indicator = self.query_one("#team_list_busy", BusyIndicator)
+        indicator.start("Loading teams…")
         try:
             teams = await team_svc.list_teams()
             self._populate_teams_table(teams)
         except Exception as exc:
             logger.error("Failed to load teams: %s", exc)
+            self.query_one("#team_workspace_summary", Static).update("Could not load teams. Check the error notification for details.")
             self.notify(f"Failed to load teams: {exc}", severity="error", markup=False)
+        finally:
+            indicator.stop()
 
     async def _load_team_detail(self, slug: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -711,6 +769,8 @@ class TeamManagementScreen(Screen):
         else:
             self._invalidate_team_detail(slug)
         generation = self._team_load_generation
+        indicator = self.query_one("#team_detail_busy", BusyIndicator)
+        indicator.start("Loading team details…")
         try:
             team = await team_svc.get_team(slug)
             members = team.get("members", [])
@@ -744,6 +804,7 @@ class TeamManagementScreen(Screen):
         except Exception as exc:
             if generation != self._team_load_generation:
                 return
+            indicator.stop()
             self._loaded_team_slug = None
             if keep_view:
                 self._render_team_header("Could not refresh. Showing the last view; refresh before making server changes.")
@@ -751,12 +812,21 @@ class TeamManagementScreen(Screen):
                 self._invalidate_team_detail(slug)
             logger.error("Failed to load team detail", exc_info=True)
             self.notify(f"Failed to load team: {exc}", severity="error", markup=False)
+        finally:
+            if generation == self._team_load_generation:
+                indicator.stop()
 
     def _render_team_header(self, status: str = "") -> None:
         name = terminal_safe(self._current_team_name or self._current_team_slug or "")
         if self.app.demo_mode and self.app.redaction_service:
             name = self.app.redaction_service.redact_name(name)
         text = Text.assemble((f"Team: {name}", "bold"), f"\n{self._team_seat_line}")
+        if self._has_team_detail:
+            role = terminal_safe(self._current_team_role or "unknown")
+            text.append(
+                f"\nYour role: {role}   Members: {len(self._members)}   "
+                f"Shared servers: {len(self._shared_servers)}   Config versions: {len(self._team_configs)}"
+            )
         if status:
             text.append(f"\n{status}")
         self.query_one("#team_header", Static).update(text)
@@ -1039,12 +1109,12 @@ class TeamManagementScreen(Screen):
 
         The backend returns ``email_sent: bool`` — when ``False`` the row was
         persisted with a valid token but mailer delivery failed. Steer the
-        user toward "Copy Accept URL" rather than silently claiming success.
+        user toward "Copy accept URL" rather than silently claiming success.
         """
         if isinstance(response, dict) and response.get("email_sent") is False:
             self.notify(
                 f"{action} recorded for {email} — email delivery failed. "
-                "Use 'Copy Accept URL' to share the link manually.",
+                "Use 'Copy accept URL' to share the link manually.",
                 severity="warning",
                 timeout=10,
             )
@@ -1108,6 +1178,10 @@ class TeamManagementScreen(Screen):
         # the CTA when we know the user already owns one — server still 403s
         # if they bypass the UI.
         self.query_one("#btn_create_team").display = owned_count == 0
+        self.query_one("#team_workspace_summary", Static).update(
+            f"{len(teams)} team{'s' if len(teams) != 1 else ''} available. Select a team and choose View team."
+            if teams else "No teams yet. Create a team or ask a team owner to invite you."
+        )
 
     def _populate_members_table(self, members: list[dict]) -> None:
         table = self.query_one("#members_table", DataTable)
@@ -1590,7 +1664,7 @@ class TeamManagementScreen(Screen):
         async def _confirm_and_remove() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
-                    title="Remove Member",
+                    title="Remove member",
                     description=with_bold_values("Remove {} from the team?", email),
                     consequences=["Member will lose access to all shared servers"],
                     confirm_text=email,
@@ -1810,7 +1884,7 @@ class TeamManagementScreen(Screen):
     def _submit_pull_config(self) -> None:
         """Apply the previously-fetched remote payload over the local config."""
         if self._pending_pull_payload is None:
-            self.notify("Click 'Pull Latest' first to fetch the team config.", severity="warning")
+            self.notify("Click 'Pull latest' first to fetch the team config.", severity="warning")
             return
         config_manager = getattr(self.app, "config_manager", None)
         config = config_manager.get() if config_manager is not None else None
@@ -1904,7 +1978,7 @@ class TeamManagementScreen(Screen):
         if not chosen:
             return
         if slug != self._loaded_team_slug or slug != self._current_team_slug:
-            self.notify("Team data changed or is refreshing. Reload the team and reopen Share All.", severity="warning")
+            self.notify("Team data changed or is refreshing. Reload the team and reopen Share all.", severity="warning")
             return
         self._start_server_operation(
             partial(self._do_share_all, slug, chosen, skipped_existing, skipped_no_ip,
@@ -1952,7 +2026,7 @@ class TeamManagementScreen(Screen):
             parts.append(f"skipped {skipped_no_ip} without IP")
         if failed:
             parts.append(f"failed {len(failed)}")
-        summary = "Share All: " + ", ".join(parts) + "."
+        summary = "Share all: " + ", ".join(parts) + "."
         severity = "warning" if failed else "information"
         self.notify(summary, severity=severity, timeout=12 if failed else 6, markup=False)
         if failed:
@@ -2041,7 +2115,10 @@ class TeamManagementScreen(Screen):
             return
         self._server_busy = True
         focused = self.focused
-        controls = [(widget, widget.disabled) for widget in self.query("Button, DataTable, Select, Input")]
+        # Only the team's own controls: the rail, the workspace controls and
+        # the chat keep their state, and the hold refuses navigation instead.
+        content = self.query_one(".workspace-content")
+        controls = [(widget, widget.disabled) for widget in content.query("Button, DataTable, Select, Input")]
         for widget, _ in controls:
             widget.disabled = True
         indicator = self.query_one("#team_servers_busy", BusyIndicator)

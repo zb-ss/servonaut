@@ -1,0 +1,252 @@
+/* A selectable directory, two record workspaces and a durable return lane. */
+TeamManagementScreen #team_management_container {
+    padding: 0 2 1 2;
+    background: $surface;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+/* Native focus scroll needs tail room as well as the reserved dock gutter. */
+TeamManagementScreen #team_document {
+    width: 100%;
+    height: auto;
+    padding-bottom: 3;
+}
+
+TeamManagementScreen #no_auth_notice {
+    height: auto;
+    padding: 1;
+    margin-bottom: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+TeamManagementScreen #team_header {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    background: transparent;
+    text-style: bold;
+}
+
+TeamManagementScreen .settings_section {
+    height: auto;
+    border: round $border-blurred;
+    background: transparent;
+    padding: 0 1 1 1;
+    margin-bottom: 1;
+}
+
+TeamManagementScreen .section_header {
+    height: auto;
+    padding: 0;
+    margin: 0;
+    color: $text;
+    text-style: bold;
+    border: none;
+}
+
+TeamManagementScreen .team_section_hint,
+TeamManagementScreen #configs_hint {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+TeamManagementScreen #team_records,
+TeamManagementScreen #team_policy_records {
+    height: auto;
+    width: 100%;
+}
+
+TeamManagementScreen #members_section,
+TeamManagementScreen #servers_section,
+TeamManagementScreen #configs_section,
+TeamManagementScreen #agent_rules_section {
+    width: 1fr;
+}
+
+TeamManagementScreen #members_section,
+TeamManagementScreen #configs_section {
+    margin-right: 1;
+}
+
+TeamManagementScreen #teams_table {
+    height: auto;
+    min-height: 3;
+    max-height: 7;
+    margin-bottom: 1;
+}
+
+TeamManagementScreen #members_table,
+TeamManagementScreen #servers_table {
+    height: 9;
+    margin-bottom: 1;
+}
+
+TeamManagementScreen #configs_table {
+    height: 7;
+    margin-bottom: 1;
+}
+
+TeamManagementScreen #agent_rules_body {
+    height: auto;
+    color: $text;
+}
+
+TeamManagementScreen #team_return_actions {
+    dock: bottom;
+    height: 3;
+    width: 100%;
+    background: $surface;
+}
+
+TeamManagementScreen #btn_back {
+    dock: none;
+    width: 16;
+    height: 3;
+    margin: 0;
+}
+
+TeamManagementScreen #team_actions_row,
+TeamManagementScreen #member_actions_row,
+TeamManagementScreen #server_actions_row,
+TeamManagementScreen #server_remove_actions_row,
+TeamManagementScreen #config_actions_row,
+TeamManagementScreen .form_actions_row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 100%;
+}
+
+TeamManagementScreen #team_actions_row Button,
+TeamManagementScreen #member_actions_row Button,
+TeamManagementScreen #server_actions_row Button,
+TeamManagementScreen #server_remove_actions_row Button,
+TeamManagementScreen #config_actions_row Button,
+TeamManagementScreen .form_actions_row Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0;
+}
+
+TeamManagementScreen #create_team_form,
+TeamManagementScreen #invite_form,
+TeamManagementScreen #change_role_form,
+TeamManagementScreen #share_server_form,
+TeamManagementScreen #push_config_form,
+TeamManagementScreen #pull_config_form {
+    height: auto;
+    margin-top: 1;
+    padding: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+TeamManagementScreen .team_field_label {
+    height: auto;
+    color: $text-muted;
+}
+
+TeamManagementScreen #pull_config_warning,
+TeamManagementScreen #push_config_preview,
+TeamManagementScreen #pull_config_preview {
+    height: auto;
+    margin-bottom: 1;
+}
+
+TeamManagementScreen.-content-narrow #team_records,
+TeamManagementScreen.-content-narrow #team_policy_records {
+    layout: vertical;
+}
+
+TeamManagementScreen.-content-narrow #members_section,
+TeamManagementScreen.-content-narrow #servers_section,
+TeamManagementScreen.-content-narrow #configs_section,
+TeamManagementScreen.-content-narrow #agent_rules_section {
+    width: 100%;
+    margin-right: 0;
+}
+
+CaScreen #ca_content {
+    padding: 0 2 1 2;
+    background: $surface;
+    overflow-y: auto;
+}
+
+CaScreen #ca_workspace {
+    width: 100%;
+    height: auto;
+}
+
+CaScreen .access_section {
+    height: auto;
+    padding: 1;
+    background: transparent;
+    border: round $border-blurred;
+    margin-bottom: 1;
+}
+
+CaScreen #ca_setup {
+    width: 38;
+    margin-right: 1;
+}
+
+CaScreen #ca_report {
+    width: 1fr;
+}
+
+CaScreen .access_heading {
+    height: auto;
+    margin-bottom: 1;
+}
+
+CaScreen .access_field_label {
+    height: auto;
+    color: $text-muted;
+}
+
+CaScreen #ca_setup Select {
+    margin-top: 0;
+    margin-bottom: 1;
+}
+
+CaScreen #ca_actions {
+    height: auto;
+}
+
+CaScreen #ca_actions ActionRow {
+    width: 100%;
+    height: auto;
+}
+
+CaScreen.-content-narrow #ca_workspace {
+    layout: vertical;
+}
+
+CaScreen.-content-narrow #ca_setup,
+CaScreen.-content-narrow #ca_report {
+    width: 100%;
+    margin-right: 0;
+}
+
+/* Short terminals: tighter cards, so a card fits above the return lane. */
+TeamManagementScreen.-short .settings_section {
+    padding: 0 1;
+}
+
+TeamManagementScreen.-short #configs_table {
+    height: 4;
+    margin-bottom: 0;
+}
+
+TeamManagementScreen.-short #members_table,
+TeamManagementScreen.-short #servers_table {
+    height: 5;
+    margin-bottom: 0;
+}
