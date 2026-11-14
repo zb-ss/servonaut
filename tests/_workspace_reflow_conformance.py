@@ -199,7 +199,7 @@ async def open_chat(
 ) -> ChatPanel:
     with one_layout_transition(screen):
         panel = await _open_chat(app, pilot)
-    await settled_layout(app, screen)
+        await settled_layout(app, screen)
     return panel
 
 
@@ -209,8 +209,8 @@ async def collapse_chat(
     with one_layout_transition(screen):
         await pilot.press("f2")
         await pilot.pause()
-    await wait_until(lambda: not screen.has_class("-chat-replace"))
-    await settled_layout(app, screen)
+        await wait_until(lambda: not screen.has_class("-chat-replace"))
+        await settled_layout(app, screen)
 
 
 async def assert_essential_targets(
@@ -261,14 +261,14 @@ async def preserve_native_state(
     with one_layout_transition(screen):
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
-    await settled_layout(app, screen)
+        await settled_layout(app, screen)
     assert case.state(screen) == baseline
     assert editor.document is document
     assert editor.selection == selection
     with one_layout_transition(screen):
         await pilot.resize_terminal(160, 50)
         await pilot.pause()
-    await settled_layout(app, screen)
+        await settled_layout(app, screen)
     await collapse_chat(app, pilot, screen)
     await wait_until(lambda: app.focused is screen.query_one(case.primary_focus_selector))
     assert editor.document is document and editor.text == "Keep this café Ω draft"
@@ -279,9 +279,9 @@ async def preserve_native_state(
         with one_layout_transition(screen):
             await _click(pilot, "#workspace_navigation")
             await pilot.pause()
-        await wait_until(lambda: screen.query_one(Sidebar).display is visible)
+            await wait_until(lambda: screen.query_one(Sidebar).display is visible)
+            await settled_layout(app, screen)
         assert screen.query_one(Sidebar).display is visible
-        await settled_layout(app, screen)
         assert case.state(screen) == baseline
     for selector in case.essential_targets:
         target = screen.query_one(selector)

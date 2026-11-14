@@ -471,13 +471,13 @@ async def test_resource_qualified_native_boundary_and_all_action_fit(
             with one_layout_transition(screen):
                 await pilot.resize_terminal(*sample.size)
                 await pilot.pause()
-            await wait_until(
-                lambda: screen.has_class("-chat-replace") is sample.expected_replace
-                and screen.has_class("-content-narrow") is sample.expected_content_narrow
-            )
+                await wait_until(
+                    lambda: screen.has_class("-chat-replace") is sample.expected_replace
+                    and screen.has_class("-content-narrow") is sample.expected_content_narrow
+                )
+                await settled_layout(app, screen)
             assert screen.has_class("-chat-replace") is sample.expected_replace
             assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            await settled_layout(app, screen)
             with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
                 screen.apply_workspace_state()
                 await pilot.pause()
