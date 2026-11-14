@@ -45,6 +45,8 @@ test = [
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.3",
+    # Spreads the unit and screenshot suites across CPU cores (-n auto).
+    "pytest-xdist>=3.8,<4",
     # Freezes the wall clock for the screenshot tests in tests/snapshots.
     "time-machine>=2.16,<4",
 ]
