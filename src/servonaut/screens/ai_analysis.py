@@ -20,6 +20,8 @@ from servonaut.config.secrets import resolve_secret, is_secret_ref
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
 from servonaut.utils.formatting import format_tokens_remaining
+from servonaut.utils.markup import literal
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -581,6 +583,14 @@ class AIAnalysisScreen(Screen):
 
         except asyncio.TimeoutError:
             status.update("[$text-error]Timed out fetching logs from server.[/$text-error]")
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("Log fetch refused: %s", exc)
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            status.update(literal(message, "$text-error"))
+            self.app.notify(message, severity="error", markup=False)
         except Exception as exc:
             logger.error("Error fetching log %s: %s", log_path, exc)
             # Demo-mode: exception messages can carry paths, IPs, or account IDs
@@ -588,7 +598,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
+            status.update(literal(f"Error: {exc_str}", "$text-error"))
         finally:
             progress.stop()
             self._set_buttons_disabled(False)

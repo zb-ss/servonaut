@@ -2068,6 +2068,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         markup=False,
                     )
 
+            except SSHRefusal as exc:
+                # A connection Servonaut will not start: the message says what to fix.
+                logger.warning("SSH launch refused: %s", exc)
+                self.app.notify(str(exc), severity="error", markup=False)
             except Exception as exc:
                 logger.error("Error launching SSH terminal: %s", exc, exc_info=True)
                 self.app.notify(

@@ -1,6 +1,7 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import logging
 from typing import Optional, List
 
 from textual.app import ComposeResult
@@ -13,6 +14,7 @@ from textual.widgets import Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.utils.markup import literal
+from servonaut.utils.ssh_names import SSHRefusal
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._footer_fit import fit_footer
@@ -1105,6 +1107,10 @@ class InstanceListScreen(Screen):
                 "proxy_args": proxy_args, "port": port, "extra_options": extra_options,
                 "profile": profile,
             }
+        except SSHRefusal as exc:
+            logging.getLogger(__name__).warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error", markup=False)
             return
@@ -1165,6 +1171,9 @@ class InstanceListScreen(Screen):
                     severity="error",
                     markup=False,
                 )
+        except SSHRefusal as exc:
+            logging.getLogger(__name__).warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error", markup=False)
 

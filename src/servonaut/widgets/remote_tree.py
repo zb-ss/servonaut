@@ -13,6 +13,7 @@ from textual.widgets.tree import TreeNode
 from textual.worker import Worker
 
 from servonaut.utils.markup import inert_text
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.remote_shell import shell_path
 from servonaut.utils.ssh_utils import run_ssh
 
@@ -194,7 +195,11 @@ class RemoteTree(Tree):
             except Exception:
                 pass
 
-            if event.worker.error:
+            if isinstance(event.worker.error, SSHRefusal):
+                # A connection Servonaut will not start: say why, as it is.
+                logger.warning("Directory listing refused: %s", event.worker.error)
+                node.add(Text(inert_text(str(event.worker.error)))).allow_expand = False
+            elif event.worker.error:
                 error_str = str(event.worker.error).lower()
                 if "permission denied" in error_str:
                     node.add("🔒 Permission denied").allow_expand = False
