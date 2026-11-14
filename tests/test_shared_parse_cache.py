@@ -55,3 +55,18 @@ def test_different_variables_never_reuse_rules() -> None:
 def test_stock_parse_cache_marker_opts_out_of_sharing() -> None:
     assert _parse_calls({"primary": "red"}) == 1
     assert _parse_calls({"primary": "red"}) == 1
+
+
+def test_rule_sets_hash_by_identity_through_the_fast_slot() -> None:
+    from textual.css.model import RuleSet
+
+    first, second = RuleSet(), RuleSet()
+    assert RuleSet.__hash__ is object.__hash__
+    assert len({first, second, first}) == 2
+
+
+@pytest.mark.stock_parse_cache
+def test_stock_parse_cache_marker_keeps_the_stock_rule_set_hash() -> None:
+    from textual.css.model import RuleSet
+
+    assert RuleSet.__hash__ is not object.__hash__

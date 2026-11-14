@@ -1,4 +1,4 @@
-"""Share parsed CSS between the Textual apps one test process starts.
+"""Make Textual stylesheet work cheaper across the apps one test process starts.
 
 Every app builds its own ``Stylesheet`` with an empty parse cache, and
 ``Stylesheet.reparse()`` builds another, so the same 300 KB bundle was parsed
@@ -40,8 +40,15 @@ def shared_parse_cache() -> Iterator[LRUCache]:
             self._parse_cache[key] = rules
         return rules
 
+    from textual.css.model import RuleSet
+
+    original_hash = RuleSet.__hash__
     Stylesheet._parse_rules = parse_rules  # type: ignore[method-assign]
+    # Textual hashes every rule set per styled node through a Python-level
+    # ``id(self)``; the C slot gives the same identity hash far faster.
+    RuleSet.__hash__ = object.__hash__  # type: ignore[method-assign,assignment]
     try:
         yield _shared
     finally:
         Stylesheet._parse_rules = original  # type: ignore[method-assign]
+        RuleSet.__hash__ = original_hash  # type: ignore[method-assign]
