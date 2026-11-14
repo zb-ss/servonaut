@@ -81,6 +81,18 @@ def _wide_parse_cache_for_host_apps(request: pytest.FixtureRequest, monkeypatch:
     monkeypatch.setattr(App, "__init__", init_with_wide_cache)
 
 
+@pytest.fixture(autouse=True)
+def _shared_parse_cache_for_host_apps(request: pytest.FixtureRequest):
+    """Parse each CSS source once per process, not once per app and reparse."""
+    if request.node.get_closest_marker("stock_parse_cache"):
+        yield
+        return
+    from tests._shared_parse_cache import shared_parse_cache
+
+    with shared_parse_cache():
+        yield
+
+
 SSH_PROGRAMS = ("ssh", "scp", "sftp")
 #: Launches of an ssh client the guard refused in the running test (the test fails at teardown).
 SSH_LAUNCH_VIOLATIONS: list[str] = []
