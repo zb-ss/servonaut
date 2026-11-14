@@ -142,3 +142,41 @@ async def test_selecting_an_invoice_names_it_as_typed(accounts, config) -> None:
         )
         assert seen and seen[0][0] == "Invoice selected: AB[bold]12"
         assert seen[0][1].get("markup") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("currency", ["EU[/x]", "EUR\\", "[bold]E", None, 7])
+async def test_a_currency_code_that_is_not_a_code_never_reaches_the_cards(currency, accounts, config) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    price = {"serviceId": 1, "elements": [], "price": {"value": 4.0, "currencyCode": currency}}
+    bill = {"billId": "B1", "date": "2026-01-01", "priceWithTax": {"value": 7.0, "currencyCode": currency}}
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [price], "forecast": [price]})
+    billing.get_invoices = AsyncMock(return_value=[bill])
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "2026-01" in _text(app, "#spend_history"), "history")
+        for _ in range(5):
+            await pilot.pause()
+        assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
+        for card in ("#current_usage", "#spend_history"):
+            text = _text(app, card)
+            assert "4.00" in text or "7.00" in text
+            assert "[/x]" not in text and "[bold]" not in text and "\\" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", [{"value": "abc", "currencyCode": "EUR"}, "12 EUR"])
+async def test_a_bill_with_an_unreadable_amount_does_not_stop_the_screen(amount, accounts, config) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    bills = _bills() + [{"billId": "B3", "date": "2026-03-01", "priceWithTax": amount}]
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=bills)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "2026-02" in _text(app, "#spend_history"), "history")
+        for _ in range(5):
+            await pilot.pause()
+        assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
+        assert "2026-03" not in _text(app, "#spend_history")

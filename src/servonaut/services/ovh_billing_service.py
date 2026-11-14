@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
@@ -15,6 +16,15 @@ logger = logging.getLogger(__name__)
 # Bill details are fetched one request per invoice. One shared limit keeps a
 # stalled API from filling the thread pool, however often the screen reopens.
 _BILL_FETCH_CONCURRENCY = 5
+
+# Currency codes are short letter codes ("EUR"). Anything else in that field
+# is not shown: it ends up in screen text and in tool output.
+_CURRENCY_CODE = re.compile(r"[A-Za-z]{1,8}")
+
+
+def currency_code(value: object) -> str:
+    """*value* when it is a plain currency code, else an empty string."""
+    return value if isinstance(value, str) and _CURRENCY_CODE.fullmatch(value) else ""
 
 
 def usage_total(payload: object) -> Optional[Tuple[float, str]]:
@@ -42,7 +52,7 @@ def usage_total(payload: object) -> Optional[Tuple[float, str]]:
             amount += float(price["value"])
         except (TypeError, ValueError):
             continue
-        currency = currency or str(price.get("currencyCode") or "")
+        currency = currency or currency_code(price.get("currencyCode"))
         found = True
     return (round(amount, 2), currency) if found else None
 
@@ -86,12 +96,15 @@ def spend_history_from_invoices(invoices: List[dict], months: int = 6) -> List[d
     for inv in invoices:
         date_str: Optional[str] = inv.get("date") or inv.get("billDate") or ""
         amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
-        if isinstance(amount_raw, dict):
-            value: float = float(amount_raw.get("value", 0) or 0)
-            currency: str = amount_raw.get("currencyCode", "")
-        else:
-            value = float(amount_raw or 0)
-            currency = ""
+        try:
+            if isinstance(amount_raw, dict):
+                value: float = float(amount_raw.get("value", 0) or 0)
+                currency: str = currency_code(amount_raw.get("currencyCode"))
+            else:
+                value = float(amount_raw or 0)
+                currency = ""
+        except (TypeError, ValueError):
+            continue  # a bill whose amount cannot be read adds nothing
 
         try:
             month_key = datetime.fromisoformat(date_str[:10]).strftime("%Y-%m")
