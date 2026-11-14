@@ -285,3 +285,29 @@ async def test_enter_on_an_invoice_row_names_the_invoice(accounts, config) -> No
         assert notice.message == "Invoice selected: AB[bold]12"
         assert notice.markup is False
         assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
+
+
+@pytest.mark.asyncio
+async def test_after_the_invoice_table_fails_a_demo_mode_toggle_does_not_leave_the_cards_loading(
+    accounts, config,
+) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    # A list entry that is not a bill makes the table step fail.
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=["not a bill"])
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "Could not load the invoices" in _text(app, "#invoices_page_info"), "page line")
+        assert app.screen._all_invoices == []
+        assert app.screen.query_one("#invoices_table").row_count == 0
+        app.demo_mode = True
+        app.screen.refresh_after_demo_toggle()
+        await _wait_for(
+            pilot,
+            lambda: "Loading" not in _text(app, "#spend_history")
+            and "Loading" not in _text(app, "#invoices_page_info")
+            and "Loading" not in _text(app, "#current_usage"),
+            "cards after the toggle",
+        )
+        assert app._exception is None and isinstance(app.screen, OVHBillingScreen)

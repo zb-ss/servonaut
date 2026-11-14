@@ -351,6 +351,10 @@ class OVHBillingScreen(Screen):
             self._render_invoice_page()
         except Exception as exc:  # noqa: BLE001 - odd bill data must not end the app
             self._log_load_failure("invoices", exc)
+            # Keep nothing of the list that failed: a later redraw (demo-mode
+            # toggle, account switch) must not run on it again.
+            self._all_invoices = []
+            self.query_one("#invoices_table", DataTable).clear()
             self._show_card_error(page_info, "the invoices")
             self._show_card_error(history, "the monthly history")
             self.query_one("#btn_prev_page", Button).disabled = True
