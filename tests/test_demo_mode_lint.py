@@ -720,6 +720,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/ovh_billing.py", "_show_card_error", "update",
                    "Writes a fixed message built from a literal label; the "
                    "provider's error text is only logged."),
+    AllowlistEntry("screens/ovh_billing.py", "_show_unreadable_bill", "update",
+                   "Writes a fixed message built from a literal label; the "
+                   "unreadable bill data is only logged."),
     AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
                    "Only writes the literal Loading placeholder while clearing "
                    "old billing values before guarded reloads."),
