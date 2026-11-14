@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
+
 from textual.css import stylesheet as css_stylesheet
 from textual.css.stylesheet import Stylesheet
 
@@ -37,6 +39,9 @@ def test_parse_after_a_new_source_only_parses_that_source() -> None:
     assert parse.call_count == 1
 
 
+# The suite widens every app's cache; this test needs the stock one so that
+# only ServonautApp's own call can produce the wide cache.
+@pytest.mark.stock_parse_cache
 def test_app_stylesheet_keeps_its_cache_size_through_a_variable_refresh() -> None:
     app = ServonautApp()
 

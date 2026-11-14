@@ -154,6 +154,27 @@ def _name_processes(escapes: list[dict], armed: list[dict]) -> None:
         escape["command"] = command
 
 
+@pytest.fixture(autouse=True)
+def _wide_parse_cache_for_host_apps(monkeypatch: pytest.MonkeyPatch):
+    """Let in-process host apps keep a parsed rule set for every CSS source.
+
+    Hosts that load the full CSS_FILES bundle build a plain Textual ``App``;
+    with Textual's stock 64-entry parse cache every new widget class re-parses
+    the whole bundle. The product widens its own cache in ``ServonautApp``.
+    """
+    from textual.app import App
+
+    from servonaut.styles import widen_parse_cache
+
+    original_init = App.__init__
+
+    def init_with_wide_cache(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        widen_parse_cache(self.stylesheet)
+
+    monkeypatch.setattr(App, "__init__", init_with_wide_cache)
+
+
 @pytest.fixture(scope="session")
 def e2e_ctx() -> E2EContext:
     return CTX

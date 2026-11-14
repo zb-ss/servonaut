@@ -173,4 +173,5 @@ markers = [
     "e2e_quarantine: known-flaky end-to-end journey, excluded from pull requests",
     "needs_browser: end-to-end journey that drives headless Chromium (desktop frontend)",
     "needs_sshd: end-to-end journey against the loopback SSH servers (needs the OpenSSH client)",
+    "stock_parse_cache: keep Textual's stock stylesheet parse cache (tests/conftest.py widens it otherwise)",
 ]

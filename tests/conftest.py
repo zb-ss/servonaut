@@ -56,6 +56,31 @@ def _scp_client_answers(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(scp_client, "_probes", {})
 
 
+@pytest.fixture(autouse=True)
+def _wide_parse_cache_for_host_apps(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Give every Textual app a parse cache that holds the whole CSS bundle.
+
+    Test host apps load the same CSS_FILES bundle as the product but build a
+    plain ``App``, so Textual's stock 64-entry parse cache re-parses every
+    source on each new widget class (minutes per file). The product widens its
+    own cache in ``ServonautApp.__init__``; tests that guard that call opt out
+    with ``@pytest.mark.stock_parse_cache`` so it is not hidden from them.
+    """
+    if request.node.get_closest_marker("stock_parse_cache"):
+        return
+    from textual.app import App
+
+    from servonaut.styles import widen_parse_cache
+
+    original_init = App.__init__
+
+    def init_with_wide_cache(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        widen_parse_cache(self.stylesheet)
+
+    monkeypatch.setattr(App, "__init__", init_with_wide_cache)
+
+
 SSH_PROGRAMS = ("ssh", "scp", "sftp")
 #: Launches of an ssh client the guard refused in the running test (the test fails at teardown).
 SSH_LAUNCH_VIOLATIONS: list[str] = []
