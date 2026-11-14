@@ -53,6 +53,11 @@ def _probe(executable: str) -> bool:
             # No console window flashes on Windows when the app has none.
             **background_process_kwargs(),
         )
+    except FileNotFoundError:
+        # No scp on this computer is a normal state (a minimal environment, or a
+        # Windows machine without OpenSSH), not a fault: paths are escaped instead.
+        logger.debug("No %s client found; remote paths will be escaped", executable)
+        return False
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("Could not ask %s for its options: %s", executable, exc)
         return False

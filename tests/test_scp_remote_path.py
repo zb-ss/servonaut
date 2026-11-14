@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import logging
 import subprocess
 from pathlib import Path
 
@@ -161,6 +162,28 @@ def test_a_client_that_cannot_be_asked_counts_as_not_having_the_flag(monkeypatch
 
     monkeypatch.setattr(subprocess, "run", broken)
     assert scp_client._probe("scp") is False
+
+
+def test_a_missing_scp_is_not_reported_as_a_warning(monkeypatch, caplog) -> None:
+    # An environment without scp (a minimal container, an empty PATH) is normal:
+    # a warning would reach stderr, where a frozen self-test must see nothing.
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "scp")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    with caplog.at_level(logging.DEBUG, logger=scp_client.logger.name):
+        assert scp_client._probe("scp") is False
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+def test_a_client_that_cannot_be_run_for_another_reason_is_still_warned_about(monkeypatch, caplog) -> None:
+    def refused(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", "scp")
+
+    monkeypatch.setattr(subprocess, "run", refused)
+    with caplog.at_level(logging.DEBUG, logger=scp_client.logger.name):
+        assert scp_client._probe("scp") is False
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
 # ---------------------------------------------------------------------------
