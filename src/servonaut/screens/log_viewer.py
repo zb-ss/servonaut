@@ -9,15 +9,17 @@ import subprocess
 import threading
 from typing import List, Optional
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.content import Content
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Footer, Static, RichLog
 
+from servonaut.utils.markup import literal
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
@@ -136,7 +138,10 @@ class LogViewerScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold $text-accent]Log Viewer:[/bold $text-accent] {name}  [dim]Probing available logs...[/dim]",
+                    Content.assemble(
+                        ("Log Viewer:", "bold $text-accent"), " ", literal(str(name)),
+                        "  ", ("Probing available logs...", "dim"),
+                    ),
                     id="log_header",
                 ),
                 RichLog(id="log_output", highlight=True, markup=True),
@@ -173,9 +178,18 @@ class LogViewerScreen(Screen):
                 self.app.connection_service,
                 rows=fleet_rows(self.app),
             )
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("Log probe refused: %s", exc)
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            output.write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
-            output.write(f"[red]Error probing logs: {e}[/red]")
+            output.write(Text(f"Error probing logs: {e}", style="red"))
             return
 
         self._available_logs = available
@@ -214,13 +228,12 @@ class LogViewerScreen(Screen):
         """Update header with current log path and status."""
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         log_label = self._current_log or "none"
-        status_parts = []
+        status_parts: list = []
         if self._is_paused:
-            # Brackets that are text, not markup, are escaped.
-            status_parts.append("[$text-warning]\\[PAUSED][/$text-warning]")
+            status_parts.append(("[PAUSED]", "$text-warning"))
         if self._is_static_view:
             classification = self.app.log_viewer_service.classify_log_file(log_label)
-            status_parts.append(f"[dim]\\[{classification}][/dim]")
+            status_parts.append((f"[{classification}]", "dim"))
         # T10: "from cache" indicator when memory.logs supplied the paths.
         source = getattr(self.app.log_viewer_service, "last_probe_source", None)
         if source == "cache":
@@ -228,12 +241,14 @@ class LogViewerScreen(Screen):
                 self.app.log_viewer_service, "last_probe_probed_at", None
             )
             age = _format_cache_age(probed_at)
-            status_parts.append(f"[dim $text-success]\\[cached{age}][/dim $text-success]")
-        status = "  " + " ".join(status_parts) if status_parts else ""
-        self.query_one("#log_header", Static).update(
-            f"[bold $text-accent]Log Viewer:[/bold $text-accent] {escape(str(name))}  "
-            f"[dim]Viewing:[/dim] {escape(log_label)}{status}"
-        )
+            status_parts.append((f"[cached{age}]", "dim $text-success"))
+        status: list = []
+        for part in status_parts:
+            status += [" ", part] if status else ["  ", part]
+        self.query_one("#log_header", Static).update(Content.assemble(
+            ("Log Viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
+            ("Viewing:", "dim"), " ", literal(log_label), *status,
+        ))
 
     # ------------------------------------------------------------------
     # Stream lifecycle
@@ -268,16 +283,24 @@ class LogViewerScreen(Screen):
             self.query_one("#log_output", RichLog).write(Text(message, style="red"))
             self.app.notify(message, severity="error", markup=False)
             return
-        ssh_cmd = self.app.ssh_service.build_ssh_command(
-            host=conn["host"],
-            username=conn["username"],
-            key_path=conn["key_path"],
-            proxy_args=conn["proxy_args"],
-            remote_command=read_cmd,
-            port=conn["port"],
-            extra_options=conn.get("extra_options") or [],
-            **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
-        )
+        try:
+            ssh_cmd = self.app.ssh_service.build_ssh_command(
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn["key_path"],
+                proxy_args=conn["proxy_args"],
+                remote_command=read_cmd,
+                port=conn["port"],
+                extra_options=conn.get("extra_options") or [],
+                **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
+            )
+        except SSHRefusal as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
 
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
 
@@ -311,7 +334,7 @@ class LogViewerScreen(Screen):
         except Exception as e:
             logger.error("Failed to start stream process: %s", e)
             output = self.query_one("#log_output", RichLog)
-            output.write(f"[red]Error starting stream: {e}[/red]")
+            output.write(Text(f"Error starting stream: {e}", style="red"))
 
     def _reader_thread_fn(self) -> None:
         """Read lines from the subprocess stdout in a dedicated OS thread.
@@ -666,7 +689,7 @@ class LogViewerScreen(Screen):
         output = self.query_one("#log_output", RichLog)
         output.clear()
         self._content_buffer.clear()
-        output.write(f"[dim]Connecting to {log_path}...[/dim]")
+        output.write(Text(f"Connecting to {log_path}...", style="dim"))
         self._current_log = log_path
         self._update_header()
         self.app.notify(f"Loading {log_path.split('/')[-1]}...")

@@ -14,7 +14,9 @@ from pathlib import Path, PureWindowsPath
 from typing import Final, Optional
 
 from servonaut.services.interfaces import TerminalServiceInterface
+from servonaut.utils.markup import inert_text
 from servonaut.utils.platform_utils import get_os
+from servonaut.utils.terminal_output import first_control_index, has_controls
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,52 @@ def _validate_wrapper_argument(argument: str) -> None:
     """Reject values that no line-oriented shell wrapper can represent."""
     if not isinstance(argument, str):
         raise ValueError("SSH command arguments must be strings.")
-    if "\x00" in argument or "\r" in argument or "\n" in argument:
+    if has_controls(argument):
         raise ValueError("SSH command contains an unsupported control character.")
+
+
+_EXCERPT_RADIUS = 30
+
+
+def _refused_field(command: Sequence[str], index: int) -> str:
+    argument = command[index]
+    previous = command[index - 1] if index > 0 else ""
+    if argument.lower().startswith(("proxycommand=", "-oproxycommand=")) or (
+        previous == "-o" and argument.lower().startswith("proxycommand")
+    ):
+        return "proxy command"
+    if previous == "-J" or argument.startswith("-J"):
+        return "jump host"
+    if "@" in argument:
+        return "user or host name"
+    if previous == "-i":
+        return "key file path"
+    return f"argument {index}"
+
+
+def _excerpt_around_control(argument: str) -> str:
+    """The part of *argument* around its first control character, written out.
+
+    Tabs and newlines are written out too, so the culprit can be seen.
+    """
+    at = max(first_control_index(argument), 0)
+    start = max(0, at - _EXCERPT_RADIUS)
+    end = at + _EXCERPT_RADIUS
+    shown = inert_text(argument[start:end]).replace("\t", "\\t").replace("\n", "\\n")
+    return ("..." if start else "") + shown + ("..." if end < len(argument) else "")
+
+
+def _describe_refused_argument(command: Sequence[str], index: int) -> str:
+    """Say which part of the SSH command holds a control character.
+
+    The value is shown with the characters written out, never as is: it may
+    come from a server list that someone else controls.
+    """
+    return (
+        f"Not connecting: the {_refused_field(command, index)} contains a control "
+        f"character ({_excerpt_around_control(command[index])}). "
+        "Check the server's details."
+    )
 
 
 class TerminalService(TerminalServiceInterface):
@@ -184,8 +230,14 @@ class TerminalService(TerminalServiceInterface):
             return None
         try:
             command = list(ssh_command)
-            for argument in command:
-                _validate_wrapper_argument(argument)
+            for index, argument in enumerate(command):
+                try:
+                    _validate_wrapper_argument(argument)
+                except ValueError:
+                    if isinstance(argument, str):
+                        self._last_error = _describe_refused_argument(command, index)
+                        return None
+                    raise
         except ValueError as exc:
             self._last_error = str(exc)
             return None
@@ -213,7 +265,7 @@ class TerminalService(TerminalServiceInterface):
         """Create the existing executable bash wrapper for POSIX terminals."""
         self._prepare_wrapper_directory()
         command_line = shlex.join(ssh_command)
-        display_line = shlex.quote(command_line)
+        display_line = shlex.quote(inert_text(command_line))
         content = f"""#!/bin/bash
 printf '%s\\n' 'Connecting:'
 printf '%s\\n' {display_line}

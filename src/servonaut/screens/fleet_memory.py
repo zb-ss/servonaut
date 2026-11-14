@@ -19,11 +19,12 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, TYPE_CHECKING, Union
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
@@ -39,6 +40,7 @@ from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.markup import cell
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -932,7 +934,7 @@ class FleetMemoryScreen(Screen):
             row["reason"],
         )
 
-    def _shared_with_cell(self, row: Dict[str, Any]) -> str:
+    def _shared_with_cell(self, row: Dict[str, Any]) -> Union[str, Text]:
         """The teams the user shares this server's memory with (stand-ins in demo mode)."""
         teams = list(row.get("shared_with") or [])
         if not teams:
@@ -941,7 +943,7 @@ class FleetMemoryScreen(Screen):
         if getattr(self.app, "demo_mode", False) and redaction is not None:
             teams = [redaction.redact_name(team) for team in teams]
         more = f" +{len(teams) - 1}" if len(teams) > 1 else ""
-        return f"[blue]{escape(teams[0])}{more}[/blue]"
+        return cell(f"{teams[0]}{more}", "blue")
 
     def _name_cell(self, row: Dict[str, Any]) -> str:
         name = escape(str(row["name"]))

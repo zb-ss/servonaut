@@ -137,7 +137,7 @@ async def test_unknown_key_name_stays_literal_in_the_demo_picker():
     app._instances_pristine = []
     async with app.run_test() as pilot:
         screen = await _loaded(app, pilot)
-        expected = Text.from_markup(screen._item_name_cell(service.items[0])).plain
+        expected = str(screen._item_name_cell(service.items[0]))
         modal = await _open(app, screen)
         label = str(modal.query_one("#bulk_action_list", SelectionList).get_option_at_index(0).prompt)
         assert expected == "(name unknown)" and expected in label

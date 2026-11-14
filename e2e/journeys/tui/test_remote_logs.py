@@ -72,7 +72,7 @@ async def test_follow_a_log_and_switch_with_the_picker(tui, seed, journey, sshd)
         )
 
     commands = sshd.target.commands(user=WEB_1.username)
-    assert commands[0].startswith("test -r /var/log/syslog && echo /var/log/syslog;")
+    assert commands[0].startswith("test -r /var/log/syslog && printf '%s\\n' /var/log/syslog;")
     assert "find /var/log -maxdepth 2 -type f -readable 2>/dev/null | sort -u" in commands
     assert "tail -n 100 -f /var/log/app/worker.log" in commands
 

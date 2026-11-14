@@ -65,8 +65,8 @@ async def test_scan_a_private_instance_through_the_bastion(tui, seed, journey, s
     )
     assert sshd.target.commands(user=fleet.BASTION_USER) == [
         "true",  # the one connection check before the scan's own commands
-        'ls -la "$HOME/" 2>/dev/null',
-        'ls -la "/var/www/" 2>/dev/null',
+        'ls -la "$HOME"/ 2>/dev/null',
+        'ls -la /var/www/ 2>/dev/null',
         "cat /etc/os-release",
     ]
 

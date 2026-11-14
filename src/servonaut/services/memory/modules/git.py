@@ -23,10 +23,10 @@ stale, but frequently enough to justify the TTL.
 from __future__ import annotations
 
 import re
-import shlex
 from typing import Any, Dict, List, Optional
 
 from .base import ModuleProber
+from servonaut.utils.remote_shell import shell_quote
 
 # ---------------------------------------------------------------------------
 # Module configuration
@@ -215,12 +215,12 @@ def _parse_find_output(find_output: str) -> List[str]:
 
 def _branch_cmd_for(repo_root: str) -> str:
     """Return the exact ``git -C`` branch-lookup command for *repo_root*."""
-    return f"git -C {shlex.quote(repo_root)} rev-parse --abbrev-ref HEAD 2>/dev/null"
+    return f"git -C {shell_quote(repo_root)} rev-parse --abbrev-ref HEAD 2>/dev/null"
 
 
 def _remote_cmd_for(repo_root: str) -> str:
     """Return the exact ``git -C`` origin-URL command for *repo_root*."""
-    return f"git -C {shlex.quote(repo_root)} remote get-url origin 2>/dev/null"
+    return f"git -C {shell_quote(repo_root)} remote get-url origin 2>/dev/null"
 
 
 def _first_stripped_line(section: str) -> Optional[str]:

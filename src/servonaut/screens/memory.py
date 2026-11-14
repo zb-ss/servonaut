@@ -17,9 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
 from rich.text import Text
+from textual.content import Content
 from typing import Any, Dict, List, Optional, Tuple
 
-from servonaut.utils.markup import literal as literal_text
+from servonaut.utils.markup import cell, literal as literal_text
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.app import ComposeResult, SuspendNotSupported
@@ -245,11 +246,19 @@ class PinKeyModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                f"[bold $text-accent]Pin value for [$text-warning]{self._module}[/$text-warning].[$text-warning]{self._key}[/$text-warning][/bold $text-accent]",
+                Content.assemble(
+                    ("Pin value for ", "bold $text-accent"),
+                    literal_text(self._module, "bold $text-warning"),
+                    (".", "bold $text-accent"),
+                    literal_text(self._key, "bold $text-warning"),
+                ),
                 id="pin_modal_title",
             ),
             Static(
-                f"[dim]Current observed value:[/dim] {self._current_value or '[dim](none)[/dim]'}",
+                Content.assemble(
+                    ("Current observed value:", "dim"), " ",
+                    literal_text(self._current_value) if self._current_value else ("(none)", "dim"),
+                ),
                 id="pin_modal_field",
             ),
             Input(
@@ -783,12 +792,11 @@ class MemoryScreen(Screen):
                     obs_str = self.app.redaction_service.scrub_stream(obs_str)
                     decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
-                literal = module_name in shared_names
                 table.add_row(
-                    module_name,
-                    Text(str(key)) if literal else key,
-                    Text(obs_str) if literal else obs_str,
-                    Text(decl_str) if literal else decl_str,
+                    cell(module_name),
+                    cell(key),
+                    cell(obs_str),
+                    cell(decl_str),
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",

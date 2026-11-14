@@ -26,7 +26,6 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING, Union
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.content import Content
 from textual.binding import Binding
@@ -34,7 +33,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
@@ -251,18 +250,16 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
                     "create one.[/dim]"
                 )
             else:
-                self._set_status(
-                    f"[dim]{n} server{'s' if n != 1 else ''}.[/dim]"
-                    + self._project_errors(svc)
-                )
+                self._set_status(Content.assemble(
+                    literal(f"{n} server{'s' if n != 1 else ''}.", "dim"),
+                    self._project_errors(svc),
+                ))
         except Exception as exc:
             logger.error("Failed to load Hetzner servers: %s", exc)
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(
-                f"[$text-error]Failed to load servers: {err_msg}[/$text-error]"
-            )
+            self._set_status(literal(f"Failed to load servers: {err_msg}", "$text-error"))
         finally:
             self._loading = False
 
@@ -274,9 +271,9 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             for idx, inst in enumerate(self._instances, start=1):
                 table.add_row(
                     str(idx),
-                    display_name(inst),
-                    str(inst.get("id", "")),
-                    str(inst.get("type", "")),
+                    cell(display_name(inst)),
+                    cell(inst.get("id", "")),
+                    cell(inst.get("type", "")),
                     self._colorize_state(str(inst.get("state", ""))),
                     str(inst.get("public_ip", "") or "—"),
                     str(inst.get("region", "")),
@@ -337,7 +334,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         """
         return display_name(inst) or str(inst.get("id") or "")
 
-    def _project_errors(self, svc) -> str:
+    def _project_errors(self, svc) -> Content:
         """Status suffix naming projects whose servers could not be refreshed.
 
         Only several projects are reported here: one failing project among
@@ -345,10 +342,10 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         """
         error = getattr(svc, "last_fetch_error", None)
         if not getattr(svc, "multi", False) or not isinstance(error, str) or not error:
-            return ""
+            return Content("")
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
+        return literal(f"\n⚠ {error}", "$text-warning")
 
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's state.
@@ -492,7 +489,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             message = text.failed_message(label, err_msg)
-            self._set_status(f"[$text-error]{escape(message)}[/$text-error]")
+            self._set_status(literal(message, "$text-error"))
             self.notify(message, severity="error", markup=False)
             return
         self.notify(text.done_message(label), severity="information", markup=False)
@@ -526,7 +523,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         if not confirmed:
             return
 
-        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
+        self._set_status(literal(f"Deleting {label}…", "dim"))
         try:
             await svc.delete_server(identifier)
         except Exception as exc:
@@ -537,7 +534,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[$text-error]Delete failed: {err_msg}[/$text-error]"
+                literal(f"Delete failed: {err_msg}", "$text-error")
             )
             self.notify(
                 f"Delete failed: {err_msg}",

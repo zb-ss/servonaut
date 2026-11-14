@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from servonaut.config.schema import AppConfig, MCPConfig
+from servonaut.config.schema import AIProviderConfig, AppConfig, MCPConfig
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.relay_executors import RelayExecutors, _TRANSFERS_DIR
 from tests._team_policy_fixtures import trust_signed_team_rules
@@ -1117,6 +1117,39 @@ class TestTeamRulesOnRelay:
 
         assert result.status == "error"
         assert "is not an allowed command there" in result.result
+
+    def test_the_hosted_ai_path_checks_ssh_exec_readonly_against_the_list(self):
+        from servonaut.services.ai_tool_bridge import ToolCall
+
+        executor = self._executor()
+        executor._config_manager.get.return_value.ai_provider = AIProviderConfig(
+            readonly_command_allowlist=["ls", "uptime"],
+        )
+
+        def call(command):
+            return ToolCall(
+                tool_call_id="tc-1", tool="ssh_exec_readonly",
+                args={"instance_id": "srv-1", "command": command},
+                guard_level="readonly", conversation_id="conv-1",
+            )
+
+        refused = run(executor.execute_for_ai(call("ls; id")))
+        assert refused.status == "error"
+        assert refused.result.startswith(
+            "Not run: this command is not on the read-only command list ("
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+        with self._ssh_ok():
+            ran = run(executor.execute_for_ai(call("uptime")))
+        assert ran.status == "ok"
+        # Every refusal leaves an audit row with its own reason.
+        executor._audit = MagicMock()
+        run(executor.execute_for_ai(call("ls; id")))
+        run(executor.execute_for_ai(call("")))
+        reasons = [c.args[4] for c in executor._audit.log.call_args_list]
+        assert reasons == ["readonly_command_refused", "readonly_command_missing"]
+        assert executor._audit.log.call_args_list[0].kwargs["source"] == "ai_chat"
 
     def test_a_local_blocklist_addition_made_after_start_applies(self):
         # The executor compiled its own blocklist when it was built, so only

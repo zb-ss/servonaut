@@ -66,7 +66,7 @@ class TestOVHManagerFeedback:
         ovh.check_credentials = _async(_AUTH_ERROR)
         status = self._run_load(_mock_app(ovh_service=ovh))
 
-        rendered = status.update.call_args[0][0]
+        rendered = str(status.update.call_args[0][0])
         assert "authentication failed" in rendered.lower()
         assert "No OVH instances" not in rendered
 
@@ -76,7 +76,7 @@ class TestOVHManagerFeedback:
         ovh.check_credentials = _async(None)  # credentials are fine
         status = self._run_load(_mock_app(ovh_service=ovh))
 
-        rendered = status.update.call_args[0][0]
+        rendered = str(status.update.call_args[0][0])
         assert "No OVH instances" in rendered
 
     def test_credentials_not_checked_when_instances_present(self):
@@ -86,7 +86,7 @@ class TestOVHManagerFeedback:
             "check_credentials must not run when instances are present"))
         status = self._run_load(_mock_app(ovh_service=ovh))
 
-        rendered = status.update.call_args[0][0]
+        rendered = str(status.update.call_args[0][0])
         assert "1 instance" in rendered
 
 

@@ -95,7 +95,7 @@ async def test_fleet_memory_names_the_team_an_own_server_is_shared_with(tmp_path
     app = _app(tmp_path, _Team({"team-a": [_grant("i-own-1", ME)]}))
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count and "Team A" in _shared_with(app))
-        assert _shared_with(app) == "[blue]Team A[/blue]"
+        assert _shared_with(app) == "Team A"
         assert str(_table(app).columns[_table(app).ordered_columns[SHARED_WITH].key].label) == "Shared with"
 
 
@@ -114,7 +114,7 @@ async def test_more_than_one_team_is_counted(tmp_path):
     app = _app(tmp_path, team)
     async with app.run_test(headless=True) as pilot:
         await _wait_for(pilot, lambda: _table(app).row_count and "+1" in _shared_with(app))
-        assert _shared_with(app) == "[blue]Team A +1[/blue]"
+        assert _shared_with(app) == "Team A +1"
 
 
 async def test_a_share_someone_else_made_is_not_shared_with(tmp_path):

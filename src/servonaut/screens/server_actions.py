@@ -34,6 +34,7 @@ from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -1710,26 +1711,32 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if not host:
             self.app.notify("No IP address available for this instance.", severity="error")
             return None
-        proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
-        username = (
-            resolved.login_user
-            or (profile.username if profile else None)
-            or instance.get("username")
-            or self.app.config_manager.get().default_username
-            or "ubuntu"
-        )
-        return self.app.ssh_service.build_ssh_command(
-            host=host,
-            username=username,
-            remote_command=remote_command,
-            proxy_args=proxy_args,
-            port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
-            extra_options=[*self.app.connection_service.get_extra_options(instance, profile), *options],
-            identity_agent=resolved.identity_agent,
-            identity_file=getattr(resolved, "identity_file", None),
-            certificate_file=resolved.certificate_path,
-            known_hosts_file=resolved.known_hosts_path,
-        )
+        try:
+            proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
+            username = (
+                resolved.login_user
+                or (profile.username if profile else None)
+                or instance.get("username")
+                or self.app.config_manager.get().default_username
+                or "ubuntu"
+            )
+            return self.app.ssh_service.build_ssh_command(
+                host=host,
+                username=username,
+                remote_command=remote_command,
+                proxy_args=proxy_args,
+                port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
+                extra_options=[*self.app.connection_service.get_extra_options(instance, profile), *options],
+                identity_agent=resolved.identity_agent,
+                identity_file=getattr(resolved, "identity_file", None),
+                certificate_file=resolved.certificate_path,
+                known_hosts_file=resolved.known_hosts_path,
+            )
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return None
 
     async def _resolve_and_launch_ssh(self, job: BusyJob) -> None:
         """The connect flow of :meth:`_ssh_connect_flow`; *job* is its busy line."""
@@ -1811,7 +1818,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     markup=True,
                 )
             else:
-                self.app.notify("Could not launch the terminal.", severity="error", markup=False)
+                terminal_error = getattr(self.app.terminal_service, "last_error", None)
+                self.app.notify(
+                    terminal_error
+                    if isinstance(terminal_error, str) and terminal_error
+                    else "Could not launch the terminal.",
+                    severity="error",
+                    markup=False,
+                )
             return
 
         if source in ("personal", "team"):
@@ -1892,16 +1906,20 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             )
             port = instance.get("port")
 
-            ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                key_path=key_path,
-                port=port,
-                # Pin a cloud instance by its alias, as every other path does.
-                extra_options=host_key_alias_options(
-                    instance, self.app.connection_service.host_key_policy(),
-                ),
-            )
+            try:
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    port=port,
+                    # Pin a cloud instance by its alias, as every other path does.
+                    extra_options=host_key_alias_options(
+                        instance, self.app.connection_service.host_key_policy(),
+                    ),
+                )
+            except SSHRefusal as exc:
+                self.app.notify(str(exc), severity="error", markup=False)
+                return
 
             tier_label = "personal" if source == "personal" else "team"
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
@@ -2056,6 +2074,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         markup=False,
                     )
 
+            except SSHRefusal as exc:
+                # A connection Servonaut will not start: the message says what to fix.
+                logger.warning("SSH launch refused: %s", exc)
+                self.app.notify(str(exc), severity="error", markup=False)
             except Exception as exc:
                 logger.error("Error launching SSH terminal: %s", exc, exc_info=True)
                 self.app.notify(

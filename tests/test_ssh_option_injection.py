@@ -75,8 +75,8 @@ def test_scp_paths_follow_an_end_of_options_marker(direction):
 def test_bastion_destination_is_quoted_for_the_proxy_shell():
     profile = ConnectionProfile(
         name="bastion",
-        bastion_host="bastion-1.example.com;touch /tmp/x",
-        bastion_user="ops",
+        bastion_host="bastion-1.example.com",
+        bastion_user="ops;touch /tmp/x",
         bastion_key="/keys/bastion.pem",
     )
     manager = MagicMock()
@@ -87,3 +87,17 @@ def test_bastion_destination_is_quoted_for_the_proxy_shell():
     proxy_command = args[1].removeprefix("ProxyCommand=")
     words = shlex.split(proxy_command)
     assert words[-2:] == ["--", f"{profile.bastion_user}@{profile.bastion_host}"]
+
+
+def test_a_bastion_host_with_shell_syntax_is_refused_before_a_command_is_built():
+    profile = ConnectionProfile(
+        name="bastion", bastion_host="bastion-1.example.com;touch /tmp/x",
+        bastion_user="ops", bastion_key="/keys/bastion.pem",
+    )
+    manager = MagicMock()
+    manager.get.return_value = AppConfig()
+
+    args = ConnectionService(manager).get_proxy_args(profile)
+
+    assert args[0] == "-o" and args[1] == "ServonautRefusedOption=yes"
+    assert not any("touch" in str(word) for word in args)

@@ -22,6 +22,15 @@ from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import ConnectionProfile, SSHConfig
 from servonaut.utils.match_utils import matches_conditions
 from servonaut.utils.platform_utils import get_os
+from servonaut.utils.ssh_names import SSHNameError, check_ssh_host, check_ssh_user, shown
+from servonaut.utils.ssh_option_policy import (
+    RefusedOption,
+    bastion_name_message,
+    judge_entries,
+    judge_proxy_command,
+    option_entries,
+    proxy_command_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -304,8 +313,9 @@ class ConnectionService(ConnectionServiceInterface):
         if profile.bastion_user:
             parts.append(f"{profile.bastion_user}@")
         parts.append(profile.bastion_host)
-        if profile.ssh_port != 22:
-            parts.append(f":{profile.ssh_port}")
+        port = _int_setting(profile.ssh_port, 22)
+        if port != 22:
+            parts.append(f":{port}")
 
         proxy_jump = ''.join(parts)
         logger.debug("Built ProxyJump string: %s", proxy_jump)
@@ -338,13 +348,32 @@ class ConnectionService(ConnectionServiceInterface):
         if not profile:
             return []
 
-        # Use explicit proxy_command if set
-        if profile.proxy_command:
-            logger.debug("Using explicit ProxyCommand: %s", profile.proxy_command)
-            return ['-o', f'ProxyCommand={profile.proxy_command}']
+        # Use explicit proxy_command if set. The entry judged is the entry run.
+        entry = proxy_command_entry(profile.proxy_command)
+        if entry is not None:
+            refused = judge_proxy_command(
+                profile.proxy_command,
+                where=f"the connection profile '{shown(profile.name)}'",
+                team_options=self._ssh_config().team_options,
+            )
+            if refused is not None:
+                return ['-o', refused]
+            logger.debug("Using explicit ProxyCommand: %s", entry)
+            return ['-o', entry]
 
         if not profile.bastion_host:
             return []
+
+        # The names reach a shell through the hop's ProxyCommand and can come
+        # from a team, so a name with shell syntax is refused here.
+        for what, value, check in (
+            ('host', profile.bastion_host, check_ssh_host),
+            ('user', profile.bastion_user, check_ssh_user),
+        ):
+            try:
+                check(value)
+            except SSHNameError:
+                return ['-o', RefusedOption(bastion_name_message(profile.name, what, value))]
 
         ssh_cfg = self._ssh_config()
         policy = HostKeyPolicy.from_ssh_config(ssh_cfg)
@@ -465,11 +494,30 @@ class ConnectionService(ConnectionServiceInterface):
         """
         # The host-key alias comes first so no per-host entry can replace it.
         extras: List[str] = host_key_alias_options(instance, self.host_key_policy())
+        team_options = self._ssh_config().team_options
         if profile and profile.extra_ssh_options:
-            extras.extend(profile.extra_ssh_options)
-        instance_extras = instance.get('extra_ssh_options') or []
+            extras.extend(judge_entries(
+                option_entries(profile.extra_ssh_options),
+                where=f"the connection profile '{shown(profile.name)}'",
+                team_options=team_options,
+            ))
+        instance_extras = option_entries(instance.get('extra_ssh_options'))
         if instance_extras:
-            extras.extend(instance_extras)
+            name = shown(str(instance.get('name') or instance.get('id') or ''))
+            if instance.get('is_shared') is True:
+                # A team's record of a server is always the team's.
+                team = str(instance.get('team_name') or '')
+                extras.extend(judge_entries(
+                    instance_extras,
+                    where=f"team {shown(team)}'s record of the server '{name}'" if team
+                    else f"a team's record of the server '{name}'",
+                    team_options=team_options, shared_team=team,
+                ))
+            else:
+                extras.extend(judge_entries(
+                    instance_extras, where=f"the custom server '{name}'",
+                    team_options=team_options,
+                ))
         return extras
 
     def get_target_host(

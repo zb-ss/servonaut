@@ -9,10 +9,15 @@ from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
 from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
+from servonaut.utils import scp_client
+from servonaut.utils.ssh_names import check_ssh_target
+from servonaut.utils.ssh_option_policy import raise_if_refused
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
 
 logger = logging.getLogger(__name__)
+
+_SCP = "scp"
 
 
 class SCPService(SCPServiceInterface):
@@ -39,6 +44,8 @@ class SCPService(SCPServiceInterface):
     ) -> None:
         self._ssh_config = ssh_config if ssh_config is not None else SSHConfig()
         self._transfer_timeout_seconds = transfer_timeout_seconds
+        # Ask the client about -s now, off the thread that draws the screen.
+        scp_client.warm_up(_SCP)
 
     def build_upload_command(
         self,
@@ -80,15 +87,19 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
+        raise_if_refused(extra_options, proxy_args)
+        check_ssh_target(host, username)
+        sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(
             key_path, proxy_jump, proxy_args, port, extra_options,
             identity_agent, identity_file, certificate_file, known_hosts_file,
+            sftp=sftp,
         )
         # "--" keeps a path that starts with "-" from being read as an scp
         # option (such as "-oProxyCommand=...", which runs a local program).
         cmd.append('--')
         cmd.append(os.path.expanduser(local_path))
-        cmd.append(f'{username}@{host}:{remote_path}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=False)}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
         return cmd
 
@@ -132,12 +143,16 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
+        raise_if_refused(extra_options, proxy_args)
+        check_ssh_target(host, username)
+        sftp = scp_client.supports_sftp_flag(_SCP)
         cmd = self._build_base_args(
             key_path, proxy_jump, proxy_args, port, extra_options,
             identity_agent, identity_file, certificate_file, known_hosts_file,
+            sftp=sftp,
         )
         cmd.append('--')  # see build_upload_command
-        cmd.append(f'{username}@{host}:{remote_path}')
+        cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=True)}')
         cmd.append(os.path.expanduser(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))
         return cmd
@@ -184,6 +199,15 @@ class SCPService(SCPServiceInterface):
             logger.error("SCP transfer error: %s", e)
             return 1, '', str(e)
 
+    @staticmethod
+    def _remote_path(remote_path: str, *, sftp: bool, download: bool) -> str:
+        """The remote path as the local client needs it (see ``utils.scp_client``)."""
+        if not sftp:
+            return scp_client.legacy_remote_path(remote_path)
+        # Over SFTP the client reads a download source as a pattern: escape what
+        # a pattern reads specially. An upload target is taken as written.
+        return scp_client.sftp_source_pattern(remote_path) if download else remote_path
+
     def _build_base_args(
         self,
         key_path: Optional[str],
@@ -195,6 +219,7 @@ class SCPService(SCPServiceInterface):
         identity_file: Optional[str] = None,
         certificate_file: Optional[str] = None,
         known_hosts_file: Optional[str] = None,
+        sftp: bool = False,
     ) -> List[str]:
         """Build base SCP command arguments.
 
@@ -257,5 +282,9 @@ class SCPService(SCPServiceInterface):
                 cmd.extend(['-o', f'IdentityFile={os.path.expanduser(identity_file)}'])
             if certificate_file:
                 cmd.extend(['-o', f'CertificateFile={certificate_file}'])
+
+        # With -s the path travels as data and no remote shell reads it.
+        if sftp:
+            cmd.append('-s')
 
         return cmd

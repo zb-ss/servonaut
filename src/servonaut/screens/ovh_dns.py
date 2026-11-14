@@ -15,9 +15,10 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
-from rich.markup import escape
+from rich.text import Text
+from textual.content import Content
 
-from servonaut.utils.markup import with_bold_values
+from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens._provider_accounts import (
@@ -227,8 +228,10 @@ class OVHDNSScreen(Screen):
         self._edit_rdns_hostname = current_hostname
         self._edit_rdns_display_hostname = self.redact_rdns_host(current_hostname)
         self.query_one("#rdns_form_ip_label", Static).update(
-            f"[dim]IP:[/dim] {escape(self.redact_rdns_host(ip))}  "
-            f"[dim]Block:[/dim] {escape(self.redact_rdns_host(ip_block))}"
+            Content.assemble(
+                ("IP: ", "dim"), literal(self.redact_rdns_host(ip)),
+                "  ", ("Block: ", "dim"), literal(self.redact_rdns_host(ip_block)),
+            )
         )
         self.query_one("#input_rdns_hostname", Input).value = self._edit_rdns_display_hostname
         self.query_one("#rdns_form").display = True
@@ -394,7 +397,7 @@ class OVHDNSScreen(Screen):
         for domain in self._domains:
             # Zone names are hostnames by definition -- the stream scrubber
             # has no bare-hostname rule, so they go through redact_host.
-            tbl.add_row(self.redact_rdns_host(domain))
+            tbl.add_row(cell(self.redact_rdns_host(domain)))
 
     def _set_domains_status(self, error: Optional[str]) -> None:
         """Show or clear an OVH credential error under the Domains header.
@@ -412,7 +415,7 @@ class OVHDNSScreen(Screen):
             return
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        header.update(f"[bold]Domains[/bold]\n[$text-error]⚠ {escape(error)}[/$text-error]")
+        header.update(Content.assemble(("Domains\n", "bold"), literal(f"⚠ {error}", "$text-error")))
 
     async def _load_records(self, zone_name: str) -> None:
         account = self._account
@@ -436,16 +439,16 @@ class OVHDNSScreen(Screen):
 
     def _render_records(self, zone_name: str) -> None:
         self.query_one("#selected_zone", Static).update(
-            f"Records for: [bold]{escape(self.redact_rdns_host(zone_name))}[/bold]"
+            with_bold_values("Records for: {}", self.redact_rdns_host(zone_name))
         )
         tbl = self.query_one("#records_table", DataTable)
         tbl.clear()
         for rec in self._records:
             tbl.add_row(
-                str(rec.get("fieldType", "")),
-                self._display_subdomain(rec.get("subDomain") or "@"),
-                self._display_record_target(rec),
-                str(rec.get("ttl", "")),
+                cell(rec.get("fieldType", "")),
+                cell(self._display_subdomain(rec.get("subDomain") or "@")),
+                cell(self._display_record_target(rec)),
+                cell(rec.get("ttl", "")),
             )
 
     async def _load_rdns(self) -> None:
@@ -495,9 +498,9 @@ class OVHDNSScreen(Screen):
         for record in self._rdns_entries:
             hostname = record.get("hostname", "")
             tbl.add_row(
-                self.redact_rdns_host(record.get("ip", "")),
-                self.redact_rdns_host(hostname) if hostname else "[dim]not set[/dim]",
-                self.redact_rdns_host(record.get("ip_block", "")),
+                cell(self.redact_rdns_host(record.get("ip", ""))),
+                cell(self.redact_rdns_host(hostname)) if hostname else Text.from_markup("[dim]not set[/dim]"),
+                cell(self.redact_rdns_host(record.get("ip_block", ""))),
             )
         if not self._rdns_entries:
             tbl.add_row("[dim]No reverse DNS entries found[/dim]", "", "")

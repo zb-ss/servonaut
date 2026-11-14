@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 
+from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -24,6 +25,10 @@ from servonaut.styles.themes import (
 )
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
+from servonaut.utils.click_policy import click_action_allowed
+from servonaut.utils.markup import is_web_url
+from servonaut.utils.markup_backstop import install as install_markup_backstop
+from servonaut.utils.terminal_output import install as install_terminal_output_filter
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +272,8 @@ class ServonautApp(App):
                 ``"desktop"`` in the desktop window; sign-in names it.
             **kwargs: Passed through to Textual App.__init__.
         """
+        install_terminal_output_filter()
+        install_markup_backstop()
         super().__init__(**kwargs)
         for theme in SERVONAUT_THEMES:
             self.register_theme(theme)
@@ -642,6 +649,8 @@ class ServonautApp(App):
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
+        if self.config_manager.team_options_recorded:
+            self._notify_saved_team_options(self.config_manager.team_options_recorded)
         self._apply_configured_theme(config.theme)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         # Every provider account and its services. The ``*_service``
@@ -968,6 +977,27 @@ class ServonautApp(App):
             except Exception:
                 logger.debug("Failed to surface session-expired toast", exc_info=True)
 
+    def _notify_saved_team_options(self, recorded: int) -> None:
+        lead = (
+            f"{recorded} SSH option that runs a program was saved before this version and needs"
+            if recorded == 1 else
+            f"{recorded} SSH options that run programs were saved before this version and need"
+        )
+        self.notify(
+            lead + " your approval: Settings > Connections.",
+            severity="warning", timeout=15, markup=False,
+        )
+
+    def _note_saved_team_options(self) -> None:
+        """Record options saved before this version, now that an account exists."""
+        try:
+            recorded = self.config_manager.record_saved_team_options()
+        except Exception:  # noqa: BLE001 - signing in must not fail over this
+            logger.warning("Could not record saved SSH options after sign-in", exc_info=True)
+            return
+        if recorded:
+            self._notify_saved_team_options(recorded)
+
     def on_user_login_success(self) -> None:
         """Called by LoginScreen after a successful device-flow completion.
 
@@ -976,6 +1006,7 @@ class ServonautApp(App):
         independent: a missing relay configuration must not prevent a
         previously enrolled device from silently unlocking.
         """
+        self._note_saved_team_options()
         self._init_relay_manager()
         if self.relay_manager is not None:
             self.run_worker(
@@ -1460,6 +1491,10 @@ class ServonautApp(App):
                     confirm_timeout=lambda: (
                         self.config_manager.get()
                         .ai_provider.tool_confirm_timeout_seconds
+                    ),
+                    readonly_commands=lambda: (
+                        self.config_manager.get()
+                        .ai_provider.readonly_command_allowlist
                     ),
                 )
                 # Demo mode: the model reasons over redacted rows and asks for
@@ -2988,6 +3023,30 @@ class ServonautApp(App):
         if _is_generic_framework_action(action, parameters):
             return False
         return super().check_action(action, parameters)
+
+    async def _broker_event(self, event_name: str, event: Any, default_namespace: Any) -> bool:
+        """Run a click action from drawn text only when its widget draws that action.
+
+        Text from outside the app can reach a widget that reads markup, and the
+        action in its style would run on a click. See ``utils.click_policy``.
+        """
+        style = getattr(event, "style", None)
+        if style is None:
+            return False
+        try:
+            _modifiers, action = extract_handler_actions(event_name, style.meta)
+        except NoHandler:
+            return False
+        if not click_action_allowed(action, default_namespace):
+            return False
+        return await super()._broker_event(event_name, event, default_namespace)
+
+    def open_url(self, url: str, *, new_tab: bool = True) -> None:
+        """Open a web address; a link may name any scheme, only http/https are opened."""
+        if not is_web_url(url):
+            self.notify("Only web links (http/https) can be opened.", severity="warning", markup=False)
+            return
+        super().open_url(url, new_tab=new_tab)
 
     async def run_action(
         self,
