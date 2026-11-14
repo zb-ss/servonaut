@@ -594,8 +594,8 @@ Allowed: proxycommand=ssh -W %h:%p jump.example.net. Connections that use it wil
 
 Read the whole option before you allow it. An approval covers that exact
 text: when the team changes the option, you are asked again. The same text on
-another profile or from another team is already allowed. When nothing needs a
-decision the list reads `No team options need your approval.` The same list is
+another profile or from another team is already allowed. When no team option is
+recorded the list reads `No team options need your approval.` The same list is
 in Settings → Connections (see
 [Team options that run programs](configuration.md#team-options-that-run-programs)).
 

@@ -254,12 +254,12 @@ keep-alives, ciphers, ports and host-key algorithms, are used as they are. An
 option that makes SSH run a program, load a library, read more settings, hand
 your SSH keys or environment to the server, or write to a file on your
 computer waits for your approval. So does any option Servonaut does not
-recognise. These are `ProxyCommand`, `ProxyJump`, `ProxyUseFdpass`,
+recognise. The options that wait are `ProxyCommand`, `ProxyJump`, `ProxyUseFdpass`,
 `LocalCommand`, `PermitLocalCommand`, `KnownHostsCommand`, `RemoteCommand`,
 `PKCS11Provider`, `SmartcardDevice`, `SecurityKeyProvider`, `XAuthLocation`,
 `ForwardX11`, `ForwardX11Trusted`, `ForwardAgent`, `GSSAPIDelegateCredentials`,
 `SendEnv`, `RemoteForward`, `StreamLocalBindUnlink`, `UserKnownHostsFile`,
-`IgnoreUnknown`, `Include`, `Match` and `Host`. Switching one of the on/off
+`UserKnownHostsFile2`, `IgnoreUnknown`, `Include`, `Match` and `Host`. Switching one of the on/off
 ones off (`ForwardAgent=no`) needs no approval.
 
 Until you allow it, a connection that needs the option is not started. The
@@ -273,7 +273,7 @@ sentence. When a Pull Latest brings such options, its preview says how many and
 lists them, and after you apply it a notice says how many need approval.
 
 **Settings → Connections** has a block **Team options that run programs**,
-shown only while there is something to decide. Its table has the columns
+shown only while a team option is on the list, allowed ones included. Its table has the columns
 **Option**, **From** and **State**. Select a row, read the whole option on the
 line under the table, and press **Allow** or **Refuse**. On the command line
 use [`servonaut team options`](cli-reference.md#servonaut-team-options).
@@ -531,7 +531,7 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 | `temperature` | float | `0.3` | Sampling temperature |
 | `stream_silence_timeout_seconds` | float | `35.0` | Servonaut AI only: how long a streamed reply may go without any data (the service sends a keep-alive about every 15 s) before the connection counts as lost. Accepted range 20–600; values outside it are clamped. Time spent answering a tool prompt or running a tool does not count |
 | `tool_confirm_timeout_seconds` | float | `50.0` | Servonaut AI only: how long a tool confirmation prompt stays open. When it passes, the prompt closes and the tool is not run. The service waits about 60 s for a tool result by default, so keep this below that. When the service pauses the reply while your tools run, its own time limit applies instead, which leaves longer to decide |
-| `readonly_command_allowlist` | array | `ls`, `cat`, `grep`, `ps`, `df`, `du`, `top`, `free`, `uptime`, `whoami`, `hostname`, `uname`, `date`, `w`, `netstat`, `ss`, `ip`, `ifconfig`, `head`, `tail`, `wc`, `sort`, `find`, `file`, `stat` | Servonaut AI only: the commands the AI may run through `ssh_exec_readonly` without asking, alone or piped into each other. Anything else (`sudo`, `&&`, `;`, redirects, `$(...)`, or a command not on the list such as `systemctl status`, `journalctl`, `docker ps`, `dig`, `nslookup` or `ping`) asks first, with "This command is not on the read-only command list, so Servonaut asks before running it." A name you add runs with any arguments, so do not add shells or tools that change the system. A value that is not a list of strings counts as empty, so every command asks. There is no Settings field for it yet |
+| `readonly_command_allowlist` | array | `ls`, `cat`, `grep`, `ps`, `df`, `du`, `top`, `free`, `uptime`, `whoami`, `hostname`, `uname`, `date`, `w`, `netstat`, `ss`, `ip`, `ifconfig`, `head`, `tail`, `wc`, `sort`, `find`, `file`, `stat` | Servonaut AI only: the commands the AI may run through `ssh_exec_readonly` without asking, alone or piped into each other. Anything else (`sudo`, `&&`, `;`, redirects, `$(...)`, or a command not on the list such as `systemctl status`, `journalctl`, `docker ps`, `dig`, `nslookup` or `ping`) asks first in the app, with "This command is not on the read-only command list, so Servonaut asks before running it." In a `servonaut connect` session, such a command is refused unless `relay.ai_tool_auto_approve` is `"dangerous"` and the account allows dangerous AI tools; on an account without dangerous AI tools it is refused in the app too. The argument rules of the [MCP standard level](mcp-tools.md#guard-levels) apply to the listed commands too A name you add runs with any arguments, so do not add shells or tools that change the system. A value that is not a list of strings counts as empty, so every command asks. There is no Settings field for it yet |
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
