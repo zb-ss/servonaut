@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import TYPE_CHECKING, List
 
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.content import Content
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, DataTable, Footer, Static
 
@@ -25,8 +24,13 @@ from servonaut.screens._provider_accounts import (
     registry_for,
     show_account_labels,
 )
-from servonaut.services.ovh_billing_service import spend_history_from_invoices, usage_figures
-from servonaut.utils.markup import literal
+from servonaut.services.ovh_billing_service import (
+    spend_history_from_invoices,
+    unreadable_bill_count,
+    usage_figures,
+)
+from servonaut.utils.theme_text import themed_text
+from servonaut.utils.markup import cell, literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -54,10 +58,20 @@ def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
     )
 
 
-def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
-    """Render monthly spend history as an ASCII table with a simple bar."""
+def _unreadable_note(count: int) -> str:
+    if count == 1:
+        return "1 bill could not be read and is not counted."
+    return f"{count} bills could not be read and are not counted."
+
+
+def _format_spend_history(history: List[dict], *, redact: bool = False, unreadable: int = 0) -> str:
+    """Render monthly spend history as an ASCII table with a simple bar.
+
+    *unreadable* is the number of bills left out of the totals; the card says so.
+    """
+    note = f"\n  [$text-warning]{_unreadable_note(unreadable)}[/$text-warning]" if unreadable > 0 else ""
     if not history:
-        return "  [dim]No history available.[/dim]"
+        return ("" if note else "  [dim]No history available.[/dim]") + note.lstrip("\n")
     if redact:
         # Bar lengths also disclose the relative amounts spent each month.
         return "  [dim]Spend history hidden in demo mode.[/dim]"
@@ -72,11 +86,12 @@ def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
         month = entry.get("month", "")
         total = entry.get("total", 0.0)
         currency = entry.get("currency", "")
-        filled = int((total / max_total) * bar_width)
+        ratio = total / max_total
+        filled = max(0, min(bar_width, int(ratio * bar_width))) if math.isfinite(ratio) else 0
         bar = "#" * filled + "." * (bar_width - filled)
         lines.append(f"  {month:<10}  {total:>8.2f} {currency:<3}  [{bar}]")
 
-    return "\n".join(lines)
+    return "\n".join(lines) + note
 
 
 _PAGE_SIZE = 15
@@ -263,6 +278,9 @@ class OVHBillingScreen(WorkspaceScreen):
 
     def _setup_tables(self) -> None:
         invoices_tbl = self.query_one("#invoices_table", DataTable)
+        # Enter selects a whole row: a cell cursor would post CellSelected, which
+        # nothing here handles, so Enter would do nothing.
+        invoices_tbl.cursor_type = "row"
         invoices_tbl.add_columns("Date", "ID", "Amount", "Status")
 
         services_tbl = self.query_one("#services_table", DataTable)
@@ -293,7 +311,7 @@ class OVHBillingScreen(WorkspaceScreen):
                 row_data = tbl.get_row(event.row_key)
                 bill_id = str(row_data[1]) if len(row_data) > 1 else ""
                 if bill_id:
-                    self.notify(f"Invoice selected: {bill_id}", title="Invoice")
+                    self.notify(f"Invoice selected: {bill_id}", title="Invoice", markup=False)
             except Exception:
                 pass
 
@@ -371,19 +389,26 @@ class OVHBillingScreen(WorkspaceScreen):
         self._invoice_page = 0
         try:
             self._render_invoice_page()
+        except Exception as exc:  # noqa: BLE001 - odd bill data must not end the app
+            self._log_load_failure("invoices", exc)
+            # Keep nothing of the list that failed: a later redraw (demo-mode
+            # toggle, account switch) must not run on it again.
+            self._all_invoices = []
+            self.query_one("#invoices_table", DataTable).clear()
+            self._show_card_error(page_info, "the invoices")
+            self._show_card_error(history, "the monthly history")
+            self.query_one("#btn_prev_page", Button).disabled = True
+            self.query_one("#btn_next_page", Button).disabled = True
+            return
+        try:
             history.update(_format_spend_history(
                 spend_history_from_invoices(self._all_invoices, months=6),
                 redact=self.app.demo_mode,
+                unreadable=unreadable_bill_count(self._all_invoices),
             ))
-        except Exception as exc:
-            # A bill the parser cannot read must not end the app.
-            logger.exception("Could not read the OVH bills: %s", exc)
-            self._all_invoices = []
-            self.query_one("#invoices_table", DataTable).clear()
-            self._show_unreadable_bill(history, "the monthly history")
-            self._show_unreadable_bill(page_info, "the invoices")
-            for name in ("#btn_prev_page", "#btn_next_page"):
-                self.query_one(name, Button).disabled = True
+        except Exception as exc:  # noqa: BLE001 - odd bill data must not end the app
+            self._log_load_failure("invoices", exc)
+            self._show_card_error(history, "the monthly history")
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""
@@ -409,8 +434,8 @@ class OVHBillingScreen(WorkspaceScreen):
             if self.app.demo_mode:
                 bill_id = f"invoice-{index:03d}"
                 amount = "Hidden"
-            # API text, and the table parses str cells as markup when it paints.
-            tbl.add_row(Text(date), Text(bill_id), Text(amount), Text(status))
+            # API text: a plain string cell is read as markup when the table paints.
+            tbl.add_row(cell(date), cell(bill_id), cell(amount), cell(status))
 
         max_page = max(0, (total - 1) // _PAGE_SIZE) if total else 0
         self.query_one("#invoices_page_info", Static).update(
@@ -427,7 +452,7 @@ class OVHBillingScreen(WorkspaceScreen):
         try:
             services = await svc.get_service_list()
             if not services:
-                tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
+                tbl.add_row(cell("No services found", "dim"), "", "", "", "")
                 return
             def _h(x: str) -> str:
                 # Service names are domains or dashed-IP hostnames.
@@ -441,18 +466,20 @@ class OVHBillingScreen(WorkspaceScreen):
                 name = _h(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
-                status_display = {
-                    "ok": Content.styled("ok", "$text-success"),
-                    "expired": Content.styled("expired", "$text-error"),
-                    "unpaid": Content.styled("unpaid", "$text-error"),
-                    "pending": Content.styled("pending", "$text-accent"),
-                }.get(status) or literal(status)
+                status_token = {
+                    "ok": "$text-success", "expired": "$text-error",
+                    "unpaid": "$text-error", "pending": "$text-accent",
+                }.get(status)
+                # Provider text: Text cells, so a plain string is never read as markup.
+                status_display = (
+                    themed_text(self.app, status, status_token) if status_token else cell(status)
+                )
                 expiry = str(service.get("expiration", ""))[:10]
                 auto_renew = (
-                    Content.styled("yes", "$text-success") if service.get("auto_renew")
-                    else Content.styled("no", "$text-muted")
+                    themed_text(self.app, "yes", "$text-success") if service.get("auto_renew")
+                    else themed_text(self.app, "no", "$text-muted")
                 )
-                tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
+                tbl.add_row(cell(name), cell(svc_type), status_display, cell(expiry), auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
             self.notify(f"Error loading services: {self._display_error(exc)}", severity="error", markup=False)

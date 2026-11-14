@@ -249,4 +249,5 @@ def test_service_states_use_theme_tokens_not_named_colours() -> None:
         asyncio.run(screen._load_services())
     cells = [c for call in table.add_row.call_args_list for c in call.args]
     assert all(not isinstance(c, str) or "[" not in c for c in cells[1:] if c)
-    assert any(isinstance(c, Content) and c.plain == "ok" for c in cells)
+    # Text cells (never parsed as markup), coloured from the theme and not by a colour name.
+    assert any(getattr(c, "plain", None) == "ok" and str(c.style) not in ("green", "red") for c in cells)

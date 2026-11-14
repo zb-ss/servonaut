@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from datetime import timedelta
+import logging
 from typing import Dict, Optional, List
 
 from rich.cells import cell_len
@@ -15,6 +16,8 @@ from textual.containers import Container, Grid, Vertical, VerticalScroll, Horizo
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
+
+from servonaut.utils.ssh_names import SSHRefusal
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._fleet_filter import (
@@ -1742,6 +1745,10 @@ class InstanceListScreen(WorkspaceScreen):
                 "proxy_args": proxy_args, "port": port, "extra_options": extra_options,
                 "profile": profile,
             }
+        except SSHRefusal as exc:
+            logging.getLogger(__name__).warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error", markup=False)
             return
@@ -1802,6 +1809,9 @@ class InstanceListScreen(WorkspaceScreen):
                     severity="error",
                     markup=False,
                 )
+        except SSHRefusal as exc:
+            logging.getLogger(__name__).warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error", markup=False)
 

@@ -1,15 +1,19 @@
 """SCP transfer screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import logging
 from typing import List, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, VerticalScroll
+from textual.content import Content
 from textual.widgets import Footer, Static, Input, Button, RadioSet, RadioButton, LoadingIndicator
 from textual.worker import Worker
 
+from servonaut.utils.markup import inert_text
+from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import connection_instance, display_text, fleet_rows, team_rows
@@ -29,6 +33,9 @@ def path_roles(is_upload: bool) -> tuple[str, str]:
     if is_upload:
         return "Source · This computer", "Destination · Remote server"
     return "Destination · This computer", "Source · Remote server"
+
+
+logger = logging.getLogger(__name__)
 
 
 class SCPTransferScreen(WorkspaceScreen):
@@ -360,9 +367,17 @@ class SCPTransferScreen(WorkspaceScreen):
                         return self.app.redaction_service.scrub_stream(x)
                     return x
 
-                if event.worker.error:
+                if isinstance(event.worker.error, SSHRefusal):
+                    # A connection Servonaut will not start: say why, as it is.
                     error_msg = _s(str(event.worker.error))
-                    status_output.update(f"[$text-error]Transfer failed:[/$text-error] {escape(error_msg)}")
+                    logger.warning("SCP transfer refused: %s", error_msg)
+                    status_output.update(Content.assemble((inert_text(error_msg), "$text-error")))
+                    self.app.notify(error_msg, severity="error", markup=False)
+                elif event.worker.error:
+                    error_msg = _s(str(event.worker.error))
+                    status_output.update(Content.assemble(
+                        ("Transfer failed:", "$text-error"), " ", inert_text(error_msg),
+                    ))
                     self.app.notify(f"Transfer failed: {error_msg}", severity="error", markup=False)
                 else:
                     returncode, stdout, stderr = event.worker.result
