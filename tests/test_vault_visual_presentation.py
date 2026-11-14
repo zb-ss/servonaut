@@ -269,7 +269,7 @@ async def test_ready_empty_native_sidebar_entry_shows_create_and_cancel_without_
         await wait_until(lambda: table.row_count == 1 and not screen._busy_work)
         await pilot.pause()
         assert table.display and table.region.height >= 7
-        assert table.get_row_at(0)[4] == "vault-record-1"
+        assert table.get_row_at(0)[4].plain == "vault-record-1"
         assert not screen.query_one("#vault_records_empty").has_class("-shown")
         assert service.created == [] and app._exception is None
 
