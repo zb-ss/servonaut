@@ -833,3 +833,49 @@ class TestUsageFigures:
     def test_failed_and_unreadable(self):
         usage = {"current_spend": {}, "forecast": {}, "current_failed": True}
         assert usage_figures(usage) == ("unavailable", "n/a")
+
+
+# ---------------------------------------------------------------------------
+# Bills that cannot be read
+# ---------------------------------------------------------------------------
+
+def _month_bill(value, date: str = "2026-01-05") -> dict:
+    return {"billId": "B", "date": date, "priceWithTax": {"value": value, "currencyCode": "EUR"}}
+
+
+@pytest.mark.parametrize("value", [
+    float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf", "abc", None, [1], True,
+])
+def test_a_bill_amount_that_is_not_a_finite_number_is_not_counted(value) -> None:
+    from servonaut.services.ovh_billing_service import (
+        bill_amount, spend_history_from_invoices, unreadable_bill_count,
+    )
+
+    bills = [_month_bill(5.0), _month_bill(value)]
+    if value is None:
+        assert bill_amount(bills[1]) == (0.0, "EUR")  # a missing amount reads as zero
+        return
+    assert bill_amount(bills[1]) is None
+    assert spend_history_from_invoices(bills) == [{"month": "2026-01", "total": 5.0, "currency": "EUR"}]
+    assert unreadable_bill_count(bills) == 1
+
+
+def test_two_bills_whose_sum_overflows_leave_the_second_out() -> None:
+    from servonaut.services.ovh_billing_service import spend_history_from_invoices, unreadable_bill_count
+
+    bills = [_month_bill(1e308), _month_bill(1e308)]
+    assert spend_history_from_invoices(bills)[0]["total"] == 1e308
+    assert unreadable_bill_count(bills) == 1
+
+
+def test_a_bill_without_a_readable_date_is_counted_as_unreadable() -> None:
+    from servonaut.services.ovh_billing_service import spend_history_from_invoices, unreadable_bill_count
+
+    bills = [_month_bill(5.0), _month_bill(2.0, date="soon"), "not a bill"]
+    assert [m["month"] for m in spend_history_from_invoices(bills)] == ["2026-01"]
+    assert unreadable_bill_count(bills) == 2
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "inf"])
+def test_a_usage_amount_that_is_not_finite_is_not_read(value) -> None:
+    assert usage_total([{"price": {"value": value, "currencyCode": "EUR"}}]) is None

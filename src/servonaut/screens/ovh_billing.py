@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import TYPE_CHECKING, List
 
 from textual.app import ComposeResult
@@ -24,7 +25,11 @@ from servonaut.screens._provider_accounts import (
     registry_for,
     show_account_labels,
 )
-from servonaut.services.ovh_billing_service import spend_history_from_invoices, usage_figures
+from servonaut.services.ovh_billing_service import (
+    spend_history_from_invoices,
+    unreadable_bill_count,
+    usage_figures,
+)
 from servonaut.utils.markup import cell, literal
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -53,10 +58,20 @@ def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
     )
 
 
-def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
-    """Render monthly spend history as an ASCII table with a simple bar."""
+def _unreadable_note(count: int) -> str:
+    if count == 1:
+        return "1 bill could not be read and is not counted."
+    return f"{count} bills could not be read and are not counted."
+
+
+def _format_spend_history(history: List[dict], *, redact: bool = False, unreadable: int = 0) -> str:
+    """Render monthly spend history as an ASCII table with a simple bar.
+
+    *unreadable* is the number of bills left out of the totals; the card says so.
+    """
+    note = f"\n  [$text-warning]{_unreadable_note(unreadable)}[/$text-warning]" if unreadable > 0 else ""
     if not history:
-        return "  [dim]No history available.[/dim]"
+        return ("" if note else "  [dim]No history available.[/dim]") + note.lstrip("\n")
     if redact:
         # Bar lengths also disclose the relative amounts spent each month.
         return "  [dim]Spend history hidden in demo mode.[/dim]"
@@ -71,11 +86,12 @@ def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
         month = entry.get("month", "")
         total = entry.get("total", 0.0)
         currency = entry.get("currency", "")
-        filled = int((total / max_total) * bar_width)
+        ratio = total / max_total
+        filled = max(0, min(bar_width, int(ratio * bar_width))) if math.isfinite(ratio) else 0
         bar = "#" * filled + "." * (bar_width - filled)
         lines.append(f"  {month:<10}  {total:>8.2f} {currency:<3}  [{bar}]")
 
-    return "\n".join(lines)
+    return "\n".join(lines) + note
 
 
 _PAGE_SIZE = 15
@@ -328,11 +344,16 @@ class OVHBillingScreen(Screen):
             self._show_card_error(page_info, "the invoices")
             return
         self._invoice_page = 0
-        self._render_invoice_page()
-        history.update(_format_spend_history(
-            spend_history_from_invoices(self._all_invoices, months=6),
-            redact=self.app.demo_mode,
-        ))
+        try:
+            self._render_invoice_page()
+            history.update(_format_spend_history(
+                spend_history_from_invoices(self._all_invoices, months=6),
+                redact=self.app.demo_mode,
+                unreadable=unreadable_bill_count(self._all_invoices),
+            ))
+        except Exception as exc:  # noqa: BLE001 - odd bill data must not end the app
+            self._log_load_failure("invoices", exc)
+            self._show_card_error(history, "the monthly history")
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""

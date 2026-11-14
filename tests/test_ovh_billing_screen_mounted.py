@@ -165,12 +165,26 @@ async def test_a_currency_code_that_is_not_a_code_never_reaches_the_cards(curren
             assert "[/x]" not in text and "[bold]" not in text and "\\" not in text
 
 
+def _bill(value, month: str = "2026-03", billId: str = "B3") -> dict:
+    return {"billId": billId, "date": f"{month}-01",
+            "priceWithTax": {"value": value, "currencyCode": "EUR"}}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("amount", [{"value": "abc", "currencyCode": "EUR"}, "12 EUR"])
-async def test_a_bill_with_an_unreadable_amount_does_not_stop_the_screen(amount, accounts, config) -> None:
+@pytest.mark.parametrize("extra", [
+    [{"billId": "B3", "date": "2026-03-01", "priceWithTax": {"value": "abc", "currencyCode": "EUR"}}],
+    [{"billId": "B3", "date": "2026-03-01", "priceWithTax": "12 EUR"}],
+    [_bill(float("nan"))],
+    [_bill("nan")],
+    [_bill(float("inf"))],
+    [_bill("inf")],
+    [_bill(float("-inf"))],
+    [_bill(1e308, billId="B3"), _bill(1e308, billId="B4")],
+], ids=["text", "text-with-unit", "nan", "nan-text", "inf", "inf-text", "-inf", "sum-overflow"])
+async def test_a_bill_with_an_unreadable_amount_does_not_stop_the_screen(extra, accounts, config) -> None:
     app = _StyledHost(accounts, config)
     billing = accounts.bundles["ovh"].billing
-    bills = _bills() + [{"billId": "B3", "date": "2026-03-01", "priceWithTax": amount}]
+    bills = _bills() + extra
     billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
     billing.get_invoices = AsyncMock(return_value=bills)
     async with app.run_test(size=(160, 50)) as pilot:
@@ -179,4 +193,51 @@ async def test_a_bill_with_an_unreadable_amount_does_not_stop_the_screen(amount,
         for _ in range(5):
             await pilot.pause()
         assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
-        assert "2026-03" not in _text(app, "#spend_history")
+        history = _text(app, "#spend_history")
+        assert "7.00 EUR" in history and "2026-01" in history
+        assert "could not be read and" in history
+        # The bill list still shows every bill.
+        assert app.screen.query_one("#invoices_table").row_count == len(bills)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_bills_are_named_on_the_history_card(accounts, config) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    bills = [_bill(5.0, "2026-01", "G1"), _bill("abc", "2026-01", "X1")]
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=bills)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "2026-01" in _text(app, "#spend_history"), "history")
+        history = _text(app, "#spend_history")
+        assert "5.00 EUR" in history
+        assert history.rstrip().endswith("1 bill could not be read and is not counted.")
+        assert app.screen.query_one("#invoices_table").row_count == 2
+
+
+@pytest.mark.asyncio
+async def test_with_no_readable_bill_the_card_says_so_instead_of_no_history(accounts, config) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    bills = [_bill("abc", "2026-01", "X1"), _bill(float("nan"), "2026-02", "X2")]
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=bills)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "could not be read" in _text(app, "#spend_history"), "history")
+        history = _text(app, "#spend_history")
+        assert "2 bills could not be read and are not counted." in history
+        assert "No history available" not in history
+        assert app.screen.query_one("#invoices_table").row_count == 2
+
+
+def test_a_negative_or_overflowing_total_keeps_the_bar_inside_its_width() -> None:
+    from servonaut.screens.ovh_billing import _format_spend_history
+
+    text = _format_spend_history([
+        {"month": "2026-01", "total": -50.0, "currency": "EUR"},
+        {"month": "2026-02", "total": 7.0, "currency": "EUR"},
+        {"month": "2026-03", "total": float("inf"), "currency": "EUR"},
+    ])
+    assert all(len(line.split("[")[-1].rstrip("]")) <= 20 for line in text.splitlines()[2:])

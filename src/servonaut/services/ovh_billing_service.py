@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from datetime import datetime
 from typing import List, Optional, Tuple, TYPE_CHECKING
@@ -49,9 +50,12 @@ def usage_total(payload: object) -> Optional[Tuple[float, str]]:
         if not isinstance(price, dict) or price.get("value") is None:
             continue
         try:
-            amount += float(price["value"])
+            part = float(price["value"])
         except (TypeError, ValueError):
             continue
+        if isinstance(price["value"], bool) or not math.isfinite(part + amount):
+            continue
+        amount += part
         currency = currency or currency_code(price.get("currencyCode"))
         found = True
     return (round(amount, 2), currency) if found else None
@@ -82,6 +86,57 @@ def usage_figures(usage: dict) -> Tuple[str, str]:
     return show("current", current), show("forecast", forecast)
 
 
+def bill_amount(invoice: object) -> Optional[Tuple[float, str]]:
+    """``(amount, currency)`` of one bill, or ``None`` when it cannot be read.
+
+    An amount that is missing, not a number, not finite (``nan``, ``inf``) or
+    a truth value is unreadable.
+    """
+    if not isinstance(invoice, dict):
+        return None
+    amount_raw = invoice.get("priceWithTax") or invoice.get("amount") or {}
+    try:
+        if isinstance(amount_raw, dict):
+            raw = amount_raw.get("value", 0) or 0
+            currency = currency_code(amount_raw.get("currencyCode"))
+        else:
+            raw, currency = amount_raw, ""
+        if isinstance(raw, bool):
+            return None
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return (value, currency) if math.isfinite(value) else None
+
+
+def _monthly_totals(invoices: List[dict]) -> Tuple[dict, int]:
+    """Per-month totals and the number of bills that could not be counted."""
+    monthly: dict[str, dict] = {}
+    uncounted = 0
+    for inv in invoices:
+        amount = bill_amount(inv)
+        date_str = inv.get("date") or inv.get("billDate") or "" if isinstance(inv, dict) else ""
+        try:
+            month_key = datetime.fromisoformat(date_str[:10]).strftime("%Y-%m")
+        except (ValueError, TypeError, IndexError):
+            month_key = None
+        if amount is None or month_key is None:
+            uncounted += 1
+            continue
+        value, currency = amount
+        entry = monthly.get(month_key)
+        total = round((entry["total"] if entry else 0.0) + value, 2)
+        if not math.isfinite(total):
+            uncounted += 1  # the month's sum does not fit in a number
+            continue
+        if entry is None:
+            entry = monthly[month_key] = {"month": month_key, "total": 0.0, "currency": currency}
+        entry["total"] = total
+        if not entry["currency"] and currency:
+            entry["currency"] = currency
+    return monthly, uncounted
+
+
 def spend_history_from_invoices(invoices: List[dict], months: int = 6) -> List[dict]:
     """Aggregate invoices into per-month spend totals, oldest first.
 
@@ -91,33 +146,16 @@ def spend_history_from_invoices(invoices: List[dict], months: int = 6) -> List[d
 
     Returns:
         ``{month, total, currency}`` dicts where ``month`` is ``YYYY-MM``.
+        A bill whose amount or date cannot be read adds nothing; see
+        ``unreadable_bill_count``.
     """
-    monthly: dict[str, dict] = {}
-    for inv in invoices:
-        date_str: Optional[str] = inv.get("date") or inv.get("billDate") or ""
-        amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
-        try:
-            if isinstance(amount_raw, dict):
-                value: float = float(amount_raw.get("value", 0) or 0)
-                currency: str = currency_code(amount_raw.get("currencyCode"))
-            else:
-                value = float(amount_raw or 0)
-                currency = ""
-        except (TypeError, ValueError):
-            continue  # a bill whose amount cannot be read adds nothing
-
-        try:
-            month_key = datetime.fromisoformat(date_str[:10]).strftime("%Y-%m")
-        except (ValueError, TypeError, IndexError):
-            continue
-
-        if month_key not in monthly:
-            monthly[month_key] = {"month": month_key, "total": 0.0, "currency": currency}
-        monthly[month_key]["total"] = round(monthly[month_key]["total"] + value, 2)
-        if not monthly[month_key]["currency"] and currency:
-            monthly[month_key]["currency"] = currency
-
+    monthly, _ = _monthly_totals(invoices)
     return sorted(monthly.values(), key=lambda x: x["month"])[-months:]
+
+
+def unreadable_bill_count(invoices: List[dict]) -> int:
+    """How many bills ``spend_history_from_invoices`` leaves out because they cannot be read."""
+    return _monthly_totals(invoices)[1]
 
 
 class OVHBillingService:
