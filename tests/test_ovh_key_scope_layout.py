@@ -23,6 +23,11 @@ def _painted(app, widget) -> str:
     )
 
 
+async def _painted_with(app, widget, text: str) -> None:
+    """Wait until *text* is painted inside *widget*; the caller then asserts it."""
+    await wait_until(lambda: text in _painted(app, widget))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key_count", [1, 30])
 async def test_focused_narrow_ovh_keys_keep_account_project_and_actions(
@@ -55,8 +60,12 @@ async def test_focused_narrow_ovh_keys_keep_account_project_and_actions(
                          and all(screen.region.contains_region(b.region) for b in actions.query(Button)))
 
         assert screen.focused is table
-        assert "backup" in _painted(app, picker)
         project = screen.query_one("#ovh_ssh_keys_project_label", Static)
+        # The cursor scroll and the repaint land a few frames after the geometry.
+        await _painted_with(app, picker, "backup")
+        await _painted_with(app, project, "project-backup")
+        await _painted_with(app, table, f"backup-key-{key_count - 1}")
+        assert "backup" in _painted(app, picker)
         assert "project-backup" in _painted(app, project)
         assert f"backup-key-{key_count - 1}" in _painted(app, table)
         assert 4 <= table.region.height <= 6
@@ -98,6 +107,7 @@ async def test_overlong_ovh_scope_retains_keyboard_scroll_and_full_value(monkeyp
         assert app.focused is scope
         assert scope.scroll_y > 0
         assert scope.scroll_y == scope.max_scroll_y
+        await _painted_with(app, scope, "last-part")
         assert "last-part" in _painted(app, scope)
         assert str(project.content) == full_value
 
