@@ -263,3 +263,25 @@ async def test_a_failure_while_filling_the_invoice_table_ends_every_loading_stat
         assert app.screen.query_one("#btn_prev_page").disabled is True
         assert app.screen.query_one("#btn_next_page").disabled is True
         assert app._exception is None and isinstance(app.screen, OVHBillingScreen)
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_invoice_row_names_the_invoice(accounts, config) -> None:
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    bills = [_bill(7.0, "2026-01", "AB[bold]12")]
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=bills)
+    async with app.run_test(size=(160, 50), notifications=True) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: app.screen.query_one("#invoices_table").row_count == 1, "table")
+        table = app.screen.query_one("#invoices_table")
+        table.focus()
+        await pilot.press("enter")
+        await _wait_for(
+            pilot, lambda: any("Invoice selected" in n.message for n in app._notifications), "notice",
+        )
+        notice = next(n for n in app._notifications if "Invoice selected" in n.message)
+        assert notice.message == "Invoice selected: AB[bold]12"
+        assert notice.markup is False
+        assert app._exception is None and isinstance(app.screen, OVHBillingScreen)

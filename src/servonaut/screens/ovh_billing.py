@@ -248,6 +248,9 @@ class OVHBillingScreen(Screen):
 
     def _setup_tables(self) -> None:
         invoices_tbl = self.query_one("#invoices_table", DataTable)
+        # Enter selects a whole row: a cell cursor would post CellSelected, which
+        # nothing here handles, so Enter would do nothing.
+        invoices_tbl.cursor_type = "row"
         invoices_tbl.add_columns("Date", "ID", "Amount", "Status")
 
         services_tbl = self.query_one("#services_table", DataTable)
