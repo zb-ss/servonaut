@@ -262,8 +262,10 @@ async def test_long_team_list_preserves_selection_and_visible_back(size: tuple[i
             _assert_whole_button_owned(app, button)
             assert back.region == back_region
             assert table.cursor_row == len(teams) - 1
-        if size == (100, 30):
-            assert screen.query_one("#team_management_container").scroll_y > 0
+        # Back stays whole and inside the container's visible area, scrolled
+        # there or not (with the two-row lane at 100x30 it is in view unscrolled).
+        container = screen.query_one("#team_management_container")
+        assert container.content_region.contains_region(back.region)
         assert not screen._server_busy and screen.navigation_hold_reason() is None
         app.team_service.list_teams.assert_awaited_once_with()
         for name in ("get_team", "list_shared_servers", "list_team_configs"):
