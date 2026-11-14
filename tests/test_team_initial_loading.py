@@ -217,7 +217,7 @@ async def test_initial_teams_without_auth_stays_idle_and_makes_no_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 30), (160, 50)])
+@pytest.mark.parametrize("size", [(100, 26), (100, 30), (160, 50)])
 async def test_long_team_list_preserves_selection_and_visible_back(size: tuple[int, int]) -> None:
     app = _TeamApp(navigation_visible=True)
     # More records than the bounded table can show, with short neutral labels.
@@ -266,6 +266,9 @@ async def test_long_team_list_preserves_selection_and_visible_back(size: tuple[i
         # there or not (with the two-row lane at 100x30 it is in view unscrolled).
         container = screen.query_one("#team_management_container")
         assert container.content_region.contains_region(back.region)
+        if size == (100, 26):
+            # Too short for the page: focusing Back scrolls the container to it.
+            assert container.max_scroll_y > 0 and container.scroll_y > 0
         assert not screen._server_busy and screen.navigation_hold_reason() is None
         app.team_service.list_teams.assert_awaited_once_with()
         for name in ("get_team", "list_shared_servers", "list_team_configs"):
