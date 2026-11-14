@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -29,6 +30,43 @@ async def click_cell(
         box["x"] + (column + 0.5) * box["width"] / dimensions["width"],
         box["y"] + (row + 0.5) * box["height"] / dimensions["height"],
     )
+
+
+ROW_START = re.compile(rb"\x1b\[(\d+);1H")
+ANSI = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]")
+# The sidebar starts at column 0; a label this far right is page content.
+SIDEBAR_LABEL_REACH = 30
+
+
+def sidebar_row(frames: bytes, label: str) -> int | None:
+    """Zero-based screen row of a sidebar label, from the received terminal output.
+
+    Textual addresses each repainted row with ``ESC [ row ; 1 H``. The sidebar
+    is the leftmost thing on a row, so the label must show up near its start.
+    The newest paint wins: a later frame repaints a row that moved. This reads
+    the redesigned sidebar wherever its sections put the entry, so the test
+    needs no row number that the next layout change would invalidate.
+    """
+    found = None
+    starts = list(ROW_START.finditer(frames))
+    for current, following in zip(starts, [*starts[1:], None]):
+        end = following.start() if following else len(frames)
+        text = ANSI.sub(b"", frames[current.end() : end]).decode(errors="ignore")
+        if label in text[:SIDEBAR_LABEL_REACH]:
+            found = int(current.group(1)) - 1
+    return found
+
+
+async def wait_for_sidebar_row(
+    frames: bytearray, host: ProbeHost, label: str
+) -> int:
+    deadline = asyncio.get_running_loop().time() + host.config.startup_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        row = sidebar_row(bytes(frames), label)
+        if row is not None:
+            return row
+        await asyncio.sleep(host.config.probe_poll_seconds)
+    raise AssertionError(f"The sidebar never painted {label!r}")
 
 
 def browser_error_category(message: str) -> str:
@@ -201,10 +239,12 @@ async def test_browser_rendering_interactions_and_rejection(
                 await capture_changed_screen(
                     page, host, instances, output / f"{prefix}help.png"
                 )
+                # Where Instances sits depends on the sidebar's sections, so read
+                # its row from the painted help screen instead of fixing it.
+                instances_row = await wait_for_sidebar_row(frames, host, "Instances")
                 frames.clear()
                 rendered.clear()
-                # Instances is in this logical sidebar cell, regardless of font DPI.
-                await click_cell(page, dimensions, 10, 10)
+                await click_cell(page, dimensions, 10, instances_row)
                 await asyncio.wait_for(rendered.wait(), host.config.startup_seconds)
                 resize_sent.clear()
                 await page.set_viewport_size({"width": 1100, "height": 760})
@@ -307,3 +347,11 @@ async def test_browser_rendering_interactions_and_rejection(
         record_property("child_errors", host.child.errors)
         record_property("child_transport", host.child.transport_status())
         record_property("browser_errors", errors)
+
+
+def test_sidebar_row_reads_the_newest_paint_of_a_label() -> None:
+    old = b"\x1b[3;1H\x1b[1;38;2;1;2;3mInstances   \x1b[0m"
+    moved = b"\x1b[5;1H\x1b[38;2;1;2;3m\xe2\x94\x82\x1b[0mInstances   \x1b[0m"
+    content = b"\x1b[9;1H" + b" " * 40 + b"Instances in the page body"
+    assert sidebar_row(old + moved + content, "Instances") == 4
+    assert sidebar_row(content, "Instances") is None
