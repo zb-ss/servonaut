@@ -600,7 +600,16 @@ async def _demo_session(tui: Any, seed: Any, moto: Any, providers: Any, monkeypa
     monkeypatch.setattr(ServonautApp, "demo_mode", True)
     async with tui(size=DEMO_SIZE) as t:
         await _wait_for_fleet(t)
-        await t.wait_for_text("DEMO")
+        # The badge is the status bar's text. The status bar shares its row with
+        # the notification lane, and Textual's toast rack can stay drawn over
+        # that row after its toasts have expired (seen on a loaded machine), so
+        # the painted screen is not a reliable place to look for it.
+        from servonaut.widgets.status_bar import StatusBar
+
+        await t.wait_until(
+            lambda: "DEMO" in str(t.on_screen(StatusBar).render()),
+            desc="the DEMO badge in the status bar",
+        )
         yield Tour(t, secrets)
 
 
