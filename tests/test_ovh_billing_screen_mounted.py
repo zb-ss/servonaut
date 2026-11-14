@@ -241,3 +241,25 @@ def test_a_negative_or_overflowing_total_keeps_the_bar_inside_its_width() -> Non
         {"month": "2026-03", "total": float("inf"), "currency": "EUR"},
     ])
     assert all(len(line.split("[")[-1].rstrip("]")) <= 20 for line in text.splitlines()[2:])
+
+
+@pytest.mark.asyncio
+async def test_a_failure_while_filling_the_invoice_table_ends_every_loading_state(
+    accounts, config, monkeypatch,
+) -> None:
+    def boom(self) -> None:
+        raise RuntimeError("row builder failed")
+
+    monkeypatch.setattr(OVHBillingScreen, "_render_invoice_page", boom)
+    app = _StyledHost(accounts, config)
+    billing = accounts.bundles["ovh"].billing
+    billing.get_current_usage = AsyncMock(return_value={"current_spend": [_price(1.0)], "forecast": []})
+    billing.get_invoices = AsyncMock(return_value=_bills())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app)
+        await _wait_for(pilot, lambda: "Could not load the invoices" in _text(app, "#invoices_page_info"), "page line")
+        assert "Could not load the monthly history" in _text(app, "#spend_history")
+        assert "Loading" not in _text(app, "#invoices_page_info")
+        assert app.screen.query_one("#btn_prev_page").disabled is True
+        assert app.screen.query_one("#btn_next_page").disabled is True
+        assert app._exception is None and isinstance(app.screen, OVHBillingScreen)

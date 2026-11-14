@@ -852,9 +852,6 @@ def test_a_bill_amount_that_is_not_a_finite_number_is_not_counted(value) -> None
     )
 
     bills = [_month_bill(5.0), _month_bill(value)]
-    if value is None:
-        assert bill_amount(bills[1]) == (0.0, "EUR")  # a missing amount reads as zero
-        return
     assert bill_amount(bills[1]) is None
     assert spend_history_from_invoices(bills) == [{"month": "2026-01", "total": 5.0, "currency": "EUR"}]
     assert unreadable_bill_count(bills) == 1
@@ -879,3 +876,28 @@ def test_a_bill_without_a_readable_date_is_counted_as_unreadable() -> None:
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), "inf"])
 def test_a_usage_amount_that_is_not_finite_is_not_read(value) -> None:
     assert usage_total([{"price": {"value": value, "currencyCode": "EUR"}}]) is None
+
+
+@pytest.mark.parametrize("invoice", [
+    {"billId": "B", "date": "2026-01-05"},
+    {"billId": "B", "date": "2026-01-05", "priceWithTax": {}},
+    {"billId": "B", "date": "2026-01-05", "priceWithTax": None},
+    {"billId": "B", "date": "2026-01-05", "priceWithTax": {"currencyCode": "EUR"}},
+    {"billId": "B", "date": "2026-01-05", "priceWithTax": {"value": "", "currencyCode": "EUR"}},
+])
+def test_a_bill_with_no_amount_is_unreadable_not_zero(invoice) -> None:
+    from servonaut.services.ovh_billing_service import bill_amount, unreadable_bill_count
+
+    assert bill_amount(invoice) is None
+    assert unreadable_bill_count([invoice]) == 1
+
+
+@pytest.mark.parametrize("invoice, expected", [
+    ({"priceWithTax": {"value": 0, "currencyCode": "EUR"}}, (0.0, "EUR")),
+    ({"priceWithTax": {"value": "0.0"}}, (0.0, "")),
+    ({"amount": 0}, (0.0, "")),
+])
+def test_a_real_zero_amount_is_a_valid_zero(invoice, expected) -> None:
+    from servonaut.services.ovh_billing_service import bill_amount
+
+    assert bill_amount(invoice) == expected

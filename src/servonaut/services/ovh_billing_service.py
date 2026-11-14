@@ -94,14 +94,19 @@ def bill_amount(invoice: object) -> Optional[Tuple[float, str]]:
     """
     if not isinstance(invoice, dict):
         return None
-    amount_raw = invoice.get("priceWithTax") or invoice.get("amount") or {}
+    amount_raw = next(
+        (invoice[key] for key in ("priceWithTax", "amount") if invoice.get(key) not in (None, {}, "")),
+        None,
+    )
+    if amount_raw is None:
+        return None  # no amount at all is not an amount of zero
     try:
         if isinstance(amount_raw, dict):
-            raw = amount_raw.get("value", 0) or 0
+            raw = amount_raw.get("value")
             currency = currency_code(amount_raw.get("currencyCode"))
         else:
             raw, currency = amount_raw, ""
-        if isinstance(raw, bool):
+        if raw is None or isinstance(raw, bool):
             return None
         value = float(raw)
     except (TypeError, ValueError):

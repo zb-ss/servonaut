@@ -346,6 +346,14 @@ class OVHBillingScreen(Screen):
         self._invoice_page = 0
         try:
             self._render_invoice_page()
+        except Exception as exc:  # noqa: BLE001 - odd bill data must not end the app
+            self._log_load_failure("invoices", exc)
+            self._show_card_error(page_info, "the invoices")
+            self._show_card_error(history, "the monthly history")
+            self.query_one("#btn_prev_page", Button).disabled = True
+            self.query_one("#btn_next_page", Button).disabled = True
+            return
+        try:
             history.update(_format_spend_history(
                 spend_history_from_invoices(self._all_invoices, months=6),
                 redact=self.app.demo_mode,
