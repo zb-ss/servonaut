@@ -178,6 +178,15 @@ class LogViewerScreen(Screen):
                 self.app.connection_service,
                 rows=fleet_rows(self.app),
             )
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("Log probe refused: %s", exc)
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            output.write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
             output.write(Text(f"Error probing logs: {e}", style="red"))

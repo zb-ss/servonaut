@@ -1711,26 +1711,32 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if not host:
             self.app.notify("No IP address available for this instance.", severity="error")
             return None
-        proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
-        username = (
-            resolved.login_user
-            or (profile.username if profile else None)
-            or instance.get("username")
-            or self.app.config_manager.get().default_username
-            or "ubuntu"
-        )
-        return self.app.ssh_service.build_ssh_command(
-            host=host,
-            username=username,
-            remote_command=remote_command,
-            proxy_args=proxy_args,
-            port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
-            extra_options=[*self.app.connection_service.get_extra_options(instance, profile), *options],
-            identity_agent=resolved.identity_agent,
-            identity_file=getattr(resolved, "identity_file", None),
-            certificate_file=resolved.certificate_path,
-            known_hosts_file=resolved.known_hosts_path,
-        )
+        try:
+            proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
+            username = (
+                resolved.login_user
+                or (profile.username if profile else None)
+                or instance.get("username")
+                or self.app.config_manager.get().default_username
+                or "ubuntu"
+            )
+            return self.app.ssh_service.build_ssh_command(
+                host=host,
+                username=username,
+                remote_command=remote_command,
+                proxy_args=proxy_args,
+                port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
+                extra_options=[*self.app.connection_service.get_extra_options(instance, profile), *options],
+                identity_agent=resolved.identity_agent,
+                identity_file=getattr(resolved, "identity_file", None),
+                certificate_file=resolved.certificate_path,
+                known_hosts_file=resolved.known_hosts_path,
+            )
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("SSH launch refused: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return None
 
     async def _resolve_and_launch_ssh(self, job: BusyJob) -> None:
         """The connect flow of :meth:`_ssh_connect_flow`; *job* is its busy line."""

@@ -440,6 +440,14 @@ class AIAnalysisScreen(Screen):
                     self._background_scan(), name="bg_scan", exclusive=False
                 )
 
+        except SSHRefusal as exc:
+            # A connection Servonaut will not start: say why, as it is.
+            logger.warning("Log probe refused: %s", exc)
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            status.update(literal(message, "$text-error"))
+            self.app.notify(message, severity="error", markup=False)
         except Exception as exc:
             logger.error("Error probing logs: %s", exc)
             # Demo-mode: exception strings can carry hostnames / IPs from SSH.
@@ -447,7 +455,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
+            status.update(literal(f"Error: {exc_str}", "$text-error"))
         finally:
             progress.stop()
             self._set_buttons_disabled(False)

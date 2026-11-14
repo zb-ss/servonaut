@@ -199,6 +199,8 @@ class RemoteTree(Tree):
                 # A connection Servonaut will not start: say why, as it is.
                 logger.warning("Directory listing refused: %s", event.worker.error)
                 node.add(Text(inert_text(str(event.worker.error)))).allow_expand = False
+                # The row is cut to the tree's width: the notice carries the whole message.
+                self.app.notify(str(event.worker.error), severity="error", markup=False)
             elif event.worker.error:
                 error_str = str(event.worker.error).lower()
                 if "permission denied" in error_str:
