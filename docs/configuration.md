@@ -245,6 +245,68 @@ The same field is also available on each `custom_servers` entry (see [Custom Ser
 
 > **Security note:** Re-enabling SHA-1 signatures (`ssh-rsa`) or DSA (`ssh-dss`) weakens the cryptographic guarantees of the connection. Scope these options to the specific hosts that need them via `extra_ssh_options` — **never** set them globally in your `~/.ssh/config`.
 
+
+### Team options that run programs
+
+Connection profiles and custom servers can arrive from a team configuration
+(Pull Latest on the team screen). Most SSH options in them, such as timeouts,
+keep-alives, ciphers, ports and host-key algorithms, are used as they are. An
+option that makes SSH run a program, load a library, read more settings, hand
+your SSH keys or environment to the server, or write to a file on your
+computer waits for your approval. So does any option Servonaut does not
+recognise. These are `ProxyCommand`, `ProxyJump`, `ProxyUseFdpass`,
+`LocalCommand`, `PermitLocalCommand`, `KnownHostsCommand`, `RemoteCommand`,
+`PKCS11Provider`, `SmartcardDevice`, `SecurityKeyProvider`, `XAuthLocation`,
+`ForwardX11`, `ForwardX11Trusted`, `ForwardAgent`, `GSSAPIDelegateCredentials`,
+`SendEnv`, `RemoteForward`, `StreamLocalBindUnlink`, `UserKnownHostsFile`,
+`IgnoreUnknown`, `Include`, `Match` and `Host`. Switching one of the on/off
+ones off (`ForwardAgent=no`) needs no approval.
+
+Until you allow it, a connection that needs the option is not started. The
+message names the profile or server, the option and where it came from, for
+example: `Not connecting: the connection profile 'jump' came from team Ops and
+sets ProxyCommand, which runs a program on this computer. To allow it, run
+"servonaut team options" or open Settings > Connections.` In the TUI it is an
+error notice; `servonaut ssh` prints it and exits with code `4`; MCP tools
+answer `Error: Not connecting: ...`; a relay request is rejected with the same
+sentence. When a Pull Latest brings such options, its preview says how many and
+lists them, and after you apply it a notice says how many need approval.
+
+**Settings → Connections** has a block **Team options that run programs**,
+shown only while there is something to decide. Its table has the columns
+**Option**, **From** and **State**. Select a row, read the whole option on the
+line under the table, and press **Allow** or **Refuse**. On the command line
+use [`servonaut team options`](cli-reference.md#servonaut-team-options).
+
+An option that was already saved when Servonaut started recording where
+settings come from cannot be told apart from one you wrote yourself, so a
+signed-in user who has such an option is asked once, with a notice at start
+(and after signing in). Options you add by hand to your own profiles are not
+asked about.
+
+A team `HostName`, `HostKeyAlias`, `User` or `Port` value that contains quotes,
+spaces or shell symbols is refused in the same way. A profile that uses the
+bastion host, user and key fields needs no approval, because Servonaut builds
+that hop itself; prefer those fields to a `ProxyCommand` or `ProxyJump` option.
+
+The decisions are kept in `config.json`:
+
+```json
+{
+  "ssh": {
+    "team_options": [
+      {"option": "proxycommand=ssh -W %h:%p jump.example.net",
+       "team_name": "Ops", "allowed": true}
+    ]
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ssh.team_options` | array | `[]` | One item per option text: `option` (the lower-cased name, `=`, then the value), `team`, `team_name` and `allowed`. An option listed here is refused until its item has `"allowed": true`; only the JSON value `true` allows. Written when a team configuration is applied and changed by Settings and `servonaut team options`; it is never part of what a team receives. |
+| `ssh.team_options_checked` | bool | `false` | Set by Servonaut once the options saved before this list existed have been looked at; leave it alone |
+
 ## SSH host-key verification
 
 Servonaut connects through your system OpenSSH client and checks each
@@ -469,6 +531,7 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 | `temperature` | float | `0.3` | Sampling temperature |
 | `stream_silence_timeout_seconds` | float | `35.0` | Servonaut AI only: how long a streamed reply may go without any data (the service sends a keep-alive about every 15 s) before the connection counts as lost. Accepted range 20–600; values outside it are clamped. Time spent answering a tool prompt or running a tool does not count |
 | `tool_confirm_timeout_seconds` | float | `50.0` | Servonaut AI only: how long a tool confirmation prompt stays open. When it passes, the prompt closes and the tool is not run. The service waits about 60 s for a tool result by default, so keep this below that. When the service pauses the reply while your tools run, its own time limit applies instead, which leaves longer to decide |
+| `readonly_command_allowlist` | array | `ls`, `cat`, `grep`, `ps`, `df`, `du`, `top`, `free`, `uptime`, `whoami`, `hostname`, `uname`, `date`, `w`, `netstat`, `ss`, `ip`, `ifconfig`, `head`, `tail`, `wc`, `sort`, `find`, `file`, `stat` | Servonaut AI only: the commands the AI may run through `ssh_exec_readonly` without asking, alone or piped into each other. Anything else (`sudo`, `&&`, `;`, redirects, `$(...)`, or a command not on the list such as `systemctl status`, `journalctl`, `docker ps`, `dig`, `nslookup` or `ping`) asks first, with "This command is not on the read-only command list, so Servonaut asks before running it." A name you add runs with any arguments, so do not add shells or tools that change the system. A value that is not a list of strings counts as empty, so every command asks. There is no Settings field for it yet |
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 

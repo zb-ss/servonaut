@@ -35,7 +35,11 @@ Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bi
 Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_level`:
 
 - `readonly` — only listing and status tools.
-- `standard` (default) — read + a curated command allowlist. `run_command` accepts one allowlisted command, optionally piped into other allowlisted commands (`ps aux | grep nginx`), with an optional leading `sudo`. Command lists (`;`, `&&`, `||`), redirects, background jobs, subshells and command substitution are refused, as are the options of allowlisted commands that write files or change the system (for example `find -exec`/`-delete`, `sort -o`, `ip ... add/del/set`, `ifconfig ... down`, `date -s`). Use `dangerous` for those.
+- `standard` (default) — read + a curated command allowlist. `run_command` accepts one allowlisted command, optionally piped into other allowlisted commands (`ps aux | grep nginx`), with an optional leading `sudo`. Command lists (`;`, `&&`, `||`), redirects, background jobs, subshells and command substitution are refused, as are the options of allowlisted commands that write files or change the system (for example `find -exec`/`-delete`, `sort -o`, `ip ... add/del/set`, `ifconfig ... down`, `date -s`). Use `dangerous` for those. Some commands have stricter argument rules at this level:
+  - `ip` accepts display options and the verbs `show`, `list` and `get` only, so `ip -br addr` works while `ip -batch ...` and `ip -force ...` are refused.
+  - `date` accepts a format (`date +%F`) and read options such as `-d '...'`, but not a bare time, which would set the clock.
+  - For `find`, `sort`, `date`, `ss`, `file`, `ping`, `ip`, `ifconfig` and `hostname`, a wildcard expands only when the word starts with `/`, `./`, `../` or `~`: write `sort ./*.txt`, not `sort *.txt` (which reaches the command as the literal text `*.txt`). `find . -name '*.log'` works as before, and other commands (`ls *.txt`) are unchanged.
+  - A `|` written as a quoted or escaped word of its own (`grep '|' file`) is refused; use `dangerous` for it. A `|` inside a longer quoted word (`grep 'a|b' file`) is fine.
 - `dangerous` — everything except a hard-coded blocklist (`rm -rf`, `shutdown`, `dd`, ...).
 
 Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, arguments, success flag, and short reason code on early returns.

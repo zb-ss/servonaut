@@ -559,6 +559,53 @@ command on the team's servers). Times are UTC, as `2026-10-20T09:30:00Z`.
 | `0` | The rules were shown, including the read-only fallback |
 | `1` | Not signed in, your teams could not be read, or you are not in that team |
 
+### `servonaut team options`
+
+List the SSH options that came from a team and run a program, load a library
+or change how a connection is carried on this computer, and allow or refuse
+them. Servonaut does not use such an option, and refuses a connection that
+needs it, until you allow it. This works on the local configuration only: you
+do not need to be signed in.
+
+```
+servonaut team options
+servonaut team options allow N
+servonaut team options allow --all
+servonaut team options refuse N
+```
+
+| Command | What it does |
+|---------|--------------|
+| *(none)* | Lists the options with a number, the state (`allowed` or `refused`), where each came from (`Team <name>`, `A team`, or `Saved before 2.33.1` for an option that was already in your configuration at the upgrade) and the option itself |
+| `allow N` | Allows option number `N` from the list |
+| `allow --all` | Allows every listed option |
+| `refuse N` | Refuses option number `N` again |
+
+```
+$ servonaut team options
+Team options that run programs on this computer
+
+  1  refused  Team Ops  proxycommand=ssh -W %h:%p jump.example.net
+
+Allow one: servonaut team options allow 1
+$ servonaut team options allow 1
+Allowed: proxycommand=ssh -W %h:%p jump.example.net. Connections that use it will run it on this computer.
+```
+
+Read the whole option before you allow it. An approval covers that exact
+text: when the team changes the option, you are asked again. The same text on
+another profile or from another team is already allowed. When nothing needs a
+decision the list reads `No team options need your approval.` The same list is
+in Settings → Connections (see
+[Team options that run programs](configuration.md#team-options-that-run-programs)).
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | The list was shown, or the option was allowed or refused |
+| `2` | There is no option with that number (or `allow` was given neither a number nor `--all`) |
+
 ---
 
 ## `servonaut vault`
