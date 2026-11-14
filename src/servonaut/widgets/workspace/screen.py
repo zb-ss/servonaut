@@ -69,9 +69,23 @@ class WorkspaceScreen(Screen):
         ] | None = None
 
     async def on_mount(self) -> None:
+        # Closing the window while the screen is still starting up tears the
+        # screen down before this handler runs; there is nothing left to set up.
+        if self.app_is_exiting():
+            return
         self._sync_notification_lane()
         if not any(isinstance(child, WorkspaceNotificationSpace) for child in self.children):
             await self.mount(WorkspaceNotificationSpace())
+
+    def app_is_exiting(self) -> bool:
+        """True once the app has been asked to exit and is dismantling its screens.
+
+        Textual has no public flag for this. ``is_attached`` reads the same one
+        but is also False for a screen that was never mounted, so it cannot tell
+        a shutdown from a screen driven directly; checking for ``True`` exactly
+        also keeps a stubbed app from reading as exiting.
+        """
+        return getattr(self.app, "_exit", False) is True
 
     def _sync_notification_lane(self, height: int | None = None) -> None:
         """Use the two-row lane on short terminals, from the terminal's own height."""

@@ -481,6 +481,10 @@ class InstanceListScreen(WorkspaceScreen):
         The start-up itself counts as a load, so nothing is released before
         every load this run needs has registered itself.
         """
+        # An exit during start-up (the desktop window closed right after its
+        # first frame) dismantles the screen before this handler runs.
+        if self.app_is_exiting():
+            return
         self._expect_team_memory_load("startup")
         try:
             self._load_on_mount()
