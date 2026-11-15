@@ -466,6 +466,20 @@ async def test_reload_reads_the_folder_in_a_worker_and_shows_it_is_busy(
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _ready(app, pilot)
         busy = panel.query_one("#appearance_busy")
+        button = panel.query_one("#appearance_reload")
+
+        def button_is_under_its_own_centre() -> bool:
+            # The header re-lays out after the panel is shown; a click made
+            # while the button is still moving lands on whatever is there.
+            region = button.region
+            if region.width == 0 or region.height == 0:
+                return False
+            centre = region.center
+            return app.screen.get_widget_at(*centre)[0] is button
+
+        await _until(button_is_under_its_own_centre)
+        await pilot.pause()
+        await _until(button_is_under_its_own_centre)
         await pilot.click("#appearance_reload")
         await _until(lambda: busy.is_active)
         await _until(lambda: not busy.is_active)
