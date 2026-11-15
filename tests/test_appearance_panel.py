@@ -217,7 +217,10 @@ async def test_a_terminal_colour_theme_explains_why_it_has_no_preview(manager: C
 async def _open_prompt(app: _Host, pilot: Pilot) -> ThemeNamePromptScreen:
     await pilot.click("#appearance_new")
     await _until(lambda: isinstance(app.screen, ThemeNamePromptScreen))
-    return app.screen  # type: ignore[return-value]
+    prompt: ThemeNamePromptScreen = app.screen  # type: ignore[assignment]
+    # A pushed screen is current before its children are composed.
+    await _until(lambda: bool(prompt.query("#theme_name_input")) and bool(prompt.query("#theme_name_save")))
+    return prompt
 
 
 async def _enter_name(pilot: Pilot, prompt: ThemeNamePromptScreen, name: str) -> None:
