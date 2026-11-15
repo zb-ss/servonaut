@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from textual import events
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, ProgressBar, Select, Static
@@ -251,12 +252,31 @@ async def _ready(app: _VoiceApp, pilot: Pilot) -> VoicePanel:
 
 
 def _exposed(app: _VoiceApp, widget: Widget) -> bool:
-    hit, _ = app.get_widget_at(*widget.region.center)
-    return (
-        widget.region.width > 0 and widget.region.height > 0
-        and app.screen.region.contains(*widget.region.center)
-        and (hit is widget or widget in hit.ancestors)
-    )
+    region = widget.region
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains(*region.center)):
+        return False
+    try:
+        hit, _ = app.get_widget_at(*region.center)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
+
+
+async def _expose(app, pilot: Pilot, widget: Widget, scroll_target: Widget | None = None) -> None:
+    """Scroll as a user would, then wait until the control is really exposed."""
+    target = scroll_target or widget
+    target.scroll_visible(animate=False)
+    await pilot.pause()
+
+    def exposed_after_scrolling() -> bool:
+        # A scroll requested before the form reached its final height can stop
+        # short; ask again while the control is still not in view.
+        if _exposed(app, widget):
+            return True
+        target.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
+
+    await wait_until(exposed_after_scrolling)
 
 
 async def _click(app: _VoiceApp, pilot: Pilot, button: Button) -> None:
@@ -363,9 +383,7 @@ async def test_explicit_download_shows_size_progress_and_blocks_overlap(
         assert "[example]" in _text(panel, "#voice_download_label")
         bar = panel.query_one("#voice_download_bar", ProgressBar)
         assert bar.total == 4096 and bar.progress == 1024
-        bar.scroll_visible(animate=False)
-        await pilot.pause()
-        assert _exposed(app, bar)
+        await _expose(app, pilot, bar)
         assert _exposed(app, panel.query_one("#save_voice"))
         actions = list(panel.query(".voice-action-row Button"))
         assert actions and all(action.disabled for action in actions)
@@ -566,9 +584,7 @@ async def test_readiness_failure_survives_edits_until_successful_recheck(manager
         await pilot.pause()
         assert "fabricated re-check failure [example]" in _text(panel, "#voice_status_banner")
         banner = panel.query_one("#voice_status_banner", Static)
-        banner.scroll_visible(animate=False)
-        await pilot.pause()
-        assert _exposed(app, banner)
+        await _expose(app, pilot, banner)
 
         setup.probe_error = None
         await _click(app, pilot, panel.query_one("#voice_btn_recheck", Button))

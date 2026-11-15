@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import boto3
 import pytest
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Select, Static
@@ -101,8 +102,33 @@ def _host(monkeypatch, manager: ConfigManager, navigation: bool) -> _IPBanHost:
 
 
 def _exposed(app: _IPBanHost, widget: Widget) -> bool:
-    hit, _ = app.get_widget_at(*widget.region.center)
-    return widget.region.width > 0 and widget.region.height > 0 and app.screen.region.contains_region(widget.region) and (hit is widget or widget in hit.ancestors)
+    region = widget.region
+    # A control scrolled out of the screen is simply not exposed; asking the
+    # compositor for a cell outside it raises.
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains_region(region)):
+        return False
+    try:
+        hit, _ = app.get_widget_at(*region.center)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
+
+
+async def _expose(app, pilot: Pilot, widget: Widget, scroll_target: Widget | None = None) -> None:
+    """Scroll as a user would, then wait until the control is really exposed."""
+    target = scroll_target or widget
+    target.scroll_visible(animate=False)
+    await pilot.pause()
+
+    def exposed_after_scrolling() -> bool:
+        # A scroll requested before the form reached its final height can stop
+        # short; ask again while the control is still not in view.
+        if _exposed(app, widget):
+            return True
+        target.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
+
+    await wait_until(exposed_after_scrolling)
 
 
 async def _click(app: _IPBanHost, pilot: Pilot, widget: Widget) -> None:
@@ -160,9 +186,7 @@ async def test_method_form_labels_and_native_inline_save_are_reachable(
         assert panel.query_one("#ipban_account_row").display
         for field_id, label in COMMON_FIELDS + METHOD_FIELDS[method]:
             field = panel.query_one(f"#{field_id}")
-            field.parent.scroll_visible(animate=False)
-            await pilot.pause()
-            assert _exposed(app, field)
+            await _expose(app, pilot, field, field.parent)
             assert _compact(label) in _compact(_paint(app))
         for other, container in (("waf", "waf"), ("security_group", "sg"), ("nacl", "nacl")):
             assert panel.query_one(f"#ipban_{container}_fields").display == (method == other)
@@ -252,9 +276,7 @@ async def test_pointer_discovery_paints_pending_and_recovers_without_implicit_sa
                 await pilot.pause()
                 assert "Discovering..." not in _paint(app)
                 select = panel.query_one("#ipban_select_ip_set", Select)
-                select.parent.scroll_visible(animate=False)
-                await pilot.pause()
-                assert _exposed(app, select)
+                await _expose(app, pilot, select, select.parent)
                 if outcome == "found":
                     assert any("Found 1 WAF IP set" in note for note in app.notes)
                     assert select.value is Select.NULL

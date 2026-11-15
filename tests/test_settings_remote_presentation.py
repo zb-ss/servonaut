@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from textual import events
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Select, Static, Switch
@@ -166,27 +167,35 @@ def _text(panel: SettingsPanel, selector: str) -> str:
 
 
 def _exposed(app: _RemoteApp, widget: Widget) -> bool:
-    return (
-        widget.region.width > 0 and widget.region.height > 0
-        and app.screen.region.contains_region(widget.region)
-        and app.get_widget_at(*widget.region.center)[0] in {widget, *widget.query("*")}
-    )
+    region = widget.region
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains_region(region)):
+        return False
+    try:
+        hit = app.get_widget_at(*region.center)[0]
+    except NoWidget:
+        return False
+    return hit in {widget, *widget.query("*")}
 
 
-async def _click(app: _RemoteApp, pilot: Pilot, button: Button) -> None:
-    await wait_until(lambda: not button.has_class("-active"))
-    button.scroll_visible(animate=False)
+async def _scroll_into_view(app: _RemoteApp, pilot: Pilot, widget: Widget) -> None:
+    """Scroll as a user would and wait until the control is really exposed."""
+    widget.scroll_visible(animate=False)
     await pilot.pause()
 
     def exposed_after_scrolling() -> bool:
         # A scroll requested before the form reached its final height can stop
-        # short; ask again while the button is still not in view.
-        if _exposed(app, button):
+        # short; ask again while the control is still not in view.
+        if _exposed(app, widget):
             return True
-        button.scroll_visible(animate=False, immediate=True)
-        return _exposed(app, button)
+        widget.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
 
     await wait_until(exposed_after_scrolling)
+
+
+async def _click(app: _RemoteApp, pilot: Pilot, button: Button) -> None:
+    await wait_until(lambda: not button.has_class("-active"))
+    await _scroll_into_view(app, pilot, button)
     assert await pilot.click(button)
 
 
@@ -357,9 +366,7 @@ async def test_memory_gates_preserve_hidden_or_disabled_controls(
         assert note.display is (not entitled)
         if not entitled:
             assert "available with the Solo plan" in _text(panel, "#settings_msync_gate_note")
-            note.scroll_visible(animate=False)
-            await pilot.pause()
-            assert _exposed(app, note)
+            await _scroll_into_view(app, pilot, note)
         assert not remote.loads and not remote.saves
         assert not panel.is_dirty()
         if entitled:
@@ -367,9 +374,7 @@ async def test_memory_gates_preserve_hidden_or_disabled_controls(
             for selector in ("#settings_msync_digest", "#settings_msync_ai_mode", "#btn_msync_save", "#btn_msync_reload"):
                 widget = panel.query_one(selector)
                 assert widget.disabled
-                widget.scroll_visible(animate=False)
-                await pilot.pause()
-                assert _exposed(app, widget)
+                await _scroll_into_view(app, pilot, widget)
 
 
 @pytest.mark.asyncio
@@ -484,9 +489,7 @@ async def test_bw_load_failure_finishes_feedback_and_keeps_local_edit_cancel_ava
 
 async def _attempt_native_memory_save(app: _RemoteApp, pilot: Pilot, trigger: str) -> None:
     button = app.screen.query_one("#btn_msync_save", Button)
-    button.scroll_visible(animate=False)
-    await pilot.pause()
-    assert _exposed(app, button)
+    await _scroll_into_view(app, pilot, button)
     if trigger == "mouse":
         await pilot.click(button)
     else:

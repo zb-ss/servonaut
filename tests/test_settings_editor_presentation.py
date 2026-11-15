@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Select, Static, Switch
@@ -69,8 +70,16 @@ class _EditorHost(_Host):
 
 
 def _exposed(app: _EditorHost, widget: Widget) -> bool:
-    hit, _ = app.get_widget_at(*widget.region.center)
-    return widget.region.width > 0 and widget.region.height > 0 and app.screen.region.contains_region(widget.region) and (hit is widget or widget in hit.ancestors)
+    region = widget.region
+    # A control scrolled out of the screen is simply not exposed; asking the
+    # compositor for a cell outside it raises.
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains_region(region)):
+        return False
+    try:
+        hit, _ = app.get_widget_at(*region.center)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
 
 
 async def _click(app: _EditorHost, pilot: Pilot, widget: Widget) -> None:

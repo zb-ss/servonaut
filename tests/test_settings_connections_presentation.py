@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input
@@ -84,8 +85,33 @@ class _ConnectionsHost(_Host):
 
 
 def _exposed(app: _ConnectionsHost, widget: Widget) -> bool:
-    hit, _ = app.get_widget_at(*widget.region.center)
-    return widget.region.width > 0 and widget.region.height > 0 and app.screen.region.contains_region(widget.region) and (hit is widget or widget in hit.ancestors)
+    region = widget.region
+    # A control scrolled out of the screen is simply not exposed; asking the
+    # compositor for a cell outside it raises.
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains_region(region)):
+        return False
+    try:
+        hit, _ = app.get_widget_at(*region.center)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
+
+
+async def _expose(app, pilot: Pilot, widget: Widget, scroll_target: Widget | None = None) -> None:
+    """Scroll as a user would, then wait until the control is really exposed."""
+    target = scroll_target or widget
+    target.scroll_visible(animate=False)
+    await pilot.pause()
+
+    def exposed_after_scrolling() -> bool:
+        # A scroll requested before the form reached its final height can stop
+        # short; ask again while the control is still not in view.
+        if _exposed(app, widget):
+            return True
+        target.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
+
+    await wait_until(exposed_after_scrolling)
 
 
 async def _click(app: _ConnectionsHost, pilot: Pilot, widget: Widget) -> None:
@@ -130,9 +156,7 @@ async def test_connection_form_labels_editor_and_actions_keep_native_reachabilit
         await wait_until(lambda: form.display)
         for field_id, label in FIELDS[form_kind]:
             field = panel.query_one(f"#{field_id}", Input)
-            field.parent.scroll_visible(animate=False)
-            await pilot.pause()
-            assert _exposed(app, field)
+            await _expose(app, pilot, field, field.parent)
             assert _compact(label) in _compact(_paint(app))
         editor = panel.query_one("#pf_extra_ssh_options" if form_kind == "profile" else "#rl_match_conditions")
         editor.scroll_visible(animate=False)

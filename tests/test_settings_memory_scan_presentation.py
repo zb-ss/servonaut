@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from rich.cells import cell_len
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Static
@@ -87,8 +88,33 @@ class _MemoryScanHost(_Host):
 
 
 def _exposed(app: _MemoryScanHost, widget: Widget) -> bool:
-    hit, _ = app.get_widget_at(*widget.region.center)
-    return widget.region.width > 0 and widget.region.height > 0 and app.screen.region.contains_region(widget.region) and (hit is widget or widget in hit.ancestors)
+    region = widget.region
+    # A control scrolled out of the screen is simply not exposed; asking the
+    # compositor for a cell outside it raises.
+    if not (region.width > 0 and region.height > 0 and app.screen.region.contains_region(region)):
+        return False
+    try:
+        hit, _ = app.get_widget_at(*region.center)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
+
+
+async def _expose(app, pilot: Pilot, widget: Widget, scroll_target: Widget | None = None) -> None:
+    """Scroll as a user would, then wait until the control is really exposed."""
+    target = scroll_target or widget
+    target.scroll_visible(animate=False)
+    await pilot.pause()
+
+    def exposed_after_scrolling() -> bool:
+        # A scroll requested before the form reached its final height can stop
+        # short; ask again while the control is still not in view.
+        if _exposed(app, widget):
+            return True
+        target.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
+
+    await wait_until(exposed_after_scrolling)
 
 
 async def _click(app: _MemoryScanHost, pilot: Pilot, widget: Widget) -> None:
@@ -96,7 +122,16 @@ async def _click(app: _MemoryScanHost, pilot: Pilot, widget: Widget) -> None:
         await wait_until(lambda: not widget.has_class("-active"))
     widget.scroll_visible(animate=False)
     await pilot.pause()
-    await wait_until(lambda: _exposed(app, widget))
+
+    def exposed_after_scrolling() -> bool:
+        # The scroll may have been requested before the form reached its final
+        # height; ask again while the control is still outside the screen.
+        if _exposed(app, widget):
+            return True
+        widget.scroll_visible(animate=False, immediate=True)
+        return _exposed(app, widget)
+
+    await wait_until(exposed_after_scrolling)
     assert await pilot.click(widget)
 
 
@@ -148,9 +183,7 @@ async def test_memory_scalar_labels_compound_status_and_editors_remain_painted_a
         panel = await _ready(app, pilot)
         for field_id, label in MEMORY_SCALARS:
             field = panel.query_one(f"#{field_id}")
-            field.parent.scroll_visible(animate=False, immediate=True)
-            await pilot.pause()
-            assert _exposed(app, field)
+            await _expose(app, pilot, field, field.parent)
             label_widget = field.parent.query_one(".label", Static)
             assert label_widget.render().plain == label
             assert _compact(label) == _compact(_paint(app, label_widget))
