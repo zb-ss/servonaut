@@ -17,6 +17,7 @@ from textual.widgets import Static
 from servonaut.screens.findings import FindingDetailScreen, FindingsScreen
 from servonaut.screens.memory import PinKeyModal
 from servonaut.screens.memory_drift import DriftDiffScreen
+from tests._async_bounds import wait_until
 from tests.test_workspace_security_reflow import (
     _SecurityHost,
     _fake_boundaries as _fake_boundaries,
@@ -133,9 +134,16 @@ async def test_findings_table_columns_are_wider_than_their_headers() -> None:
         await app.push_screen(FindingsScreen())
         await pilot.pause(0.5)
         table = app.screen.query_one("#findings_table")
-        widths = {str(c.label): c.get_render_width(table) for c in table.columns.values()}
-        assert widths["Title"] >= len("Root login over SSH is permitted")
-        assert widths["Status"] >= len("acknowledged")
+
+        def widths() -> dict[str, int]:
+            return {str(c.label): c.get_render_width(table) for c in table.columns.values()}
+
+        # The columns are planned from the table's final width, which can land
+        # after the rows do.
+        await wait_until(
+            lambda: widths().get("Title", 0) >= len("Root login over SSH is permitted")
+            and widths().get("Status", 0) >= len("acknowledged"),
+        )
 
 
 @pytest.mark.asyncio

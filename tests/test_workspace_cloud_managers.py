@@ -343,7 +343,9 @@ async def test_narrow_manager_primary_actions_are_painted_on_arrival(
         assert app.focused is container and container.scroll_y == 0
         assert screen.query_one(Sidebar).display
         assert table.region.height >= 6
-        assert rows[0]["name"] in _painted(app, table)
+        # The columns follow the table's final width, planned once the last
+        # layout pass has run; the rows exist before that re-plan does.
+        await wait_until(lambda: rows[0]["name"] in _painted(app, table))
         identity = screen.query_one(f"#{provider}_mgr_identity", Static)
         assert rows[0]["id"] in str(identity.content)
         assert rows[0]["public_ip"] in str(identity.content)
