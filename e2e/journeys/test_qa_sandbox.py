@@ -138,6 +138,26 @@ async def _screen(page) -> str:
     return await page.page.evaluate("() => window.servonautQa.text()")
 
 
+# The fleet list says how fresh it is ("just now", "14 s ago", "6 min ago",
+# "2 h ago") and keeps that current by itself, so two reads of an otherwise
+# unchanged screen can differ in the age alone.
+_RELATIVE_AGE = re.compile(r"(?:just now|\d+ (?:s|min|h) ago)")
+
+
+def _without_relative_ages(screen: str) -> str:
+    """*screen* with each relative age replaced by one marker.
+
+    The words change width ("just now" to "12 s ago"), so the blanks around an
+    age are collapsed too; everything else must still match exactly.
+    """
+    lines = []
+    for line in screen.splitlines():
+        if _RELATIVE_AGE.search(line):
+            line = re.sub(r" {2,}", " ", _RELATIVE_AGE.sub("<age>", line))
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def _screen_until(page, predicate, desc: str, timeout: float = 20.0) -> str:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -219,7 +239,7 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
             " catch (error) { return error.message; } }"
         )
         assert rerun.startswith("this page already started its session")
-        assert await _screen(page) == screen
+        assert _without_relative_ages(await _screen(page)) == _without_relative_ages(screen)
         await page.page.evaluate("() => window.servonautQa.focus()")
         await _screen_until(page, lambda text: "o Actions" in text, "the fleet table focused again")
         # Without a captured terminal, waitForText says so at once.
