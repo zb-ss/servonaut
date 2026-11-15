@@ -26,6 +26,7 @@ async def _open(app, screen) -> BulkActionModal:
     screen.query_one("#vault_delete_keys", Button).press()
     await wait_until(lambda: isinstance(app.screen, BulkActionModal)
                      and bool(app.screen.query("#bulk_action_list"))
+                     and bool(app.screen.query("#bulk_action_submit"))
                      and app.screen.query_one("#bulk_action_list", SelectionList).option_count > 0)
     return app.screen
 
@@ -34,7 +35,8 @@ async def _review(app, pilot, initial) -> BulkActionModal:
     await pilot.pause()
     initial.query_one("#bulk_action_submit", Button).press()
     await wait_until(lambda: isinstance(app.screen, BulkActionModal) and app.screen is not initial
-                     and bool(app.screen.query("#bulk_action_confirm_input")))
+                     and bool(app.screen.query("#bulk_action_confirm_input"))
+                     and bool(app.screen.query("#bulk_action_submit")))
     return app.screen
 
 

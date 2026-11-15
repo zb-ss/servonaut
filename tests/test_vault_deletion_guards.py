@@ -41,6 +41,9 @@ async def test_demo_deletion_checks_the_real_bound_server(bulk):
             modal = await _open(app, screen)
             modal.query_one("#bulk_action_list", SelectionList).select_all()
             # The initial picker selects; usage is reviewed before confirmation.
+            # The dialog frame mounts its status row (with the input) after the
+            # body, and the action row last, so wait for the action row.
+            await wait_until(lambda: bool(modal.query("#bulk_action_submit")))
             if modal.query("#bulk_action_confirm_input"):
                 modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
             await pilot.pause()
@@ -80,12 +83,15 @@ async def test_unchecked_review_names_each_key_and_limits_the_override_to_it():
         screen = await _loaded(app, pilot)
         initial = await _open(app, screen)
         initial.query_one("#bulk_action_list", SelectionList).select_all()
+        await wait_until(lambda: bool(initial.query("#bulk_action_submit")))
         if initial.query("#bulk_action_confirm_input"):
             initial.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
         await pilot.pause()
         initial.query_one("#bulk_action_submit", Button).press()
         await wait_until(lambda: app.screen is not initial)
-        await wait_until(lambda: bool(app.screen.query("#bulk_action_acknowledge")))
+        # The status row (with the confirmation input) mounts after the body.
+        await wait_until(lambda: bool(app.screen.query("#bulk_action_acknowledge"))
+                         and bool(app.screen.query("#bulk_action_confirm_input")))
         review = app.screen
         description = str(review.query_one("#bulk_action_description").render())
         assert "server-1" in description and "web-1" in description and "db-1" in description

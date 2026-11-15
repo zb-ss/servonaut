@@ -568,7 +568,10 @@ async def test_ca_held_picker_loading_failure_and_explicit_all_selection_are_dis
         screen.query_one("#ca_team", Select).value = "ops"
         await wait_until(lambda: screen._picker_state.get("ca_server") == "loading")
         busy = screen.query_one("#ca_busy")
-        assert busy.is_active and "Loading" in busy.message
+        # The picker state flips before the options worker starts and raises the
+        # busy indicator, so wait for the indicator rather than assume it.
+        await wait_until(lambda: busy.is_active)
+        assert "Loading" in busy.message
         assert screen.query_one("#ca_krl", Button).disabled
         assert screen.query_one("#ca_break_glass_scan", Button).disabled
         assert screen._chosen_servers() is None
