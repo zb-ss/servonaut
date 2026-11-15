@@ -243,7 +243,7 @@ def _glyph_pairs(row: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)  # Measured about 100 s.
 async def test_registered_themes_keep_severity_text_and_pressed_cues_readable(
     record_property: Callable[[str, object], None],
 ) -> None:

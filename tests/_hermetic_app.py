@@ -73,6 +73,7 @@ def run_hermetic_app(
     scenario: str,
     *args: str,
     guarded_home: Optional[Path] = None,
+    child_timeout: float = _CHILD_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     """Run *scenario* in a child process and return its JSON report.
 
@@ -98,7 +99,7 @@ def run_hermetic_app(
     guarded = guarded_home if guarded_home is not None else Path.home()
 
     command = [sys.executable, "-m", "tests._hermetic_app", scenario, str(report_path), *args]
-    completed = _run_child(command, _child_env(home, workdir, guarded), scenario)
+    completed = _run_child(command, _child_env(home, workdir, guarded), scenario, child_timeout)
     report = _read_report(report_path, completed, scenario)
     report["home"] = str(home)
     return report
@@ -127,7 +128,7 @@ def _child_env(home: Path, workdir: Path, guarded: Path) -> Dict[str, str]:
 
 
 def _run_child(
-    command: List[str], env: Dict[str, str], scenario: str
+    command: List[str], env: Dict[str, str], scenario: str, child_timeout: float
 ) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
@@ -138,7 +139,7 @@ def _run_child(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_CHILD_TIMEOUT_SECONDS,
+            timeout=child_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise AssertionError(

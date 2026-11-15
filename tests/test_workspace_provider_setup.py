@@ -273,6 +273,7 @@ async def test_setup_workspace_pane_combinations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)  # Measured up to 17 s.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 async def test_setup_workspace_native_state_survives_reflow(case: ReflowCase) -> None:
     app = case.app_factory(False)

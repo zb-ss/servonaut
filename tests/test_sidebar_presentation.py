@@ -87,6 +87,7 @@ async def _tab_to(pilot: Pilot, control: Button) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)  # Measured about 20 s.
 @pytest.mark.parametrize("theme", THEMES)
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 async def test_routes_and_headers_paint_complete_left_aligned_single_rows(

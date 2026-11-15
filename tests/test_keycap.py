@@ -122,6 +122,7 @@ class _CapHost(App):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)  # Measured about 20 s.
 async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> None:
     """In every registered theme, idle, hovered and focused, framed and compact."""
     app = _CapHost()

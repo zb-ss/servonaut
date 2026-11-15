@@ -194,6 +194,7 @@ async def _click(app: ServonautApp, pilot: Pilot, target: Widget) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 26-33 s; a slow runner needs a wide margin.
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
 async def test_registered_theme_native_switch_paint_census(
     size: tuple[int, int], tmp_path: Path,
@@ -342,6 +343,7 @@ async def _settings_destination(pilot: Pilot, panel_id: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)  # Measured about 21 s.
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_vault_switch_save_reload_keep_and_discard_use_native_controls(
