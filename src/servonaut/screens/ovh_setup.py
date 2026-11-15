@@ -476,6 +476,10 @@ class OVHSetupScreen(WorkspaceScreen):
 
     def on_mount(self) -> None:
         """Load the account being set up into the form fields."""
+        # The form can be left or the app closed before it has finished composing;
+        # Textual then dismantles it under this handler and its fields are gone.
+        if self.is_being_dismantled():
+            return
         config = self.app.config_manager.get()
         ovh = config.ovh
         if self._account_mode:

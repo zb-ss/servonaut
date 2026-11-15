@@ -376,22 +376,63 @@ async def test_setup_save_without_enable_saves_typed_values_then_pops(kind: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
-async def test_setup_add_another_switches_to_itself_without_a_result(kind: str) -> None:
+async def test_setup_add_another_switches_to_itself_without_a_result(
+    kind: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     case = _case(kind)
     app = case.app_factory(True)
+    started: list[WorkspaceScreen] = []
+    original = SCREENS[kind].on_mount
+
+    def record_start(self: WorkspaceScreen) -> None:
+        original(self)
+        started.append(self)
+
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await open_case(case, app, pilot)
         below = app.screen_stack[-2]
         await _assert_whole_toolbar(app, pilot, screen, kind)
+        monkeypatch.setattr(SCREENS[kind], "on_mount", record_start)
         await _click(pilot, IDS[kind].add)
         await wait_until(lambda: screen not in app.screen_stack)
         added = app.screen
         assert type(added) is SCREENS[kind] and added._add_extra is True
+        # The form must finish starting before the app is closed under it.
+        await wait_until(lambda: added in started)
         # switch_screen replaces only the form: the opener stays beneath, and
         # the replaced form's callback is never called.
         assert app.screen_stack[-2] is below
         assert app.root_results == []
         assert app.config_manager.save.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", KINDS)
+async def test_setup_form_closed_during_startup_ends_cleanly(kind: str) -> None:
+    errors: list[BaseException] = []
+
+    class ClosedDuringStartup(SCREENS[kind]):  # type: ignore[misc, valid-type]
+        """Closes the app first, as a closing window does, so Textual dismantles
+        the form before the form's own start-up reads its fields."""
+
+        async def on_mount(self) -> None:
+            self.app.exit()
+            await self.remove_children()
+
+    case = _case(kind)
+    app = case.app_factory(True)
+    original = app._handle_exception
+
+    def record(error: Exception) -> None:
+        errors.append(error)
+        original(error)
+
+    app._handle_exception = record  # type: ignore[method-assign]
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, InstanceListScreen))
+        app.push_screen(ClosedDuringStartup())
+        await pilot.pause()
+    assert errors == []
 
 
 @pytest.mark.asyncio

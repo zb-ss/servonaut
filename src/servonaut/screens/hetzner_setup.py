@@ -412,6 +412,10 @@ class HetznerSetupScreen(WorkspaceScreen):
 
     def on_mount(self) -> None:
         """Load existing Hetzner config into form fields."""
+        # The form can be left or the app closed before it has finished composing;
+        # Textual then dismantles it under this handler and its fields are gone.
+        if self.is_being_dismantled():
+            return
         config = self.app.config_manager.get()
         h = config.hetzner
         if self._account_mode:
