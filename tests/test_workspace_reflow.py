@@ -201,8 +201,9 @@ async def test_navigation_reveal_uses_width_predicate_and_restores_visible_origi
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(90)  # Five full reflows of the Actions screen take about 15 s.
 @pytest.mark.parametrize("family", ["fleet", "actions"])
-async def test_replacement_returns_to_native_columns_and_reopened_panel(
+async def test_replacement_returns_to_native_columns_and_keeps_the_draft(
     family: str,
 ) -> None:
     app = _LayoutHost()
@@ -223,6 +224,17 @@ async def test_replacement_returns_to_native_columns_and_reopened_panel(
                 assert _content(screen).region.right <= panel.region.x
                 assert screen.has_class("-content-narrow") is (size[0] == 160)
             assert editor.document is document and editor.selection == selection
+        assert app._exception is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["fleet", "actions"])
+async def test_a_reopened_panel_returns_to_the_native_column(family: str) -> None:
+    app = _LayoutHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _screen(app, pilot, family)
+        panel = await _open_chat(app, pilot)
+        column_width = panel.region.width
         await pilot.press("f3")
         await wait_until(lambda: not panel.is_attached)
         await wait_until(lambda: screen.query_one("#workspace_chat", Button).label.plain == "Open chat")

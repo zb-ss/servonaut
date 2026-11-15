@@ -291,6 +291,7 @@ async def test_settings_visibility_keeps_actual_field_and_pinned_save_usable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(90)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
 @pytest.mark.parametrize("provider", ["aws", "hetzner", "ovh"])
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 @pytest.mark.parametrize("navigation_visible", [False, True])
@@ -393,55 +394,66 @@ async def test_reflow_keeps_dirty_guard_lazy_cache_search_and_parked_chat(
         assert screen._panels["general"] is general
 
 
+_SAMPLE_NAMES = ("below", "at", "above")
+_BOUNDARY_CASES = [
+    pytest.param(kind, navigation_visible, index, id=f"{kind}-{navigation_visible}-{_SAMPLE_NAMES[index]}")
+    for (kind, navigation_visible) in MEASURED_BOUNDARIES for index in range(3)
+]
+
+
+# The native widths walk a full Settings focus order by Tab (about 15 s of key
+# presses): one width per case keeps each case far from the per-test limit.
 @pytest.mark.asyncio
-@pytest.mark.timeout(120)  # Three widths each retain a full native Settings focus traversal.
-@pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("kind", ["chat-min", "content-narrow"])
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("kind,navigation_visible,sample_index", _BOUNDARY_CASES)
 async def test_qualified_settings_boundaries_measure_fields_and_account_actions(
-    manager: ConfigManager, navigation_visible: bool, kind: str,
+    manager: ConfigManager, kind: str, navigation_visible: bool, sample_index: int,
 ) -> None:
+    """One width around a threshold, reached by the resize that crosses it.
+
+    The app starts at the width before the sample, so the sample is reached by
+    the same single layout transition a resize through all three widths makes.
+    """
     case = _case(manager, "aws")
     samples = case.boundary_samples(kind, navigation_visible)
+    threshold = (
+        SettingsScreen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
+        else SettingsScreen.CONTENT_NARROW_WIDTH
+    )
+    assert [sample.native_content_width for sample in samples] == [
+        threshold - 1, threshold, threshold + 1,
+    ]
+    sample = samples[sample_index]
     app = case.app_factory(navigation_visible)
-    async with app.run_test(size=samples[0].size) as pilot:
+    async with app.run_test(size=samples[max(sample_index - 1, 0)].size) as pilot:
         screen = await open_case(case, app, pilot)
         baseline = case.state(screen)
         await open_chat(app, pilot, screen)
-        threshold = (
-            screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
-            else screen.CONTENT_NARROW_WIDTH
-        )
-        assert [sample.native_content_width for sample in samples] == [
-            threshold - 1, threshold, threshold + 1,
-        ]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                # Width only while forcing columns that the real policy hides.
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
+        with one_layout_transition(screen):
+            await pilot.resize_terminal(*sample.size)
+            await pilot.pause()
+        assert screen.has_class("-chat-replace") is sample.expected_replace
+        assert screen.has_class("-content-narrow") is sample.expected_content_narrow
+        assert_layout(app, screen)
+        if sample.expected_replace:
+            # Width only while forcing columns that the real policy hides.
+            with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
                 screen.apply_workspace_state()
                 await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is (
-                    sample.expected_content_narrow
-                )
-                assert not content(screen).display
-            else:
                 assert content(screen).region.width == sample.native_content_width
-                await _assert_field_fit(
-                    app, pilot, screen.query_one(ACCOUNT_FIELDS["aws"]),
-                )
-                await _assert_account_actions(app, pilot, "aws")
-                await _assert_save_fit(app, pilot, "aws")
-            assert case.state(screen) == baseline
+            screen.apply_workspace_state()
+            await pilot.pause()
+            assert screen.has_class("-chat-replace") is sample.expected_replace
+            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
+            assert not content(screen).display
+        else:
+            assert content(screen).region.width == sample.native_content_width
+            await _assert_field_fit(
+                app, pilot, screen.query_one(ACCOUNT_FIELDS["aws"]),
+            )
+            await _assert_account_actions(app, pilot, "aws")
+            await _assert_save_fit(app, pilot, "aws")
+        assert case.state(screen) == baseline
 
 
 @pytest.mark.asyncio
@@ -661,6 +673,7 @@ async def test_hetzner_add_child_return_refreshes_and_applies_reflow_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(90)  # Walks a full Settings focus order by Tab (about 15 s).
 @pytest.mark.parametrize("size,navigation_visible,chat_open", [
     ((120, 40), True, False), ((128, 40), True, False),
     ((136, 40), True, False), ((160, 50), False, True),
