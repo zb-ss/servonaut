@@ -485,10 +485,10 @@ changes that have nothing to do with it. Set `SERVONAUT_SNAPSHOTS_STRICT=1`
 to run them anyway: a screen that renders differently fails as usual, and one
 that renders the same fails because the recorded version is out of date.
 
-CI runs the tests in both ways. The test jobs skip them on a version
-mismatch; the `screenshots / Python 3.12` job runs them in strict mode on
-every pull request and on master, and uploads the new renderings and diffs as
-the `screenshot-failures` artifact when it fails. That job is not a required
+A plain local run skips them on a version mismatch. CI runs them only in the
+`screenshots / Python 3.12` job, in strict mode, on every pull request and on
+master, and uploads the new renderings and diffs as the `screenshot-failures`
+artifact when it fails. That job is not a required
 check: when it fails because Textual changed, install the new version, review
 the renderings, and update all the snapshots in one change with
 `--update-snapshots`, which also records the new version.

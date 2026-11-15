@@ -315,8 +315,19 @@ def test_ci_runs_the_screenshot_tests_strictly_in_their_own_job() -> None:
     assert 'SERVONAUT_SNAPSHOTS_STRICT: "1"' in job
     assert "pytest --tb=short -q -n auto tests/snapshots" in job
     assert "tests/snapshots/__failures__/" in job
-    # Elsewhere a Textual version mismatch skips them instead of failing.
+    # The test matrix leaves them out, so they run once, strictly, here.
     assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["test"]
+    pytest_commands = [
+        line for line in jobs["test"].splitlines() if "python -m pytest" in line
+    ]
+    assert len(pytest_commands) == 2
+    for command in pytest_commands:
+        assert "--ignore=tests/snapshots" in command
+
+
+def test_ci_test_matrix_lets_every_python_version_finish() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    assert "fail-fast: false" in jobs["test"]
 
 
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
