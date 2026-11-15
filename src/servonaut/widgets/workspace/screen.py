@@ -71,7 +71,7 @@ class WorkspaceScreen(Screen):
     async def on_mount(self) -> None:
         # Closing the window while the screen is still starting up tears the
         # screen down before this handler runs; there is nothing left to set up.
-        if self.app_is_exiting():
+        if self.is_being_dismantled():
             return
         self._sync_notification_lane()
         if not any(isinstance(child, WorkspaceNotificationSpace) for child in self.children):
@@ -86,6 +86,20 @@ class WorkspaceScreen(Screen):
         also keeps a stubbed app from reading as exiting.
         """
         return getattr(self.app, "_exit", False) is True
+
+    def is_being_dismantled(self) -> bool:
+        """True when this screen's start-up is running on a screen that will not be shown.
+
+        A screen composes its children before its mount handlers run, and that
+        can take a while. If the app is exiting or shutting down, or the screen
+        was replaced or popped in the meantime, Textual dismantles it underneath
+        the handlers, so the widgets they look up may be missing.
+        """
+        if self.app_is_exiting() or getattr(self.app, "is_running", True) is False:
+            return True
+        # A real app reports a list; a stubbed app is never read as dismantling.
+        stack = getattr(self.app, "screen_stack", None)
+        return isinstance(stack, list) and self not in stack
 
     def _sync_notification_lane(self, height: int | None = None) -> None:
         """Use the two-row lane on short terminals, from the terminal's own height."""

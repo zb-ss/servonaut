@@ -7,12 +7,16 @@ the screen underneath them, which used to end the process with a traceback.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from textual.app import App
+from textual.screen import Screen
 
 from scripts.desktop_probe import child
 from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.widgets.workspace.screen import WorkspaceScreen
+from tests._async_bounds import wait_until
 
 
 class _ExitsBeforeStartup(InstanceListScreen):
@@ -67,3 +71,40 @@ async def test_workspace_screen_skips_setup_once_the_app_is_exiting() -> None:
     async with Host().run_test():
         pass
     assert errors == []
+
+
+class _SlowToCompose(InstanceListScreen):
+    """Takes a while to mount its widgets, as the real screen does on a busy machine."""
+
+    async def mount_composed_widgets(self, widgets: list) -> None:
+        await asyncio.sleep(0.5)
+        await super().mount_composed_widgets(widgets)
+
+
+@pytest.mark.asyncio
+async def test_fleet_screen_skips_startup_when_replaced_before_it_has_composed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(child, "InstanceListScreen", _SlowToCompose)
+    app = _ErrorLog()
+    async with app.run_test(size=(120, 40)) as pilot:
+        # The fleet screen is current as soon as it is pushed, but its widgets
+        # are still being composed; navigating away at once dismantles it.
+        app.push_screen(_SlowToCompose())
+        await wait_until(lambda: type(app.screen) is _SlowToCompose)
+        await app.switch_screen(Screen())
+        await pilot.pause()
+        await pilot.pause()
+    assert app.errors == []
+
+
+@pytest.mark.asyncio
+async def test_fleet_screen_skips_startup_when_the_app_shuts_down_before_it_has_composed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(child, "InstanceListScreen", _SlowToCompose)
+    app = _ErrorLog()
+    async with app.run_test(size=(120, 40)):
+        app.push_screen(_SlowToCompose())
+        await wait_until(lambda: type(app.screen) is _SlowToCompose)
+    assert app.errors == []
