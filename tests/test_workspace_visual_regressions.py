@@ -27,14 +27,27 @@ def _line_values(app: _Host) -> dict[str, ValueRow]:
     return rows
 
 
+def _shows_instance(app: _Host, name: str) -> bool:
+    """The cursor is on ``name`` and the one-line form already shows it."""
+    selected = app.screen.query_one(InstanceTable).get_selected_instance()
+    bar = app.screen.query_one("#fleet_value_bar")
+    rows = {row.field: row for row in app.screen.query_one("#fleet_value_line").query(ValueRow)}
+    return bool(selected) and selected["name"] == name and bar.display and "name" in rows \
+        and rows["name"].value == name
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resize", ["navigation", "terminal"])
 async def test_values_stay_complete_and_reachable_after_reflow(resize: str) -> None:
     app = _Host()
     app.instances = [_row("web-1"), _row("api-1"), _row("db-1")]
     async with app.run_test(size=(120 if resize == "terminal" else 100, 30)) as pilot:
-        app.screen.query_one(InstanceTable).move_cursor(row=2)
-        await pilot.pause()
+        table = app.screen.query_one(InstanceTable)
+        # The rows arrive after the screen mounts, and the value line follows the cursor
+        # a frame later; move to the third row only once it exists, then wait for it.
+        await wait_until(lambda: table.row_count == 3)
+        table.move_cursor(row=2)
+        await wait_until(lambda: _shows_instance(app, "db-1"))
         rows = _line_values(app)
         selected = app.screen.query_one(InstanceTable).get_selected_instance()
         expected = {field: selected[field] for field in ("public_ip", "private_ip", "region")}
@@ -62,7 +75,7 @@ async def test_reflow_keeps_the_values_and_the_chat_draft(
     app = _Host()
     async with app.run_test(size=(120, 30)) as pilot:
         app.screen.query_one(InstanceTable).focus()
-        await pilot.pause()
+        await wait_until(lambda: _shows_instance(app, "web-1"))
         rows = _line_values(app)
         values = {field: row.value for field, row in rows.items()}
         await pilot.press("f2")
