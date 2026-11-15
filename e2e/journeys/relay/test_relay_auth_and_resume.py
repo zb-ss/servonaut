@@ -39,15 +39,22 @@ def test_expired_access_token_is_refreshed_mid_session(journey, fake_cloud, acco
     listener = relay(home).start()
     user_id = wait_until_connected(fake_cloud, listener)
 
+    before = len(fake_cloud.requests())
     fake_cloud.expire_access_token()
     wait_for(
         lambda: any(h["token_generation"] == 2 for h in fake_cloud.relay.heartbeats()),
         desc="a heartbeat with the refreshed token",
         alive=lambda: listener.running,
     )
-    # One rejected heartbeat, one refresh, and the heartbeat retried.
-    heartbeats = fake_cloud.statuses("/api/cli/heartbeat")
-    assert 401 in heartbeats and heartbeats[heartbeats.index(401) + 1] == 200
+    # The first authenticated call to reach the service is refused (the
+    # heartbeat or, as often, the subscriber-token or stream call); which one
+    # sees the expiry first is not the point. One refresh follows, and a
+    # heartbeat then succeeds with the new token.
+    refused = [
+        entry["path"] for entry in fake_cloud.requests()[before:]
+        if entry["status"] == 401 and entry["path"] != "/api/oauth/refresh"
+    ]
+    assert refused, "no authenticated call was refused after the expiry"
     assert fake_cloud.statuses("/api/oauth/refresh") == [200]
     # The rotated pair was saved, so the next start uses it.
     assert read_session(home.home)["refresh_token"] == fake_cloud.tokens()[1]
