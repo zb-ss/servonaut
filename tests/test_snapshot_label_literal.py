@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -14,7 +15,7 @@ from textual.widgets._toast import Toast
 from servonaut.config.schema import AppConfig
 from servonaut.screens.snapshot_manager import LabelInputModal, SnapshotManagerScreen
 from servonaut.services.redaction_service import RedactionService
-from tests._async_bounds import wait_until
+from tests._async_bounds import STEP_TIMEOUT_SECONDS, wait_until
 from tests.test_workspace_pilot import _Host
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -95,6 +96,38 @@ def _host(sync: _Sync) -> _Host:
     return app
 
 
+def _layout_fingerprint(screen: SnapshotManagerScreen, table: DataTable) -> tuple:
+    return (
+        tuple(table.region), tuple(table.content_region), table.header_height,
+        tuple((widget.id, tuple(widget.region)) for widget in screen.query("Button")),
+    )
+
+
+async def _wait_for_a_still_first_row(
+    app: _Host, pilot: Pilot, screen: SnapshotManagerScreen, table: DataTable, frames: int = 4,
+) -> None:
+    """Wait until the first data row is under the pointer for ``frames`` unchanged frames."""
+    seen: list[tuple] = []
+
+    def first_row_hit() -> bool:
+        x = table.content_region.x + 1
+        y = table.content_region.y + table.header_height
+        return app.get_widget_at(x, y)[0] is table
+
+    async def settle() -> None:
+        while len(seen) < frames:
+            await pilot.pause()
+            current = _layout_fingerprint(screen, table)
+            if not first_row_hit():
+                seen.clear()
+                continue
+            if seen and seen[-1] != current:
+                seen.clear()
+            seen.append(current)
+
+    await asyncio.wait_for(settle(), timeout=STEP_TIMEOUT_SECONDS)
+
+
 async def _open(app: _Host, pilot: Pilot) -> SnapshotManagerScreen:
     await app.push_screen(SnapshotManagerScreen())
     screen = app.screen
@@ -151,14 +184,10 @@ async def test_snapshot_native_label_save_keeps_success_toast_literal(
         screen = await _open(app, pilot)
         table = screen.query_one("#snapshots_table", DataTable)
         await wait_until(lambda: table.row_count == 1)
-        # The action rows re-fit their buttons over a few frames; click once the
-        # first data row is under the pointer.
-        def _first_row_hit() -> bool:
-            x = table.content_region.x + 1
-            y = table.content_region.y + table.header_height
-            return app.get_widget_at(x, y)[0] is table
-
-        await wait_until(_first_row_hit)
+        # The action rows re-fit their buttons over a few frames, and a click lands
+        # wherever the layout is when it is delivered; click once the first data row
+        # is under the pointer and the layout has held still for several frames.
+        await _wait_for_a_still_first_row(app, pilot, screen, table)
         assert await pilot.click(table, offset=(
             table.content_region.x - table.region.x + 1,
             table.content_region.y - table.region.y + table.header_height,

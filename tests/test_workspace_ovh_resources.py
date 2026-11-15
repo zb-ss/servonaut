@@ -152,6 +152,23 @@ async def _toggle_navigation(app: _ResourceApp, pilot: Pilot) -> None:
     await pilot.pause()
 
 
+async def _round_trip_through_the_rail(
+    app: _ResourceApp, pilot: Pilot, screen: WorkspaceScreen, origin: object, *keys: str,
+) -> None:
+    """Open the rail, press ``keys`` in it, leave with escape and wait for focus to return.
+
+    Focus moves into the rail a frame after the key, and escape only leaves the
+    rail once focus is there; sent earlier it would go back to the screen.
+    """
+    sidebar = screen.query_one(Sidebar)
+    await pilot.press("shift+f6")
+    await wait_until(lambda: sidebar.navigation_mode and sidebar.has_focus_within)
+    if keys:
+        await pilot.press(*keys)
+    await pilot.press("escape")
+    await wait_until(lambda: app.screen is not screen or (not sidebar.navigation_mode and app.focused is origin))
+
+
 async def _tab_to(app: _ResourceApp, pilot: Pilot, selector: str) -> None:
     target = app.screen.query_one(selector)
     assert target in app.screen.focus_chain
@@ -195,7 +212,7 @@ async def test_resource_controls_and_content_remain_reachable(
         assert screen.query_one("#workspace_context", Static).render().plain == label
         for selector in ("#workspace_navigation", "#workspace_chat"):
             _assert_exposed(app, selector)
-        await pilot.press("shift+f6", "escape")
+        await _round_trip_through_the_rail(app, pilot, screen, origin)
         assert app.screen is screen and app.focused is origin
         assert screen.query_one(Sidebar).display is visible
         for selector in (f"#{table_id}", f"#{action_id}"):
@@ -226,9 +243,8 @@ async def test_resource_letters_are_inert_in_navigation_and_work_in_content(
 
         monkeypatch.setattr(screen, method, record_action)
         origin = app.focused
-        await pilot.press("shift+f6", key)
+        await _round_trip_through_the_rail(app, pilot, screen, origin, key)
         called.assert_not_called()
-        await pilot.press("escape")
         assert app.screen is screen and app.focused is origin
         assert not screen.query_one(Sidebar).display
         await pilot.press(key)
