@@ -19,7 +19,7 @@ from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.screens.server_actions import ServerActionsScreen
 from servonaut.widgets.chat_panel import ChatPanel
-from servonaut.widgets.fleet_values import ValueRow
+from servonaut.widgets.fleet_values import ValueRow, instance_values
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
@@ -97,6 +97,13 @@ async def _click(pilot: Pilot, selector: str) -> None:
     assert await pilot.click(selector)
 
 
+def _inspector_shows_selection(screen: Screen, table: InstanceTable) -> bool:
+    """The inspector has caught up with the server under the table's cursor."""
+    selected = instance_values(table.get_selected_instance())
+    shown = [row.value for row in screen.query(ValueRow)]
+    return bool(selected) and selected["name"] in shown
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 async def test_navigation_toggle_reclaims_width_without_changing_content(size: tuple) -> None:
@@ -106,13 +113,18 @@ async def test_navigation_toggle_reclaims_width_without_changing_content(size: t
         table = screen.query_one(InstanceTable)
         assert app.focused is table
         table.move_cursor(row=1)
+        await wait_until(lambda: _inspector_shows_selection(screen, table))
         await pilot.pause()
         old_width = table.region.width
         old_row = table.cursor_row
         sidebar_width = screen.query_one(Sidebar).region.width
         values = [row.value for row in screen.query(ValueRow)]
         await _click(pilot, "#workspace_navigation")
-        await pilot.pause()
+        await wait_until(lambda: (
+            not screen.query_one(Sidebar).display
+            and table.region.width == old_width + sidebar_width
+            and [row.value for row in screen.query(ValueRow)] == values
+        ))
         assert not screen.query_one(Sidebar).display
         assert table.region.width == old_width + sidebar_width
         assert table.cursor_row == old_row
@@ -120,7 +132,7 @@ async def test_navigation_toggle_reclaims_width_without_changing_content(size: t
         assert app.focused is table
         _assert_controls_clickable(app)
         await _click(pilot, "#workspace_navigation")
-        await pilot.pause()
+        await wait_until(lambda: table.region.width == old_width)
         assert table.region.width == old_width
 
 
