@@ -362,45 +362,70 @@ async def _scenario_boot() -> Dict[str, Any]:
         }
 
 
-async def _settings_round_trip(dwell: float) -> Dict[str, Any]:
-    """Open Settings from the sidebar, leave for Instances after *dwell* s."""
-    from textual.widgets import Button
+async def _settings_round_trips_in_one_app(dwells: List[float]) -> List[Dict[str, Any]]:
+    """Open Settings from the sidebar and leave for Instances, once per dwell.
 
+    All the round trips run in one app. Each one still opens a freshly built
+    Settings screen and a freshly built Instances screen, which is what the
+    mount and teardown window under test depends on; booting a new app for
+    every dwell only repeated the start-up, which dominated the run time.
+    """
     from servonaut.app import ServonautApp
-    from servonaut.screens.instance_list import InstanceListScreen
-    from servonaut.screens.settings import SettingsScreen
 
-    outcome: Dict[str, Any] = {"dwell": dwell, "error": None, "final_screen": None}
+    outcomes: List[Dict[str, Any]] = [
+        {"dwell": dwell, "error": "not run: an earlier round trip failed", "final_screen": None}
+        for dwell in dwells
+    ]
     app = ServonautApp()
     try:
         async with app.run_test(headless=True, size=(140, 45)) as pilot:
             await pilot.pause()
-            # Expand the sidebar group that holds Settings, as a user would.
-            await pilot.click("#section_tools > Button.section-header")
-            instances = app.screen
-            # Button.press() rather than pilot.click(): a Pilot click settles
-            # the new screen before returning, hiding the window under test.
-            instances.query_one("#nav_settings", Button).press()
-            await _wait_until(
-                app,
-                lambda: isinstance(app.screen, SettingsScreen) and app.screen.is_mounted,
-                "the Settings screen",
-            )
-            await asyncio.sleep(dwell)
-            app.screen.query_one("#nav_list", Button).press()
-            await _wait_until(
-                app,
-                lambda: isinstance(app.screen, InstanceListScreen)
-                and app.screen is not instances
-                and app.screen.is_mounted,
-                "the Instances screen",
-            )
-            await pilot.pause()
-            await pilot.pause()
-            outcome["final_screen"] = type(app.screen).__name__
-    except Exception as exc:  # noqa: BLE001 - reported to the parent test
-        outcome["error"] = f"{type(exc).__name__}: {exc}"
-    return outcome
+            for outcome in outcomes:
+                outcome["error"] = None
+                try:
+                    await _settings_round_trip(app, pilot, outcome["dwell"], outcome)
+                except Exception as exc:  # noqa: BLE001 - reported to the parent test
+                    outcome["error"] = f"{type(exc).__name__}: {exc}"
+                    break
+                if app._exception is not None:
+                    outcome["error"] = f"{type(app._exception).__name__}: {app._exception}"
+                    break
+    except Exception as exc:  # noqa: BLE001 - raised by the app's exit, after the last trip
+        failed = [o for o in outcomes if o["error"] is not None]
+        for outcome in failed or outcomes[-1:]:
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+    return outcomes
+
+
+async def _settings_round_trip(app: Any, pilot: Any, dwell: float, outcome: Dict[str, Any]) -> None:
+    from textual.widgets import Button
+
+    from servonaut.screens.instance_list import InstanceListScreen
+    from servonaut.screens.settings import SettingsScreen
+
+    # Expand the sidebar group that holds Settings, as a user would.
+    await pilot.click("#section_tools > Button.section-header")
+    instances = app.screen
+    # Button.press() rather than pilot.click(): a Pilot click settles
+    # the new screen before returning, hiding the window under test.
+    instances.query_one("#nav_settings", Button).press()
+    await _wait_until(
+        app,
+        lambda: isinstance(app.screen, SettingsScreen) and app.screen.is_mounted,
+        "the Settings screen",
+    )
+    await asyncio.sleep(dwell)
+    app.screen.query_one("#nav_list", Button).press()
+    await _wait_until(
+        app,
+        lambda: isinstance(app.screen, InstanceListScreen)
+        and app.screen is not instances
+        and app.screen.is_mounted,
+        "the Instances screen",
+    )
+    await pilot.pause()
+    await pilot.pause()
+    outcome["final_screen"] = type(app.screen).__name__
 
 
 async def _scenario_leave_before_rebaseline() -> Dict[str, Any]:
@@ -463,9 +488,9 @@ async def _scenario_leave_before_rebaseline() -> Dict[str, Any]:
 
 
 async def _scenario_settings_round_trips(*dwells: str) -> List[Dict[str, Any]]:
-    """Run one fresh app per dwell (seconds) and report each outcome."""
+    """Run one Settings round trip per dwell (seconds) and report each outcome."""
     _install_stubs()
-    return [await _settings_round_trip(float(dwell)) for dwell in dwells]
+    return await _settings_round_trips_in_one_app([float(dwell) for dwell in dwells])
 
 
 async def _scenario_signed_in_with_api_override(api_url: str) -> Dict[str, Any]:
