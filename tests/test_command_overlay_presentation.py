@@ -474,7 +474,9 @@ async def test_console_notification_never_obscures_input_after_original_qualific
         overlay = await _open(app, pilot)
         positions = _controls(app, overlay)
         overlay.notify("Fixture command information", title="Command", timeout=30)
-        await wait_until(lambda: bool(app.screen.query(Toast)))
+        # Measure only once the toast has been laid out; a toast that exists
+        # but has no region yet covers nothing and would hide an overlap.
+        await wait_until(lambda: any(toast.region.area for toast in app.screen.query(Toast)))
         assert _controls(app, overlay) == positions
 
 

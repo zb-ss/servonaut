@@ -94,3 +94,10 @@ RichLog {
     color: $text;
     border: none;
 }
+
+/* Toasts sit above the composer, over the output, so they never cover the
+   input, its label or the key hints. */
+CommandOverlay > ToastRack {
+    margin-bottom: 8;
+    max-height: 8;
+}
