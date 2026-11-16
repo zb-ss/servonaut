@@ -91,9 +91,11 @@ async def _answer(app, pilot, *, confirm: bool) -> None:
         lambda: isinstance(app.screen, ConfirmActionScreen) and app.screen.query("#btn_cancel"),
     )
     if confirm:
-        app.screen.query_one("#confirm_input").value = "remove"
-        await pilot.pause()
-        app.screen.query_one("#btn_confirm").press()
+        dialog = app.screen
+        dialog.query_one("#confirm_input").value = "remove"
+        # The button stays disabled until the input change has been handled.
+        await wait_until(lambda: not dialog.query_one("#btn_confirm").disabled)
+        dialog.query_one("#btn_confirm").press()
     else:
         app.screen.query_one("#btn_cancel").press()
     await wait_until(lambda: not isinstance(app.screen, ConfirmActionScreen))
@@ -142,6 +144,8 @@ async def test_confirming_removes_exactly_the_highlighted_override(trigger) -> N
         else:
             await pilot.press("delete")
         await _answer(app, pilot, confirm=True)
+        # The dialog closes before its result reaches the keys screen, so wait for the removal.
+        await wait_until(lambda: "id-db-1" not in app.config_manager.get().instance_keys)
         assert app.config_manager.get().instance_keys == {"id-web-1": "~/.ssh/web_key"}
 
 
