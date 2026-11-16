@@ -31,9 +31,18 @@ async def _open(app, screen) -> BulkActionModal:
     return app.screen
 
 
+async def _press_when_enabled(button: Button) -> None:
+    """Press a submit button once the dialog has enabled it.
+
+    The dialog enables submit from the selection and input change handlers, so
+    a press right after changing them is ignored while the button is disabled.
+    """
+    await wait_until(lambda: not button.disabled)
+    button.press()
+
+
 async def _review(app, pilot, initial) -> BulkActionModal:
-    await pilot.pause()
-    initial.query_one("#bulk_action_submit", Button).press()
+    await _press_when_enabled(initial.query_one("#bulk_action_submit", Button))
     await wait_until(lambda: isinstance(app.screen, BulkActionModal) and app.screen is not initial
                      and bool(app.screen.query("#bulk_action_confirm_input"))
                      and bool(app.screen.query("#bulk_action_submit")))
@@ -60,7 +69,7 @@ async def test_bulk_delete_selects_only_ssh_keys_and_requires_typed_confirmation
         await pilot.pause()
         for selector in ("#bulk_action_cancel", "#bulk_action_submit"):
             assert modal.region.contains_region(modal.query_one(selector).region)
-        modal.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: len(service.delete_calls) == 2)
         await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 2)
         assert [call["item_id"] for call in service.delete_calls] == ["k1", "k3"]
@@ -118,8 +127,7 @@ async def test_bulk_delete_continues_after_in_use_and_service_failures():
         modal.query_one("#bulk_action_list", SelectionList).select_all()
         modal = await _review(app, pilot, modal)
         modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
-        await pilot.pause()
-        modal.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: service.delete_ssh_key.await_count == 3)
         await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 3)
         messages = "\n".join(message for message, _ in app.notes)
@@ -142,13 +150,12 @@ async def test_unchecked_assignments_need_the_extra_choice_and_stronger_phrase()
         modal = await _review(app, pilot, modal)
         modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
         modal.query_one("#bulk_action_acknowledge", Checkbox).value = True
-        await pilot.pause()
+        hint = modal.query_one("#bulk_action_acknowledge_hint")
+        await wait_until(lambda: hint.display)
         assert modal.query_one("#bulk_action_submit", Button).disabled
-        assert modal.query_one("#bulk_action_acknowledge_hint").display
         assert not service.delete_ssh_key.called
         modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE UNCHECKED"
-        await pilot.pause()
-        modal.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: service.delete_ssh_key.await_count == 1)
         service.delete_ssh_key.assert_awaited_once_with(
             vault_id=VAULT, item_id="k1", servers=[], allow_unchecked=True, unchecked_targets=[["aws", "", "i-1"]],
@@ -172,8 +179,7 @@ async def test_demo_mode_hides_key_and_server_names_in_partial_results():
         modal.query_one("#bulk_action_list", SelectionList).select("k1")
         modal = await _review(app, pilot, modal)
         modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
-        await pilot.pause()
-        modal.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: any("1 kept" in message for message, _ in app.notes))
         messages = "\n".join(message for message, _ in app.notes)
         assert "private-key" not in messages and "private-server" not in messages
