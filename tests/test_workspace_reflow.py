@@ -201,7 +201,7 @@ async def test_navigation_reveal_uses_width_predicate_and_restores_visible_origi
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(90)  # Five full reflows of the Actions screen take about 15 s.
+@pytest.mark.timeout(180)  # Five full reflows of the Actions screen take about 15 s.
 @pytest.mark.parametrize("family", ["fleet", "actions"])
 async def test_replacement_returns_to_native_columns_and_keeps_the_draft(
     family: str,

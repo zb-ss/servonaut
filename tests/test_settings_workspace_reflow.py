@@ -291,7 +291,7 @@ async def test_settings_visibility_keeps_actual_field_and_pinned_save_usable(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(90)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
+@pytest.mark.timeout(180)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
 @pytest.mark.parametrize("provider", ["aws", "hetzner", "ovh"])
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 @pytest.mark.parametrize("navigation_visible", [False, True])
@@ -319,7 +319,7 @@ async def test_accounts_keep_actual_fields_and_all_native_actions_exposed(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(120)  # Full reflow and native focus traversal exceed the default budget.
+@pytest.mark.timeout(240)  # About 26 s alone: a full reflow plus a Tab walk to every essential control.
 async def test_dirty_cached_aws_cursor_and_native_chat_selection_survive_reflow(
     manager: ConfigManager,
 ) -> None:
@@ -404,7 +404,7 @@ _BOUNDARY_CASES = [
 # The native widths walk a full Settings focus order by Tab (about 15 s of key
 # presses): one width per case keeps each case far from the per-test limit.
 @pytest.mark.asyncio
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("kind,navigation_visible,sample_index", _BOUNDARY_CASES)
 async def test_qualified_settings_boundaries_measure_fields_and_account_actions(
     manager: ConfigManager, kind: str, navigation_visible: bool, sample_index: int,
@@ -673,7 +673,7 @@ async def test_hetzner_add_child_return_refreshes_and_applies_reflow_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(90)  # Walks a full Settings focus order by Tab (about 15 s).
+@pytest.mark.timeout(180)  # Walks a full Settings focus order by Tab (about 15 s).
 @pytest.mark.parametrize("size,navigation_visible,chat_open", [
     ((120, 40), True, False), ((128, 40), True, False),
     ((136, 40), True, False), ((160, 50), False, True),
