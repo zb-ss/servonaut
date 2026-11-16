@@ -18,6 +18,7 @@ from servonaut.styles.themes import SERVONAUT_THEMES
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
 
 from tests._async_bounds import wait_until
+from tests._theme_sets import theme_chunks
 
 
 class DialogHost(App):
@@ -104,81 +105,83 @@ async def test_short_dialog_keeps_safe_focus_and_returns_to_origin(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", REGISTERED_THEMES)
-async def test_dialog_action_focus_shows_a_cue_in_every_theme(theme: str) -> None:
+@pytest.mark.parametrize("themes", theme_chunks())
+async def test_dialog_action_focus_shows_a_cue_in_every_theme(themes: tuple[str, ...]) -> None:
     """Every action variant shows focus with an underline, and an accent border where it can."""
     app = DialogHost()
-    app.theme = theme
-    screen, _ = make_dialog("confirm")
-    results: list[bool] = []
+    assert set(themes) <= set(app.available_themes)
     async with app.run_test(size=(100, 30)) as pilot:
-        app.push_screen(screen, results.append)
-        await pilot.pause()
-        field = screen.query_one("#confirm_input", Input)
-        button = screen.query_one("#btn_confirm", Button)
-        field.value = "web-1"
-        await pilot.pause()
-        def label_underlined() -> bool:
-            segments = [
-                segment
-                for y in range(button.size.height)
-                for segment in button.render_line(y)
-                if "Delete" in segment.text
-            ]
-            assert segments
-            return all(segment.style and segment.style.underline for segment in segments)
+        for theme in themes:
+            app.theme = theme
+            screen, _ = make_dialog("confirm")
+            results: list[bool] = []
+            app.push_screen(screen, results.append)
+            await pilot.pause()
+            field = screen.query_one("#confirm_input", Input)
+            button = screen.query_one("#btn_confirm", Button)
+            field.value = "web-1"
+            await pilot.pause()
+            def label_underlined() -> bool:
+                segments = [
+                    segment
+                    for y in range(button.size.height)
+                    for segment in button.render_line(y)
+                    if "Delete" in segment.text
+                ]
+                assert segments
+                return all(segment.style and segment.style.underline for segment in segments)
 
-        # Dialog actions draw no background block (no halo), so focus shows as
-        # an underlined label (a cue that needs no colour) plus an accent border.
-        # Some themes (textual-dark, textual-light) give warning the accent's
-        # own colour; there the underline is the cue.
-        css = app.get_css_variables()
-        missing_cues: list[str] = []
-        for variant in ("default", "warning", "error"):
-            border_can_change = variant == "default" or css[variant] != css["accent"]
-            button.variant = variant
+            # Dialog actions draw no background block (no halo), so focus shows as
+            # an underlined label (a cue that needs no colour) plus an accent border.
+            # Some themes (textual-dark, textual-light) give warning the accent's
+            # own colour; there the underline is the cue.
+            css = app.get_css_variables()
+            missing_cues: list[str] = []
+            for variant in ("default", "warning", "error"):
+                border_can_change = variant == "default" or css[variant] != css["accent"]
+                button.variant = variant
+                field.focus()
+                await pilot.pause()
+                blurred_border = button.styles.border_top
+                blurred_underline = label_underlined()
+                await pilot.press("tab", "tab")
+                await pilot.pause()
+                assert screen.focused is button
+                if blurred_underline or not label_underlined():
+                    missing_cues.append(f"{variant}: underline")
+                if border_can_change and button.styles.border_top == blurred_border:
+                    missing_cues.append(f"{variant}: border")
+            assert not missing_cues, f"{theme} lacks focus cues: {missing_cues}"
             field.focus()
+            field.value = "invalid"
             await pilot.pause()
-            blurred_border = button.styles.border_top
-            blurred_underline = label_underlined()
-            await pilot.press("tab", "tab")
+            assert button.disabled and button.styles.opacity == 0.5
+            button.focus()
             await pilot.pause()
-            assert screen.focused is button
-            if blurred_underline or not label_underlined():
-                missing_cues.append(f"{variant}: underline")
-            if border_can_change and button.styles.border_top == blurred_border:
-                missing_cues.append(f"{variant}: border")
-        assert not missing_cues, f"{theme} lacks focus cues: {missing_cues}"
-        field.focus()
-        field.value = "invalid"
-        await pilot.pause()
-        assert button.disabled and button.styles.opacity == 0.5
-        button.focus()
-        await pilot.pause()
-        assert screen.focused is field
-        await pilot.press("enter")
-        await pilot.pause()
-        assert results == [] and app.screen is screen
-        await pilot.press("escape")
-        await pilot.pause()
-        assert results == [False]
-        power_screen, safe_id = make_dialog("power")
-        app.push_screen(power_screen)
-        await pilot.pause()
-        safe_button = power_screen.query_one(f"#{safe_id}", Button)
-        assert power_screen.focused is safe_button
-        safe_segments = [
-            segment
-            for y in range(safe_button.size.height)
-            for segment in safe_button.render_line(y)
-            if "No" in segment.text
-        ]
-        assert safe_segments and all(
-            segment.style and segment.style.underline for segment in safe_segments
-        )
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.screen is not power_screen
+            assert screen.focused is field
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == [] and app.screen is screen
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [False]
+            power_screen, safe_id = make_dialog("power")
+            app.push_screen(power_screen)
+            await pilot.pause()
+            safe_button = power_screen.query_one(f"#{safe_id}", Button)
+            assert power_screen.focused is safe_button
+            safe_segments = [
+                segment
+                for y in range(safe_button.size.height)
+                for segment in safe_button.render_line(y)
+                if "No" in segment.text
+            ]
+            assert safe_segments and all(
+                segment.style and segment.style.underline for segment in safe_segments
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen is not power_screen
 
 
 @pytest.mark.asyncio

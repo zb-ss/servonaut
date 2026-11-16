@@ -27,6 +27,7 @@ from servonaut.services.memory.crypto import PassphraseAssessment
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.styles.themes import SERVONAUT_THEMES
 from tests._async_bounds import wait_until
+from tests._theme_sets import theme_names
 from tests.test_basic_dialogs import BasicDialogHost
 from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
 
@@ -699,7 +700,7 @@ async def test_consent_original_initial_focus_is_preserved_and_enter_never_decid
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", BLURB_THEMES)
+@pytest.mark.parametrize("theme", theme_names(BLURB_THEMES))
 @pytest.mark.parametrize("mode", ["enrol", "unlock"])
 async def test_passphrase_blurb_all_glyphs_are_readable(theme, mode, record_property, monkeypatch) -> None:
     """Measure all visible disclosure runs, including inherited inline dim."""
@@ -783,7 +784,7 @@ def _list_literal_styles(app: _Host, listing: SelectionList, literal: str) -> li
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", BLURB_THEMES)
+@pytest.mark.parametrize("theme", theme_names(BLURB_THEMES))
 async def test_share_highlight_links_native_editor_and_keeps_address_readable(theme, record_property, monkeypatch) -> None:
     _colour_fixture(monkeypatch)
     app = _Host()
@@ -831,7 +832,7 @@ async def test_share_highlight_links_native_editor_and_keeps_address_readable(th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", BLURB_THEMES)
+@pytest.mark.parametrize("theme", theme_names(BLURB_THEMES))
 async def test_passphrase_feedback_visible_glyph_contrast(theme, record_property, monkeypatch) -> None:
     # Paint phases must not depend on an optional estimator installation.
     scores = {"": 0, "Abcd12!localx": 2, PHRASE: 4}

@@ -12,6 +12,8 @@ import pytest
 from textual.geometry import Region
 from textual.widgets import Button, Tree
 
+from tests._theme_sets import theme_names
+
 from . import _geometry, test_screens as screens
 
 THEMES = {"dark": "servonaut", "light": "servonaut-light", "ansi": "ansi-dark"}
@@ -206,14 +208,14 @@ def test_hovered_menu_rows_stay_readable_in_every_registered_theme() -> None:
         entries = [b for b in screen.query("Sidebar .nav-button") if b.display and b.region.height]
         current = next(b for b in entries if b.has_class("--active"))
         other = next(b for b in entries if not b.has_class("--active") and b.id != "nav_quit")
-        for theme in sorted(app.available_themes):
+        for theme in theme_names(app.available_themes):
             app.theme = theme
-            await pilot.pause(0.05)
+            await pilot.pause()
             if app.current_theme.ansi:
                 continue
             for button in (current, other):
                 await pilot.hover(button)
-                await pilot.pause(0.05)
+                await pilot.pause()
                 for strip in button.render_lines(Region(2, 0, button.outer_size.width - 2, 1)):
                     for segment in strip:
                         style = segment.style

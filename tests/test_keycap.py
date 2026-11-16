@@ -9,6 +9,7 @@ from textual.geometry import Region
 from servonaut.widgets.action_button import ActionButton, ActionRow, action_label, keycap_parts
 from servonaut.widgets.link_button import LinkButton
 from tests.test_action_button import CSS_FILES, cap
+from tests._theme_sets import theme_names
 
 EDGE_LEFT, EDGE_RIGHT = "▐", "▌"
 
@@ -122,13 +123,12 @@ class _CapHost(App):
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(120)  # Measured about 20 s.
 async def test_the_cap_shows_against_the_button_in_every_theme_and_state() -> None:
     """In every registered theme, idle, hovered and focused, framed and compact."""
     app = _CapHost()
     problems = []
     async with app.run_test(size=(60, 14)) as pilot:
-        for theme in sorted(app.available_themes):
+        for theme in theme_names(app.available_themes):
             app.theme = theme
             await pilot.pause()
             if app.current_theme.ansi:
@@ -177,7 +177,7 @@ async def test_the_disabled_cap_is_visible_and_weaker_than_the_enabled_one_in_ev
     app = _DisabledCapHost()
     problems = []
     async with app.run_test(size=(60, 20)) as pilot:
-        for theme in sorted(app.available_themes):
+        for theme in theme_names(app.available_themes):
             app.theme = theme
             await pilot.pause()
             if app.current_theme.ansi:
