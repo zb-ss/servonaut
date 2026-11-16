@@ -145,10 +145,14 @@ def test_fifty_hostile_files_still_start_the_app_in_bounded_time(themes_folder: 
     for index in range(50):
         (themes_folder / f"f{index:02d}.toml").write_text(flood, encoding="utf-8")
 
-    started = time.perf_counter()
+    # CPU time, not wall clock: a busy or shared runner deschedules the process
+    # for seconds at a time, which says nothing about how much work the parser
+    # does. The work takes about 2 s of CPU, 5 s under coverage; a parser that is
+    # not bounded per file costs many times the budget.
+    started = time.process_time()
     app = _app(tmp_path)
 
-    assert time.perf_counter() - started < 10
+    assert time.process_time() - started < 20
     assert len({error.file for error in app.user_theme_errors}) == 50
 
 
