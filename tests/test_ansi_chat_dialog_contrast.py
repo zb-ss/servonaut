@@ -26,7 +26,7 @@ from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
 from tests._async_bounds import wait_until
-from tests._theme_sets import theme_chunks
+from tests._theme_sets import COLOUR_THEMES, theme_chunks
 from tests.test_dialog_frame import DialogHost
 from tests.test_fleet_workspace_layout import _LayoutHost, _open_chat
 from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
@@ -161,7 +161,7 @@ def _dialog(variant: str) -> tuple[ModalScreen[bool], str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", ("servonaut",))
+@pytest.mark.parametrize("theme", COLOUR_THEMES)
 @pytest.mark.parametrize("variant", ("warning", "error"))
 async def test_enabled_severity_action_paints_readable_complete_native_label(
     theme: str, variant: str,
