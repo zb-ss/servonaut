@@ -342,8 +342,9 @@ def test_chat_propagates_api_errors(monkeypatch):
 
     assert exc_info.value.code == "rate_limited"
     assert exc_info.value.status == 429
-    sleep_mock.assert_awaited_once()
-    assert sleep_mock.await_args.args[0] == pytest.approx(12.0, abs=1.0)
+    assert sleep_mock.await_count == provider_module._RATE_LIMIT_MAX_ATTEMPTS - 1
+    for call in sleep_mock.await_args_list:
+        assert 12.0 <= call.args[0] <= 12.0 + provider_module._RATE_LIMIT_JITTER_S
 
 
 # ---------------------------------------------------------------------------

@@ -230,14 +230,14 @@ async def test_a_good_sample_is_not_wiped_by_an_earlier_errors_timer() -> None:
         screen = await _open_actions(app, pilot)
         text = lambda: str(screen.query_one("#live_stats", Static).content)  # noqa: E731
         with (
-            patch("servonaut.screens.server_actions._SAMPLE_ERROR_SECONDS", 0.05),
+            patch("servonaut.screens.server_actions._SAMPLE_ERROR_SECONDS", 0.4),
             patch("servonaut.screens.server_actions.format_live_stats", lambda stats, **kw: "good sample"),
         ):
             _button(screen, "btn_live_refresh").press()
             await wait_until(lambda: "no route" in text())
             _button(screen, "btn_live_refresh").press()
             await wait_until(lambda: "good sample" in text())
-            await pilot.pause(0.1)  # past the first error's window
+            await pilot.pause(0.8)  # past the first error's window
         assert "good sample" in text()
 
 

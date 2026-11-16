@@ -337,7 +337,9 @@ async def assert_visibility_combinations(
         assert_layout(app, screen)
         assert screen.query_one(Sidebar).display is navigation_visible
         assert case.state(screen) == baseline
-        if chat_open and size == (160, 50) and not navigation_visible:
+        if chat_open and size == (160, 50) and (
+            not navigation_visible or screen.CHAT_MIN_CONTENT_WIDTH <= 89
+        ):
             assert content(screen).display
         if after_state is not None:
             await after_state(app, pilot, screen, navigation_visible, chat_open)
@@ -352,25 +354,32 @@ async def assert_visibility_combinations(
         assert case.state(screen) == baseline
         assert app._exception is None
 
+    assert not list(screen.query(ChatPanel))
     await check_state(False, False)
 
+    await _click(pilot, "#workspace_navigation")
+    await pilot.pause()
+    await wait_until(lambda: screen.query_one(Sidebar).display is True)
+    assert not list(screen.query(ChatPanel))
+    await check_state(True, False)
+
     panel = await open_chat(app, pilot, screen)
+    await check_state(True, True)
+
+    await _click(pilot, "#workspace_navigation")
+    await pilot.pause()
+    await wait_until(lambda: screen.query_one(Sidebar).display is False)
     await check_state(False, True)
 
     if include_collapsed:
         await collapse_chat(app, pilot, screen)
         assert panel._collapsed and panel.is_attached
         await check_state(False, False)
-        await open_chat(app, pilot, screen)
-
-    await _click(pilot, "#workspace_navigation")
-    await pilot.pause()
-    await wait_until(lambda: screen.query_one(Sidebar).display is True)
-    await check_state(True, True)
-
-    await collapse_chat(app, pilot, screen)
-    assert panel._collapsed and panel.is_attached
-    await check_state(True, False)
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: screen.query_one(Sidebar).display is True)
+        assert panel._collapsed and panel.is_attached
+        await check_state(True, False)
 
 
 async def assert_qualified_boundaries(
