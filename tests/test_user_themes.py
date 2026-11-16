@@ -251,9 +251,12 @@ def test_a_file_of_unknown_keys_scans_quickly_and_keeps_a_capped_list(tmp_path: 
     from servonaut.styles.user_themes import MAX_PROBLEMS_PER_FILE
 
     _write(tmp_path, "flood.toml", _flood(header='primary = "#5EB1FF"\n'))
-    started = time.perf_counter()
+    # Thread CPU time measures the scan's own work, so a loaded machine that
+    # deschedules the worker cannot fail the guard, while a slower algorithm
+    # still does. The scan runs synchronously in this thread.
+    started = time.thread_time()
     result = load_user_themes((), tmp_path)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
     assert result.themes == ()
     assert len(result.errors) == MAX_PROBLEMS_PER_FILE + 1
     assert "more problems" in result.errors[-1].message
@@ -264,9 +267,9 @@ def test_variables_full_of_unknown_keys_scan_quickly_too(tmp_path: Path) -> None
     import time
 
     _write(tmp_path, "flood.toml", _flood(header='primary = "#5EB1FF"\n[variables]\n'))
-    started = time.perf_counter()
+    started = time.thread_time()
     result = load_user_themes((), tmp_path)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
     assert len(result.errors) <= 11
 
 
@@ -275,12 +278,12 @@ def test_the_most_files_of_the_largest_size_still_scan_in_bounded_time(tmp_path:
 
     for index in range(MAX_THEME_FILES):
         _write(tmp_path, f"f{index:02d}.toml", _flood(header='primary = "#5EB1FF"\n'))
-    started = time.perf_counter()
+    started = time.thread_time()
     result = load_user_themes((), tmp_path)
     # About 400k keys in all: a linear scan takes a few seconds (most of it
     # TOML parsing), a quadratic one takes minutes. The bound leaves room for
     # a slow or busy CI runner and still fails on a quadratic scan.
-    assert time.perf_counter() - started < 20
+    assert time.thread_time() - started < 20
     assert len({e.file for e in result.errors}) == MAX_THEME_FILES
 
 
