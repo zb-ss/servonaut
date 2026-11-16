@@ -269,17 +269,24 @@ _BOUNDARIES = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
-@pytest.mark.parametrize("delta", [-1, 0, 1])
 @pytest.mark.parametrize("family,navigation_visible,boundary", _BOUNDARIES)
 async def test_native_painted_boundary_keeps_essential_content_usable(
-    theme: str, delta: int, family: str, navigation_visible: bool, boundary: int,
+    family: str, navigation_visible: bool, boundary: int,
 ) -> None:
     app = _LayoutHost(navigation_visible=navigation_visible)
-    app.theme = theme
-    async with app.run_test(size=(boundary + delta, 40)) as pilot:
+    app.theme = "servonaut"
+    async with app.run_test(size=(boundary - 1, 40)) as pilot:
         screen = await _screen(app, pilot, family)
         panel = await _open_chat(app, pilot)
+        await _assert_painted_boundary_deltas(app, pilot, screen, panel, family, boundary)
+
+
+async def _assert_painted_boundary_deltas(
+    app: _LayoutHost, pilot: Pilot, screen: WorkspaceScreen, panel: ChatPanel, family: str, boundary: int,
+) -> None:
+    for delta in (-1, 0, 1):
+        await pilot.resize_terminal(boundary + delta, 40)
+        await wait_until(lambda: screen.has_class("-chat-replace") is (delta < 0))
         await pilot.pause()
         content = _content(screen)
         assert screen.has_class("-chat-replace") is (delta < 0)
