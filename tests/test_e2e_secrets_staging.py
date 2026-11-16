@@ -6,8 +6,8 @@ only run when the corresponding env vars point at a seeded staging
 environment. With no env vars set (e.g. in CI) every gated test
 auto-skips and only :class:`TestSkeletonPlumbing` executes.
 
-Two test surfaces, two markers (see ``tests/conftest.py`` for the
-auto-skip plumbing):
+The contract tests use the OAuth marker (see ``tests/conftest.py``
+for the auto-skip plumbing):
 
 - :class:`TestJointE2E5_ContractHandshake` — pinned by
   ``@pytest.mark.requires_e2e_oauth``. Hits a real staging
@@ -17,11 +17,6 @@ auto-skip plumbing):
   :class:`LocalProvider` to :class:`BitwardenProvider` with the
   right project_id + token_env_var. bws subprocess is STUBBED here
   — we're validating the contract between server and CLI, not bws.
-
-- :class:`TestFullE2E3_RealStackSmoke` — pinned by
-  ``@pytest.mark.requires_e2e_bws + requires_e2e_hetzner``
-  (additive on top of the OAuth marker). Real bws subprocess +
-  real Hetzner provisioning. Pre-prod smoke; nightly cron only.
 
 Operational notes:
 
@@ -435,82 +430,6 @@ class TestJointE2E5_ContractHandshake:
         # Resolver now hands out LocalProvider — the safe fallback.
         provider = resolve_secret_provider(auth, guard)
         assert isinstance(provider, LocalProvider)
-
-    def test_403_when_token_lacks_team_membership(self):
-        """A token scoped to a different team must 403, not 404 —
-        the server collapses unknown-slug into 403 to prevent
-        enumeration. CLI surfaces :class:`ForbiddenError`.
-
-        Needs a SECOND service-account token that ISN'T a member of the
-        seeded team. The test below is wired to read
-        SERVONAUT_E2E_OAUTH_TOKEN_NONMEMBER if present; otherwise it
-        auto-skips. Unit test
-        TestGetTeamSecretsConfig403::test_403_raises_forbidden
-        already pins the wire format, so this is belt+braces.
-        """
-        nonmember = os.environ.get("SERVONAUT_E2E_OAUTH_TOKEN_NONMEMBER", "")
-        if not nonmember:
-            pytest.skip(
-                "Optional: set SERVONAUT_E2E_OAUTH_TOKEN_NONMEMBER to a "
-                "service-account OAuth token that is NOT a member of "
-                "the seeded team. Unit test "
-                "TestGetTeamSecretsConfig403::test_403_raises_forbidden "
-                "already pins the wire format; this test is a live "
-                "verification only."
-            )
-        # The full live test follows the same shape as
-        # test_endpoint_returns_locked_contract_shape; left as
-        # an explicit TODO when the second token is wired in.
-        pytest.skip(
-            "Bundle includes a single OAuth token (the team member). "
-            "When a non-member companion token is provisioned, fill in "
-            "the live assertion: fetch must raise ForbiddenError."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Test surface 2 — full-stack real-bws + real-Hetzner smoke (E2E #3)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.requires_e2e_oauth
-@pytest.mark.requires_e2e_bws
-@pytest.mark.requires_e2e_hetzner
-class TestFullE2E3_RealStackSmoke:
-    """The expensive cell of the test pyramid.
-
-    Runs the full secrets-management round-trip:
-    1. CLI fetches team config from staging (real OAuth).
-    2. Resolver instantiates :class:`BitwardenProvider`.
-    3. :meth:`SSHService.discover_key_async` is called with the
-       seeded key name; bws is invoked for real against the
-       Bitwarden project.
-    4. The private key blob round-trips back to a temp file at
-       0600.
-    5. We use it to SSH into a freshly-provisioned Hetzner test
-       server (cleaned up after).
-
-    Skipped by default; runs in the nightly cron only. NOT a gate
-    for staging deploy.
-
-    Cost reality check: each run provisions + tears down a Hetzner
-    instance (cents per run depending on type), well within a
-    smoke-testing budget.
-    """
-
-    def test_end_to_end_ssh_using_bws_supplied_key(self):
-        """Resolve → fetch BWS-stored private key → SSH into Hetzner.
-
-        TODO: fill in once a seeded staging environment is wired. Needs:
-        - Hetzner test server type + region pinned (cheapest = cx22
-          / hel1 currently).
-        - Tear-down on finally (regardless of test outcome).
-        - 30s timeout on the SSH connect.
-        """
-        pytest.skip(
-            "Full-stack E2E pending a seeded staging environment. Costs "
-            "cents per run; gated on three env vars by design."
-        )
 
 
 # ---------------------------------------------------------------------------
