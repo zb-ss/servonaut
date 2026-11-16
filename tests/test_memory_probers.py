@@ -56,6 +56,13 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _short_cmd_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from servonaut.services.memory.modules import base
+
+    monkeypatch.setattr(base, "_CMD_TIMEOUT_SECONDS", 0.05)
+
+
 # ---------------------------------------------------------------------------
 # OSProber
 # ---------------------------------------------------------------------------
@@ -96,7 +103,7 @@ class TestOSProber:
 
     def test_timeout_returns_result_not_raises(self):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(OSProber().probe(slow_runner))
@@ -194,7 +201,7 @@ class TestRuntimesProber:
 
     def test_timeout_returns_result_not_raises(self):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(RuntimesProber().probe(slow_runner))
@@ -308,7 +315,7 @@ class TestServicesProber:
 
     def test_timeout_returns_result_not_raises(self):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(ServicesProber().probe(slow_runner))
@@ -389,7 +396,7 @@ class TestWebStackProber:
 
     def test_timeout_returns_result_not_raises(self):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(WebStackProber().probe(slow_runner))
@@ -1047,7 +1054,7 @@ class TestDatabasesProber:
 
     def test_timeout_returns_result_not_raises(self):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(DatabasesProber().probe(slow_runner))
         assert isinstance(result, ModuleResult)
@@ -1148,7 +1155,7 @@ class TestContainersProber:
 
     def test_timeout_returns_result(self):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(ContainersProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1214,7 +1221,7 @@ class TestNetworkProber:
 
     def test_timeout_returns_result(self):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(NetworkProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1328,7 +1335,7 @@ class TestGitProber:
 
     def test_timeout_on_find_returns_result(self):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(GitProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1394,7 +1401,7 @@ class TestDiskProber:
 
     def test_timeout_returns_result(self):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(DiskProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
