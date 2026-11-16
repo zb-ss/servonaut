@@ -32,6 +32,7 @@ from tests._workspace_reflow_conformance import (
     ReflowCase,
     assert_essential_targets,
     assert_layout,
+    assert_visibility_combinations,
     collapse_chat,
     content,
     one_layout_transition,
@@ -266,56 +267,47 @@ async def _assert_account_actions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-@pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("chat_open", [False, True])
 async def test_settings_visibility_keeps_actual_field_and_pinned_save_usable(
     manager: ConfigManager, size: tuple[int, int],
-    navigation_visible: bool, chat_open: bool,
 ) -> None:
+    async def check_general(
+        app: ServonautApp, pilot: Pilot, screen: WorkspaceScreen,
+    ) -> None:
+        await _assert_field_fit(app, pilot, screen.query_one("#general_username"))
+        await _assert_save_fit(app, pilot, "general")
+
     case = _case(manager)
-    app = case.app_factory(navigation_visible)
+    app = case.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        if chat_open:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert case.state(screen) == baseline
-        if chat_open and size == (160, 50):
-            assert content(screen).display
-        if content(screen).display:
-            await _assert_field_fit(app, pilot, screen.query_one("#general_username"))
-            await _assert_save_fit(app, pilot, "general")
+        await assert_visibility_combinations(
+            case, app, pilot, screen, after_targets=check_general,
+        )
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(180)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
+@pytest.mark.timeout(240)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
 @pytest.mark.parametrize("provider", ["aws", "hetzner", "ovh"])
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-@pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("chat_open", [False, True])
 async def test_accounts_keep_actual_fields_and_all_native_actions_exposed(
     manager: ConfigManager, provider: str, size: tuple[int, int],
-    navigation_visible: bool, chat_open: bool,
 ) -> None:
-    case = _case(manager, provider)
-    app = case.app_factory(navigation_visible)
-    async with app.run_test(size=size) as pilot:
-        screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        if chat_open:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        if chat_open and size == (160, 50):
-            assert content(screen).display
-        if not content(screen).display:
-            await collapse_chat(app, pilot, screen)
+    async def check_account(
+        app: ServonautApp, pilot: Pilot, screen: WorkspaceScreen,
+    ) -> None:
         await _assert_field_fit(app, pilot, screen.query_one(ACCOUNT_FIELDS[provider]))
         await _assert_account_actions(app, pilot, provider)
         await _assert_save_fit(app, pilot, provider)
-        assert case.state(screen) == baseline
+
+    case = _case(manager, provider)
+    app = case.app_factory(False)
+    async with app.run_test(size=size) as pilot:
+        screen = await open_case(case, app, pilot)
+        await assert_visibility_combinations(
+            case, app, pilot, screen, after_targets=check_account,
+        )
 
 
 @pytest.mark.asyncio

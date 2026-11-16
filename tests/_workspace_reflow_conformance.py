@@ -125,6 +125,25 @@ def assert_button_label_painted(app: ServonautApp, button: Button) -> None:
             assert hit is button or button in hit.ancestors
 
 
+async def wait_button_label_painted(app: ServonautApp, button: Button) -> None:
+    """Wait, bounded, for a button's label and hit region to catch up after reflow."""
+    failure: AssertionError | None = None
+
+    def holds() -> bool:
+        nonlocal failure
+        try:
+            assert_button_label_painted(app, button)
+        except AssertionError as error:
+            failure = error
+            return False
+        return True
+
+    try:
+        await wait_until(holds)
+    except asyncio.TimeoutError:
+        raise failure or AssertionError("button label did not paint") from None
+
+
 def assert_controls(app: ServonautApp, screen: WorkspaceScreen) -> None:
     selectors = ["#workspace_navigation", "#workspace_chat"]
     if screen.query(ChatPanel):
@@ -230,11 +249,12 @@ async def assert_essential_targets(
         hit = app.get_widget_at(*target.region.center)[0]
         assert hit is target or target in hit.ancestors
         if isinstance(target, Button):
-            assert_button_label_painted(app, target)
+            await wait_button_label_painted(app, target)
     for selector, text in case.painted_targets:
         target = screen.query_one(selector)
         target.scroll_visible(animate=False, immediate=True)
         await pilot.pause()
+        await wait_until(lambda t=target, expected=text: expected in _painted(app, t))
         assert text in _painted(app, target)
 
 
@@ -289,3 +309,153 @@ async def preserve_native_state(
         await tab_to(pilot, target)
         assert app.focused is target
     await assert_essential_targets(case, app, pilot, screen)
+
+
+async def assert_visibility_combinations(
+    case: ReflowCase,
+    app: ServonautApp,
+    pilot: Pilot,
+    screen: WorkspaceScreen,
+    *,
+    include_collapsed: bool = False,
+    targets_check: Callable[
+        [ReflowCase, ServonautApp, Pilot, WorkspaceScreen], Awaitable[None]
+    ] = assert_essential_targets,
+    after_state: Callable[
+        [ServonautApp, Pilot, WorkspaceScreen, bool, bool], Awaitable[None]
+    ] | None = None,
+    after_targets: Callable[
+        [ServonautApp, Pilot, WorkspaceScreen], Awaitable[None]
+    ] | None = None,
+) -> None:
+    """Verify the four (navigation_visible, chat_open) states in one app run."""
+    baseline = case.state(screen)
+    size = (app.size.width, app.size.height)
+
+    async def check_state(navigation_visible: bool, chat_open: bool) -> None:
+        await settled_layout(app, screen)
+        assert_layout(app, screen)
+        assert screen.query_one(Sidebar).display is navigation_visible
+        assert case.state(screen) == baseline
+        if chat_open and size == (160, 50) and not navigation_visible:
+            assert content(screen).display
+        if after_state is not None:
+            await after_state(app, pilot, screen, navigation_visible, chat_open)
+        if content(screen).display:
+            entry_scroll = content(screen).scroll_y
+            await targets_check(case, app, pilot, screen)
+            if after_targets is not None:
+                await after_targets(app, pilot, screen)
+            if content(screen).scroll_y != entry_scroll:
+                content(screen).scroll_to(y=entry_scroll, animate=False, immediate=True)
+                await pilot.pause()
+        assert case.state(screen) == baseline
+        assert app._exception is None
+
+    await check_state(False, False)
+
+    panel = await open_chat(app, pilot, screen)
+    await check_state(False, True)
+
+    if include_collapsed:
+        await collapse_chat(app, pilot, screen)
+        assert panel._collapsed and panel.is_attached
+        await check_state(False, False)
+        await open_chat(app, pilot, screen)
+
+    await _click(pilot, "#workspace_navigation")
+    await pilot.pause()
+    await wait_until(lambda: screen.query_one(Sidebar).display is True)
+    await check_state(True, True)
+
+    await collapse_chat(app, pilot, screen)
+    assert panel._collapsed and panel.is_attached
+    await check_state(True, False)
+
+
+async def assert_qualified_boundaries(
+    case: ReflowCase,
+    app: ServonautApp,
+    pilot: Pilot,
+    screen: WorkspaceScreen,
+    navigation_visible: bool,
+    *,
+    kinds: tuple[str, ...] = ("chat-min", "content-narrow"),
+    check_replaced_width: bool = True,
+    check_single_transition: bool = True,
+    targets_check: Callable[
+        [ReflowCase, ServonautApp, Pilot, WorkspaceScreen], Awaitable[None]
+    ] = assert_essential_targets,
+    after_targets: Callable[
+        [ServonautApp, Pilot, WorkspaceScreen], Awaitable[None]
+    ] | None = None,
+) -> None:
+    """Walk both boundary triples in one app run per navigation state."""
+    sample_groups = [
+        (kind, case.boundary_samples(kind, navigation_visible))
+        for kind in kinds
+    ]
+    baseline = case.state(screen)
+    await open_chat(app, pilot, screen)
+    for kind, samples in sample_groups:
+        threshold = (
+            screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
+            else screen.CONTENT_NARROW_WIDTH
+        )
+        assert [sample.native_content_width for sample in samples] == [
+            threshold - 1, threshold, threshold + 1,
+        ]
+        for sample in samples:
+            if check_single_transition:
+                with one_layout_transition(screen):
+                    await pilot.resize_terminal(*sample.size)
+                    await pilot.pause()
+                    await wait_until(
+                        lambda s=sample: screen.has_class("-chat-replace") is s.expected_replace
+                        and screen.has_class("-content-narrow") is s.expected_content_narrow
+                    )
+                    await settled_layout(app, screen)
+            else:
+                await pilot.resize_terminal(*sample.size)
+                await pilot.pause()
+                await wait_until(
+                    lambda s=sample: screen.has_class("-chat-replace") is s.expected_replace
+                    and screen.has_class("-content-narrow") is s.expected_content_narrow
+                )
+                await settled_layout(app, screen)
+            assert screen.has_class("-chat-replace") is sample.expected_replace
+            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
+            assert_layout(app, screen)
+            if sample.expected_replace:
+                if check_replaced_width:
+                    with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
+                        screen.apply_workspace_state()
+                        await pilot.pause()
+                        await wait_until(
+                            lambda s=sample: content(screen).region.width == s.native_content_width
+                        )
+                        assert content(screen).region.width == sample.native_content_width
+                    screen.apply_workspace_state()
+                    await pilot.pause()
+                    await wait_until(
+                        lambda s=sample: screen.has_class("-chat-replace") is s.expected_replace
+                        and screen.has_class("-content-narrow") is s.expected_content_narrow
+                        and not content(screen).display
+                    )
+                    assert screen.has_class("-chat-replace") is sample.expected_replace
+                    assert screen.has_class("-content-narrow") is sample.expected_content_narrow
+                    assert not content(screen).display
+                    await settled_layout(app, screen)
+            else:
+                await wait_until(
+                    lambda s=sample: content(screen).region.width == s.native_content_width
+                )
+                assert content(screen).region.width == sample.native_content_width
+                entry_scroll = content(screen).scroll_y
+                await targets_check(case, app, pilot, screen)
+                if after_targets is not None:
+                    await after_targets(app, pilot, screen)
+                if content(screen).scroll_y != entry_scroll:
+                    content(screen).scroll_to(y=entry_scroll, animate=False, immediate=True)
+                    await pilot.pause()
+            assert case.state(screen) == baseline

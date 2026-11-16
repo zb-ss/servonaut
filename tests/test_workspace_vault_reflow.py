@@ -24,8 +24,9 @@ from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
 from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import (
-    BoundarySample, ReflowCase, assert_essential_targets, assert_layout, content, open_case,
-    one_layout_transition, open_chat, preserve_native_state, tab_to,
+    BoundarySample, ReflowCase, assert_essential_targets, assert_layout,
+    assert_qualified_boundaries, assert_visibility_combinations,
+    content, open_case, one_layout_transition, open_chat, preserve_native_state, tab_to,
 )
 from tests.test_workspace_pilot import _Host, _click
 from tests.test_workspace_reflow import _painted
@@ -369,20 +370,11 @@ async def reveal_secondary_vault_target(pilot: Pilot, screen: WorkspaceScreen) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["vault", "auto"])
 @pytest.mark.parametrize("size", SIZES)
-@pytest.mark.parametrize("navigation", [False, True])
-@pytest.mark.parametrize("chat", [False, True])
-async def test_vault_panes_keep_context(kind: str, size: tuple[int, int], navigation: bool, chat: bool) -> None:
-    case = case_for(kind)
-    app = case.app_factory(navigation)
-    async with app.run_test(size=size) as pilot:
-        screen = await open_case(case, app, pilot)
-        await reveal_secondary_vault_target(pilot, screen)
-        before = state(screen)
-        if chat:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation
-        assert state(screen) == before
+async def test_vault_panes_keep_context(kind: str, size: tuple[int, int]) -> None:
+    async def check_shell(
+        app: _Host, _pilot: Pilot, screen: WorkspaceScreen,
+        _navigation_visible: bool, _chat_open: bool,
+    ) -> None:
         outer = screen.query_one("#vault_layout" if kind == "vault" else "#auto_bind_layout")
         inner = screen.query_one("#main-layout")
         controls = screen.query_one("#workspace_navigation").parent
@@ -394,9 +386,16 @@ async def test_vault_panes_keep_context(kind: str, size: tuple[int, int], naviga
         assert outer.content_region.contains_region(inner.region)
         assert not inner.region.overlaps(controls.region)
         assert outer.max_scroll_y == inner.max_scroll_y == 0
-        if content(screen).display:
-            await assert_essential_targets(case, app, pilot, screen)
-        assert not app.vault_command_service.operations and app._exception is None
+        assert not app.vault_command_service.operations
+
+    case = case_for(kind)
+    app = case.app_factory(False)
+    async with app.run_test(size=size) as pilot:
+        screen = await open_case(case, app, pilot)
+        await reveal_secondary_vault_target(pilot, screen)
+        await assert_visibility_combinations(
+            case, app, pilot, screen, after_state=check_shell,
+        )
 
 
 @pytest.mark.asyncio
@@ -414,41 +413,15 @@ async def test_vault_native_state_and_chat_survive_reflow(kind: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["vault", "auto"])
-@pytest.mark.parametrize("boundary", ["chat-min", "content-narrow"])
 @pytest.mark.parametrize("navigation", [False, True])
-async def test_vault_qualified_native_boundaries(kind: str, boundary: str, navigation: bool) -> None:
+async def test_vault_qualified_native_boundaries(kind: str, navigation: bool) -> None:
     case = case_for(kind)
-    samples = case.boundary_samples(boundary, navigation)
+    samples = case.boundary_samples("chat-min", navigation)
     app = case.app_factory(navigation)
     async with app.run_test(size=samples[0].size) as pilot:
         screen = await open_case(case, app, pilot)
         await reveal_secondary_vault_target(pilot, screen)
-        baseline = case.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = screen.CHAT_MIN_CONTENT_WIDTH if boundary == "chat-min" else screen.CONTENT_NARROW_WIDTH
-        assert [sample.native_content_width for sample in samples] == [threshold - 1, threshold, threshold + 1]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
-                screen.apply_workspace_state()
-                await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-                assert not content(screen).display
-                assert_layout(app, screen)
-            else:
-                assert content(screen).region.width == sample.native_content_width
-                await assert_essential_targets(case, app, pilot, screen)
-            assert case.state(screen) == baseline
+        await assert_qualified_boundaries(case, app, pilot, screen, navigation)
 
 
 @pytest.mark.asyncio

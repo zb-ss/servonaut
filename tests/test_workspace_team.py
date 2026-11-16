@@ -27,6 +27,8 @@ from tests._workspace_reflow_conformance import (
     ReflowCase,
     assert_essential_targets,
     assert_layout,
+    assert_qualified_boundaries,
+    assert_visibility_combinations,
     content,
     one_layout_transition,
     open_case,
@@ -188,24 +190,14 @@ def test_team_reflow_replaces_the_terminal_breakpoint() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
-@pytest.mark.parametrize("navigation_visible,chat_open", [
-    (False, False), (False, True), (True, False), (True, True),
-])
 async def test_team_workspace_visibility_combinations(
-    size: tuple[int, int], navigation_visible: bool, chat_open: bool,
+    size: tuple[int, int],
 ) -> None:
-    app = CASE.app_factory(navigation_visible)
+    app = CASE.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(CASE, app, pilot)
-        baseline = CASE.state(screen)
         assert "Teams" in _painted(app, screen.query_one("#workspace_context", Static))
-        if chat_open:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert CASE.state(screen) == baseline
-        if content(screen).display:
-            await assert_essential_targets(CASE, app, pilot, screen)
+        await assert_visibility_combinations(CASE, app, pilot, screen)
 
 
 @pytest.mark.asyncio
@@ -253,47 +245,35 @@ async def test_member_buttons_follow_content_width_not_terminal_width(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("kind", ["chat-min", "content-narrow"])
 async def test_team_qualified_native_boundary_and_painted_fit(
-    navigation_visible: bool, kind: str,
+    navigation_visible: bool,
 ) -> None:
-    samples = CASE.boundary_samples(kind, navigation_visible)
+    async def check_member_buttons(
+        app: _TeamApp, pilot: Pilot, screen: WorkspaceScreen,
+    ) -> None:
+        await tab_to(pilot, screen.query_one("#btn_remove", Button))
+        await pilot.pause()
+        row = screen.query_one("#member_actions_row")
+        for selector in _MEMBER_BUTTONS:
+            button = screen.query_one(selector, Button)
+            assert row.content_region.contains_region(button.region)
+            assert content(screen).scrollable_content_region.contains_region(button.region)
+            assert all(
+                app.get_widget_at(x, y)[0] is button
+                for y in range(button.region.y, button.region.bottom)
+                for x in range(button.region.x, button.region.right)
+            )
+            assert button.label.plain in _painted(app, button)
+
+    samples = CASE.boundary_samples("chat-min", navigation_visible)
     app = CASE.app_factory(navigation_visible)
     async with app.run_test(size=samples[0].size) as pilot:
         screen = await open_case(CASE, app, pilot)
-        baseline = CASE.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = (
-            screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
-            else screen.CONTENT_NARROW_WIDTH
+        await assert_qualified_boundaries(
+            CASE, app, pilot, screen, navigation_visible,
+            check_replaced_width=False,
+            after_targets=check_member_buttons,
         )
-        assert [sample.native_content_width for sample in samples] == [
-            threshold - 1, threshold, threshold + 1,
-        ]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if not sample.expected_replace:
-                assert content(screen).region.width == sample.native_content_width
-                await assert_essential_targets(CASE, app, pilot, screen)
-                await tab_to(pilot, screen.query_one("#btn_remove", Button))
-                await pilot.pause()
-                row = screen.query_one("#member_actions_row")
-                for selector in _MEMBER_BUTTONS:
-                    button = screen.query_one(selector, Button)
-                    assert row.content_region.contains_region(button.region)
-                    assert content(screen).scrollable_content_region.contains_region(button.region)
-                    assert all(
-                        app.get_widget_at(x, y)[0] is button
-                        for y in range(button.region.y, button.region.bottom)
-                        for x in range(button.region.x, button.region.right)
-                    )
-                    assert button.label.plain in _painted(app, button)
-            assert CASE.state(screen) == baseline
 
 
 @pytest.mark.asyncio
