@@ -448,17 +448,19 @@ async def test_reload_reads_the_folder_in_a_worker_and_shows_it_is_busy(
     manager: ConfigManager, folder: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import threading
-    import time
 
     from servonaut.screens.settings.panels import appearance
     from servonaut.styles.user_themes import load_user_themes as real_load
 
     main_thread = threading.current_thread()
     seen: list[bool] = []
+    # The load holds until the test has observed the busy indicator, so a slow
+    # runner cannot let the indicator come and go between two checks.
+    release = threading.Event()
 
     def slow_load(*args, **kwargs):
         seen.append(threading.current_thread() is not main_thread)
-        time.sleep(0.4)
+        release.wait(timeout=10)
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(appearance, "load_user_themes", slow_load)
@@ -477,13 +479,17 @@ async def test_reload_reads_the_folder_in_a_worker_and_shows_it_is_busy(
             centre = region.center
             return app.screen.get_widget_at(*centre)[0] is button
 
-        await _until(button_is_under_its_own_centre)
-        await pilot.pause()
-        await _until(button_is_under_its_own_centre)
-        await pilot.click("#appearance_reload")
-        await _until(lambda: busy.is_active)
-        await _until(lambda: not busy.is_active)
-        assert seen == [True]
+        try:
+            await _until(button_is_under_its_own_centre)
+            await pilot.pause()
+            await _until(button_is_under_its_own_centre)
+            await pilot.click("#appearance_reload")
+            await _until(lambda: busy.is_active)
+            release.set()
+            await _until(lambda: not busy.is_active)
+            assert seen == [True]
+        finally:
+            release.set()
 
 
 @pytest.mark.asyncio
@@ -740,6 +746,7 @@ async def test_every_kind_of_card_shows_when_it_has_focus(manager: ConfigManager
             blurred = _title_cells(card)
             card.focus()
             await pilot.pause()
+            await _until(lambda: _title_cells(card) != blurred)
             assert _title_cells(card) != blurred, f"a focused {kind} card looks the same"
             assert _title_cells(card).underline, f"a focused {kind} card's title is not underlined"
 
@@ -756,6 +763,7 @@ async def test_two_rows_of_cards_show_at_100x30_with_user_themes_and_a_broken_fi
         panel = await _ready(app, pilot)
         await _until(lambda: bool(panel.query(ThemeErrorCard)))
         await pilot.pause()
+        await _until(lambda: _rows_fully_visible(panel) >= 2)
         assert _rows_fully_visible(panel) >= 2
         assert panel.query_one("#appearance_new", Button).compact, "a stacked header uses one-row buttons"
         assert _card(panel, "ocean").query_one(".theme-card-path .theme-card-detail").region.height == 1
@@ -787,6 +795,7 @@ async def test_default_layout_with_navigation_open_keeps_special_cards_visible_a
         panel = await _ready(app, pilot)
         await _until(lambda: bool(panel.query(ThemeErrorCard)))
         await pilot.pause()
+        await _until(lambda: _visible(panel, _card(panel, "pale")))
         assert _visible(panel, _card(panel, "pale"))
         assert _visible(panel, next(iter(panel.query(ThemeErrorCard))))
         assert _card(panel, "ocean").region.height == _card(panel, "servonaut-light").region.height

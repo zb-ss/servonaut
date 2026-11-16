@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from textual import events
+from textual.errors import NoWidget
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Static
@@ -84,7 +86,24 @@ async def _ready(app: _CredentialsApp, pilot: Pilot) -> SettingsPanel:
     return panel
 
 
-def _assert_exposed(app: _CredentialsApp, widget: Widget) -> None:
+def _is_exposed(app: _CredentialsApp, widget: Widget) -> bool:
+    if widget.region.width <= 0 or widget.region.height <= 0:
+        return False
+    if not app.screen.region.contains(*widget.region.center):
+        return False
+    try:
+        return app.get_widget_at(*widget.region.center)[0] is widget
+    except NoWidget:
+        return False
+
+
+async def _assert_exposed(app: _CredentialsApp, widget: Widget) -> None:
+    # A scroll or layout change can still be in flight when a single pause
+    # returns, so wait for the compositor to hit-test the widget first.
+    try:
+        await wait_until(lambda: _is_exposed(app, widget))
+    except asyncio.TimeoutError:
+        pass
     assert widget.region.width > 0 and widget.region.height > 0
     assert app.screen.region.contains(*widget.region.center)
     assert app.get_widget_at(*widget.region.center)[0] is widget
@@ -94,7 +113,7 @@ async def _click_reveal(app: _CredentialsApp, pilot: Pilot, reveal: Button) -> N
     await wait_until(lambda: not reveal.has_class("-active"))
     reveal.scroll_visible(animate=False)
     await pilot.pause()
-    _assert_exposed(app, reveal)
+    await _assert_exposed(app, reveal)
     assert await pilot.click(reveal)
 
 
@@ -154,7 +173,7 @@ async def test_secret_rows_keep_reveal_hint_and_single_tab_stop(
         hint = field.query_one(".envvar-hint", Static)
         assert hint.render().plain == f"↳ ${VARIABLE} → set"
         assert hint.region.y >= inner.region.bottom
-        _assert_exposed(app, hint)
+        await _assert_exposed(app, hint)
         assert RESOLVED_FIXTURE not in app.export_screenshot()
         await _assert_reveal_and_demo_contract(app, pilot, secret)
         assert field.value == f"${VARIABLE}"
@@ -181,7 +200,7 @@ async def test_credential_save_keeps_raw_reference_and_other_provider_keys(
         field.value = "  $SERVONAUT_S2A_CHANGED_KEY  "
         await wait_until(panel.is_dirty)
         save = panel.query_one(f"#save_{panel_id}", Button)
-        _assert_exposed(app, save)
+        await _assert_exposed(app, save)
         assert await pilot.click(save)
         await wait_until(lambda: not panel.is_dirty())
         saved = manager.get()

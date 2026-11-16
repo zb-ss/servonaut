@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import json
 from types import SimpleNamespace
@@ -222,20 +223,32 @@ async def _visit_form_controls(app: _Host, pilot: Pilot, screen: ModalScreen) ->
     assert app.focused is initial_focus
 
 
-def _assert_painted_target(app: _Host, container: Widget, text: str, owner: Widget) -> tuple[int, int]:
-    """Locate an actual compositor glyph row, then hit-test the whole literal."""
+def _find_painted_target(app: _Host, container: Widget, text: str) -> tuple[int, int] | None:
     rows = app.screen._compositor.render_strips()
     region = container.content_region.intersection(app.screen.region)
-    for y in range(region.y, region.bottom):
-        painted = rows[y].crop(region.x, region.right).text
-        start = painted.find(text)
-        if start < 0:
-            continue
-        for x in range(region.x + start, region.x + start + len(text)):
-            hit, _ = app.get_widget_at(x, y)
-            assert hit is owner or owner in hit.ancestors
-        return region.x + start, y
-    pytest.fail(f"Native painted endpoint is missing: {text!r}")
+    for y in range(region.y, min(region.bottom, len(rows))):
+        start = rows[y].crop(region.x, region.right).text.find(text)
+        if start >= 0:
+            return region.x + start, y
+    return None
+
+
+async def _assert_painted_target(app: _Host, container: Widget, text: str, owner: Widget) -> tuple[int, int]:
+    """Locate an actual compositor glyph row, then hit-test the whole literal."""
+    # A scroll or state change can still be in flight when a single pause
+    # returns, so wait for the compositor to paint the literal first.
+    try:
+        await wait_until(lambda: _find_painted_target(app, container, text) is not None)
+    except asyncio.TimeoutError:
+        pass
+    point = _find_painted_target(app, container, text)
+    if point is None:
+        pytest.fail(f"Native painted endpoint is missing: {text!r}")
+    x0, y = point
+    for x in range(x0, x0 + len(text)):
+        hit, _ = app.get_widget_at(x, y)
+        assert hit is owner or owner in hit.ancestors
+    return point
 
 
 async def _click(app: _Host, pilot: Pilot, widget: Widget) -> None:
@@ -510,7 +523,7 @@ async def test_consent_details_expand_once_and_scroll_to_the_actual_copy_end(siz
         rows = screen._compositor.render_strips()
         visible_details = "\n".join(rows[y].crop(region.x, region.right).text for y in range(region.y, region.bottom))
         assert " ".join(final_line.split()) in " ".join(visible_details.split())
-        _assert_painted_target(app, body, "services/memory/redaction.py).", details)
+        await _assert_painted_target(app, body, "services/memory/redaction.py).", details)
         assert [button.region for button in actions] == regions
         assert all(_exposed(app, button) for button in actions)
         assert results == []
@@ -537,7 +550,7 @@ async def test_long_share_list_scrolls_without_moving_confirm_or_losing_selectio
         await wait_until(lambda: listing.highlighted == 44)
         await pilot.pause()
         assert listing.scroll_y > start and listing.scroll_y == maximum
-        _assert_painted_target(app, listing, "server-44", listing)
+        await _assert_painted_target(app, listing, "server-44", listing)
         assert set(listing.selected) == set(range(45))
         await _tab_to(app, pilot, screen.query_one("#share_confirm_port", Input))
         assert [button.region for button in actions] == regions
@@ -600,7 +613,7 @@ async def test_informational_copy_paints_the_existing_muted_role(theme, kind) ->
         await pilot.pause()
         body = screen.query_one(DialogBody)
         before = copy.render().plain
-        point = _assert_painted_target(app, copy, before.split()[0], copy)
+        point = await _assert_painted_target(app, copy, before.split()[0], copy)
         assert body.scrollable_content_region.contains(*point)
         actual = screen._compositor.get_style_at(*point).color
         copy.set_styles(f"color: {app.get_css_variables()['text-muted']};")
@@ -851,7 +864,7 @@ async def test_passphrase_feedback_visible_glyph_contrast(theme, record_property
             await pilot.pause()
             assert phrase in score_calls[previous_calls:], "The native change must use the local estimator"
             target = screen.query_one(selector, Static)
-            x, y = _assert_painted_target(app, target, expected, target)
+            x, y = await _assert_painted_target(app, target, expected, target)
             styles = [screen._compositor.get_style_at(x + offset, y) for offset, glyph in enumerate(expected) if glyph.strip()]
             runs = [{"style": str(style), "foreground": list(_paint_colours(style, palette)[0]),
                      "background": list(_paint_colours(style, palette)[1]), "contrast": _contrast(*_paint_colours(style, palette))}

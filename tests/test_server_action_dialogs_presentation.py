@@ -364,6 +364,7 @@ async def test_scope_native_end_scroll_and_personal_pointer_result(size: tuple[i
         start = choices.scroll_y
         await pilot.press("end")
         await wait_until(lambda: choices.highlighted == 30 and choices.scroll_y > start)
+        await wait_until(lambda: "Just me" in _painted(app, choices))
         assert "Just me" in _painted(app, choices)
         assert _layout(app, modal) == positions
         _exposed(app, cancel)
@@ -396,6 +397,7 @@ async def test_long_own_key_copy_scrolls_without_moving_safe_actions(size: tuple
         start = body.scroll_y
         await pilot.press("end")
         await wait_until(lambda: body.scroll_y > start)
+        await wait_until(lambda: "operator[/b]" in _painted(app, body))
         assert "operator[/b]" in _painted(app, body)
         assert _layout(app, modal) == positions
         await tab_to(pilot, keep)
@@ -422,6 +424,7 @@ async def test_verify_variant_disclosure_and_explicit_pointer_result(kind: str) 
         body = modal.query_one("#ssh_verify_modal_body", Static)
         body.scroll_visible(animate=False, immediate=True)
         await pilot.pause()
+        await wait_until(lambda: "web[/b].example.test" in _painted(app, body))
         text = _painted(app, body)
         assert "web[/b].example.test" in text
         disclosure = {
@@ -468,6 +471,7 @@ async def test_binding_held_loading_error_and_early_cancel_keep_footer_native(si
             message = modal.query_one("#vault_bind_message", Static)
             message.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
+            await wait_until(lambda: "Could not load the SSH keys" in _painted(app, message))
             assert "Could not load the SSH keys" in _painted(app, message)
             assert not modal.query_one("#vault_bind_confirm", Button).disabled
             _layout(app, modal)
@@ -563,6 +567,7 @@ async def test_binding_trusted_keys_and_long_form_scroll_preserve_pinned_status_
             line.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
             for fingerprint in TRUSTED_FINGERPRINTS:
+                await wait_until(lambda: fingerprint in _painted(app, line))
                 assert fingerprint in _painted(app, line)
             assert _layout(app, modal) == positions
             body = modal.query_one(DialogBody)
