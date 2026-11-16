@@ -169,6 +169,12 @@ async def test_notifications_keep_live_composer_controls_and_footer_clear(
 
             # Native pointer dismissal, with actual hit proof inside the rack.
             while rack.query(Toast):
+                await wait_until(lambda: not rack.query(Toast) or any(
+                    rack.scrollable_content_region.intersection(t.region).area > 0
+                    for t in rack.query(Toast)
+                ))
+                if not rack.query(Toast):
+                    break
                 toast = next(t for t in rack.query(Toast)
                              if rack.scrollable_content_region.intersection(t.region).area > 0)
                 visible = rack.scrollable_content_region.intersection(toast.region)

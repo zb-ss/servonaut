@@ -62,6 +62,7 @@ async def open_case(
     screen = await case.open_screen(app, pilot)
     await case.ready(screen)
     await pilot.pause()
+    await wait_until(lambda: app.focused is screen.query_one(case.primary_focus_selector))
     assert app.focused is screen.query_one(case.primary_focus_selector)
     assert screen.query_one("#main-layout").has_class("workspace-chat-layout")
     assert len(screen.query(".workspace-content")) == 1

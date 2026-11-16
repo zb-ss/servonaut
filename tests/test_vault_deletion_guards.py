@@ -12,7 +12,7 @@ from servonaut.screens._demo_resolve import replace_instances
 from servonaut.services.redaction_service import RedactionService
 from servonaut.services.vault.errors import VaultKeyInUse
 from tests._async_bounds import wait_until
-from tests.test_vault_bulk_delete import _keys, _open, _review
+from tests.test_vault_bulk_delete import _keys, _open, _press_when_enabled, _review
 from tests.test_vault_key_names_tui import VAULT, _Host, _Service, _loaded
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -46,8 +46,7 @@ async def test_demo_deletion_checks_the_real_bound_server(bulk):
             await wait_until(lambda: bool(modal.query("#bulk_action_submit")))
             if modal.query("#bulk_action_confirm_input"):
                 modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
-            await pilot.pause()
-            modal.query_one("#bulk_action_submit", Button).press()
+            await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
             await wait_until(lambda: bool(service.usage_calls) or bool(service.delete_calls))
         else:
             screen.action_delete_key()
@@ -86,8 +85,7 @@ async def test_unchecked_review_names_each_key_and_limits_the_override_to_it():
         await wait_until(lambda: bool(initial.query("#bulk_action_submit")))
         if initial.query("#bulk_action_confirm_input"):
             initial.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
-        await pilot.pause()
-        initial.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(initial.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: app.screen is not initial)
         # The status row (with the confirmation input) mounts after the body.
         await wait_until(lambda: bool(app.screen.query("#bulk_action_acknowledge"))
@@ -98,8 +96,7 @@ async def test_unchecked_review_names_each_key_and_limits_the_override_to_it():
         assert not service.delete_ssh_key.called
         review.query_one("#bulk_action_acknowledge").value = True
         review.query_one("#bulk_action_confirm_input", Input).value = "DELETE UNCHECKED"
-        await pilot.pause()
-        review.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(review.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: service.delete_ssh_key.await_count == 3)
         calls = {call.kwargs["item_id"]: call.kwargs for call in service.delete_ssh_key.await_args_list}
         assert calls["k1"]["allow_unchecked"] is True
@@ -211,8 +208,7 @@ async def test_unexpected_batch_delete_error_reloads_items_and_keeps_the_app_ali
         listing.select_all() if partial else listing.select("k1")
         modal = await _review(app, pilot, initial)
         modal.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
-        await pilot.pause()
-        modal.query_one("#bulk_action_submit", Button).press()
+        await _press_when_enabled(modal.query_one("#bulk_action_submit", Button))
         await wait_until(lambda: any("kept" in message for message, _ in app.notes))
         assert screen._load_items.await_count == 1
         assert app.screen is screen and not app._exit

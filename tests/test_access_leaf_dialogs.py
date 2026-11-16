@@ -118,7 +118,13 @@ async def _click(pilot: Pilot, selector: str) -> None:
 async def _assert_native_toast(
     app: DialogHost, pilot: Pilot, modal: ModalScreen, message: str, kind: str,
 ) -> None:
-    await wait_until(lambda: bool(modal.query("Toast")))
+    await wait_until(lambda: any(
+        t.is_mounted
+        and t.content_region.width > 0
+        and t.content_region.height > 0
+        for t in modal.query("Toast")
+    ))
+    await wait_until(lambda: message in _painted(app))
     await pilot.pause()
     toast = modal.query_one("Toast")
     rack = modal.query_one("ToastRack")
