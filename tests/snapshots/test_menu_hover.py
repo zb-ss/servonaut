@@ -12,7 +12,7 @@ import pytest
 from textual.geometry import Region
 from textual.widgets import Button, Tree
 
-from tests._theme_sets import theme_names
+from tests._theme_sets import theme_chunks
 
 from . import _geometry, test_screens as screens
 
@@ -198,7 +198,10 @@ def _contrast(first: Any, second: Any) -> float:
     return (light + 0.05) / (dark + 0.05)
 
 
-def test_hovered_menu_rows_stay_readable_in_every_registered_theme() -> None:
+@pytest.mark.parametrize("themes", theme_chunks())
+def test_hovered_menu_rows_stay_readable_in_every_registered_theme(
+    themes: tuple[str, ...],
+) -> None:
     """A hovered row (current or not) keeps text at 4.5:1 or better against its tint."""
     failures: List[str] = []
 
@@ -208,14 +211,15 @@ def test_hovered_menu_rows_stay_readable_in_every_registered_theme() -> None:
         entries = [b for b in screen.query("Sidebar .nav-button") if b.display and b.region.height]
         current = next(b for b in entries if b.has_class("--active"))
         other = next(b for b in entries if not b.has_class("--active") and b.id != "nav_quit")
-        for theme in theme_names(app.available_themes):
+        assert set(themes) <= set(app.available_themes)
+        for theme in themes:
             app.theme = theme
-            await pilot.pause()
+            await pilot.pause(0.05)
             if app.current_theme.ansi:
                 continue
             for button in (current, other):
                 await pilot.hover(button)
-                await pilot.pause()
+                await pilot.pause(0.05)
                 for strip in button.render_lines(Region(2, 0, button.outer_size.width - 2, 1)):
                     for segment in strip:
                         style = segment.style
