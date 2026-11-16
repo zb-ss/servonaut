@@ -22,6 +22,7 @@ from servonaut.services.memory import MemoryService
 from servonaut.services.memory.store import MemoryStore
 from servonaut.services.scan_service import ScanConnectionError, ScanService
 from servonaut.utils.ssh_names import check_ssh_target
+from tests._async_bounds import wait_until
 
 BAD_HOST = "web-1;x"
 MESSAGE = "Not connecting"
@@ -115,6 +116,18 @@ def _seed_home(home: Path) -> None:
     }))
 
 
+def _toasts(app) -> list[str]:
+    return [str(n.message) for n in app._notifications]
+
+
+def _screen_text(app) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", app.export_screenshot())).replace("\xa0", " ")
+
+
+def _refusal_visible(app) -> bool:
+    return any(MESSAGE in toast for toast in _toasts(app)) or MESSAGE in _screen_text(app)
+
+
 async def _drive(monkeypatch, tmp_path, action):
     from textual.app import App
 
@@ -132,10 +145,15 @@ async def _drive(monkeypatch, tmp_path, action):
                 break
         row = next(r for r in app.instances if r.get("name") == "bad-1")
         await action(app, pilot, row)
-        for _ in range(20):
-            await pilot.pause(0.1)
-        toasts = [str(n.message) for n in app._notifications]
-        shown = html.unescape(re.sub(r"<[^>]+>", "", app.export_screenshot())).replace("\xa0", " ")
+        try:
+            # The refusal arrives after a worker or a thread hop, so wait for it
+            # rather than for a fixed time. On a timeout the caller's assertion
+            # reports what was actually on screen.
+            await wait_until(lambda: _refusal_visible(app))
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+        await pilot.pause()
+        toasts, shown = _toasts(app), _screen_text(app)
         return app.is_running, errors, toasts, shown
 
 
@@ -188,10 +206,14 @@ async def _scp_upload(app, pilot, row):
 async def _server_actions_connect(app, pilot, row):
     from servonaut.screens.server_actions import ServerActionsScreen
 
-    app.push_screen(ServerActionsScreen(row))
-    await pilot.pause(1.0)
+    screen = ServerActionsScreen(row)
+    app.push_screen(screen)
+    # on_mount focuses the first action button as its first step, so a focused
+    # widget on the active screen means the key bindings are live.
+    await wait_until(
+        lambda: app.screen is screen and screen.query("#btn_ssh") and screen.focused is not None,
+    )
     await pilot.press("3")
-    await pilot.pause(0.5)
 
 
 PATHS = {
