@@ -26,6 +26,7 @@ from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
 from tests._async_bounds import wait_until
+from tests._theme_sets import theme_chunks
 from tests.test_dialog_frame import DialogHost
 from tests.test_fleet_workspace_layout import _LayoutHost, _open_chat
 from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
@@ -243,13 +244,14 @@ def _glyph_pairs(row: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(300)  # Measured about 100 s.
+@pytest.mark.parametrize("names", theme_chunks())
 async def test_registered_themes_keep_severity_text_and_pressed_cues_readable(
     record_property: Callable[[str, object], None],
+    names: tuple[str, ...],
 ) -> None:
     # One host covers the registry without booting an app for every state.
     app = DialogHost()
-    names = tuple(sorted(app.available_themes))
+    assert set(names) <= set(app.available_themes)
     screen = _NativeStateDialog("warning")
     rows: list[dict[str, Any]] = []
     failures = []

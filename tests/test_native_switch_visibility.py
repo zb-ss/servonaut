@@ -28,6 +28,7 @@ from servonaut.screens.settings.shell import DiscardChangesModal
 from servonaut.services.memory import passphrase_store
 from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
 from tests._async_bounds import wait_until
+from tests._theme_sets import theme_chunks
 from tests.test_navigation_dialog_contrast import PALETTES, _contrast, _paint_colours
 from tests.test_settings_presentation import _Host as _SettingsHost, _ready, _tab_to
 
@@ -194,18 +195,20 @@ async def _click(app: ServonautApp, pilot: Pilot, target: Widget) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(150)  # Measured 26-33 s; a slow runner needs a wide margin.
-@pytest.mark.parametrize("size", [(100, 30), (160, 50)])
+@pytest.mark.parametrize("names", theme_chunks())
 async def test_registered_theme_native_switch_paint_census(
-    size: tuple[int, int], tmp_path: Path,
+    names: tuple[str, ...], tmp_path: Path,
 ) -> None:
     # Enabled controls use the registered theme's matching terminal palette.
     # Other palettes and disabled decoration remain separate diagnostics.
-    names = tuple(sorted(_ControlsHost().available_themes))
+    app = _ControlsHost()
+    assert set(names) <= set(app.available_themes)
+    size = (100, 30)
     records = []
-    for name in names:
-        app = _ControlsHost(name)
-        async with app.run_test(size=size) as pilot:
+    async with app.run_test(size=size) as pilot:
+        for name in names:
+            app.theme = name
+            await pilot.pause()
             matching_palette = "servonaut-dark" if app.current_theme.dark else "servonaut-light"
             after = app.screen.query_one("#after", Input)
             for control_id in ("off", "on"):
