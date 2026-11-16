@@ -163,9 +163,8 @@ packages = ["src/servonaut"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-# Cap any single test at 60 seconds. The slowest legitimate tests in the
-# suite (memory probers exercising 7 × 5 s SDK timeouts) finish in ~35 s,
-# so a 60 s ceiling catches infinite hangs without flaking valid tests.
+# Cap any single test at 60 seconds so an infinite hang fails boundedly
+# without flaking legitimate slow tests under coverage or parallel load.
 timeout = 60
 timeout_method = "thread"
 # Markers for the end-to-end suite in e2e/ (run it with `pytest e2e`; the
