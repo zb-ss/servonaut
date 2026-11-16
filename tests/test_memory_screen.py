@@ -25,6 +25,7 @@ from servonaut.config.schema import MemoryConfig
 from servonaut.services.memory.redaction import noop_redactor
 from servonaut.services.memory.service import MemoryService
 from servonaut.services.memory.store import MemoryStore
+from tests._async_bounds import wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,10 @@ async def test_opt_out_banner_visible_by_name_override(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-opt-out-banner"))
+            and "hidden" not in app.screen.query_one("#memory-opt-out-banner", Static).classes,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         banner = app.screen.query_one("#memory-opt-out-banner", Static)
         # Name-based override must trigger the opt-out banner
@@ -430,7 +434,10 @@ async def test_render_table_with_stale_module_has_yellow_markup(tmp_path: Path) 
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-table"))
+            and app.screen.query_one("#memory-table", DataTable).row_count >= 2,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         # Should have rows for both modules
         assert table.row_count >= 2
@@ -607,7 +614,10 @@ async def test_opt_out_banner_visible_when_per_server_disabled(tmp_path: Path) -
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-opt-out-banner"))
+            and "hidden" not in app.screen.query_one("#memory-opt-out-banner", Static).classes,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         banner = app.screen.query_one("#memory-opt-out-banner", Static)
         assert table.row_count == 0
@@ -665,7 +675,10 @@ async def test_memory_screen_renders_with_two_modules(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-table"))
+            and app.screen.query_one("#memory-table", DataTable).row_count >= 2,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         # Two modules × 2 keys each = 4 rows minimum
         assert table.row_count >= 2
@@ -697,7 +710,10 @@ async def test_memory_screen_opt_out_banner_visible(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-opt-out-banner"))
+            and "hidden" not in app.screen.query_one("#memory-opt-out-banner", Static).classes,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         banner = app.screen.query_one("#memory-opt-out-banner", Static)
         assert table.row_count == 0
@@ -880,7 +896,10 @@ async def test_memory_screen_no_service_renders_empty(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and bool(app.screen.query("#memory-table")),
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         assert table.row_count == 0
 
@@ -938,7 +957,10 @@ async def test_get_cursor_module_key_empty_table(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and bool(app.screen.query("#memory-table")),
+        )
         screen = app.screen
         module_name, key = screen._get_cursor_module_key()
         assert module_name == ""
@@ -1256,7 +1278,10 @@ async def test_action_refresh_module_with_row(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and app.screen.query_one("#memory-table").row_count >= 1,
+        )
         # Press 'm' to refresh the currently selected module
         await pilot.press("m")
         try:
@@ -1299,7 +1324,7 @@ async def test_pin_key_modal_dismiss_on_cancel_button(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, PinKeyModal))
         # Press escape to cancel
         await pilot.press("escape")
         await pilot.pause(0.1)
@@ -1332,7 +1357,10 @@ async def test_pin_key_modal_confirm_button_click(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, PinKeyModal)
+            and bool(app.screen.query("#pin_value_input")),
+        )
         # Get the modal input and set a value
         modal = app.screen
         inp = modal.query_one("#pin_value_input", Input)
@@ -1370,7 +1398,10 @@ async def test_pin_key_modal_cancel_button_click(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, PinKeyModal)
+            and bool(app.screen.query("#pin_btn_cancel")),
+        )
         modal = app.screen
         btn = modal.query_one("#pin_btn_cancel", Button)
         btn.press()
@@ -1408,7 +1439,10 @@ async def test_simple_confirm_modal_yes_button(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, SimpleConfirmModal)
+            and bool(app.screen.query("#confirm_yes_btn")),
+        )
         modal = app.screen
         btn = modal.query_one("#confirm_yes_btn", Button)
         btn.press()
@@ -1442,7 +1476,10 @@ async def test_simple_confirm_modal_no_button(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: isinstance(app.screen, SimpleConfirmModal)
+            and bool(app.screen.query("#confirm_no_btn")),
+        )
         modal = app.screen
         btn = modal.query_one("#confirm_no_btn", Button)
         btn.press()
@@ -1476,7 +1513,7 @@ async def test_simple_confirm_modal_escape_cancels(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, SimpleConfirmModal))
         await pilot.press("escape")
         await pilot.pause(0.1)
 
@@ -1567,7 +1604,7 @@ async def test_do_refresh_all_exception_path(tmp_path: Path) -> None:
     async with app.run_test(headless=True) as pilot:
         await pilot.pause(0.1)
         await pilot.press("r")
-        await pilot.pause(0.3)  # give worker time to run and fail
+        await wait_until(lambda: any("error" == s for _, s in notified))
 
     assert any("error" == s for _, s in notified)
 
@@ -1616,9 +1653,12 @@ async def test_do_refresh_module_exception_path(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)  # wait for table to render with rows
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and app.screen.query_one("#memory-table").row_count >= 1,
+        )
         await pilot.press("m")  # action_refresh_module
-        await pilot.pause(0.3)
+        await wait_until(lambda: any("error" == s for _, s in notified))
 
     assert any("error" == s for _, s in notified)
 
@@ -1664,7 +1704,10 @@ async def test_action_clear_module_confirmed(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)  # wait for table to render and "os" row to appear
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and app.screen.query_one("#memory-table").row_count >= 1,
+        )
         screen = app.screen
         assert isinstance(screen, MemoryScreen)
 
@@ -1734,7 +1777,7 @@ async def test_action_annotate_no_row_covers_full_path(tmp_path: Path) -> None:
 
             app.suspend = _noop_suspend
             screen.action_annotate()
-            await pilot.pause(0.2)
+            await wait_until(lambda: svc.get_annotations_path.called)
 
     # Annotations path was resolved — get_annotations_path was called
     svc.get_annotations_path.assert_called()
@@ -1783,7 +1826,7 @@ async def test_do_export_exception_path(tmp_path: Path) -> None:
     async with app.run_test(headless=True) as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await pilot.pause(0.3)
+        await wait_until(lambda: any("error" == s for _, s in notified))
 
     assert any("error" == s for _, s in notified)
 
@@ -1825,7 +1868,10 @@ async def test_action_pin_key_with_row_selected_pushes_modal(tmp_path: Path) -> 
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)  # wait for table to render
+        await wait_until(
+            lambda: isinstance(app.screen, MemoryScreen)
+            and app.screen.query_one("#memory-table").row_count >= 1,
+        )
         await pilot.press("p")  # action_pin_key
         await pilot.pause(0.1)
         # Check what screen is on top
@@ -1877,7 +1923,7 @@ async def test_do_pin_calls_service_pin(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         # Directly call _do_pin on the screen to cover that code path
         screen = app.screen
         if hasattr(screen, "_do_pin"):
@@ -1981,7 +2027,10 @@ async def test_render_table_with_declared_values(tmp_path: Path) -> None:
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-table"))
+            and app.screen.query_one("#memory-table", DataTable).row_count >= 2,
+        )
         table = app.screen.query_one("#memory-table", DataTable)
         # kernel + distro = 2 observed keys = 2 rows
         assert table.row_count >= 2
@@ -2019,7 +2068,10 @@ async def test_memory_screen_empty_state_cta_visible_when_no_modules(tmp_path: P
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-empty-state"))
+            and not app.screen.query_one("#memory-empty-state").has_class("hidden"),
+        )
         cta = app.screen.query_one("#memory-empty-state")
         assert not cta.has_class("hidden"), (
             "Empty-state CTA must be visible when there are no modules."
@@ -2068,7 +2120,10 @@ async def test_memory_screen_empty_state_hidden_when_modules_exist(tmp_path: Pat
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-empty-state"))
+            and app.screen.query_one("#memory-empty-state").has_class("hidden"),
+        )
         cta = app.screen.query_one("#memory-empty-state")
         assert cta.has_class("hidden"), (
             "Empty-state CTA must be hidden once a module has been saved."
@@ -2103,7 +2158,10 @@ async def test_memory_screen_empty_state_hidden_when_opted_out(tmp_path: Path) -
 
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-opt-out-banner"))
+            and not app.screen.query_one("#memory-opt-out-banner", Static).has_class("hidden"),
+        )
         cta = app.screen.query_one("#memory-empty-state")
         banner = app.screen.query_one("#memory-opt-out-banner", Static)
         assert cta.has_class("hidden"), "Opt-out takes precedence over CTA."
@@ -2240,7 +2298,7 @@ async def test_memory_screen_opens_on_the_table_not_the_setup_banner(tmp_path: P
 
     app = _focus_test_app(svc, instance)
     async with app.run_test(headless=True, size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: app.focused is not None and app.focused.id == "memory-table")
         banner = app.screen.query_one("#memory-cloud-banner")
         assert not banner.has_class("hidden"), "the setup banner is on screen"
         assert app.focused is not None
@@ -2260,7 +2318,7 @@ async def test_memory_screen_opens_on_the_probe_button_when_empty(tmp_path: Path
 
     app = _focus_test_app(svc, instance)
     async with app.run_test(headless=True, size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: app.focused is not None and app.focused.id == "btn_empty_probe")
         assert app.focused is not None
         assert app.focused.id == "btn_empty_probe"
 

@@ -8,6 +8,7 @@ from textual.widgets import Button, Input, Static
 
 from servonaut.screens.tool_confirm_modal import DangerousToolConfirmModal, ToolConfirmModal
 from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 ARGS = {f"option {i:02d}": f"value {i:02d}" for i in range(1, 40)}
 ARGS["zz_final"] = "LAST-LINE-VISIBLE"
@@ -31,12 +32,10 @@ def _drawn(app) -> str:
 
 
 async def _settled(pilot, screen, prefix):
-    for _ in range(60):
-        await pilot.pause(0.05)
-        cue = screen.query_one(f"#{prefix}_confirm_more", Static)
-        if cue.display:
-            return
-    raise AssertionError("the cue never appeared")
+    await wait_until(
+        lambda: bool(screen.query(f"#{prefix}_confirm_more"))
+        and screen.query_one(f"#{prefix}_confirm_more", Static).display,
+    )
 
 
 MODALS = [(ToolConfirmModal, "tool"), (DangerousToolConfirmModal, "dangerous")]
@@ -54,7 +53,10 @@ async def test_the_last_argument_and_the_cue_are_drawn(modal_cls, prefix, size) 
         assert "LAST-LINE-VISIBLE" not in _drawn(app)
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
         scroll.scroll_end(animate=False)
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: "LAST-LINE-VISIBLE" in _drawn(app)
+            and "End of the text." in _drawn(app),
+        )
         drawn = _drawn(app)
         assert "LAST-LINE-VISIBLE" in drawn
         assert "End of the text." in drawn
@@ -69,7 +71,10 @@ async def test_the_cue_shows_lines_remaining_in_full_while_some_are_below(size) 
     async with app.run_test(size=size) as pilot:
         await _settled(pilot, app.screen, "tool")
         await pilot.press("down")
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: app.screen.query_one("#tool_confirm_scroll", VerticalScroll).scroll_y > 0
+            and "more lines below: Down or Page Down, or the mouse." in _drawn(app),
+        )
         assert "more lines below: Down or Page Down, or the mouse." in _drawn(app)
 
 
@@ -110,14 +115,18 @@ async def test_the_remediation_command_is_drawn_and_reachable(size, long_undo) -
     preview = make_preview(long=True, long_undo=long_undo)
     app = _Host(RemediationConfirmModal(preview, dry_run=False))
     async with app.run_test(size=size) as pilot:
-        await pilot.pause(0.5)
+        await wait_until(
+            lambda: bool(app.screen.query("#remediation_confirm_scroll"))
+            and app.screen.query_one("#remediation_confirm_scroll", VerticalScroll).size.height >= 3
+            and "Exact command (server-signed):" in _drawn(app),
+        )
         body = app.screen.query_one("#remediation_confirm_scroll", VerticalScroll)
         assert body.size.height >= 3
         drawn = _drawn(app)
         assert "Exact command (server-signed):" in drawn
         assert "example step 1 [red]literal[/red]" in drawn
         body.scroll_end(animate=False)
-        await pilot.pause(0.3)
+        await wait_until(lambda: "example step 45 [red]literal[/red]" in _drawn(app))
         assert "example step 45 [red]literal[/red]" in _drawn(app)
         for button in app.screen.query(Button):
             assert button.region.area > 0 and button.region.bottom <= app.size.height
@@ -156,7 +165,10 @@ async def test_other_dialogs_keep_the_border_hint() -> None:
 
     app = _Host(RemediationConfirmModal(make_preview(long=True), dry_run=False))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.5)
+        await wait_until(
+            lambda: bool(app.screen.query(DialogFrame))
+            and app.screen.query_one(DialogFrame).border_subtitle == "Scroll for all details",
+        )
         assert app.screen.query_one(DialogFrame).border_subtitle == "Scroll for all details"
 
 
@@ -168,7 +180,11 @@ async def test_the_undo_box_shrinks_only_on_a_short_terminal(size, undo_rows) ->
 
     app = _Host(RemediationConfirmModal(make_preview(long=False, long_undo=True), dry_run=False))
     async with app.run_test(size=size) as pilot:
-        await pilot.pause(0.5)
+        await wait_until(
+            lambda: bool(app.screen.query("#remediation_confirm_revert"))
+            and app.screen.query_one("#remediation_confirm_revert").parent.size.height == undo_rows
+            and app.screen.query_one("#remediation_confirm_scroll").size.height >= 3,
+        )
         undo = app.screen.query_one("#remediation_confirm_revert").parent
         assert undo.size.height == undo_rows
         assert app.screen.query_one("#remediation_confirm_scroll").size.height >= 3

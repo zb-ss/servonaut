@@ -97,7 +97,11 @@ async def _diff_text(old: dict, new: dict, **event: str) -> tuple[str, str]:
     app = _SecurityHost(True)
     async with app.run_test(size=(160, 50)) as pilot:
         await app.push_screen(DriftDiffScreen(SimpleNamespace(**{**base, **event}), service))
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#drift-diff-content"))
+            and "Loading diff" not in _plain(app.screen.query_one("#drift-diff-content", Static))
+            and _plain(app.screen.query_one("#drift-diff-content", Static)) != "",
+        )
         return (
             _plain(app.screen.query_one("#drift-diff-title", Static)),
             _plain(app.screen.query_one("#drift-diff-content", Static)),
@@ -132,7 +136,7 @@ async def test_findings_table_columns_are_wider_than_their_headers() -> None:
     }
     async with app.run_test(size=(160, 50)) as pilot:
         await app.push_screen(FindingsScreen())
-        await pilot.pause(0.5)
+        await wait_until(lambda: bool(app.screen.query("#findings_table")))
         table = app.screen.query_one("#findings_table")
 
         def widths() -> dict[str, int]:
@@ -164,7 +168,13 @@ async def test_drift_table_and_diff_heading_hide_the_instance_id_in_demo_mode() 
     app.drift_service = SimpleNamespace(list_drift=AsyncMock(return_value=[event]))
     async with app.run_test(size=(160, 50)) as pilot:
         await app.push_screen(MemoryDriftScreen())
-        await pilot.pause(0.5)
+        await wait_until(
+            lambda: bool(app.screen.query("#drift-table"))
+            and app.screen.query_one("#drift-table", DataTable).row_count == 1
+            and app.screen.query_one("#drift-table", DataTable).columns[
+                next(iter(app.screen.query_one("#drift-table", DataTable).columns))
+            ].get_render_width(app.screen.query_one("#drift-table", DataTable)) >= 10,
+        )
         table = app.screen.query_one("#drift-table", DataTable)
         cells = [str(c) for c in table.get_row_at(0)]
         assert real not in " ".join(cells)
@@ -172,7 +182,10 @@ async def test_drift_table_and_diff_heading_hide_the_instance_id_in_demo_mode() 
         await app.push_screen(DriftDiffScreen(event, SimpleNamespace(
             get_snapshot=AsyncMock(return_value=_envelope({})),
         )))
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: bool(app.screen.query("#drift-diff-title"))
+            and _plain(app.screen.query_one("#drift-diff-title", Static)) != "",
+        )
         heading = _plain(app.screen.query_one("#drift-diff-title", Static))
         assert real not in heading
 
@@ -197,13 +210,16 @@ async def test_findings_and_drift_tables_restyle_on_a_theme_switch() -> None:
         for screen, table_id in ((FindingsScreen(), "#findings_table"),
                                  (MemoryDriftScreen(), "#drift-table")):
             await app.push_screen(screen)
-            await pilot.pause(0.5)
+            await wait_until(
+                lambda: bool(screen.query(table_id))
+                and screen.query_one(table_id, DataTable).row_count == 2,
+            )
             table = screen.query_one(table_id, DataTable)
             table.move_cursor(row=1)
             col = 0 if table_id == "#findings_table" else 3
             before = str(table.get_row_at(0)[col].style)
             app.theme = "servonaut-light" if app.theme != "servonaut-light" else "servonaut"
-            await pilot.pause(0.5)
+            await wait_until(lambda: str(table.get_row_at(0)[col].style) != before)
             assert str(table.get_row_at(0)[col].style) != before
             assert table.cursor_row == 1
             await app.pop_screen()
