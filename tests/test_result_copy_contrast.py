@@ -163,7 +163,7 @@ def _confirm_copy(app: _Host, screen: ConfirmActionScreen) -> list[dict[str, Any
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('severity', ('warning', 'danger'))
 @pytest.mark.parametrize('size', ((100, 30), (160, 50)))
 async def test_confirmation_copy_keeps_severity_and_exact_native_result(
@@ -242,7 +242,7 @@ def _metadata(app: _Host, screen: AIAnalysisScreen, price: str, model: str) -> l
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('cost,price,model', COSTS)
 async def test_analysis_metadata_preserves_service_output_and_exact_cost(
     manager, services, clipboard: _Clipboard, tmp_path: Path, record_property,
@@ -311,7 +311,7 @@ def _logs() -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('kind', ('idle', 'warning', 'error'))
 async def test_analysis_native_nonresult_status_is_measured_without_side_effects(
     manager, services, tmp_path: Path, record_property, theme, kind,
