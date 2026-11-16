@@ -69,20 +69,29 @@ def test_full_registry_requires_explicit_opt_in(
 
 
 @pytest.mark.parametrize("release", [False, True])
-@pytest.mark.parametrize("count", [1, 2, 4, 100])
+@pytest.mark.parametrize("max_size", [1, 2, 3, 100])
 def test_chunks_cover_the_selected_registry_once_and_remain_balanced(
-    monkeypatch: pytest.MonkeyPatch, release: bool, count: int,
+    monkeypatch: pytest.MonkeyPatch, release: bool, max_size: int,
 ) -> None:
     monkeypatch.setenv("SERVONAUT_TEST_ALL_THEMES", "1" if release else "0")
-    chunks = theme_chunks(count=count)
+    chunks = theme_chunks(max_size=max_size)
     flattened = tuple(name for chunk in chunks for name in chunk)
     assert len(flattened) == len(set(flattened)) == len(theme_names())
     assert set(flattened) == set(theme_names())
     assert all(chunks)
+    assert max(map(len, chunks)) <= max_size
     assert max(map(len, chunks)) - min(map(len, chunks)) <= 1
 
 
-@pytest.mark.parametrize("count", [0, -1])
-def test_invalid_chunk_count_fails_explicitly(count: int) -> None:
+@pytest.mark.parametrize("max_size", [0, -1])
+def test_invalid_chunk_size_fails_explicitly(max_size: int) -> None:
     with pytest.raises(ValueError, match="must be positive"):
-        theme_chunks(count=count)
+        theme_chunks(max_size=max_size)
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_default_chunks_bound_release_and_normal_work_equally(
+    monkeypatch: pytest.MonkeyPatch, release: bool,
+) -> None:
+    monkeypatch.setenv("SERVONAUT_TEST_ALL_THEMES", "1" if release else "0")
+    assert all(len(chunk) <= 3 for chunk in theme_chunks())

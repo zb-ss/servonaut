@@ -42,10 +42,11 @@ def theme_names(available: Iterable[str] = REGISTERED_THEMES) -> tuple[str, ...]
 def theme_chunks(
     available: Iterable[str] = REGISTERED_THEMES,
     *,
-    count: int = 4,
+    max_size: int = 3,
 ) -> tuple[tuple[str, ...], ...]:
     """Distribute the selected themes evenly without duplicating app starts."""
-    if count < 1:
-        raise ValueError("Theme chunk count must be positive")
+    if max_size < 1:
+        raise ValueError("Theme chunk size must be positive")
     names = theme_names(available)
-    return tuple(names[index::count] for index in range(min(count, len(names))))
+    count = (len(names) + max_size - 1) // max_size
+    return tuple(names[index::count] for index in range(count))

@@ -33,7 +33,7 @@ def _visible_pair(row: dict) -> set[tuple]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cursor_mode", ("row", "cell"))
-@pytest.mark.parametrize("names", theme_chunks(count=2))
+@pytest.mark.parametrize("names", theme_chunks())
 async def test_registered_native_cursor_keeps_readable_glyphs_and_row_cell_targets(
     manager, services, record_property, cursor_mode: str, names: tuple[str, ...],
 ) -> None:
