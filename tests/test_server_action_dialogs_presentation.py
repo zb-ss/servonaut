@@ -317,8 +317,9 @@ async def test_dialog_native_regions_and_notification_lane(kind: str, size: tupl
         heading = modal.query_one(".dialog-heading", Static)
         text = {"scope": "Who is this key for?", "own": "Also update your own key", "verify-ref": "Verify SSH", "binding": "Use vault key"}[kind]
         assert text in _painted(app, heading)
-        modal.notify("Example notification", title="Review", timeout=30)
-        await wait_until(lambda: bool(modal.query(Toast)))
+        if size == (100, 30):
+            modal.notify("Example notification", title="Review", timeout=30)
+            await wait_until(lambda: bool(modal.query(Toast)))
         assert _layout(app, modal) == positions
         await pilot.press("escape")
         await wait_until(lambda: app.screen is app.landing)

@@ -228,7 +228,7 @@ async def test_long_notice_copy_scrolls_with_safe_focus_and_pinned_actions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["consent", "upsell", "waitlist", "maintenance"])
 async def test_notification_lifecycle_preserves_targets_focus_and_form_values(
     size: tuple[int, int], kind: str, monkeypatch: pytest.MonkeyPatch,

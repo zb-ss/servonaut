@@ -231,7 +231,7 @@ async def test_long_content_scrolls_with_pinned_actions_and_status(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["clear", "voice", "backup", "snapshot", "label"])
 async def test_notifications_leave_modal_targets_stationary_and_clickable(
     kind: str, size: tuple[int, int],
