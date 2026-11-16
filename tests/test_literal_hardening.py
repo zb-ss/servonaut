@@ -516,19 +516,16 @@ async def test_the_cue_follows_the_scroll_position_without_moving_the_layout(mod
 
     app = _ModalHost(modal_cls("run_command", _long_args("newlines")))
     async with app.run_test(size=(120, 40)) as pilot:
-        await wait_until(
-            lambda: bool(app.screen.query(f"#{prefix}_confirm_more"))
-            and app.screen.query_one(f"#{prefix}_confirm_more", Static).display
-            and app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll).max_scroll_y > 0,
-        )
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
-        buttons_before = app.screen.query_one(f"#btn_{prefix}_confirm").region
-        region_before = cue.region
 
         def hidden() -> int:
             match = re.match(r"(\d+) more lines below", cue.visual.plain)
             return int(match.group(1)) if match else 0
+
+        await wait_until(lambda: cue.display and hidden() == int(scroll.max_scroll_y) > 0)
+        buttons_before = app.screen.query_one(f"#btn_{prefix}_confirm").region
+        region_before = cue.region
 
         assert hidden() == int(scroll.max_scroll_y) > 0
         scroll.focus()
