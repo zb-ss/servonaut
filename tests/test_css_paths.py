@@ -6,17 +6,12 @@ Guards three properties:
 2. The App's stylesheet loads without errors (no StylesheetError on boot).
    The boot runs in a child process with a throwaway HOME and no network, so
    it never reads the developer's own ``~/.servonaut`` or calls PyPI.
-3. The CSS bundle has not grown since the original split (size guard): the
-   concatenated size of CSS_FILES must be smaller than or equal to the
-   original pre-split app.css.  This catches accidental rule duplication or
-   unintended file additions.  After the dedup pass (commit 2), the bundle is
-   intentionally smaller than the original, so byte-identity is no longer the
-   right invariant — the size guard is the correct ongoing sentinel.
+3. Stylesheets stay within an explicit byte budget, including new files that
+   have not yet been registered in CSS_FILES.
 """
 from __future__ import annotations
 
 import pathlib
-import subprocess
 
 import pytest
 
@@ -24,6 +19,9 @@ from servonaut.styles import CSS_FILES
 from tests._hermetic_app import SENTINEL_USERNAME, run_hermetic_app
 
 STYLES_ROOT = pathlib.Path(__file__).parent.parent / "src" / "servonaut" / "styles"
+# The stylesheets total 313,723 bytes. Raising this budget requires deliberate
+# review so accidental duplication cannot silently increase every app start.
+CSS_SIZE_BUDGET_BYTES = 330_000
 
 
 # ---------------------------------------------------------------------------
@@ -78,35 +76,16 @@ def test_app_stylesheet_loads_without_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Bundle size guard — must not exceed the original pre-split app.css
+# 3. Bundle size guard — all maintained stylesheets fit the reviewed budget
 # ---------------------------------------------------------------------------
 
 def test_css_bundle_has_not_grown():
-    """The concatenated CSS_FILES must not be larger than the original app.css.
-
-    After the dedup pass the bundle is intentionally smaller, so byte-identity
-    is no longer the invariant.  This size guard catches accidental rule
-    duplication or unintended additions while remaining valid post-dedup.
-
-    If git history is unavailable (e.g. shallow clone), this test is skipped
-    rather than failing spuriously.
-    """
-    golden_bytes: bytes | None = None
-    for ref in ("HEAD:src/servonaut/app.css", "HEAD^:src/servonaut/app.css"):
-        result = subprocess.run(
-            ["git", "show", ref],
-            capture_output=True,
-            cwd=pathlib.Path(__file__).parent.parent,
-        )
-        if result.returncode == 0:
-            golden_bytes = result.stdout
-            break
-
-    if golden_bytes is None:
-        pytest.skip("git golden copy of src/servonaut/app.css not available in history")
-
-    rebuilt = b"".join(f.read_bytes() for f in CSS_FILES)
-    assert len(rebuilt) <= len(golden_bytes), (
-        f"CSS bundle grew: {len(rebuilt)} bytes > original {len(golden_bytes)} bytes. "
-        "Check for accidental rule duplication or extra files in CSS_FILES."
+    """All maintained stylesheets fit the budget without needing git history."""
+    stylesheets = [path for path in STYLES_ROOT.rglob("*")
+                   if path.is_file() and path.suffix in {".tcss", ".css"}]
+    assert stylesheets, "No stylesheets found under styles/"
+    total_bytes = sum(path.stat().st_size for path in stylesheets)
+    assert total_bytes <= CSS_SIZE_BUDGET_BYTES, (
+        f"CSS bundle grew: {total_bytes} bytes > {CSS_SIZE_BUDGET_BYTES} byte budget. "
+        "Check for duplicated rules before deliberately reviewing the budget."
     )
