@@ -145,11 +145,22 @@ async def test_pilot_reflow_preserves_independent_pane_combinations(
                 end = screen.query_one("#workspace_chat_end", Button)
                 assert app.get_widget_at(*end.region.center)[0] is end
 
+        assert not list(screen.query(ChatPanel))
         assert_pose(False, "closed")
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: sidebar.display is True)
+        assert not list(screen.query(ChatPanel))
+        assert_pose(True, "closed")
         panel = await _open_chat(app, pilot)
         editor = panel.query_one("#chat-input", TextArea)
         editor.load_text("Keep the same draft")
         document = editor.document
+        assert_pose(True, "open")
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: sidebar.display is False)
+        assert editor.document is document
         assert_pose(False, "open")
         await pilot.press("f2")
         await pilot.pause()
@@ -159,12 +170,9 @@ async def test_pilot_reflow_preserves_independent_pane_combinations(
         await _click(pilot, "#workspace_navigation")
         await pilot.pause()
         await wait_until(lambda: sidebar.display is True)
-        assert_pose(True, "collapsed")
-        await pilot.press("f2")
-        await pilot.pause()
-        assert not panel._collapsed and panel.is_attached
+        assert panel._collapsed and panel.is_attached
         assert editor.document is document
-        assert_pose(True, "open")
+        assert_pose(True, "collapsed")
 
 
 @pytest.mark.asyncio
