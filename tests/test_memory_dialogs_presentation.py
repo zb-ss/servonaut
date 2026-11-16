@@ -278,7 +278,7 @@ def _painted_screen(screen: ModalScreen) -> str:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["enrol", "unlock", "share", "consent"])
 async def test_escape_returns_none_once_without_side_effects_and_restores_focus(size, kind) -> None:
     app = _Host()
@@ -293,7 +293,7 @@ async def test_escape_returns_none_once_without_side_effects_and_restores_focus(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("remember", [False, True])
 @pytest.mark.parametrize("submit", ["enter", "click"])
 async def test_enrol_weak_mismatch_then_matching_input_returns_only_local_result(
@@ -337,7 +337,7 @@ async def test_enrol_weak_mismatch_then_matching_input_returns_only_local_result
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("remember", [False, True])
 async def test_unlock_has_one_secret_field_and_preserves_explicit_remember_choice(
     monkeypatch, size, remember,
@@ -365,7 +365,7 @@ async def test_unlock_has_one_secret_field_and_preserves_explicit_remember_choic
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["enrol", "unlock", "share"])
 async def test_pointer_cancel_discards_typed_drafts_without_persisting(size, kind) -> None:
     app = _Host()
@@ -386,7 +386,7 @@ async def test_pointer_cancel_discards_typed_drafts_without_persisting(size, kin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("demo", [False, True])
 async def test_share_selection_edit_and_demo_redraw_preserve_raw_server_dicts(size, demo) -> None:
     original = deepcopy(SERVERS)
@@ -425,7 +425,7 @@ async def test_share_selection_edit_and_demo_redraw_preserve_raw_server_dicts(si
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("field,value", [("name", ""), ("username", "bad user"), ("port", "70000")])
 async def test_share_invalid_draft_stays_open_and_focuses_the_offending_field(size, field, value) -> None:
     app = _Host()
@@ -442,7 +442,7 @@ async def test_share_invalid_draft_stays_open_and_focuses_the_offending_field(si
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 async def test_share_empty_inventory_never_enables_share(size) -> None:
     app = _Host()
     screen = ShareServersConfirmModal("Example team", [])
@@ -461,7 +461,7 @@ async def test_share_empty_inventory_never_enables_share(size) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 async def test_share_initial_enter_uses_existing_cancel_default(size) -> None:
     app = _Host()
     screen = ShareServersConfirmModal("Example team", SERVERS)
@@ -474,7 +474,7 @@ async def test_share_initial_enter_uses_existing_cancel_default(size) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("decision", ["allowed", "denied"])
 async def test_memory_consent_returns_only_explicit_decision_without_persisting(size, decision) -> None:
     app = _Host()

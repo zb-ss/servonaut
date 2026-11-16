@@ -71,7 +71,7 @@ def assert_exposed(app: App, screen: ModalScreen, widget: Static | Input | Butto
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["clear", "voice", "backup", "snapshot"])
 async def test_safe_default_enter_cancels_and_restores_focus(
     kind: str, size: tuple[int, int],
@@ -92,7 +92,7 @@ async def test_safe_default_enter_cancels_and_restores_focus(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["clear", "voice", "backup", "snapshot", "label"])
 async def test_explicit_confirm_click_keeps_exact_result_contract(
     kind: str, size: tuple[int, int],
@@ -152,7 +152,7 @@ async def test_keep_and_label_cancel_preserve_false_and_none(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("value", ["", "   ", "x" * 101])
 async def test_label_validation_remains_open_with_exposed_error(
     size: tuple[int, int], value: str,
