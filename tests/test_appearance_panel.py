@@ -385,6 +385,41 @@ async def test_reload_picks_up_new_files_and_fixed_ones(manager: ConfigManager, 
 
 
 @pytest.mark.asyncio
+async def test_leaving_appearance_while_the_cards_rebuild_keeps_the_app_running(
+    manager: ConfigManager, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from textual.containers import Grid
+
+    real_mount_all = Grid.mount_all
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held_mount_all(self, *args, **kwargs):
+        if self.id == "appearance_cards":
+            entered.set()
+            await release.wait()
+        return await real_mount_all(self, *args, **kwargs)
+
+    app = _Host(manager)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _ready(app, pilot)
+        monkeypatch.setattr(Grid, "mount_all", held_mount_all)
+        try:
+            panel.action_reload_themes(announce=False)
+            await wait_until(entered.is_set)
+            # The rebuild is between its awaits. Closing removes a panel's children before
+            # the panel and its workers, so the details are gone while the rebuild resumes.
+            await panel.query_one("#appearance_preview_title").remove()
+            assert not panel.query("#appearance_preview_title")
+        finally:
+            release.set()
+        await app.workers.wait_for_complete()
+        assert app._exception is None
+        assert all(worker.error is None for worker in app.workers)
+
+
+@pytest.mark.asyncio
 async def test_reload_when_the_active_themes_file_vanishes_falls_back(
     manager: ConfigManager, folder: Path,
 ) -> None:

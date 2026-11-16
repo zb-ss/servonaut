@@ -464,6 +464,8 @@ class AppearancePanel(SettingsPanel):
         grid = self.query_one("#appearance_cards", Grid)
         await grid.remove_children()
         await grid.mount_all(cards)
+        if not self._is_showing_details():
+            return  # the panel closed while the cards rebuilt; nothing left to draw on
         self._fit_card_paths()
         for description in self.query("#appearance_description"):  # none once the panel is closing
             description.update(self._hint())
@@ -510,9 +512,13 @@ class AppearancePanel(SettingsPanel):
     # Preview and readability
     # ------------------------------------------------------------------
 
+    def _is_showing_details(self) -> bool:
+        """False once the panel is closing: its children are gone, so there is nothing to update."""
+        return self.is_attached and bool(self.query("#appearance_preview_title"))
+
     def _show_details(self, name: str) -> None:
         theme = self.app.available_themes.get(name)
-        if theme is None:
+        if theme is None or not self._is_showing_details():
             return
         info = next((i for i in describe_themes({name: theme}, self.app.user_themes)), None)
         label = info.label if info else name
