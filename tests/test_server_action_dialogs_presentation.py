@@ -484,6 +484,7 @@ async def test_binding_held_loading_error_and_early_cancel_keep_footer_native(si
             await wait_until(lambda: app.screen is app.landing)
             retry.release.set()
             await wait_until(lambda: not modal._busy.is_busy)
+            await wait_until(lambda: not modal.is_attached)
             assert app.results == [None] and not modal.is_attached
             assert app._exception is None
         finally:
