@@ -177,8 +177,10 @@ jobs:
         # hetzner tests that block ci would block the release-time publish.
         run: pip install -e ".[test,hetzner,ovh,mcp]"
 
+      # The release gate runs the suite in parallel, like ci.yml, so it
+      # finishes within the job time limit.
       - name: Run tests
-        run: pytest --tb=short -q
+        run: python -m pytest --tb=short -q -n auto
 
   publish:
     needs: [eligibility, cadence, test]

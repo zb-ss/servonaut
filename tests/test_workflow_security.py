@@ -224,6 +224,13 @@ def _mcp_publisher_script() -> str:
     return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
 
+def test_publish_test_gate_runs_pytest_in_parallel() -> None:
+    source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
+    steps = _steps(_jobs(source)["test"])
+    run_step = next(step for step in steps if step.startswith("name: Run tests"))
+    assert re.search(r"^\s*run: python -m pytest\b.*\s-n auto\b", run_step, re.MULTILINE)
+
+
 def test_mcp_publisher_is_pinned_to_a_release_and_checksum() -> None:
     source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
     assert re.search(r"MCP_PUBLISHER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+\n", source)
