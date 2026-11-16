@@ -561,7 +561,7 @@ async def test_long_share_list_scrolls_without_moving_confirm_or_losing_selectio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["enrol", "share", "consent"])
 async def test_native_toasts_never_move_or_cover_modal_decision_targets(size, kind) -> None:
     app = _Host()

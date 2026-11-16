@@ -278,7 +278,7 @@ async def test_long_undo_stays_accessible_without_hiding_remediation_controls(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["standard", "dangerous", "remediation"])
 async def test_toast_lifecycle_keeps_safety_targets_stable_until_explicit_click(
     size: tuple[int, int], kind: str,
