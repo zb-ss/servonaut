@@ -51,6 +51,8 @@ async def test_native_select_highlight_contrast_preserves_selection_and_focus(
             app.theme = theme
             await pilot.pause()
             select = app.query_one("#native_select", Select)
+            select.value = "selected"
+            await wait_until(lambda: select.value == "selected" and not select.expanded)
             select.focus()
             await pilot.press("enter")
             overlay = select.query_one(SelectOverlay)
