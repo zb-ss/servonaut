@@ -74,9 +74,40 @@ def _assert_readable(app: App, key: FooterKey, *, state: str) -> dict:
     return evidence
 
 
-def _footer_key(app: App, description: str) -> FooterKey:
-    return next(key for key in app.screen.query_one(Footer).query(FooterKey)
-                if key.description == description)
+def _ready_footer_key(app: App, description: str) -> FooterKey | None:
+    footers = list(app.screen.query(Footer))
+    if not footers:
+        return None
+    rows = app.screen._compositor.render_strips()
+    for key in footers[0].query(FooterKey):
+        if (
+            key.description != description
+            or not key.is_mounted
+            or not key.is_attached
+            or key.screen is not app.screen
+            or not app.screen.region.contains_region(key.region)
+        ):
+            continue
+        region = key.content_region
+        if region.width <= 0 or region.height <= 0:
+            continue
+        if all(
+            any(
+                rows[y].crop(region.x, region.right).text.find(label) >= 0
+                for y in range(region.y, min(region.bottom, len(rows)))
+            )
+            for label in (key.key_display, key.description)
+        ):
+            return key
+    return None
+
+
+async def _wait_footer_key(app: App, description: str) -> FooterKey:
+    while True:
+        await wait_until(lambda: _ready_footer_key(app, description) is not None)
+        key = _ready_footer_key(app, description)
+        if key is not None:
+            return key
 
 
 @pytest.mark.asyncio
@@ -91,28 +122,16 @@ async def test_native_footer_painted_shortcuts_keep_contrast_and_actions(
         monkeypatch.delenv(name, raising=False)
     app = _FooterHost(theme)
     async with app.run_test(size=size) as pilot:
-        footer = app.screen.query_one(Footer)
         origin = app.screen.query_one("#origin", Input)
         await wait_until(lambda: app.focused is origin)
-        await wait_until(lambda: bool(footer.query(FooterKey)))
         await pilot.pause()
-        await wait_until(lambda: any(
-            key.description == "Inspect" and key.is_mounted and key.is_attached
-            for key in footer.query(FooterKey)
-        ))
-        inspect = _footer_key(app, "Inspect")
+        inspect = await _wait_footer_key(app, "Inspect")
         assert inspect.is_mounted and inspect.is_attached
         evidence = {"idle": _assert_readable(app, inspect, state="idle")}
 
         async def hover_and_click_current_inspect() -> dict:
             while True:
-                current_footer = app.screen.query_one(Footer)
-                inspect = next((key for key in current_footer.query(FooterKey)
-                                if key.description == "Inspect"
-                                and key.is_mounted and key.is_attached), None)
-                if inspect is None:
-                    await pilot.pause()
-                    continue
+                inspect = await _wait_footer_key(app, "Inspect")
                 hovered = await pilot.hover(inspect)
                 await pilot.pause()
                 current_footer = app.screen.query_one(Footer)
@@ -142,15 +161,16 @@ async def test_native_footer_painted_shortcuts_keep_contrast_and_actions(
         await pilot.press("enter")
         await wait_until(lambda: selector.expanded)
         await pilot.pause()
+        dismiss = await _wait_footer_key(app, "Dismiss menu")
         evidence["selector"] = _assert_readable(
-            app, _footer_key(app, "Dismiss menu"), state="selector",
+            app, dismiss, state="selector",
         )
         await pilot.press("escape")
         await wait_until(lambda: not selector.expanded)
         await pilot.press("f7")
         await wait_until(lambda: isinstance(app.screen, ConfirmActionScreen))
         await pilot.pause()
-        cancel = _footer_key(app, "Cancel")
+        cancel = await _wait_footer_key(app, "Cancel")
         evidence["confirmation"] = _assert_readable(app, cancel, state="confirmation")
         await pilot.press("escape")
         await wait_until(lambda: not isinstance(app.screen, ConfirmActionScreen))
