@@ -315,19 +315,41 @@ def test_ci_runs_the_screenshot_tests_strictly_in_their_own_job() -> None:
     assert 'SERVONAUT_SNAPSHOTS_STRICT: "1"' in job
     assert "pytest --tb=short -q -n auto tests/snapshots" in job
     assert "tests/snapshots/__failures__/" in job
-    # The test matrix leaves them out, so they run once, strictly, here.
+    # The unit shards leave them out, so they run once, strictly, here.
+    assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["unit"]
     assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["test"]
     pytest_commands = [
-        line for line in jobs["test"].splitlines() if "python -m pytest" in line
+        line for line in jobs["unit"].splitlines() if "python -m pytest" in line
     ]
     assert len(pytest_commands) == 2
     for command in pytest_commands:
         assert "--ignore=tests/snapshots" in command
+        assert "-p tests._ci_shard" in command
 
 
 def test_ci_test_matrix_lets_every_python_version_finish() -> None:
     jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    assert "fail-fast: false" in jobs["unit"]
     assert "fail-fast: false" in jobs["test"]
+
+
+def test_ci_test_job_aggregates_every_unit_shard() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    aggregate = jobs["test"]
+    assert "    needs: unit\n" in aggregate
+    assert "    if: always()\n" in aggregate
+    assert "for shard in 1 2 3 4" in aggregate
+    assert "reported no result" in aggregate
+    unit_steps = _steps(jobs["unit"])
+    for name in ("Record the shard result", "Upload the shard result"):
+        (step,) = [step for step in unit_steps if f"name: {name}" in step]
+        assert "if: always()" in step
+    # A rerun of one shard must replace its earlier artifact.
+    for job in (jobs["unit"], jobs["test"]):
+        uploads = [s for s in _steps(job) if "actions/upload-artifact@" in s]
+        assert uploads
+        for step in uploads:
+            assert "overwrite: true" in step
 
 
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
