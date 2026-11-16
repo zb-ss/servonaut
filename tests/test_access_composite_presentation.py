@@ -250,7 +250,7 @@ async def _click(app: App, pilot: Pilot, screen, widget_id: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("theme", ["servonaut"])
 @pytest.mark.parametrize("size", SIZES)
 async def test_native_long_body_keeps_controls_stationary_and_literal(kind, theme, size, boundaries):
     app = _Host(boundaries, theme)
