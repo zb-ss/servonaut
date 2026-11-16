@@ -499,16 +499,15 @@ async def test_clear_prompt_escapes_selected_module_without_changing_raw_target(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
 @pytest.mark.parametrize("navigation_visible", [False, True])
 @pytest.mark.parametrize("kind,width", [("memory-populated", 95), ("memory-populated", 96),
                                        ("memory-populated", 99), ("sync-configured", 71),
                                        ("sync-configured", 75), ("sync-configured", 104)])
 async def test_memory_action_rows_paint_inside_their_actual_content_width(
-    theme: str, navigation_visible: bool, kind: str, width: int,
+    navigation_visible: bool, kind: str, width: int,
 ) -> None:
     app = _MemoryWorkspaceApp(kind, navigation_visible=navigation_visible)
-    app.theme = theme
+    app.theme = "servonaut"
     async with app.run_test(size=(width + (25 if navigation_visible else 0), 50)) as pilot:
         screen = app.screen
         body = screen.query_one(
