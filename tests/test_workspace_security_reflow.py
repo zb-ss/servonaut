@@ -422,6 +422,7 @@ async def test_security_workspace_visibility_and_every_native_target(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 12 s normal, 61 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_security_native_state_selection_and_tab_round_trip(case: ReflowCase) -> None:
     app = case.app_factory(False)
@@ -437,6 +438,7 @@ async def test_security_native_state_selection_and_tab_round_trip(case: ReflowCa
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 11 s normal, 51 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_security_qualified_native_boundaries(

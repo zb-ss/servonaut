@@ -326,6 +326,7 @@ async def test_remaining_workspace_four_visibility_states(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(270)  # Measured 14 s normal, 81 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_remaining_native_draft_selection_state_and_tab_journey(case: ReflowCase) -> None:
     app = case.app_factory(False)
@@ -337,6 +338,7 @@ async def test_remaining_native_draft_selection_state_and_tab_journey(case: Refl
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(270)  # Measured 14 s normal, 85 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_remaining_qualified_native_boundaries(
@@ -624,6 +626,7 @@ async def test_popping_history_cancels_only_its_held_loading_worker() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 11 s normal, 67 s on two cores with coverage; a slow runner needs more.
 async def test_help_collapse_preserves_held_turn_but_explicit_end_cancels_it() -> None:
     app = _RemainingHost(False)
     started, cancelled = asyncio.Event(), asyncio.Event()

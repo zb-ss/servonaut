@@ -315,6 +315,7 @@ async def test_db_workspace_pane_combinations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 12 s normal, 61 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 async def test_db_workspace_native_state_survives_reflow(case: ReflowCase) -> None:
     app = case.app_factory(False)

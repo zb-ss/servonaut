@@ -352,6 +352,7 @@ async def test_memory_workspace_four_visibility_states(case: ReflowCase, size: t
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 11 s normal, 59 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_memory_state_and_native_tab_survive_replacement(case: ReflowCase) -> None:
     app = case.app_factory(False)

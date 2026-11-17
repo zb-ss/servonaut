@@ -267,7 +267,7 @@ async def test_setup_workspace_pane_combinations(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(120)  # Measured up to 17 s.
+@pytest.mark.timeout(270)  # Measured 17 s normal, 80 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 async def test_setup_workspace_native_state_survives_reflow(case: ReflowCase) -> None:
     app = case.app_factory(False)
@@ -280,6 +280,7 @@ async def test_setup_workspace_native_state_survives_reflow(case: ReflowCase) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 11 s normal; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_setup_workspace_uses_qualified_native_boundaries(

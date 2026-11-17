@@ -399,7 +399,7 @@ async def test_vault_panes_keep_context(kind: str, size: tuple[int, int]) -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(180)  # Measured 34 s, 59 s on two cores with coverage.
+@pytest.mark.timeout(480)  # Measured 33 s normal, 159 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("kind", ["vault", "auto"])
 async def test_vault_native_state_and_chat_survive_reflow(kind: str) -> None:
     case = case_for(kind)
@@ -412,6 +412,7 @@ async def test_vault_native_state_and_chat_survive_reflow(kind: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 12 s normal, 60 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("kind", ["vault", "auto"])
 @pytest.mark.parametrize("navigation", [False, True])
 async def test_vault_qualified_native_boundaries(kind: str, navigation: bool) -> None:

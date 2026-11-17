@@ -288,7 +288,7 @@ async def test_settings_visibility_keeps_actual_field_and_pinned_save_usable(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(240)  # The AWS cases walk a full Settings focus order by Tab (about 15 s).
+@pytest.mark.timeout(750)  # Measured 59 s normal, >240 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("provider", ["aws", "hetzner", "ovh"])
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 async def test_accounts_keep_actual_fields_and_all_native_actions_exposed(
@@ -311,7 +311,7 @@ async def test_accounts_keep_actual_fields_and_all_native_actions_exposed(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(240)  # About 26 s alone: a full reflow plus a Tab walk to every essential control.
+@pytest.mark.timeout(240)  # Measured 31 s normal, 65 s on two cores with coverage; a slow runner needs more.
 async def test_dirty_cached_aws_cursor_and_native_chat_selection_survive_reflow(
     manager: ConfigManager,
 ) -> None:

@@ -201,6 +201,7 @@ async def test_team_workspace_visibility_combinations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 13 s normal, 63 s on two cores with coverage; a slow runner needs more.
 async def test_team_reflow_preserves_draft_team_state_and_native_tab_targets() -> None:
     app = CASE.app_factory(False)
     async with app.run_test(size=(160, 50)) as pilot:
@@ -244,6 +245,7 @@ async def test_member_buttons_follow_content_width_not_terminal_width(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 12 s normal, 58 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_team_qualified_native_boundary_and_painted_fit(
     navigation_visible: bool,
