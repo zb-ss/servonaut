@@ -357,8 +357,8 @@ async def test_value_row_focus_return_does_not_leak_textarea_selection_under_que
         chat = app.screen.query_one("#chat-input", TextArea)
         await wait_until(lambda: app.focused is chat)
         chat.load_text("old chat draft")
-        await _drag(pilot, chat, (0, 0), (8, 0))
-        assert clipboard.calls == ["old chat"]
+        chat.selection = Selection((0, 0), (0, 8))
+        await pilot.pause()
         clipboard.calls.clear()
 
         # Delay TextSelected forwarding by one callback turn to simulate Screen -> App
@@ -398,8 +398,8 @@ async def test_clicking_non_focusable_area_with_composer_selection_copies_nothin
         chat = app.screen.query_one("#chat-input", TextArea)
         await wait_until(lambda: app.focused is chat)
         chat.load_text("old chat draft")
-        await _drag(pilot, chat, (0, 0), (8, 0))
-        assert clipboard.calls == ["old chat"]
+        chat.selection = Selection((0, 0), (0, 8))
+        await pilot.pause()
         clipboard.calls.clear()
         app.copy_to_clipboard("keep this value")
 

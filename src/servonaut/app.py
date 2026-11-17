@@ -2698,6 +2698,16 @@ class ServonautApp(App):
                 )
         return result.passphrase
 
+    def pointer_gesture_started(self) -> None:
+        """Start a fresh pointer-gesture window for TextArea auto-copy."""
+        changed = getattr(self, "_changed_selection_editors", None)
+        if changed is not None:
+            changed.clear()
+
+    def on_mouse_down(self, _event: Any) -> None:
+        """Clear pre-gesture TextArea changes when a new mouse gesture begins."""
+        self.pointer_gesture_started()
+
     def on_text_area_selection_changed(self, event: Any) -> None:
         """Record a TextArea whose selection changed since the previous TextSelected."""
         text_area = getattr(event, "text_area", None)
