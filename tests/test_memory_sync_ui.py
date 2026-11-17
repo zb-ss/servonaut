@@ -172,3 +172,43 @@ async def test_sync_card_repaints_and_job_survives_navigation() -> None:
             )
             assert refreshed_pending == "0 envelope(s)"
             assert refreshed_last_sync != "never"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_action", ["exit", "pop"])
+async def test_memory_sync_setup_closed_or_left_during_startup_ends_cleanly(
+    close_action: str,
+) -> None:
+    errors: list[BaseException] = []
+
+    class _BaseHostApp(App):
+        CSS_PATH = CSS_FILES
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.auth_service = _AuthStub()
+            self.memory_sync_service = _SetupSyncStub()
+
+    class _ClosedDuringStartup(MemorySyncSetupScreen):
+        """Closes the app or pops the screen first so Textual dismantles it
+        before MemorySyncSetupScreen.on_mount queries its body."""
+
+        async def on_mount(self) -> None:
+            if close_action == "exit":
+                self.app.exit()
+            else:
+                self.app.pop_screen()
+            await self.remove_children()
+
+    app = _BaseHostApp()
+    original = app._handle_exception
+
+    def record(error: Exception) -> None:
+        errors.append(error)
+        original(error)
+
+    app._handle_exception = record  # type: ignore[method-assign]
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        app.push_screen(_ClosedDuringStartup())
+        await pilot.pause()
+    assert errors == []
