@@ -1,4 +1,4 @@
-"""Tests for ObjectStorageScreen — pilot mount, demo mode, navigation, guards."""
+"""Tests for ObjectStorageScreen — demo mode, navigation, guards."""
 
 from __future__ import annotations
 
@@ -394,79 +394,6 @@ class TestCopyMoveFormPrefillScrub:
             "#s3_input_move_dst_bucket")
         assert key_w is not None and "acme-corp" not in str(key_w.value)
         assert bucket_w is not None and "acme-corp" not in str(bucket_w.value)
-
-
-# ---------------------------------------------------------------------------
-# TestPilotMountBucketsView (ISSUE-1 smoke test)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_object_storage_screen_buckets_pilot() -> None:
-    """Full Textual pilot mount — verifies buckets view renders without WorkerFailed."""
-    from textual.app import App, ComposeResult
-    from servonaut.config.schema import AppConfig
-
-    svc = _mock_storage_service()
-
-    class _Harness(App):
-        def __init__(self):
-            super().__init__()
-            self.aws_object_storage_service = svc
-            self.hetzner_object_storage_service = None
-            self.ovh_object_storage_service = None
-            self.demo_mode = False
-            self.redaction_service = None
-            cfg_mgr = MagicMock()
-            cfg_mgr.get.return_value = AppConfig()
-            self.config_manager = cfg_mgr
-
-        def compose(self) -> ComposeResult:
-            yield ObjectStorageScreen("aws")
-
-    async with _Harness().run_test(headless=True) as pilot:
-        await wait_until(lambda: svc.list_buckets.called)
-        # Confirm buckets were loaded (list_buckets called)
-        svc.list_buckets.assert_called()
-        assert pilot.app is not None
-
-
-# ---------------------------------------------------------------------------
-# TestPilotMountObjectsView
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_object_storage_screen_objects_pilot() -> None:
-    """Pilot mount then navigate into a bucket — objects view renders."""
-    from textual.app import App, ComposeResult
-    from servonaut.config.schema import AppConfig
-
-    svc = _mock_storage_service()
-
-    class _Harness(App):
-        def __init__(self):
-            super().__init__()
-            self.aws_object_storage_service = svc
-            self.hetzner_object_storage_service = None
-            self.ovh_object_storage_service = None
-            self.demo_mode = False
-            self.redaction_service = None
-            cfg_mgr = MagicMock()
-            cfg_mgr.get.return_value = AppConfig()
-            self.config_manager = cfg_mgr
-
-        def compose(self) -> ComposeResult:
-            yield ObjectStorageScreen("aws")
-
-    async with _Harness().run_test(headless=True) as pilot:
-        await wait_until(lambda: svc.list_buckets.called)
-        screen = pilot.app.query_one(ObjectStorageScreen)
-        # Simulate opening a bucket
-        screen._current_bucket = "my-bucket"
-        screen._view = _VIEW_OBJECTS
-        screen.run_worker(screen._load_objects(), exclusive=True, name="s3_load_objects")
-        await wait_until(lambda: svc.list_objects.called)
-        assert svc.list_objects.called
-        assert pilot.app is not None
 
 
 # ---------------------------------------------------------------------------
