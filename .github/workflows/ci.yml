@@ -228,7 +228,10 @@ jobs:
 
   desktop-host:
     name: desktop host / Python 3.12
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      # Official Noble packages; run real fish quoting in this one job only.
+      FISH_VERSION: '3.7.0-1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -248,6 +251,14 @@ jobs:
           # host, authentication and Origin tests.
           SERVONAUT_REQUIRE_DESKTOP_TESTS: "1"
         run: python -m pytest --tb=short -q tests/desktop
+
+      - name: Install pinned fish
+        run: .github/scripts/apt-install.sh --no-install-recommends "fish=${FISH_VERSION}" "fish-common=${FISH_VERSION}"
+
+      - name: Run shell quoting tests with fish
+        run: |
+          fish --version
+          python -m pytest --tb=short -q tests/test_shell_quote.py
 
   screenshots:
     # The screenshot tests against the Textual a fresh install gets. The test
@@ -432,3 +443,9 @@ jobs:
           tests/test_runtime_integration.py
           tests/packaging/test_standalone_artifact_filesystem_windows.py
           tests/packaging/test_standalone_sbom_normalize.py::test_native_windows_generation_normalizes_full_syft_file_component_path
+
+      - name: Run native Windows process containment test
+        if: runner.os == 'Windows'
+        run: >-
+          python -m pytest --tb=short -q
+          tests/desktop/test_process_tree.py::test_windows_native_job_object_reclaims_child_and_grandchild

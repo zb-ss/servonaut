@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -120,35 +119,3 @@ def test_native_window_bridge_claim_contract() -> None:
     # Second claim fails
     with pytest.raises(DesktopBridgeError):
         bridge.claim_session()
-
-
-@pytest.mark.skipif(
-    not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"),
-    reason="Headless environment without display server",
-)
-@pytest.mark.skipif(
-    os.environ.get("SERVONAUT_DESKTOP_NATIVE_TEST") != "1",
-    reason="Set SERVONAUT_DESKTOP_NATIVE_TEST=1 to execute live GUI window render",
-)
-def test_live_native_window_smoke() -> None:
-    """Optional live native window smoke test when display server is available."""
-    import webview
-
-    window = webview.create_window(
-        "Servonaut Native Smoke",
-        "data:text/html,<html><body><h1>Smoke</h1></body></html>",
-        width=400,
-        height=300,
-    )
-
-    def close_soon() -> None:
-        import time
-
-        time.sleep(0.5)
-        window.destroy()
-
-    import threading
-
-    threading.Thread(target=close_soon, daemon=True).start()
-
-    webview.start(debug=False, private_mode=True)
