@@ -6,7 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Static
 
 from servonaut.screens.path_picker import LocalPathPickerModal, RemotePathPickerModal
 from servonaut.screens.scp_folder_confirm import SCPFolderConfirmModal
@@ -248,6 +248,12 @@ async def test_picker_long_paths_keep_location_selection_and_actions_visible(tmp
             picker = LocalPathPickerModal(path, source=False)
         await app.push_screen(picker)
         await wait_until(lambda: not picker.is_loading())
+        choose = picker.query_one('#path_picker_choose', Button)
+        selected = picker.query_one('#path_picker_selected', Static)
+        # The listing and the queued tree highlight settle separately.
+        await wait_until(
+            lambda: not choose.disabled and selected.content == f'Selected: {path}',
+        )
         await pilot.pause()
         field = picker.query_one('#path_picker_location', Input)
         assert field.value == path
