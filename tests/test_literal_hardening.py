@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
 import pytest
 from textual.app import App
 from rich.text import Text
@@ -286,7 +287,7 @@ async def test_a_remote_error_line_is_not_read_as_markup() -> None:
 
     class TreeOnly(RemoteTree):
         def __init__(self) -> None:
-            Tree.__init__(self, "~", id="rt")
+            RemoteTree.__init__(self, {"id": "web-1"}, MagicMock(), MagicMock(), "deploy", [], id="rt")
 
         def on_mount(self, event):
             event.prevent_default()
@@ -299,10 +300,11 @@ async def test_a_remote_error_line_is_not_read_as_markup() -> None:
     async with app.run_test(size=(100, 10)) as pilot:
         tree = app.query_one("#rt", RemoteTree)
         loading = tree.root.add("loading")
-        tree._pending_fetch = (tree.root, loading, "/srv")
-        worker = SimpleNamespace(
-            group="fetch_dir", is_finished=True, error=RuntimeError(message), result=None,
+        worker = MagicMock(
+            group="remote_directory", is_finished=True, error=RuntimeError(message), result=None,
+            is_cancelled=False,
         )
+        tree._pending_fetch[worker] = (tree.root, "/srv", tree._generation)
         tree.on_worker_state_changed(SimpleNamespace(worker=worker))
         await wait_until(
             lambda: isinstance(tree.root.children[-1].label, Text)
@@ -404,7 +406,7 @@ def _tree_host(entries: list):
 
     class TreeOnly(RemoteTree):
         def __init__(self) -> None:
-            Tree.__init__(self, "~", id="rt")
+            RemoteTree.__init__(self, {"id": "web-1"}, MagicMock(), MagicMock(), "deploy", [], id="rt")
 
         def on_mount(self, event):
             event.prevent_default()
@@ -452,11 +454,11 @@ async def test_escape_sequences_in_a_remote_error_line_are_not_drawn() -> None:
     async with app.run_test(size=(100, 10)) as pilot:
         tree = app.query_one("#rt", RemoteTree)
         loading = tree.root.add("loading")
-        tree._pending_fetch = (tree.root, loading, "/srv")
-        worker = SimpleNamespace(
-            group="fetch_dir", is_finished=True, result=None,
+        worker = MagicMock(
+            group="remote_directory", is_finished=True, result=None, is_cancelled=False,
             error=RuntimeError(f"ls: cannot read {OSC_CLIPBOARD}"),
         )
+        tree._pending_fetch[worker] = (tree.root, "/srv", tree._generation)
         tree.on_worker_state_changed(SimpleNamespace(worker=worker))
         await wait_until(lambda: OSC_SHOWN in tree.root.children[-1].label.plain)
         assert OSC_SHOWN in tree.root.children[-1].label.plain
