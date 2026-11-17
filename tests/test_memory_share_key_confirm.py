@@ -393,13 +393,64 @@ async def test_switching_team_while_sharing_opens_no_confirmation_and_shares_not
         await _settle(pilot, screen, lambda: backend.held.is_set(), "the pending key request")
         backend.hold_team = None
         screen.query_one("#share-team-select", Select).value = "team-b"
-        await _settle(pilot, screen, lambda: screen._selected_team() == "team-b", "team switch")
+        await _settle(pilot, screen, lambda: screen._observed_team == "team-b", "team switch")
         backend.release.set()
         await _settle(pilot, screen, lambda: "team changed while sharing" in _status(screen), "message")
         assert "Nothing was shared" in _status(screen) or "nothing was shared" in _status(screen)
         assert app.screen is screen
     assert backend.posted == []
     assert app.pins.get(SLUG, 2) is None and app.pins.get("team-b", 2) is None
+
+
+async def test_team_switch_error_survives_delayed_select_changed_and_clears_on_next_switch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    backend = _KeyBackend(members=[_member(1, "Kim Member"), _member(2, "Lee Member", key_changed=True)])
+    app = _KeyHost(backend, teams=TWO_TEAMS)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        backend.hold_team = "team-a"
+        screen.query_one("#share-btn-confirm", Button).press()
+        await _settle(pilot, screen, lambda: backend.held.is_set(), "the pending key request")
+        backend.hold_team = None
+
+        # Simulate Select.Changed arriving after the in-flight worker already
+        # observed the new Select.value and locked the team-changed error.
+        select = screen.query_one("#share-team-select", Select)
+        deferred_changed: List[Select.Changed] = []
+        orig_post = select.post_message
+
+        def hold_first_team_changed(message: Any) -> bool:
+            if isinstance(message, Select.Changed) and not deferred_changed:
+                deferred_changed.append(message)
+                return True
+            return orig_post(message)
+
+        monkeypatch.setattr(select, "post_message", hold_first_team_changed)
+        select.value = "team-b"
+        await _settle(pilot, screen, lambda: bool(deferred_changed), "queued Select.Changed")
+
+        backend.release.set()
+        await _settle(pilot, screen, lambda: "team changed while sharing" in _status(screen), "message")
+
+        # Now deliver that same switch's Select.Changed and let team-b's refresh finish.
+        monkeypatch.undo()
+        before_calls = len(backend.calls)
+        orig_post(deferred_changed[0])
+        await _settle(
+            pilot, screen,
+            lambda: any("GET /api/v1/teams/team-b/memory" in c for c in backend.calls[before_calls:]),
+            "team-b refresh",
+        )
+        await pilot.pause()
+
+        assert "team changed while sharing" in _status(screen)
+        assert app.screen is screen
+
+        # A subsequent switch to a different team clears the prior warning as usual.
+        select.value = "team-a"
+        await _settle(pilot, screen, lambda: "team changed while sharing" not in _status(screen), "cleared")
+    assert backend.posted == []
 
 
 async def test_the_retry_after_confirming_uses_the_choices_made_when_sharing_started():
