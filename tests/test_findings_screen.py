@@ -24,6 +24,36 @@ from textual.widgets import Static
 
 from servonaut.screens.findings import FindingDetailScreen, FindingsScreen
 from servonaut.services.api_client import APIError, PaymentRequiredError
+from tests._async_bounds import wait_until
+
+
+def _workers_idle(screen) -> bool:
+    return all(worker.is_finished for worker in screen.workers)
+
+
+async def _wait_for_screen(app: App, screen_cls: type):
+    await wait_until(
+        lambda: (
+            isinstance(app.screen_stack[-1], screen_cls)
+            and app.screen_stack[-1].is_mounted
+            and _workers_idle(app.screen_stack[-1])
+        )
+    )
+    return app.screen_stack[-1]
+
+
+async def _wait_for_confirm_modal(app: App):
+    from servonaut.screens.remediation_confirm import RemediationConfirmModal
+
+    await wait_until(
+        lambda: (
+            isinstance(app.screen_stack[-1], RemediationConfirmModal)
+            and app.screen_stack[-1].is_mounted
+            and len(app.screen_stack[-1].query("#remediation_confirm_run")) == 1
+            and len(app.screen_stack[-1].query("#remediation_confirm_input")) == 1
+        )
+    )
+    return app.screen_stack[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +196,8 @@ class TestFindingsScreenStates:
             findings_service=None,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "Sign in required" in _rendered_text(app))
             text = _rendered_text(app)
             assert "Sign in required" in text
             assert "Open login" in text
@@ -180,8 +210,8 @@ class TestFindingsScreenStates:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "Upgrade required" in _rendered_text(app))
             text = _rendered_text(app)
             assert "Upgrade required" in text
             assert "Open pricing" in text
@@ -201,8 +231,8 @@ class TestFindingsScreenStates:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "Upgrade required" in _rendered_text(app))
             text = _rendered_text(app)
             assert "Upgrade required" in text
 
@@ -214,8 +244,8 @@ class TestFindingsScreenStates:
             findings_service=_mock_findings_service([]),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "No findings" in _rendered_text(app))
             text = _rendered_text(app)
             assert "No findings" in text
 
@@ -233,8 +263,10 @@ class TestFindingsScreenStates:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(
+                lambda: svc.list_findings.await_count >= 1 and "2 total" in _rendered_text(app)
+            )
             text = _rendered_text(app)
             assert "2 total" in text
             svc.list_findings.assert_awaited()
@@ -251,8 +283,8 @@ class TestFindingsScreenStates:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: svc.list_findings.await_count >= 1)
             _, kwargs = svc.list_findings.await_args
             assert kwargs["instance"] == "i-0000test01"
 
@@ -267,8 +299,8 @@ class TestFindingsScreenStates:
             findings_service=_mock_findings_service(rows),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "1 total" in _rendered_text(app))
             # Reaching here without a MarkupError is the assertion;
             # the pill still renders.
             text = _rendered_text(app)
@@ -289,8 +321,8 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            screen = await _wait_for_screen(app, FindingDetailScreen)
+            await wait_until(lambda: "Nothing executes until you confirm" in _rendered_text(app))
             text = _rendered_text(app)
             assert "SSH password authentication is enabled" in text
             assert "Disable password authentication" in text
@@ -298,7 +330,6 @@ class TestFindingDetailScreen:
             # Phase 3 pin: execution is offered, but ONLY behind the
             # server-signed preview + explicit confirmation flow.
             assert "Nothing executes until you confirm" in text
-            screen = app.screen_stack[-1]
             assert len(screen._remediation_buttons) == 1
 
     @pytest.mark.asyncio
@@ -309,9 +340,7 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert screen._remediation_buttons == {}
 
     @pytest.mark.asyncio
@@ -329,9 +358,7 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert screen._remediation_buttons == {}
 
     @pytest.mark.asyncio
@@ -353,9 +380,8 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
+            await wait_until(lambda: "Manual action" in _rendered_text(app))
             assert screen._remediation_buttons == {}
             text = _rendered_text(app)
             assert "Manual action" in text
@@ -377,9 +403,7 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert len(screen._remediation_buttons) == 1
 
     @pytest.mark.asyncio
@@ -398,9 +422,7 @@ class TestFindingDetailScreen:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert len(screen._remediation_buttons) == 1
 
     @pytest.mark.asyncio
@@ -426,13 +448,12 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             button = screen.query_one(f"#{button_id}")
             button.press()
-            await pilot.pause(0.1)
+            modal = await _wait_for_confirm_modal(app)
+            await wait_until(lambda: svc.remediate_preview.await_count == 1 and _workers_idle(screen))
             svc.remediate_preview.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth",
                 dry_run=False, method=None,
@@ -441,11 +462,11 @@ class TestFindingDetailScreen:
             from servonaut.screens.remediation_confirm import (
                 RemediationConfirmModal,
             )
-            assert isinstance(app.screen_stack[-1], RemediationConfirmModal)
+            assert app.screen_stack[-1] is modal
+            assert isinstance(modal, RemediationConfirmModal)
             svc.remediate.assert_not_awaited()
             # The server's byte-for-byte command string renders verbatim.
-            text = _rendered_text(app)
-            assert "sudo -n sshd-harden --password-auth no" in text
+            await wait_until(lambda: "sudo -n sshd-harden --password-auth no" in _rendered_text(app))
 
     @pytest.mark.asyncio
     async def test_block_ip_resolves_method_from_config_and_sends_it(self):
@@ -480,12 +501,11 @@ class TestFindingDetailScreen:
             ip_ban_service=ip_ban,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await _wait_for_confirm_modal(app)
+            await wait_until(lambda: svc.remediate_preview.await_count == 1 and _workers_idle(screen))
             svc.remediate_preview.assert_awaited_once_with(
                 "fnd_01abc", "block_ip",
                 dry_run=False, method="security_group",
@@ -524,12 +544,17 @@ class TestFindingDetailScreen:
                         "is_custom": True, "provider": "ovh"}],
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await _wait_for_confirm_modal(app)
+            await wait_until(
+                lambda: (
+                    tools.detect_onbox_firewall.await_count == 1
+                    and svc.remediate_preview.await_count == 1
+                    and _workers_idle(screen)
+                )
+            )
             tools.detect_onbox_firewall.assert_awaited_once_with("custom-web-1")
             svc.remediate_preview.assert_awaited_once_with(
                 "fnd_01abc", "block_ip", dry_run=False, method="nftables",
@@ -558,12 +583,13 @@ class TestFindingDetailScreen:
                         "is_custom": True}],
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: tools.detect_onbox_firewall.await_count == 1 and _workers_idle(screen)
+            )
+            await pilot.pause()
             svc.remediate_preview.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -587,12 +613,11 @@ class TestFindingDetailScreen:
             ip_ban_service=ip_ban,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await wait_until(lambda: ip_ban.get_configs.call_count >= 1 and _workers_idle(screen))
+            await pilot.pause()
             # No config → no server round-trip that would 422.
             svc.remediate_preview.assert_not_awaited()
 
@@ -629,21 +654,24 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             # Execute is disarmed until the phrase is typed.
             run_button = modal.query_one("#remediation_confirm_run")
             assert run_button.disabled is True
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
-            assert run_button.disabled is False
+            await wait_until(lambda: run_button.disabled is False)
             run_button.press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and svc.await_remediation_outcome.await_count == 1
+                    and screen._finding["status"] == "resolved"
+                    and _workers_idle(screen)
+                )
+            )
             svc.remediate.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
                 dry_run=False, method=None,
@@ -690,19 +718,23 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, rem), = screen._remediation_buttons.items()
             # Drive the dry-run path directly (the modal's "Dry run
             # first" button re-enters _launch_remediation with dry_run).
             screen._launch_remediation(rem, dry_run=True)
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
+            await wait_until(lambda: modal.query_one("#remediation_confirm_run").disabled is False)
             modal.query_one("#remediation_confirm_run").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and svc.await_remediation_outcome.await_count == 1
+                    and not screen._remediating
+                    and _workers_idle(screen)
+                )
+            )
             svc.remediate.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth", "tok-dry",
                 dry_run=True, method=None,
@@ -739,17 +771,20 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
+            await wait_until(lambda: modal.query_one("#remediation_confirm_run").disabled is False)
             modal.query_one("#remediation_confirm_run").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and not screen._remediating
+                    and _workers_idle(screen)
+                )
+            )
             # Unchanged + the guard released so a retry is possible.
             assert screen._changed is False
             assert screen._remediating is False
@@ -784,17 +819,21 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
+            await wait_until(lambda: modal.query_one("#remediation_confirm_run").disabled is False)
             modal.query_one("#remediation_confirm_run").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and svc.await_remediation_outcome.await_count == 1
+                    and not screen._remediating
+                    and _workers_idle(screen)
+                )
+            )
             assert screen._remediating is False
             assert screen._finding["status"] == "detected"
 
@@ -824,17 +863,21 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
+            await wait_until(lambda: modal.query_one("#remediation_confirm_run").disabled is False)
             modal.query_one("#remediation_confirm_run").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and svc.await_remediation_outcome.await_count == 1
+                    and not screen._remediating
+                    and _workers_idle(screen)
+                )
+            )
             assert screen._remediating is False
             # No outcome claimed — finding left as-is.
             assert screen._changed is False
@@ -866,17 +909,20 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
-            modal = app.screen_stack[-1]
+            modal = await _wait_for_confirm_modal(app)
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
+            await wait_until(lambda: modal.query_one("#remediation_confirm_run").disabled is False)
             modal.query_one("#remediation_confirm_run").press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.remediate.await_count == 1
+                    and not screen._remediating
+                    and _workers_idle(screen)
+                )
+            )
             assert screen._changed is False
             assert screen._remediating is False
             assert screen._finding["status"] == "detected"
@@ -894,14 +940,13 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             screen._remediating = True
             depth_before = len(app.screen_stack)
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
+            await wait_until(lambda: _workers_idle(screen))
+            await pilot.pause()
             # No preview fetched, no modal pushed.
             svc.remediate_preview.assert_not_awaited()
             assert len(app.screen_stack) == depth_before
@@ -932,13 +977,14 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (_button_id, rem), = screen._remediation_buttons.items()
             depth_before = len(app.screen_stack)
             screen._launch_remediation(rem, dry_run=False)
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: svc.remediate_preview.await_count == 1 and _workers_idle(screen)
+            )
+            await pilot.pause()
             # No modal pushed — the mismatch was refused, not displayed.
             assert len(app.screen_stack) == depth_before
             svc.remediate.assert_not_awaited()
@@ -952,9 +998,15 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             await pilot.press("a")
-            await pilot.pause(0.05)
+            await wait_until(
+                lambda: (
+                    svc.acknowledge.await_count == 1
+                    and "acked" in _rendered_text(app)
+                    and _workers_idle(screen)
+                )
+            )
             svc.acknowledge.assert_awaited_once_with("fnd_01abc")
             text = _rendered_text(app)
             assert "acked" in text
@@ -968,9 +1020,9 @@ class TestFindingDetailScreen:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             await pilot.press("x")
-            await pilot.pause(0.05)
+            await wait_until(lambda: svc.suppress.await_count == 1 and _workers_idle(screen))
             svc.suppress.assert_awaited_once_with("fnd_01abc")
 
 
@@ -990,10 +1042,9 @@ class TestScanNow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            screen = await _wait_for_screen(app, FindingsScreen)
             await pilot.press("s")
-            await pilot.pause(0.1)
+            await wait_until(lambda: svc.stream_scan.call_count == 1 and _workers_idle(screen))
             # The SSE variant ran the scan…
             svc.stream_scan.assert_called_once()
             # …and the buffered POST was NEVER issued — two calls would
@@ -1012,10 +1063,9 @@ class TestScanNow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            screen = await _wait_for_screen(app, FindingsScreen)
             await pilot.press("s")
-            await pilot.pause(0.1)
+            await wait_until(lambda: svc.scan.await_count == 1 and _workers_idle(screen))
             svc.scan.assert_awaited_once_with(instance_id=None)
 
     @pytest.mark.asyncio
@@ -1029,10 +1079,9 @@ class TestScanNow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            screen = await _wait_for_screen(app, FindingsScreen)
             await pilot.press("s")
-            await pilot.pause(0.1)
+            await wait_until(lambda: svc.stream_scan.call_count == 1 and _workers_idle(screen))
             svc.stream_scan.assert_called_once_with(instance="i-0000test01")
 
     @pytest.mark.asyncio
@@ -1047,10 +1096,11 @@ class TestScanNow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            screen = await _wait_for_screen(app, FindingsScreen)
+            await wait_until(lambda: "Upgrade required" in _rendered_text(app))
             await pilot.press("s")
-            await pilot.pause(0.1)
+            await wait_until(lambda: _workers_idle(screen))
+            await pilot.pause()
             svc.stream_scan.assert_not_called()
             svc.scan.assert_not_awaited()
 
@@ -1071,8 +1121,8 @@ class TestEvidenceShapes:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
+            await _wait_for_screen(app, FindingDetailScreen)
+            await wait_until(lambda: "Evidence" in _rendered_text(app))
             text = _rendered_text(app)
             assert "Evidence" in text
             assert "91% /var" in text
@@ -1156,9 +1206,7 @@ class TestFindingRevertGating:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert len(screen.query("#btn_finding_revert")) == 1
             # The card's Static copy (the button label lives on a Button,
             # which _rendered_text doesn't scan).
@@ -1174,9 +1222,7 @@ class TestFindingRevertGating:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert len(screen.query("#btn_finding_revert")) == 0
 
     @pytest.mark.asyncio
@@ -1187,9 +1233,7 @@ class TestFindingRevertGating:
             findings_service=_mock_findings_service(),
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             assert len(screen.query("#btn_finding_revert")) == 0
 
     def test_can_undo_is_defensive_against_malformed_payloads(self):
@@ -1225,21 +1269,25 @@ class TestFindingRevertFlow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             screen.query_one("#btn_finding_revert").press()
-            await pilot.pause(0.1)
+            modal = await _wait_for_confirm_modal(app)
+            await wait_until(lambda: svc.revert_preview.await_count == 1 and _workers_idle(screen))
             # Parameter-free preview.
             svc.revert_preview.assert_awaited_once_with("fnd_01abc", dry_run=False)
-            modal = app.screen_stack[-1]
             run_button = modal.query_one("#remediation_confirm_run")
             assert run_button.disabled is True
             modal.query_one("#remediation_confirm_input").value = "RUN"
-            await pilot.pause()
-            assert run_button.disabled is False
+            await wait_until(lambda: run_button.disabled is False)
             run_button.press()
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: (
+                    svc.revert.await_count == 1
+                    and svc.await_revert_outcome.await_count == 1
+                    and not screen._reverting
+                    and _workers_idle(screen)
+                )
+            )
             svc.revert.assert_awaited_once_with(
                 "fnd_01abc", "tok-revert", dry_run=False,
             )
@@ -1260,12 +1308,11 @@ class TestFindingRevertFlow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             screen._reverting = True  # simulate an in-flight undo
             screen._launch_revert(dry_run=False)
-            await pilot.pause(0.05)
+            await wait_until(lambda: _workers_idle(screen))
+            await pilot.pause()
             # Guard fires before any preview call.
             assert getattr(svc, "revert_preview", None) is None or True
             # No confirm modal was pushed.
@@ -1290,9 +1337,7 @@ class TestFindingRevertFlow:
             findings_service=svc,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             # Drive the dry-run path directly through the execute worker.
             await screen._revert_execute_worker(
                 "fnd_01abc", "tok-revert", dry_run=True,
@@ -1390,12 +1435,11 @@ class TestConfirmModalPresentation:
             ip_ban_service=ip_ban,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await _wait_for_confirm_modal(app)
+            await wait_until(lambda: "Block 198.51.100.23" in _rendered_text(app))
             text = _rendered_text(app)
             assert "Block 198.51.100.23" in text
             assert "block_ip" not in text.split("Exact command")[0]
@@ -1405,7 +1449,6 @@ class TestConfirmModalPresentation:
         from textual.widgets import Button, Input
 
         from servonaut.screens.remediation_confirm import RemediationConfirmModal
-        from tests._async_bounds import wait_until
 
         svc = _mock_findings_service()
         preview = self._preview()
@@ -1426,9 +1469,7 @@ class TestConfirmModalPresentation:
             ip_ban_service=ip_ban,
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
             await wait_until(lambda: isinstance(app.screen, RemediationConfirmModal))
@@ -1550,12 +1591,17 @@ class TestBlockIPProviderRouting:
                         flag: True, "provider": provider}],
         )
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            await pilot.pause(0.05)
-            screen = app.screen_stack[-1]
+            screen = await _wait_for_screen(app, FindingDetailScreen)
             (button_id, _rem), = screen._remediation_buttons.items()
             screen.query_one(f"#{button_id}").press()
-            await pilot.pause(0.1)
+            await _wait_for_confirm_modal(app)
+            await wait_until(
+                lambda: (
+                    tools.detect_onbox_firewall.await_count == 1
+                    and svc.remediate_preview.await_count == 1
+                    and _workers_idle(screen)
+                )
+            )
             tools.detect_onbox_firewall.assert_awaited_once_with("web-1")
             # The configured AWS plane must NOT win for a non-AWS box.
             svc.remediate_preview.assert_awaited_once_with(
