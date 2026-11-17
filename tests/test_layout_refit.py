@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
+import textwrap
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, ScrollableContainer
 from textual.events import Resize
 from textual.geometry import Size
+from textual.widget import Widget
 from textual.widgets import Static
 
 from servonaut.styles import CSS_FILES
@@ -15,6 +20,12 @@ from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.fleet_values import FleetValueLine
 from servonaut.widgets.planned_table import PlannedTable
 from tests._async_bounds import wait_until
+
+# SHA-256 of Textual's Widget._size_updated, which LayoutRefitMixin wraps to
+# observe size/container_size changes and the layout flag when Resize is skipped.
+_UPSTREAM_WIDGET_SIZE_UPDATED_SHA256 = (
+    "9353851bdac2955b2660a60ea3da7d453a12c3248bb37d8e0d88e1f888d62b68"
+)
 
 
 class _ProbeWidget(LayoutRefitMixin, Static):
@@ -134,3 +145,20 @@ async def test_fitters_refit_after_scroll_and_sidebar_toggle() -> None:
         await wait_until(lambda: row.has_class("-wrap"))
         await wait_until(lambda: bool(app.planned_widths) and app.planned_widths[-1] <= 70)
         await wait_until(lambda: set(line.classes) != line_classes_wide)
+
+
+def test_upstream_widget_size_updated_matches_layout_refit_hook() -> None:
+    """LayoutRefitMixin wraps Widget._size_updated and reads _size/_container_size and layout.
+
+    If a Textual release changes Widget._size_updated's signature, attribute
+    names, or layout parameter semantics, re-check src/servonaut/widgets/_layout_refit.py
+    against the new upstream implementation before updating this hash.
+    """
+    source = textwrap.dedent(inspect.getsource(Widget._size_updated))
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert digest == _UPSTREAM_WIDGET_SIZE_UPDATED_SHA256, (
+        "Textual's Widget._size_updated has changed. Re-check LayoutRefitMixin "
+        "(src/servonaut/widgets/_layout_refit.py) against Widget._size_updated "
+        "(_size, _container_size, layout parameter semantics, and return contract), "
+        "then update _UPSTREAM_WIDGET_SIZE_UPDATED_SHA256 in this file."
+    )
