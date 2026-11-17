@@ -41,6 +41,7 @@ from servonaut.desktop.voice.protocol import (
     write_voice_frame,
 )
 from servonaut.desktop.voice.worker import VoiceWorker
+from tests._async_bounds import STEP_TIMEOUT_SECONDS
 
 
 class PipeTransport:
@@ -69,8 +70,10 @@ class PipeTransport:
 @pytest.fixture
 def pipes():
     transport = PipeTransport()
-    yield transport
-    transport.close()
+    try:
+        yield transport
+    finally:
+        transport.close()
 
 
 def test_voice_connection_lifecycle_mock_handshake(pipes):
@@ -98,7 +101,7 @@ def test_voice_connection_lifecycle_mock_handshake(pipes):
     worker_thread = threading.Thread(target=mock_worker, daemon=True)
     worker_thread.start()
 
-    hs = conn.connect(timeout=2.0)
+    hs = conn.connect(timeout=STEP_TIMEOUT_SECONDS)
     assert hs.manifest_id == "test-manifest"
     assert list(hs.capabilities) == ["stt_batch", "tts"]
     assert conn.is_connected
@@ -127,13 +130,17 @@ def test_voice_connection_handshake_version_mismatch(pipes):
         )
         write_voice_frame(pipes.worker_out, VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload=payload))
 
-    threading.Thread(target=mock_worker, daemon=True).start()
+    worker_thread = threading.Thread(target=mock_worker, daemon=True)
+    worker_thread.start()
+    try:
+        with pytest.raises(VoiceConnectionError, match="protocol version mismatch"):
+            conn.connect(timeout=STEP_TIMEOUT_SECONDS)
 
-    with pytest.raises(VoiceConnectionError, match="protocol version mismatch"):
-        conn.connect(timeout=2.0)
-
-    assert not conn.is_connected
-    conn.close()
+        assert not conn.is_connected
+    finally:
+        conn.close()
+        worker_thread.join(timeout=STEP_TIMEOUT_SECONDS)
+        assert not worker_thread.is_alive()
 
 
 def test_voice_connection_handshake_rejected_by_worker(pipes):
@@ -155,13 +162,17 @@ def test_voice_connection_handshake_rejected_by_worker(pipes):
             ),
         )
 
-    threading.Thread(target=mock_worker, daemon=True).start()
+    worker_thread = threading.Thread(target=mock_worker, daemon=True)
+    worker_thread.start()
+    try:
+        with pytest.raises(VoiceConnectionError, match="Worker rejected handshake"):
+            conn.connect(timeout=STEP_TIMEOUT_SECONDS)
 
-    with pytest.raises(VoiceConnectionError, match="Worker rejected handshake"):
-        conn.connect(timeout=2.0)
-
-    assert not conn.is_connected
-    conn.close()
+        assert not conn.is_connected
+    finally:
+        conn.close()
+        worker_thread.join(timeout=STEP_TIMEOUT_SECONDS)
+        assert not worker_thread.is_alive()
 
 
 def test_voice_connection_request_timeout(pipes):
@@ -227,15 +238,20 @@ def test_voice_connection_remote_error(pipes):
             ),
         )
 
-    threading.Thread(target=mock_worker, daemon=True).start()
-    conn.connect(timeout=2.0)
+    worker_thread = threading.Thread(target=mock_worker, daemon=True)
+    worker_thread.start()
+    try:
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
 
-    with pytest.raises(VoiceRemoteError) as exc_info:
-        conn.send_request(InputStartRequest(id="req-start", streaming=False, max_seconds=30.0), timeout=1.0)
+        with pytest.raises(VoiceRemoteError) as exc_info:
+            conn.send_request(InputStartRequest(id="req-start", streaming=False, max_seconds=30.0), timeout=1.0)
 
-    assert exc_info.value.code == VoiceErrorCode.AUDIO_DEVICE_ERROR
-    assert "No microphone available" in exc_info.value.message
-    conn.close()
+        assert exc_info.value.code == VoiceErrorCode.AUDIO_DEVICE_ERROR
+        assert "No microphone available" in exc_info.value.message
+    finally:
+        conn.close()
+        worker_thread.join(timeout=STEP_TIMEOUT_SECONDS)
+        assert not worker_thread.is_alive()
 
 
 def test_voice_connection_event_subscription(pipes):
@@ -269,7 +285,7 @@ def test_voice_connection_event_subscription(pipes):
         write_voice_frame(pipes.worker_out, InputPartialEvent(id="ev-3", text="world"))
 
     threading.Thread(target=mock_worker, daemon=True).start()
-    conn.connect(timeout=2.0)
+    conn.connect(timeout=STEP_TIMEOUT_SECONDS)
 
     # Wait for events to arrive
     for _ in range(50):
@@ -310,13 +326,13 @@ def test_voice_connection_eof_aborts_pending(pipes):
         pipes.worker_out.close()
 
     threading.Thread(target=mock_worker, daemon=True).start()
-    conn.connect(timeout=2.0)
+    conn.connect(timeout=STEP_TIMEOUT_SECONDS)
 
     closed_notified = threading.Event()
     conn.on_close(closed_notified.set)
 
     with pytest.raises(VoiceConnectionClosedError):
-        conn.send_request(PingRequest(id="req-ping-eof"), timeout=2.0)
+        conn.send_request(PingRequest(id="req-ping-eof"), timeout=STEP_TIMEOUT_SECONDS)
 
     assert closed_notified.wait(timeout=1.0)
     assert not conn.is_connected
@@ -336,10 +352,10 @@ def test_voice_connection_with_real_voice_worker(pipes):
     assert conn.is_connected
 
     # Ping
-    assert conn.ping(timeout=2.0) is True
+    assert conn.ping(timeout=STEP_TIMEOUT_SECONDS) is True
 
     # Probe
-    probe = conn.probe(timeout=2.0)
+    probe = conn.probe(timeout=STEP_TIMEOUT_SECONDS)
     assert isinstance(probe, ProbeResponsePayload)
 
     # Clean shutdown
@@ -441,7 +457,7 @@ class TestEventDispatcher:
             pipes.worker_out, InputPartialEvent(id="e", text="hi"),
         ))
         with caplog.at_level(logging.WARNING, logger="servonaut.desktop.voice.connection"):
-            conn.connect(timeout=2.0)
+            conn.connect(timeout=STEP_TIMEOUT_SECONDS)
             assert answered.wait(5.0)
         assert elapsed[0] < 1.0
         assert "event dispatcher" in caplog.text
@@ -457,7 +473,7 @@ class TestEventDispatcher:
                 write_voice_frame(pipes.worker_out, InputPartialEvent(id=str(index), text=str(index)))
 
         _serve(pipes, after_handshake=burst)
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         deadline = time.monotonic() + 3
         while len(texts) < 50 and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -472,7 +488,7 @@ class TestSettingsHandOver:
         conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in, config=config)
         conn.set_epoch_provider(lambda: 4)
         _serve(pipes, seen=seen)
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         handshake = seen[0]
         assert isinstance(handshake, HandshakeRequest)
         assert handshake.config == config
@@ -485,11 +501,11 @@ class TestSettingsHandOver:
         before_connect = VoiceWorkerConfig(tts_voice="bf_emma")
         conn.configure(before_connect)
         _serve(pipes, seen=seen)
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         assert seen[0].config == before_connect  # type: ignore[union-attr]
 
         live = VoiceWorkerConfig(tts_speed=1.5)
-        conn.configure(live, timeout=2.0)
+        conn.configure(live, timeout=STEP_TIMEOUT_SECONDS)
         assert isinstance(seen[1], ConfigureRequest) and seen[1].config == live
         conn.close()
 
@@ -497,7 +513,7 @@ class TestSettingsHandOver:
         seen: List[VoiceRequest] = []
         conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
         _serve(pipes, seen=seen)
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         conn.close()
         deadline = time.monotonic() + 2
         while not any(isinstance(r, ShutdownRequest) for r in seen) and time.monotonic() < deadline:
@@ -515,9 +531,12 @@ class TestRobustness:
             % (VOICE_PROTOCOL_VERSION, "9" * 5000)
         ).encode()
         _serve(pipes, after_handshake=lambda: pipes.worker_out.write(hostile))
-        conn.connect(timeout=2.0)
-        assert conn.ping(timeout=2.0) is True
-        conn.close()
+        try:
+            # Allow the pipe-reader thread to be scheduled on a busy runner.
+            conn.connect(timeout=STEP_TIMEOUT_SECONDS)
+            assert conn.ping(timeout=STEP_TIMEOUT_SECONDS) is True
+        finally:
+            conn.close()
 
     def test_default_timeout_comes_from_the_policy(self, pipes) -> None:
         conn = VoiceConnection(
@@ -542,7 +561,7 @@ class TestRobustness:
     def test_owner_close_is_permanent(self, pipes) -> None:
         conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
         _serve(pipes)
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         conn.close()
         with pytest.raises(VoiceConnectionClosedError):
             conn.connect(timeout=1.0)
@@ -777,14 +796,16 @@ class TestOversizedFrames:
     def test_oversized_request_fails_cleanly(self, pipes) -> None:
         conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
         _serve(pipes)
-        conn.connect(timeout=2.0)
-        with pytest.raises(VoiceFrameError, match="exceeds"):
-            conn.send_request(OutputSpeakRequest(id="big", text="a" * 70_000, epoch=0))
-        with pytest.raises(VoiceFrameError):
-            conn.send_request(OutputSpeakRequest(id="bad", text="\ud800", epoch=0))
-        assert conn._pending == {}
-        assert conn.ping(timeout=2.0) is True
-        conn.close()
+        try:
+            conn.connect(timeout=STEP_TIMEOUT_SECONDS)
+            with pytest.raises(VoiceFrameError, match="exceeds"):
+                conn.send_request(OutputSpeakRequest(id="big", text="a" * 70_000, epoch=0))
+            with pytest.raises(VoiceFrameError):
+                conn.send_request(OutputSpeakRequest(id="bad", text="\ud800", epoch=0))
+            assert conn._pending == {}
+            assert conn.ping(timeout=STEP_TIMEOUT_SECONDS) is True
+        finally:
+            conn.close()
 
 
 class TestConfigureDuringHandshake:
@@ -830,7 +851,7 @@ class TestSessionEndHook:
         _serve(pipes, after_handshake=lambda: write_voice_frame(
             pipes.worker_out, InputPartialEvent(id="e", text="hi"),
         ))
-        conn.connect(timeout=2.0)
+        conn.connect(timeout=STEP_TIMEOUT_SECONDS)
         time.sleep(0.1)  # the dispatcher is now inside the slow subscriber
         pipes.worker_out.close()  # the worker exits
         assert hooked.wait(0.5)
