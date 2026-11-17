@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import stat
@@ -54,6 +55,15 @@ class PrivateSshAgent:
         # A per-agent directory created for this socket, removed on close.
         self._private_directory = private_directory
         self._closed = False
+        # A pidfd remains tied to this launch after its numeric PID is reused.
+        # Linux agents can exit before application teardown (or be reaped by
+        # a sandbox owner); never ask ssh-agent -k to signal a replacement.
+        self._pidfd: int | None = None
+        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+            try:
+                self._pidfd = os.pidfd_open(pid)
+            except OSError:
+                pass
 
     @classmethod
     def start(cls, directory: Path | None = None) -> "PrivateSshAgent":
@@ -361,7 +371,23 @@ class PrivateSshAgent:
             return
         self._closed = True
         try:
-            subprocess.run(
+            if self._pidfd is None or not select.select([self._pidfd], [], [], 0)[0]:
+                self._stop_owned_agent()
+        finally:
+            if self._pidfd is not None:
+                os.close(self._pidfd)
+                self._pidfd = None
+        try:
+            self.socket_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._remove_private_directory(self._private_directory)
+        self._instances.discard(self)
+
+    def _stop_owned_agent(self) -> None:
+        """Try OpenSSH shutdown, then signal this launch if the tool fails."""
+        try:
+            result = subprocess.run(
                 ["ssh-agent", "-k"],
                 check=False,
                 capture_output=True,
@@ -369,14 +395,19 @@ class PrivateSshAgent:
                 timeout=5,
                 env=self._environment(include_pid=True),
             )
+            if result.returncode != 0:
+                self._signal_owned_agent()
         except (OSError, subprocess.SubprocessError):
+            self._signal_owned_agent()
+
+    def _signal_owned_agent(self) -> None:
+        if self._pidfd is None:
             self._terminate_agent(self.pid)
+            return
         try:
-            self.socket_path.unlink(missing_ok=True)
+            signal.pidfd_send_signal(self._pidfd, signal.SIGTERM)
         except OSError:
             pass
-        self._remove_private_directory(self._private_directory)
-        self._instances.discard(self)
 
     def __enter__(self) -> "PrivateSshAgent":
         return self

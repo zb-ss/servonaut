@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import select
+import signal
 import socket
 import stat
 import subprocess
@@ -110,6 +112,57 @@ def test_closed_agent_rejects_new_key(short_socket_dir):
     agent.close()
     with pytest.raises(PrivateSshAgentError, match="closed"):
         agent.add_private_key(_private_key())
+
+
+def test_close_terminates_the_owned_agent_when_shutdown_returns_nonzero(short_socket_dir, monkeypatch):
+    monkeypatch.setattr(os, "pidfd_open", MagicMock(side_effect=ProcessLookupError), raising=False)
+    agent = PrivateSshAgent(short_socket_dir / "agent.sock", pid=123456)
+    terminated = []
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=255))
+    monkeypatch.setattr(PrivateSshAgent, "_terminate_agent", terminated.append)
+
+    agent.close()
+    agent.close()
+
+    assert terminated == [agent.pid]
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfds are unavailable")
+@pytest.mark.parametrize("failure", ["nonzero", "missing-tool"])
+def test_failed_shutdown_command_stops_the_real_owned_agent(short_socket_dir, monkeypatch, failure):
+    agent = PrivateSshAgent.start(short_socket_dir)
+    observer = os.pidfd_open(agent.pid)
+    try:
+        run = MagicMock(return_value=SimpleNamespace(returncode=255))
+        if failure == "missing-tool":
+            run.side_effect = FileNotFoundError("shutdown tool disappeared")
+        monkeypatch.setattr(subprocess, "run", run)
+        agent.close()
+        assert select.select([observer], [], [], 5)[0], "the fallback left its real agent running"
+    finally:
+        if not select.select([observer], [], [], 0)[0]:
+            signal.pidfd_send_signal(observer, signal.SIGTERM)
+        os.close(observer)
+        agent.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfds are unavailable")
+def test_close_does_not_signal_a_replacement_after_agent_was_reaped(short_socket_dir, monkeypatch):
+    agent = PrivateSshAgent.start(short_socket_dir)
+    try:
+        assert agent._pidfd is not None
+        os.kill(agent.pid, signal.SIGTERM)
+        assert select.select([agent._pidfd], [], [], 5)[0]
+        run = MagicMock(side_effect=AssertionError("an exited agent must not use a numeric PID"))
+        monkeypatch.setattr(subprocess, "run", run)
+        terminate = MagicMock()
+        monkeypatch.setattr(PrivateSshAgent, "_terminate_agent", terminate)
+        agent.close()
+        run.assert_not_called()
+        terminate.assert_not_called()
+        assert agent._pidfd is None
+    finally:
+        agent.close()
 
 
 def test_windows_fails_before_starting_a_unix_socket_agent(monkeypatch):
