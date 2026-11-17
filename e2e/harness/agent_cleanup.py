@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, TextIO
 
 LEDGER_NAME = "ssh-agents.jsonl"
 STOP_TIMEOUT_SECONDS = 5.0
@@ -61,40 +61,75 @@ def process_identity(pid: int, executable: str, socket: str) -> str | None:
         return None
 
 
-def records(root: Path, *, shim_dir: Path | None = None) -> list[dict[str, Any]]:
-    try:
-        lines = (root / LEDGER_NAME).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+def _read_records(handle: TextIO) -> list[dict[str, Any]]:
+    handle.seek(0)
     found = []
-    for line in lines:
+    for line in handle:
         try:
             record = json.loads(line)
         except ValueError:
             continue  # A truncated last write cannot grant ownership.
-        if isinstance(record, dict) and (shim_dir is None or record.get("shim_dir") == str(shim_dir)):
+        if isinstance(record, dict):
             found.append(record)
     return found
 
 
-def record_agent(root: Path, shim_dir: Path, pid: int, executable: str, socket: str) -> None:
+def _append_record(handle: TextIO, record: dict[str, Any]) -> None:
+    handle.seek(0, os.SEEK_END)
+    handle.write(json.dumps(record) + "\n")
+    handle.flush()
+
+
+@contextlib.contextmanager
+def _registry(root: Path) -> Iterator[TextIO]:
+    with (root / LEDGER_NAME).open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield handle
+
+
+def records(root: Path, *, shim_dir: Path | None = None) -> list[dict[str, Any]]:
+    try:
+        with (root / LEDGER_NAME).open(encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_SH)
+            found = _read_records(handle)
+    except OSError:
+        return []
+    return [record for record in found if shim_dir is None or record.get("shim_dir") == str(shim_dir)]
+
+
+def _record_agent(handle: TextIO, shim_dir: Path, pid: int, executable: str, socket: str) -> None:
     started = process_identity(pid, executable, socket)
     if started is None:
         raise RuntimeError("could not establish the launched SSH agent's ownership")
     record = {"pid": pid, "executable": executable, "socket": socket,
               "started": started, "shim_dir": str(shim_dir)}
-    with (root / LEDGER_NAME).open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        handle.write(json.dumps(record) + "\n")
-        handle.flush()
+    _append_record(handle, record)
+
+
+@contextlib.contextmanager
+def agent_launch(root: Path, shim_dir: Path) -> Iterator[Callable[[int, str, str], None]]:
+    """Serialize daemon creation/registration with teardown and refuse late starts."""
+    with _registry(root) as handle:
+        if any(record.get("closed") or record.get("closed_shim") == str(shim_dir)
+               for record in _read_records(handle)):
+            raise RuntimeError("the SSH agent owner is closing")
+        yield lambda pid, executable, socket: _record_agent(handle, shim_dir, pid, executable, socket)
+
+
+def record_agent(root: Path, shim_dir: Path, pid: int, executable: str, socket: str) -> None:
+    with agent_launch(root, shim_dir) as register:
+        register(pid, executable, socket)
 
 
 def owns_agent(root: Path, pid: int, executable: str, socket: str) -> bool:
+    found = records(root)
+    # A concurrent teardown may hold the registry while stopping this PID.
+    # Inspect liveness after waiting for that lock, not before it.
     identity = process_identity(pid, executable, socket)
     return identity is not None and any(
         record.get("pid") == pid and record.get("executable") == executable
         and record.get("socket") == socket and record.get("started") == identity
-        for record in records(root)
+        for record in found
     )
 
 
@@ -128,5 +163,12 @@ def _stop_record(record: dict[str, Any]) -> None:
 
 def stop_owned_agents(root: Path, *, shim_dir: Path | None = None) -> None:
     """Stop only agents whose launch and current process identity agree."""
-    for record in records(root, shim_dir=shim_dir):
-        _stop_record(record)
+    try:
+        with _registry(root) as handle:
+            found = _read_records(handle)
+            _append_record(handle, {"closed": True} if shim_dir is None else {"closed_shim": str(shim_dir)})
+            for record in found:
+                if shim_dir is None or record.get("shim_dir") == str(shim_dir):
+                    _stop_record(record)
+    except FileNotFoundError:
+        return  # The unique run root has already been removed.
