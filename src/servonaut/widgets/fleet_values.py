@@ -124,8 +124,12 @@ class ValueRow(Horizontal):
             return
         # Taking the focus for the gesture keeps keyboard focus clean while
         # clicking or dragging a value; focus then goes back to where it was.
+        # Notify the app directly in case a widget handles/stops MouseDown.
         focused = self.screen.focused
         self._returns_to = None if isinstance(focused, ValueRow) else focused
+        started = getattr(self.app, "pointer_gesture_started", None)
+        if callable(started):
+            started()
         self.parent.walking = True
         self.focus()
 
