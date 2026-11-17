@@ -198,6 +198,9 @@ async def _command_overlay(app, pilot, row):
 
 
 async def _scp_upload(app, pilot, row):
+    from textual.errors import NoWidget
+    from textual.widgets import Button
+
     from servonaut.screens.scp_transfer import SCPTransferScreen
 
     screen = SCPTransferScreen(row)
@@ -205,12 +208,23 @@ async def _scp_upload(app, pilot, row):
     await wait_until(
         lambda: app.screen is screen
         and bool(screen.query("#local_path_input"))
+        and bool(screen.query("#transfer_button"))
         and screen.focused is not None,
     )
     screen.query_one("#local_path_input").value = str(Path.home() / ".servonaut" / "config.json")
     screen.query_one("#remote_path_input").value = "/tmp/x"
-    if screen.query("#transfer_button"):
-        await pilot.click("#transfer_button")
+    button = screen.query_one("#transfer_button", Button)
+
+    def _transfer_button_clickable() -> bool:
+        if button.disabled or button.region.width <= 0 or button.region.height <= 0:
+            return False
+        try:
+            return app.get_widget_at(*button.region.center)[0] is button
+        except NoWidget:
+            return False
+
+    await wait_until(_transfer_button_clickable)
+    assert await pilot.click("#transfer_button")
 
 
 async def _server_actions_connect(app, pilot, row):
