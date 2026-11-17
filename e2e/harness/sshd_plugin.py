@@ -68,7 +68,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture
-def sshd(journey: Any, request: pytest.FixtureRequest) -> Any:
+def sshd(journey: Any, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Any:
     """A target (``web-1``) and a bastion on loopback, reached with real OpenSSH."""
     from e2e.harness.sshd import CommandLog, OpenSshMissing, SshWorld
 
@@ -85,6 +85,11 @@ def sshd(journey: Any, request: pytest.FixtureRequest) -> Any:
     world.start()
     try:
         world.install_clients(journey.shims.directory)
+        # Each journey replaces PATH's client. Do not reuse an answer learned
+        # from an earlier journey's scripted tool or a different protocol.
+        from servonaut.utils import scp_client
+        monkeypatch.setattr(scp_client, '_answers', {})
+        monkeypatch.setattr(scp_client, '_probes', {})
     except BaseException:
         world.stop()
         raise

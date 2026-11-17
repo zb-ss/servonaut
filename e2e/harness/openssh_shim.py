@@ -190,7 +190,9 @@ def _argv_problem(guard: Any, tool: str, args: list[str], config: str, root: str
             return f"a log file (-E) outside the test root ({value!r}) is not allowed"
         if letter in REFUSED_OPTIONS[tool]:
             return f"{REFUSED_OPTIONS[tool][letter]} is not allowed"
-    if tool == "scp" and not any(_is_remote_operand(o) for o in operands):
+    # The product asks for usage with no arguments to learn protocol support.
+    # With no operands the real client only prints help; it cannot copy.
+    if tool == "scp" and args and not any(_is_remote_operand(o) for o in operands):
         return "scp needs a remote side (local copies are not allowed)"
     return ""
 
