@@ -45,7 +45,13 @@ def make_dialog(kind: str) -> tuple[ModalScreen, str, str]:
 def painted_text(app: BasicDialogHost) -> str:
     """Read the composed terminal viewport, excluding clipped widget lines."""
     output = StringIO()
-    console = Console(file=output, width=app.size.width, force_terminal=True, color_system=None)
+    console = Console(
+        file=output,
+        width=app.size.width,
+        height=app.size.height,
+        force_terminal=True,
+        color_system=None,
+    )
     console.print(app.screen._compositor.render_update(full=True))
     return output.getvalue()
 
