@@ -24,7 +24,7 @@ from tests._team_policy_fixtures import (
     trust_test_key,
 )
 
-from . import _harness
+from . import _harness, _snapshot
 
 Scenario = Callable[[Any], Awaitable[None]]
 
@@ -113,23 +113,35 @@ def _agent_rules_card(agent_rules: Optional[dict] = None, *, signed: bool = True
     return scenario
 
 
-def _capture(screen_snapshot: Any, size: str, scenario: Scenario) -> None:
+def _capture(
+    screen_snapshot: Any, size: str, scenario: Scenario, *, check: _snapshot.Check | None = None,
+) -> None:
     async def run_before(pilot: Any) -> None:
         await _harness.wait_for_fleet(pilot)
         await scenario(pilot)
         await pilot.pause()
         _harness.freeze_cursors(pilot.app)
 
-    screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], run_before)
+    screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], run_before, check=check)
+
+
+def _check_return_lane(pilot: Any) -> None:
+    screen = pilot.app.screen
+    back_row = screen.query_one("#team_return_actions")
+    for card_id in ("configs_section", "agent_rules_section"):
+        card = screen.query_one(f"#{card_id}")
+        assert card.region.bottom <= back_row.region.y, f"{card_id} runs under the Back row"
 
 
 @sizes
 def test_agent_rules_in_force(screen_snapshot, size: str) -> None:
     """Levels per role, a per-server level, the team's command lists, version and times."""
-    _capture(screen_snapshot, size, _agent_rules_card(_RULES))
+    _capture(screen_snapshot, size, _agent_rules_card(_RULES),
+             check=_check_return_lane if size == "100x30" else None)
 
 
 @sizes
 def test_agent_rules_fallback(screen_snapshot, size: str) -> None:
     """No signed rules: agents run at the readonly level, and the card says why."""
-    _capture(screen_snapshot, size, _agent_rules_card(signed=False))
+    _capture(screen_snapshot, size, _agent_rules_card(signed=False),
+             check=_check_return_lane if size == "100x30" else None)
