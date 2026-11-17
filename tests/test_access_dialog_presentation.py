@@ -128,6 +128,8 @@ async def _pinned_local_signout_target(app: _AccessHost, pilot: Pilot, selector:
     refreshed = asyncio.Event()
     modal.call_after_refresh(refreshed.set)
     await wait_until(refreshed.is_set)
+    # The refresh can re-run layout; wait for the target to settle again.
+    await wait_until(pinned)
     assert pinned() and app._exception is None
     _critical_regions(app, modal)
     ancestors = (modal, frame, actions.parent, actions)

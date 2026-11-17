@@ -138,6 +138,7 @@ async def _click(app: _MemoryScanHost, pilot: Pilot, widget: Widget) -> None:
 async def _tab_to(app: _MemoryScanHost, pilot: Pilot, widget: Widget) -> None:
     for _ in range(len(app.screen.focus_chain) + 1):
         if app.focused is widget:
+            await wait_until(lambda: _exposed(app, widget))
             assert _exposed(app, widget)
             return
         await pilot.press("tab")
@@ -192,7 +193,9 @@ async def test_memory_scalar_labels_compound_status_and_editors_remain_painted_a
         await pilot.pause()
         assert status.render().plain
         assert _compact(status.render().plain) == _compact(_paint(app, status))
-        assert _exposed(app, panel.query_one("#memory_manage_device_auto_unlock", Button))
+        manage = panel.query_one("#memory_manage_device_auto_unlock", Button)
+        await wait_until(lambda: _exposed(app, manage))
+        assert _exposed(app, manage)
         body = panel.query_one(".panel-body")
         for editor_id, selector in (("memory_disabled_modules", ".list-add"), ("memory_ttl_overrides", ".kv-add")):
             editor = panel.query_one(f"#{editor_id}")
@@ -271,6 +274,7 @@ async def test_scan_blank_surviving_rule_focuses_real_field_after_middle_id_gap(
         await pilot.pause()
         await _click(app, pilot, panel.query_one("#save_scan", Button))
         await wait_until(lambda: app.focused is survivor)
+        await wait_until(lambda: _exposed(app, survivor))
         assert _exposed(app, survivor)
         assert manager._config_path.read_bytes() == before
         assert "Saved" not in app.notes
