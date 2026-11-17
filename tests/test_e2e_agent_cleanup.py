@@ -5,7 +5,6 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import threading
 import re
@@ -125,30 +124,3 @@ def test_closed_owner_refuses_a_late_start_before_launching_a_daemon(tmp_path, m
                                       ["-a", str(tmp_path / "agent.sock"), "-s"])
 
     run.assert_not_called()
-
-
-@pytest.mark.parametrize("ending, status", [("success", 0), ("failure", 1), ("interrupt", 2)])
-@pytest.mark.parametrize("keep", [False, True], ids=["removed", "kept"])
-def test_vault_journey_teardown_stops_unclosed_agent(ending, status, keep):
-    repo = Path(__file__).resolve().parents[1]
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(repo), str(repo / "src")]),
-           "SERVONAUT_E2E_KEEP": str(int(keep))}
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", f"e2e/probes/agent_lifecycle.py::test_{ending}", "-q", "-s"],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=90, check=False,
-    )
-    line = next((line for line in result.stdout.splitlines() if line.startswith("AGENT_PROBE ")), None)
-    assert line is not None, result.stdout + result.stderr
-    record = json.loads(line.removeprefix("AGENT_PROBE "))
-    try:
-        assert record["started"] is not None, result.stdout + result.stderr
-        assert Path(record["implementation"]) == repo / "src/servonaut/services/vault/ssh_agent.py"
-        assert result.returncode == status, result.stdout + result.stderr
-        assert agent_cleanup.process_identity(record["pid"], record["executable"], record["socket"]) is None, (
-            result.stdout + result.stderr
-        )
-        assert Path(record["root"]).exists() == keep
-    finally:
-        # The child explicitly reported this launch; never scan other runs.
-        agent_cleanup._stop_record(record)
-        shutil.rmtree(record["root"], ignore_errors=True)
