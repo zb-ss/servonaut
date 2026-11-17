@@ -417,6 +417,7 @@ async def test_setup_escape_pops_without_saving(kind: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 9 s normal, 49 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("kind", KINDS)
 async def test_setup_held_connection_test_survives_chat_reflow(
     kind: str, monkeypatch: pytest.MonkeyPatch,

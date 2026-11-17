@@ -574,23 +574,27 @@ async def test_rail_focused_vault_keys_have_no_side_effects(
 
 
 @pytest.mark.asyncio
-async def test_check_action_composes_rail_guard_before_passthrough() -> None:
-    for kind, selector, action in (("s3", "#s3_table", "refresh"),
-                                   ("dns", "#domains_table", "back"),
-                                   ("vault", "#bw_vault_mgr_table", "refresh")):
-        case = _case(kind)
-        app = case.app_factory(True)
-        async with app.run_test(size=(160, 50)) as pilot:
-            screen = await open_case(case, app, pilot)
-            await _focus_table(pilot, screen, selector, 0)
-            assert screen.check_action(action, ()) is True, kind
-            await _enter_rail(pilot, screen)
-            # Printable single-key bindings are muted from the rail; Escape is not.
-            assert screen.check_action("back", ()) is True, kind
-            if action == "refresh":
-                # The guard is keyed by action, so the vault's F5 (which shares
-                # `refresh` with `r`) is muted from the rail too.
-                assert screen.check_action("refresh", ()) is None, kind
+@pytest.mark.parametrize("kind,selector,action", [
+    ("s3", "#s3_table", "refresh"),
+    ("dns", "#domains_table", "back"),
+    ("vault", "#bw_vault_mgr_table", "refresh"),
+])
+async def test_check_action_composes_rail_guard_before_passthrough(
+    kind: str, selector: str, action: str,
+) -> None:
+    case = _case(kind)
+    app = case.app_factory(True)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        await _focus_table(pilot, screen, selector, 0)
+        assert screen.check_action(action, ()) is True, kind
+        await _enter_rail(pilot, screen)
+        # Printable single-key bindings are muted from the rail; Escape is not.
+        assert screen.check_action("back", ()) is True, kind
+        if action == "refresh":
+            # The guard is keyed by action, so the vault's F5 (which shares
+            # `refresh` with `r`) is muted from the rail too.
+            assert screen.check_action("refresh", ()) is None, kind
 
 
 @pytest.mark.asyncio
@@ -697,6 +701,7 @@ async def test_object_storage_upload_sends_the_typed_target(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 9 s normal, 55 s on two cores with coverage; a slow runner needs more.
 async def test_object_storage_held_listing_survives_chat_reflow() -> None:
     app = _BrowserHost(True)
     app.list_release.clear()

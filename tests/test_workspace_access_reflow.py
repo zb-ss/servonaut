@@ -374,6 +374,7 @@ async def test_access_state_native_tab_and_chat_restore(case: ReflowCase) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 9 s normal, 49 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_access_qualified_native_boundaries(case: ReflowCase, navigation_visible: bool) -> None:
