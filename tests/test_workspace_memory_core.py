@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from textual import events
@@ -22,10 +22,9 @@ from servonaut.widgets.upsell_modal import UpsellModal
 from servonaut.widgets.workspace import WorkspaceScreen
 from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import (
-    BoundarySample, ReflowCase, assert_button_label_painted, assert_essential_targets,
-    assert_layout, assert_qualified_boundaries, assert_visibility_combinations,
-    collapse_chat, content, one_layout_transition, open_case, open_chat,
-    preserve_native_state, settled_layout,
+    BoundarySample, ReflowCase, assert_button_label_painted, assert_layout,
+    assert_qualified_boundaries, assert_visibility_combinations, content, open_case,
+    preserve_native_state,
 )
 from tests.test_fleet_workspace_layout import _open_chat
 from tests.test_memory_dashboard_regressions import _memory_service, _module
@@ -299,31 +298,6 @@ def memory_case(kind: str) -> ReflowCase:
     )
 
 
-async def _assert_chat_cycle_for_navigation(
-    case: ReflowCase, app: _MemoryWorkspaceApp, pilot: Pilot,
-    screen: WorkspaceScreen, navigation_visible: bool,
-) -> None:
-    baseline = case.state(screen)
-    assert not list(screen.query(ChatPanel))
-    for chat_open in (False, True, False):
-        if chat_open:
-            panel = await open_chat(app, pilot, screen)
-        elif list(screen.query(ChatPanel)):
-            await collapse_chat(app, pilot, screen)
-            assert panel._collapsed and panel.is_attached
-        await settled_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert case.state(screen) == baseline
-        if content(screen).display:
-            entry_scroll = content(screen).scroll_y
-            await assert_essential_targets(case, app, pilot, screen)
-            if content(screen).scroll_y != entry_scroll:
-                content(screen).scroll_to(y=entry_scroll, animate=False, immediate=True)
-                await pilot.pause()
-        assert case.state(screen) == baseline
-        assert app._exception is None
-
-
 @pytest.mark.asyncio
 async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
     case = memory_case("memory-populated")
@@ -336,6 +310,9 @@ async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
         content(screen).scroll_to(y=0, animate=False)
         await pilot.pause()
         await _click(pilot, "#workspace_navigation")
+        # Reading a region here rebuilds the compositor map before the layout
+        # pass, which is how the reflow used to reach the row without a Resize.
+        _ = content(screen).region
         await wait_until(lambda: screen.query_one(Sidebar).display is True)
         row = screen.query_one("#memory-actions", ActionRow)
         await wait_until(lambda: row.has_class("-wrap"))
@@ -353,18 +330,6 @@ async def test_memory_workspace_pane_combinations(
     kind: str, size: tuple[int, int],
 ) -> None:
     case = memory_case(kind)
-    # Until ActionRow refits after layout changes that follow a scroll, toggling
-    # navigation after scrolling at 100x30 drops Resize; see
-    # test_memory_actions_wrap_after_scroll_and_navigation_toggle.
-    if kind == "memory-populated" and size == (100, 30):
-        for navigation_visible in (False, True):
-            app = case.app_factory(navigation_visible)
-            async with app.run_test(size=size) as pilot:
-                screen = await open_case(case, app, pilot)
-                await _assert_chat_cycle_for_navigation(
-                    case, app, pilot, screen, navigation_visible,
-                )
-        return
     app = case.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(case, app, pilot)
@@ -373,29 +338,6 @@ async def test_memory_workspace_pane_combinations(
         )
 
 
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="ActionRow misses Resize when a region read rebuilds the full map before the layout pass",
-)
-async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
-    case = memory_case("memory-populated")
-    app = case.app_factory(False)
-    async with app.run_test(size=(100, 30)) as pilot:
-        screen = await open_case(case, app, pilot)
-        await settled_layout(app, screen)
-        content(screen).scroll_to(y=16, animate=False)
-        await pilot.pause()
-        content(screen).scroll_to(y=0, animate=False)
-        await pilot.pause()
-        await _click(pilot, "#workspace_navigation")
-        _ = content(screen).region
-        await wait_until(lambda: screen.query_one(Sidebar).display is True)
-        await settled_layout(app, screen)
-        row = screen.query_one("#memory-actions", ActionRow)
-        button = screen.query_one("#btn_clear_module")
-        assert row.has_class("-wrap")
-        assert button.region.right <= content(screen).region.right
 
 
 @pytest.mark.asyncio
