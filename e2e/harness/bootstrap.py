@@ -14,6 +14,7 @@ real home directory, which is only used to *protect* it.
 from __future__ import annotations
 
 import importlib.util
+import atexit
 import os
 import shutil
 import sys
@@ -444,6 +445,7 @@ def bootstrap(root: Optional[Path] = None) -> E2EContext:
     if _CONTEXT is not None:
         return _CONTEXT
     _assert_servonaut_not_imported()
+    atexit.register(teardown)
     original_env = dict(os.environ)
     _lift_inherited_guard()
     worker = original_env.get("PYTEST_XDIST_WORKER", "main")
@@ -477,7 +479,12 @@ def bootstrap(root: Optional[Path] = None) -> E2EContext:
 def teardown() -> None:
     """Remove the test root unless ``SERVONAUT_E2E_KEEP=1``."""
     ctx = _CONTEXT
-    if ctx is None or ctx.keep_root:
+    if ctx is None:
+        return
+    from e2e.harness.agent_cleanup import stop_owned_agents
+
+    stop_owned_agents(ctx.root)
+    if ctx.keep_root or not ctx.root.exists():
         return
     try:
         shutil.rmtree(ctx.root)
