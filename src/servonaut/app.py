@@ -3,14 +3,13 @@
 from __future__ import annotations
 import asyncio
 import contextlib
-import functools
 import importlib
 import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
+import weakref
 
-from textual import events
 from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
 from textual.binding import Binding
@@ -37,37 +36,6 @@ from servonaut.utils.markup_backstop import install as install_markup_backstop
 from servonaut.utils.terminal_output import install as install_terminal_output_filter
 
 logger = logging.getLogger(__name__)
-
-
-def _install_copy_gesture_hook() -> None:
-    """Snapshot any focused TextArea before Screen._forward_event processes MouseDown.
-
-    Pilot tests invoke ``screen._forward_event`` directly (bypassing
-    ``App.on_event``), and ``Screen._forward_event`` may also shift focus
-    before forwarding ``MouseDown`` to a widget. Wrapping idempotently ensures
-    the pre-gesture snapshot runs before focus changes in both live runs and
-    Pilot tests.
-    """
-    from textual.screen import Screen
-
-    current = Screen._forward_event
-    if getattr(current, "_servonaut_copy_gesture_hooked", False):
-        return
-
-    @functools.wraps(current)
-    def _forward_event_with_copy_snapshot(self: Any, event: events.Event) -> None:
-        if isinstance(event, events.MouseDown) and not event.is_forwarded:
-            try:
-                app = self.app
-            except Exception:
-                app = None
-            snapshot = getattr(app, "_snapshot_mouse_down_editor", None)
-            if callable(snapshot):
-                snapshot()
-        return current(self, event)
-
-    _forward_event_with_copy_snapshot._servonaut_copy_gesture_hooked = True  # type: ignore[attr-defined]
-    Screen._forward_event = _forward_event_with_copy_snapshot  # type: ignore[method-assign]
 
 # Maps sidebar nav ids for provider S3 screens to their provider strings.
 # Used by on_sidebar_navigation_requested to resolve the ObjectStorageScreen
@@ -334,9 +302,7 @@ class ServonautApp(App):
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
         self.client_kind = client_kind
-        self._mouse_down_editor_snapshot: Optional[Tuple[Any, Any]] = None
-        self._editor_selection_changed_in_gesture: bool = False
-        _install_copy_gesture_hook()
+        self._changed_selection_editors: weakref.WeakSet[Any] = weakref.WeakSet()
 
     def notify(
         self,
@@ -2732,64 +2698,37 @@ class ServonautApp(App):
                 )
         return result.passphrase
 
-    def _snapshot_mouse_down_editor(self) -> None:
-        """Record the focused widget and its TextArea selection before MouseDown dispatch."""
-        from textual.widgets import TextArea
-
-        try:
-            focused = self.focused
-        except Exception:
-            focused = None
-        self._mouse_down_editor_snapshot = (
-            (focused, focused.selection)
-            if isinstance(focused, TextArea)
-            else (focused, None)
-        )
-        self._editor_selection_changed_in_gesture = False
-
     def on_text_area_selection_changed(self, event: Any) -> None:
-        """Note when the focused TextArea's selection changes during an active mouse gesture."""
-        if (
-            getattr(self, "_mouse_down_editor_snapshot", None) is not None
-            and getattr(event, "text_area", None) is self.focused
-        ):
-            self._editor_selection_changed_in_gesture = True
-
-    async def on_event(self, event: events.Event) -> None:
-        """Snapshot any focused TextArea selection before mouse-down dispatch."""
-        if isinstance(event, events.MouseDown) and not event.is_forwarded:
-            self._snapshot_mouse_down_editor()
-        await super().on_event(event)
+        """Record a TextArea whose selection changed since the previous TextSelected."""
+        text_area = getattr(event, "text_area", None)
+        if text_area is None:
+            return
+        changed = getattr(self, "_changed_selection_editors", None)
+        if changed is None:
+            changed = weakref.WeakSet()
+            self._changed_selection_editors = changed
+        changed.add(text_area)
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
 
         Prefer the screen selection, otherwise use only the focused
-        TextArea when this gesture changed focus or altered the editor's
-        selection. Clicking elsewhere leaves an older editor selection alone.
+        TextArea when its selection changed since the previous TextSelected.
+        Clicking elsewhere leaves an older editor selection alone.
         """
         import re
         from textual.widgets import TextArea
 
-        snapshot = getattr(self, "_mouse_down_editor_snapshot", None)
-        changed_in_gesture = getattr(self, "_editor_selection_changed_in_gesture", False)
-        self._mouse_down_editor_snapshot = None
-        self._editor_selection_changed_in_gesture = False
+        changed = getattr(self, "_changed_selection_editors", None)
+        changed_editors = set(changed) if changed is not None else set()
+        if changed is not None:
+            changed.clear()
 
         text = self.screen.get_selected_text()
         if not text:
             focused = self.focused
-            if isinstance(focused, TextArea):
-                if snapshot is None:
-                    text = focused.selected_text
-                else:
-                    snap_widget, snap_selection = snapshot
-                    if (
-                        focused is not snap_widget
-                        or changed_in_gesture
-                        or focused.selection != snap_selection
-                    ):
-                        text = focused.selected_text
+            if isinstance(focused, TextArea) and focused in changed_editors:
+                text = focused.selected_text
 
         if not text or not text.strip():
             return
