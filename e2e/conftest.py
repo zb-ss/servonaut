@@ -349,6 +349,9 @@ def _reset_team_agent_rules(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _close_journey(request: pytest.FixtureRequest, journey: Journey) -> list[dict]:
     """Collect artifacts for a failed journey; return escapes not yet reported."""
+    from e2e.harness.agent_cleanup import stop_owned_agents
+
+    stop_owned_agents(journey.ctx.root, shim_dir=journey.shims.directory)
     leftover = journey.take_escapes()
     GUARD.set_spawn_dirs([str(journey.ctx.default_shims)])
     node = request.node
@@ -377,11 +380,13 @@ def journey(
     current = _open_journey(request, e2e_ctx)
     _enter_journey(current, monkeypatch)
     detach_log = _attach_servonaut_log(current.directory / "servonaut.log")
-    yield current
-    detach_log()
-    leftover = _close_journey(request, current)
-    if leftover:
-        pytest.fail(_describe_escapes(leftover))
+    try:
+        yield current
+    finally:
+        detach_log()
+        leftover = _close_journey(request, current)
+        if leftover:
+            pytest.fail(_describe_escapes(leftover))
 
 
 # ---------------------------------------------------------------------------

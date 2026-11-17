@@ -535,7 +535,8 @@ def allow_ssh_clients(programs: dict[str, str], config: Optional[str]) -> None:
 def allow_ssh_agent_tool(program: str, argv: list[str]) -> None:
     """Allow one exact, pre-validated real Vault-agent command to exec.
 
-    Only ``openssh_agent_shim`` calls this immediately before ``os.execv``.
+    Only ``openssh_agent_shim`` calls this immediately before the real tool
+    launch (an exec, or a captured agent start whose PID it records).
     The audit hook still compares both the resolved executable and every
     argument, so this permission cannot be reused for a different command.
     """

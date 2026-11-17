@@ -783,6 +783,46 @@ async def _until(predicate, desc: str, timeout: float = READY_TIMEOUT) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
+@pytest.mark.parametrize("ending", ["down", "terminate"])
+async def test_qa_vault_agent_outside_the_root_is_stopped(journey, qa_sandbox, ending):
+    """The owner's ledger covers short sockets even when /proc environ is hidden."""
+    from e2e.harness.agent_cleanup import _stop_record, process_identity, record_agent
+    from e2e.harness.bootstrap import load_guard
+    from e2e.harness.sshd import find_openssh
+
+    current = await qa_sandbox.up()
+    executable = find_openssh()["ssh-agent"]
+    socket = str(journey.ctx.root / "orphan-agent.sock")
+    command = [executable, "-a", socket, "-s"]
+    guard = load_guard()
+    # Start exactly one real daemon with a short socket outside the QA root,
+    # as happens for a long home. The test records this exact launch only.
+    guard.allow_ssh_agent_tool(executable, command)
+    try:
+        launched = subprocess.run(command, env=current["env"], capture_output=True, text=True, check=True, timeout=10)
+    finally:
+        guard.allow_ssh_agent_tool(executable, [])
+    pid = int(re.search(r"SSH_AGENT_PID=(\d+);", launched.stdout)[1])
+    record = {"pid": pid, "executable": executable, "socket": socket,
+              "started": process_identity(pid, executable, socket)}
+    try:
+        record_agent(qa_sandbox.root, qa_sandbox.root / "orphaned-client", pid, executable, socket)
+        if ending == "down":
+            await qa_sandbox.down()
+        else:
+            qa_sandbox.owner.terminate()
+            assert await asyncio.to_thread(qa_sandbox.owner.wait, COMMAND_TIMEOUT) == 0
+        assert process_identity(pid, executable, socket) is None
+        assert not qa_sandbox.root.exists()
+        assert not qa_sandbox.pointer.exists()
+        log = qa_sandbox.stderr.read_text(encoding="utf-8")
+        assert "could not" not in log and "Traceback" not in log, log
+    finally:
+        _stop_record(record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
 @pytest.mark.parametrize("keep", [False, True], ids=["removed", "kept"])
 async def test_a_stop_during_start_up_cleans_up(qa_sandbox, keep):
     owner = qa_sandbox.start(*(["--keep"] if keep else []))
