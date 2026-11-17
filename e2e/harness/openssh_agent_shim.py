@@ -16,14 +16,22 @@ argument has been validated. Standard library only.
 from __future__ import annotations
 
 import fcntl
+from contextlib import contextmanager
 import json
 import os
 import re
 import stat
+import signal
+import subprocess
 import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 
+if __package__:
+    from .agent_cleanup import agent_launch, owns_agent
+else:
+    from agent_cleanup import agent_launch, owns_agent
 
 REFUSED = 255
 GUARD_MODULE = "_servonaut_e2e_netguard"
@@ -120,11 +128,44 @@ def _agent_problem(args: list[str], root: str, real_tool: str) -> str:
     pid = os.environ.get("SSH_AGENT_PID", "")
     if not pid.isdecimal() or int(pid) <= 0:
         return "ssh-agent shutdown requires a numeric agent pid"
+    return "" if owns_agent(Path(root), int(pid), real_tool, socket) else "agent pid is not an owned live ssh-agent"
+
+
+@contextmanager
+def _defer_shutdown() -> Iterator[None]:
+    # A cancellation must not land between daemon creation and recording its
+    # PID. The owner finalizer can then collect it even if the caller dies.
+    pending = []
+    def defer(signum: int, _frame: object) -> None:
+        pending.append(signum)
+    previous = {signum: signal.signal(signum, defer)
+                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        executable = os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
-    except OSError:
-        return "ssh-agent shutdown requires a live agent process"
-    return "" if executable == os.path.realpath(real_tool) else "agent pid is not ssh-agent"
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        for signum in pending:
+            os.kill(os.getpid(), signum)
+
+
+def _start_agent(shim_dir: str, real_tool: str, root: str, args: list[str]) -> int:
+    with _defer_shutdown(), agent_launch(Path(root), Path(shim_dir)) as register:
+        result = subprocess.run([real_tool, *args], capture_output=True, text=True, check=False, timeout=10)
+        if result.returncode == 0:
+            match = re.search(r"SSH_AGENT_PID=(\d+);", result.stdout)
+            if match is None:
+                return _refuse("ssh-agent returned no process id")
+            pid = int(match[1])
+            try:
+                register(pid, real_tool, args[1])
+            except BaseException:
+                # The PID came directly from this launch, never from a scan.
+                os.kill(pid, signal.SIGTERM)
+                raise
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
 
 
 def _add_problem(args: list[str], root: str) -> str:
@@ -163,6 +204,8 @@ def main(argv: list[str]) -> int:
     if problem:
         return _refuse(problem)
     guard.allow_ssh_agent_tool(real_tool, [real_tool, *args])
+    if tool == "ssh-agent" and args[:1] == ["-a"]:
+        return _start_agent(shim_dir, real_tool, root, args)
     os.execv(real_tool, [real_tool, *args])
     return REFUSED  # not reached
 

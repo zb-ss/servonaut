@@ -594,6 +594,9 @@ def test_a_transfer_without_a_vault_key_keeps_the_bastions_hop(tmp_path, known_h
                                         "proxy_args": service.get_proxy_args(PROFILE), "port": None},
         _command_for=lambda options, local, remote: sent.append(options) or ["scp"],
     )
+    # Browse, preflight and copy now share this extracted resolver; retain the
+    # real resolution path in this focused command-builder fixture.
+    screen._resolved_transfer_options = lambda conn: SCPTransferScreen._resolved_transfer_options(screen, conn)
 
     asyncio.run(SCPTransferScreen._vault_transfer_command(screen, dict(APP), "/tmp/a", "/tmp/b"))
 

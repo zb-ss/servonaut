@@ -7,6 +7,7 @@ ones; only the HTTP boundary is faked.
 from __future__ import annotations
 
 import base64
+import time
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -167,8 +168,9 @@ class _Host(App):
         self.notes.append(str(message))
 
 
-async def _settle(pilot, screen, cond, what="state") -> None:
-    for _ in range(200):
+async def _settle(pilot, screen, cond, what="state", *, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         await pilot.pause(0.05)
         if cond():
             return

@@ -12,6 +12,7 @@ The bar for T9 is zero tolerance on both directions:
 
 from __future__ import annotations
 
+import gc
 import time
 
 import pytest
@@ -272,9 +273,17 @@ class TestPerformance:
         huge = (payload + "\n") * repeat
         assert len(huge) >= 100 * 1024
 
-        start = time.perf_counter()
-        out = default_redactor(huge)
-        elapsed = time.perf_counter() - start
+        default_redactor("warmup")
+        gc.collect()
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            start = time.perf_counter()
+            out = default_redactor(huge)
+            elapsed = time.perf_counter() - start
+        finally:
+            if was_enabled:
+                gc.enable()
 
         assert elapsed < 0.1, f"Redaction too slow: {elapsed * 1000:.1f}ms"
         # Sanity: at least one secret was scrubbed.

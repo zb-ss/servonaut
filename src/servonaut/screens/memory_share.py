@@ -213,6 +213,8 @@ class ShareInstanceScreen(WorkspaceScreen):
         self._addable: List[str] = []
         # True while an error line is on show: a refresh must not wipe it.
         self._status_locked = False
+        self._status_locked_team: Optional[str] = None
+        self._observed_team: str = ""
         # The confirmation write in flight; the next one waits for it.
         self._pin_write: Optional["asyncio.Future[None]"] = None
 
@@ -412,7 +414,13 @@ class ShareInstanceScreen(WorkspaceScreen):
         if event.select.id == "share-team-select":
             # The other team's share is not this one's: drop it at once.
             self._grant = None
-            self._status_locked = False
+            selected = self._selected_team()
+            self._observed_team = selected
+            # Keep an error already raised against this newly selected team when
+            # Select.Changed arrives after the in-flight worker finishes.
+            if not (self._status_locked and self._status_locked_team == selected):
+                self._status_locked = False
+                self._status_locked_team = None
             self._render_existing()
             self._start_refresh(reload=True)
         elif event.select.id == "share-role-select":
@@ -596,6 +604,7 @@ class ShareInstanceScreen(WorkspaceScreen):
 
     def _show_error(self, message: str) -> None:
         self._status_locked = True
+        self._status_locked_team = self._selected_team()
         self._say_to("#share-status", literal(message, "$text-error"))
 
     # ------------------------------------------------------------------
@@ -608,6 +617,7 @@ class ShareInstanceScreen(WorkspaceScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         self._status_locked = False
+        self._status_locked_team = None
         if button_id == "share-btn-confirm":
             self._start_action(self._do_share, name="share_execute")
         elif button_id == "share-btn-cancel":

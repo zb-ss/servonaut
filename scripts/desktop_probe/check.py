@@ -167,6 +167,8 @@ def run_tests(args: argparse.Namespace, results_dir: Path, results: Results) -> 
             }[platform.system()]
         )
         files.append("tests/test_desktop_probe_native.py")
+        if platform.system() == 'Linux' and environment['SERVONAUT_PROBE_RENDERER'] == 'gtk':
+            files.append('tests/desktop/test_launcher.py::test_glib_takes_the_program_name')
     previous = {name: os.environ.get(name) for name in environment}
     try:
         os.environ.update(environment)

@@ -54,6 +54,7 @@ STRICT_ENV = "SERVONAUT_SNAPSHOTS_STRICT"
 _UNIQUE_ID = re.compile(r"\bterminal-\d+-")
 
 Scenario = Callable[[Any], Awaitable[None]]
+Check = Callable[[Any], None]
 
 # How long to wait between the exports compared while a screen settles, and
 # how many exports to take before giving up.
@@ -106,7 +107,9 @@ def normalize_svg(svg: str) -> str:
     return _UNIQUE_ID.sub("terminal-", svg)
 
 
-def capture_svg(app: App, size: Tuple[int, int], scenario: Scenario) -> str:
+def capture_svg(
+    app: App, size: Tuple[int, int], scenario: Scenario, *, check: Optional[Check] = None,
+) -> str:
     """Run *app* at *size*, let *scenario* drive it, and return the SVG export.
 
     The export is taken once the screen has settled: two exports in a row,
@@ -114,6 +117,9 @@ def capture_svg(app: App, size: Tuple[int, int], scenario: Scenario) -> str:
     (the footer's key list after a focus change, a list's highlight) land a
     frame or two after the event that caused them, so a single export could
     catch either state.
+
+    An optional synchronous geometry check inspects that same settled app
+    before it closes. Its assertions fail independently of the image match.
     """
 
     async def run() -> str:
@@ -128,6 +134,11 @@ def capture_svg(app: App, size: Tuple[int, int], scenario: Scenario) -> str:
                 # screen, does not change the snapshot.
                 current = app.export_screenshot(simplify=True)
                 if current == previous:
+                    if check is not None:
+                        try:
+                            check(pilot)
+                        except AssertionError as error:
+                            raise AssertionError(f"snapshot geometry check at {size} failed: {error}") from error
                     return current
                 previous = current
         raise AssertionError(

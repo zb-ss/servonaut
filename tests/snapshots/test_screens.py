@@ -13,11 +13,11 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 import pytest
-from textual.widgets import Button, DataTable, Select
+from textual.widgets import Button, DataTable, Select, Static, Tree
 
 from servonaut.screens.settings.registry import PANELS
 
-from . import _harness
+from . import _harness, _snapshot
 
 Scenario = Callable[[Any], Awaitable[None]]
 
@@ -39,8 +39,11 @@ def _run(scenario: Scenario) -> Callable[[Any], Awaitable[None]]:
     return run_before
 
 
-def _capture(screen_snapshot: Any, size: str, scenario: Scenario, *, demo: bool = False) -> None:
-    screen_snapshot(_harness.SnapshotApp(demo=demo), _harness.SIZES[size], _run(scenario))
+def _capture(
+    screen_snapshot: Any, size: str, scenario: Scenario, *, demo: bool = False,
+    check: _snapshot.Check | None = None,
+) -> None:
+    screen_snapshot(_harness.SnapshotApp(demo=demo), _harness.SIZES[size], _run(scenario), check=check)
 
 
 async def _navigate(pilot: Any, nav_id: str, screen: str) -> Any:
@@ -68,6 +71,15 @@ async def _open_server(pilot: Any, name: str, key: str, screen: str) -> Any:
 
 async def _fleet(pilot: Any) -> None:
     del pilot
+
+
+async def _copy_paths(pilot: Any) -> None:
+    await _open_focus_server(pilot, 't', 'SCPTransferScreen')
+
+
+@sizes
+def test_copy_paths(screen_snapshot: Any, size: str) -> None:
+    _capture(screen_snapshot, size, _copy_paths)
 
 
 async def _fleet_selected_stopped(pilot: Any) -> None:
@@ -404,7 +416,11 @@ def test_dialog_over_fleet(screen_snapshot, size: str) -> None:
 @sizes
 def test_help(screen_snapshot, size: str) -> None:
     """The keyboard help screen."""
-    _capture(screen_snapshot, size, _help)
+    def check(pilot: Any) -> None:
+        tree = pilot.app.screen.query_one("#help_topics Tree", Tree)
+        assert tree.max_scroll_x == 0, "the topic list scrolls sideways"
+
+    _capture(screen_snapshot, size, _help, check=check)
 
 
 @sizes
@@ -422,7 +438,11 @@ def test_custom_servers(screen_snapshot, size: str) -> None:
 @sizes
 def test_ip_ban(screen_snapshot, size: str) -> None:
     """The IP ban manager with nothing configured: a hint points to Settings."""
-    _capture(screen_snapshot, size, _ip_ban)
+    def check(pilot: Any) -> None:
+        hint = pilot.app.screen.query_one("#ip_ban_empty_hint", Static)
+        assert "Settings → IP ban" in hint.visual.plain
+
+    _capture(screen_snapshot, size, _ip_ban, check=check if size == "100x30" else None)
 
 
 def test_ip_ban_configured(screen_snapshot) -> None:

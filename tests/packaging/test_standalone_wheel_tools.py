@@ -414,6 +414,30 @@ def test_stage_pump_reads_only_one_byte_beyond_remaining_capacity() -> None:
     assert destination.getvalue() == b"x" * 1024
 
 
+_WRITE_PID_AND_SLEEP_SCRIPT = (
+    "import os, pathlib, sys, time; "
+    "pid_path = pathlib.Path(sys.argv[1]); "
+    "tmp_path = pid_path.with_suffix('.tmp'); "
+    "tmp_path.write_text(str(os.getpid()), encoding='utf-8'); "
+    "os.replace(tmp_path, pid_path); "
+    "time.sleep(30)"
+)
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    """Return the parsed integer PID from *pid_file*, or ``None`` if absent/incomplete."""
+    try:
+        raw = pid_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def test_run_stage_times_out_and_reaps_its_child(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -430,7 +454,7 @@ def test_run_stage_times_out_and_reaps_its_child(tmp_path: Path) -> None:
             [
                 sys.executable,
                 "-c",
-                "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+                _WRITE_PID_AND_SLEEP_SCRIPT,
                 str(pid_file),
             ],
             {"PATH": ""},
@@ -444,8 +468,10 @@ def test_run_stage_times_out_and_reaps_its_child(tmp_path: Path) -> None:
     assert time.monotonic() - started < 5
     assert pid_file.is_file()
     if os.name != "nt":
+        pid = _read_pid(pid_file)
+        assert pid is not None
         with pytest.raises(ProcessLookupError):
-            os.kill(int(pid_file.read_text(encoding="utf-8")), 0)
+            os.kill(pid, 0)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signal interruption contract")
@@ -457,9 +483,9 @@ def test_run_stage_interruption_reaps_its_child(tmp_path: Path) -> None:
 
     def interrupt_when_started() -> None:
         deadline = time.monotonic() + 5
-        while not pid_file.exists() and time.monotonic() < deadline:
+        while _read_pid(pid_file) is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        if pid_file.exists():
+        if _read_pid(pid_file) is not None:
             os.kill(os.getpid(), signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_started, daemon=True)
@@ -469,7 +495,7 @@ def test_run_stage_interruption_reaps_its_child(tmp_path: Path) -> None:
             [
                 sys.executable,
                 "-c",
-                "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+                _WRITE_PID_AND_SLEEP_SCRIPT,
                 str(pid_file),
             ],
             {"PATH": ""},
@@ -482,8 +508,10 @@ def test_run_stage_interruption_reaps_its_child(tmp_path: Path) -> None:
     interrupter.join(timeout=2)
 
     assert not interrupter.is_alive()
+    pid = _read_pid(pid_file)
+    assert pid is not None
     with pytest.raises(ProcessLookupError):
-        os.kill(int(pid_file.read_text(encoding="utf-8")), 0)
+        os.kill(pid, 0)
 
 
 def test_isolated_direct_script_bootstrap_ignores_pythonpath(tmp_path: Path) -> None:

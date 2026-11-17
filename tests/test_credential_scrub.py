@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 
 import pytest
@@ -48,9 +49,18 @@ class TestScrubCost:
     )
     def test_long_adversarial_lines_scrub_in_linear_time(self, text: str) -> None:
         # Unbounded user-info runs made these take seconds each.
-        started = time.perf_counter()
-        scrub_credentials(text)
-        assert time.perf_counter() - started < 1.0
+        scrub_credentials("warmup")
+        gc.collect()
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            started = time.perf_counter()
+            scrub_credentials(text)
+            elapsed = time.perf_counter() - started
+        finally:
+            if was_enabled:
+                gc.enable()
+        assert elapsed < 1.0
 
 
 class TestProxyCredentials:

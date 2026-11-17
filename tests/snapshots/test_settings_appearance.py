@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from textual.widgets import Footer
 
 from servonaut.styles.user_themes import themes_dir
 
@@ -66,7 +67,17 @@ def test_appearance_with_user_theme_files(screen_snapshot: Any, size: str) -> No
         card.focus()
         await pilot.pause()
 
-    screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], before)
+    def check(pilot: Any) -> None:
+        from textual.widgets._footer import FooterKey
+
+        footer = pilot.app.screen.query_one(Footer)
+        keys = list(footer.query(FooterKey))
+        assert "Help" in [key.description for key in keys]
+        for key in keys:
+            assert key.region.right <= key.parent.region.right, f"{key.description!r} is cut"
+
+    screen_snapshot(_harness.SnapshotApp(), _harness.SIZES[size], before,
+                    check=check if size == "100x30" else None)
 
 
 def test_appearance_name_prompt_asks_before_replacing(screen_snapshot: Any) -> None:

@@ -148,25 +148,33 @@ def test_a_refused_log_fetch_shows_the_refusal_as_it_is(caplog) -> None:
     assert status.update.call_args.args[0].plain == REFUSAL
 
 
-def test_a_refused_directory_listing_shows_the_refusal_as_it_is(caplog) -> None:
-    from servonaut.widgets.remote_tree import RemoteTree
+@pytest.mark.asyncio
+async def test_a_refused_directory_listing_shows_the_refusal_as_it_is(caplog) -> None:
+    from textual.app import App
+    from unittest.mock import AsyncMock
 
-    tree = object.__new__(RemoteTree)
-    node = MagicMock()
-    loading = MagicMock()
-    tree._pending_fetch = (node, loading, "/srv")
-    tree.refresh = lambda *a, **k: None
-    event = SimpleNamespace(worker=SimpleNamespace(
-        group="fetch_dir", is_finished=True, error=SSHOptionRefused(REFUSAL), result=None,
-    ))
-    app = _app()
+    from servonaut.widgets.remote_tree import RemoteTree
+    from tests._async_bounds import wait_until
+
+    services = _app()
+    tree = RemoteTree(dict(INSTANCE), services.ssh_service, services.connection_service, "deploy", ["/srv"])
+    tree._fetch_directory_async = AsyncMock(side_effect=SSHOptionRefused(REFUSAL))
+
+    class Host(App):
+        def compose(self):
+            yield tree
+
+    app = Host()
+    app.notify = MagicMock()
     caplog.set_level(logging.DEBUG)
-    with _with_app(tree, app):
-        tree.on_worker_state_changed(event)
-    label = node.add.call_args.args[0]
-    assert isinstance(label, Text) and label.plain == REFUSAL
-    # The row is cut to the tree's width: the notice carries the whole message.
-    _assert_plain_refusal(app, caplog)
+    async with app.run_test() as pilot:
+        node = tree.root.children[0]
+        node.expand()
+        await wait_until(lambda: not tree.is_listing and bool(node.children) and node.children[0].data is not None)
+        label = node.children[0].label
+        assert isinstance(label, Text) and label.plain == REFUSAL
+        # The row is cut to the tree's width: the notice carries the whole message.
+        _assert_plain_refusal(app, caplog)
 
 
 def test_a_refused_log_probe_in_the_analysis_screen_shows_the_refusal_as_it_is(caplog) -> None:

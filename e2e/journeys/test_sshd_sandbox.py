@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -244,6 +245,12 @@ def test_vault_agent_socket_inside_custody_authenticates(journey, sshd):
     finally:
         agent.close()
 
+    from e2e.sandbox.state import process_alive
+
+    deadline = time.monotonic() + 5
+    while process_alive(agent.pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not process_alive(agent.pid), "the closed Vault agent survived the journey"
     assert agent.socket_path.parent == directory
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == sshd.target.name
@@ -251,6 +258,32 @@ def test_vault_agent_socket_inside_custody_authenticates(journey, sshd):
     assert [call.argv for call in journey.shims.calls("ssh-agent")] == [
         ["-a", str(agent.socket_path), "-s"], ["-k"],
     ]
+
+
+def test_vault_agent_shutdown_matches_the_recorded_socket_and_pid(journey, sshd):
+    from e2e.harness.agent_cleanup import process_identity
+
+    first, second = PrivateSshAgent.start(), PrivateSshAgent.start()
+    executable = sshd.openssh["ssh-agent"]
+    try:
+        env = first._environment(include_pid=True)
+        env["SSH_AGENT_PID"] = str(second.pid)
+        refused = subprocess.run(["ssh-agent", "-k"], env=env, capture_output=True, text=True,
+                                 check=False, timeout=10)
+        assert refused.returncode == 255
+        assert "not an owned live ssh-agent" in refused.stderr
+        assert process_identity(second.pid, executable, str(second.socket_path)) is not None
+        assert process_identity(first.pid, executable, str(first.socket_path)) is not None
+        stopped = subprocess.run(["ssh-agent", "-k"], env=first._environment(include_pid=True),
+                                 capture_output=True, text=True, check=False, timeout=10)
+        assert stopped.returncode == 0, stopped.stderr
+        deadline = time.monotonic() + 5
+        while process_identity(first.pid, executable, str(first.socket_path)) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert process_identity(first.pid, executable, str(first.socket_path)) is None
+    finally:
+        first.close()
+        second.close()
 
 
 def test_vault_agent_refuses_outside_custody_and_a_named_regular_file(journey, sshd):
@@ -372,6 +405,19 @@ def test_scp_copies_only_to_or_from_a_server(journey, sshd):
     assert result.returncode == 255
     assert "scp needs a remote side" in result.stderr
     assert not (journey.directory / "copy.txt").exists()
+
+
+def test_scp_usage_probe_reads_the_real_client_without_connecting(journey, sshd):
+    from servonaut.utils import scp_client
+
+    result = subprocess.run(
+        ['scp'], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        timeout=30, check=False,
+    )
+    assert result.returncode != 0
+    assert 'usage: scp ' in result.stderr and 'e2e:' not in result.stderr
+    assert scp_client._probe('scp') == scp_client.parse_sftp_flag(result.stderr)
+    assert sshd.target.sessions() == [] and sshd.bastion.sessions() == []
 
 
 def test_the_real_client_starts_only_as_the_pass_through_allows(journey, sshd):

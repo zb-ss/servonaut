@@ -62,6 +62,8 @@ class SCPService(SCPServiceInterface):
         identity_file: Optional[str] = None,
         certificate_file: Optional[str] = None,
         known_hosts_file: Optional[str] = None,
+        *,
+        recursive: bool = False,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -83,6 +85,7 @@ class SCPService(SCPServiceInterface):
             certificate_file: Public OpenSSH certificate for the agent key.
             known_hosts_file: Verified Vault host-key pins. When set, the
                 configurable host-key policy is deliberately omitted.
+            recursive: Copy a folder and its contents when explicitly requested.
 
         Returns:
             List of command arguments for subprocess.
@@ -97,8 +100,10 @@ class SCPService(SCPServiceInterface):
         )
         # "--" keeps a path that starts with "-" from being read as an scp
         # option (such as "-oProxyCommand=...", which runs a local program).
+        if recursive:
+            cmd.append('-r')
         cmd.append('--')
-        cmd.append(os.path.expanduser(local_path))
+        cmd.append(scp_client.local_operand(local_path))
         cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=False)}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
         return cmd
@@ -118,6 +123,8 @@ class SCPService(SCPServiceInterface):
         identity_file: Optional[str] = None,
         certificate_file: Optional[str] = None,
         known_hosts_file: Optional[str] = None,
+        *,
+        recursive: bool = False,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -139,6 +146,7 @@ class SCPService(SCPServiceInterface):
             certificate_file: Public OpenSSH certificate for the agent key.
             known_hosts_file: Verified Vault host-key pins. When set, the
                 configurable host-key policy is deliberately omitted.
+            recursive: Copy a folder and its contents when explicitly requested.
 
         Returns:
             List of command arguments for subprocess.
@@ -151,9 +159,11 @@ class SCPService(SCPServiceInterface):
             identity_agent, identity_file, certificate_file, known_hosts_file,
             sftp=sftp,
         )
+        if recursive:
+            cmd.append('-r')
         cmd.append('--')  # see build_upload_command
         cmd.append(f'{username}@{host}:{self._remote_path(remote_path, sftp=sftp, download=True)}')
-        cmd.append(os.path.expanduser(local_path))
+        cmd.append(scp_client.local_operand(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))
         return cmd
 
@@ -202,6 +212,7 @@ class SCPService(SCPServiceInterface):
     @staticmethod
     def _remote_path(remote_path: str, *, sftp: bool, download: bool) -> str:
         """The remote path as the local client needs it (see ``utils.scp_client``)."""
+        remote_path = scp_client.remote_path_value(remote_path)
         if not sftp:
             return scp_client.legacy_remote_path(remote_path)
         # Over SFTP the client reads a download source as a pattern: escape what

@@ -25,6 +25,38 @@ from servonaut.widgets.command_output import CommandOutput
 from tests._async_bounds import wait_until
 
 
+@pytest.mark.parametrize('system,native,renderer,include_glib', [
+    ('Linux', True, None, True),
+    ('Linux', True, 'gtk', True),
+    ('Linux', False, 'gtk', False),
+    ('Linux', True, 'edgechromium', False),
+    ('Windows', True, None, False),
+    ('Windows', True, 'gtk', False),
+    ('Darwin', True, 'cocoa', False),
+])
+def test_check_selects_glib_only_for_a_native_linux_gtk_probe(
+    monkeypatch, tmp_path, system, native, renderer, include_glib,
+) -> None:
+    from scripts.desktop_probe import check
+
+    captured = []
+    monkeypatch.setattr(check.platform, 'system', lambda: system)
+    monkeypatch.setenv('PYTEST_ADDOPTS', '-k unrelated')
+
+    def run(arguments, *, plugins):
+        captured.extend(arguments)
+        assert check.os.environ['PYTEST_ADDOPTS'] == ''
+        return 0
+
+    monkeypatch.setattr(pytest, 'main', run)
+    args = SimpleNamespace(browser=None, native=native, renderer=renderer)
+    assert check.run_tests(args, tmp_path, Results()) == 0
+    node = 'tests/desktop/test_launcher.py::test_glib_takes_the_program_name'
+    assert captured.count(node) == int(include_glib)
+    assert ('tests/test_desktop_probe_native.py' in captured) is native
+    assert check.os.environ['PYTEST_ADDOPTS'] == '-k unrelated'
+
+
 @pytest.mark.parametrize("outcome", ["failed", "skipped"])
 def test_check_rejects_unsuccessful_test(outcome: str) -> None:
     results = Results()

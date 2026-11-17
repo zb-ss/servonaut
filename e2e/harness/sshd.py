@@ -451,6 +451,7 @@ class SshWorld:
     target: RemoteHost = field(init=False)
     bastion: RemoteHost = field(init=False)
     openssh: dict[str, str] = field(default_factory=find_openssh)
+    _client_shim_dirs: set[Path] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -497,6 +498,10 @@ class SshWorld:
         return self
 
     def stop(self) -> None:
+        from e2e.harness.agent_cleanup import stop_owned_agents
+
+        for shim_dir in self._client_shim_dirs:
+            stop_owned_agents(self.test_root, shim_dir=shim_dir)
         loop = _loop()
         for host in (self.target, self.bastion):
             try:
@@ -583,6 +588,7 @@ class SshWorld:
         Only the pass-through these scripts run may start the real clients;
         nothing is exported to other processes.
         """
+        self._client_shim_dirs.add(shim_dir)
         shim = HARNESS_DIR / "openssh_shim.py"
         for tool in ("ssh", "scp"):
             words = [

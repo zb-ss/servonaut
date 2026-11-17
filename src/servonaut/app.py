@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
+import weakref
 
 from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
@@ -301,6 +302,7 @@ class ServonautApp(App):
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
         self.client_kind = client_kind
+        self._changed_selection_editors: weakref.WeakSet[Any] = weakref.WeakSet()
 
     def notify(
         self,
@@ -2696,32 +2698,47 @@ class ServonautApp(App):
                 )
         return result.passphrase
 
-    def suppress_editor_text_selected(self) -> None:
-        """Skip the focused-TextArea fallback on the next TextSelected event.
+    def pointer_gesture_started(self) -> None:
+        """Start a fresh pointer-gesture window for TextArea auto-copy."""
+        changed = getattr(self, "_changed_selection_editors", None)
+        if changed is not None:
+            changed.clear()
 
-        Used when a non-editor widget (such as ValueRow) takes focus for a
-        mouse gesture and restores focus afterward: if focus returns to a
-        TextArea before TextSelected is processed, its pre-existing selection
-        must not be auto-copied.
-        """
-        self._suppress_editor_selection = True
+    def on_mouse_down(self, _event: Any) -> None:
+        """Clear pre-gesture TextArea changes when a new mouse gesture begins."""
+        self.pointer_gesture_started()
+
+    def on_text_area_selection_changed(self, event: Any) -> None:
+        """Record a TextArea whose selection changed since the previous TextSelected."""
+        text_area = getattr(event, "text_area", None)
+        if text_area is None:
+            return
+        changed = getattr(self, "_changed_selection_editors", None)
+        if changed is None:
+            changed = weakref.WeakSet()
+            self._changed_selection_editors = changed
+        changed.add(text_area)
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
 
         Prefer the screen selection, otherwise use only the focused
-        TextArea. Other editors may retain selections from older gestures.
+        TextArea when its selection changed since the previous TextSelected.
+        Clicking elsewhere leaves an older editor selection alone.
         """
         import re
         from textual.widgets import TextArea
 
-        suppress_editor = getattr(self, "_suppress_editor_selection", False)
-        self._suppress_editor_selection = False
+        changed = getattr(self, "_changed_selection_editors", None)
+        changed_editors = set(changed) if changed is not None else set()
+        if changed is not None:
+            changed.clear()
 
         text = self.screen.get_selected_text()
-        if not text and not suppress_editor:
+        if not text:
             focused = self.focused
-            text = focused.selected_text if isinstance(focused, TextArea) else None
+            if isinstance(focused, TextArea) and focused in changed_editors:
+                text = focused.selected_text
 
         if not text or not text.strip():
             return

@@ -101,9 +101,18 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "browser URL."),
     AllowlistEntry("screens/login.py", "_show_no_httpx_state", "update",
                    "Writes only the fixed authentication-unavailable label."),
-    AllowlistEntry("screens/scp_transfer.py", "on_radio_set_changed", "update",
+    AllowlistEntry("screens/scp_transfer.py", "_update_path_roles", "update",
                    "Both role labels select fixed Source/Destination and This computer/Remote "
                    "server phrases; no paths or identifiers."),
+    AllowlistEntry("screens/scp_transfer.py", "_render_path_summaries", "update",
+                   "Display-only paths pass _display_identity (display_text and demo "
+                   "scrub_stream); raw inputs are masked and operational values stay intact."),
+    AllowlistEntry("screens/scp_transfer.py", "_render_status", "update",
+                   "Raw status and paths pass local_display_text, _display_identity "
+                   "(display_text and demo scrub_stream), then inert_text and literal Content."),
+    AllowlistEntry("screens/scp_folder_confirm.py", "refresh_after_demo_toggle", "update",
+                   "The target uses _target_text: home-relative display_text, demo "
+                   "scrub_stream and single_line_text; the raw operational path stays intact."),
     AllowlistEntry("screens/team_management.py", "_show_no_auth_state", "update",
                    "Writes only fixed sign-in guidance, without team names or account data."),
     AllowlistEntry("screens/team_management.py", "_load_teams", "update",

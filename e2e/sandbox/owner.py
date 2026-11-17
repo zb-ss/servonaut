@@ -1091,8 +1091,11 @@ class Owner:
             self._monkeypatch.undo()
 
     def _stop_remaining(self) -> None:
+        from e2e.harness.agent_cleanup import stop_owned_agents
         from e2e.harness.processes import stop_sandbox_pid
 
+        # Includes recorded sockets in agent_tmp outside the main root.
+        stop_owned_agents(self.root)
         for pid in state.sandbox_pids(self.root):
             _say(stop_sandbox_pid(pid, sandbox_root=self.root))
 

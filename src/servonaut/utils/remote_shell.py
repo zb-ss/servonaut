@@ -36,6 +36,11 @@ def shell_word(value: str) -> str:
     return shell_quote(value)
 
 
+def posix_command(script: str) -> str:
+    """Run a POSIX control script through sh even with a different login shell."""
+    return '/bin/sh -c ' + shell_quote(script)
+
+
 _HOME_PREFIXES = ("$HOME", "${HOME}")
 
 

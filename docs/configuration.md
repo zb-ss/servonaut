@@ -434,6 +434,10 @@ Existing configurations receive these defaults automatically. Choose a
 monitoring timeout long enough for the configured SSH `connect_timeout`
 and the remote command to complete.
 
+File browsers allow `ssh.connect_timeout` plus `ssh.listing_allowance_seconds`
+for each remote listing. The listing allowance defaults to `15.0` seconds;
+increase it for large or slow directories. It may be zero and must be finite.
+
 ## Custom Servers
 
 Non-AWS servers (DigitalOcean, Hetzner, bare-metal, shared hosting, etc.) live under `custom_servers`. They show up in the instance list alongside AWS instances and use the same SSH/SCP/log-viewer UI.
