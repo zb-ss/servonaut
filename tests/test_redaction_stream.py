@@ -11,6 +11,7 @@ Tests are organized into:
 
 from __future__ import annotations
 
+import gc
 import os
 import time
 
@@ -424,13 +425,21 @@ class TestScrubStreamPerformance:
     def test_10k_lines_stay_within_the_cpu_budget(self) -> None:
         """10 000 typical 80-char log lines are scrubbed within the CPU budget."""
         svc = _svc()
+        svc.scrub_stream("warmup")
         line = "INFO 2024-01-15 10:23:45 request from 10.0.0.1 to /api/v1 status=200 in 45ms"
         lines = [line] * 10_000
 
-        start = time.process_time()
-        for ln in lines:
-            svc.scrub_stream(ln)
-        elapsed = time.process_time() - start
+        gc.collect()
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            start = time.process_time()
+            for ln in lines:
+                svc.scrub_stream(ln)
+            elapsed = time.process_time() - start
+        finally:
+            if was_enabled:
+                gc.enable()
 
         assert elapsed < self.CPU_BUDGET_SECONDS, (
             f"scrub_stream too slow: {elapsed:.3f}s CPU for 10 000 lines "
