@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = collect_data_files(
     "servonaut",
-    includes=["*.css", "*.tcss", "styles/**/*.tcss", "data/*.txt"],
+    includes=["*.css", "*.tcss", "styles/**/*.tcss", "styles/cache.json", "data/*.txt"],
 )
 
 hiddenimports = [

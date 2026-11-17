@@ -84,10 +84,12 @@ def _wide_parse_cache_for_host_apps(request: pytest.FixtureRequest, monkeypatch:
 @pytest.fixture(autouse=True)
 def _shared_parse_cache_for_host_apps(request: pytest.FixtureRequest):
     """Parse each CSS source once per process, not once per app and reparse."""
+    from servonaut.styles.parse_cache import shared_parse_cache, stock_parse_cache
+
     if request.node.get_closest_marker("stock_parse_cache"):
-        yield
+        with stock_parse_cache():
+            yield
         return
-    from tests._shared_parse_cache import shared_parse_cache
 
     with shared_parse_cache():
         yield

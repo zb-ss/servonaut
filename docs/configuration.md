@@ -625,7 +625,7 @@ Or using a file reference instead:
 
 ## Environment Variables
 
-These environment variables override hardcoded API endpoints. Useful for pointing the CLI at a staging server.
+These environment variables configure service endpoints and local runtime behavior.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -638,6 +638,7 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_HETZNER_API_URL` | `https://api.hetzner.cloud/v1` | Hetzner Cloud API base URL, version path included |
 | `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
 | `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
+| `SERVONAUT_STYLE_CACHE_SIZE` | `4096` | Maximum parsed stylesheet sources retained in the process cache to speed startup and theme changes. Set before launching the app; `0` disables this cache. Smaller values reduce retained memory but may require more parsing. An invalid value disables the cache without preventing startup |
 
 Every URL variable above accepts only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too, and so is a query (`?`) or fragment (`#`): paths are appended to these base URLs, which a query or fragment would swallow. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
 
