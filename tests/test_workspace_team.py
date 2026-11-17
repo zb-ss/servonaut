@@ -335,6 +335,7 @@ async def test_busy_hold_outranks_the_rail_guard_and_the_input_passthrough() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 10 s normal, 49 s on two cores with coverage; a slow runner needs more.
 async def test_held_server_operation_disables_only_team_controls() -> None:
     app = CASE.app_factory(True)
     entered, release = asyncio.Event(), asyncio.Event()

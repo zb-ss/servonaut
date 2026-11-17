@@ -314,6 +314,7 @@ IDS = [case.name for case in CASES]
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 50 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
 async def test_remaining_workspace_four_visibility_states(
@@ -355,6 +356,7 @@ async def test_remaining_qualified_native_boundaries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 45 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_remaining_modal_barrier_returns_visible_content_or_chat(case: ReflowCase) -> None:
     app = case.app_factory(True)
