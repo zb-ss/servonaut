@@ -122,15 +122,10 @@ class ValueRow(Horizontal):
     def on_mouse_down(self, event: MouseDown) -> None:
         if event.button != 1 or not isinstance(self.parent, _ValueWalker):
             return
-        # Taking the focus for the gesture keeps another editor's old
-        # selection (the chat composer's) from being copied when the click is
-        # released; the focus then goes back to where it was. Suppress the
-        # TextArea fallback directly too in case focus returns before TextSelected.
+        # Taking the focus for the gesture keeps keyboard focus clean while
+        # clicking or dragging a value; focus then goes back to where it was.
         focused = self.screen.focused
         self._returns_to = None if isinstance(focused, ValueRow) else focused
-        suppress = getattr(self.app, "suppress_editor_text_selected", None)
-        if callable(suppress):
-            suppress()
         self.parent.walking = True
         self.focus()
 
