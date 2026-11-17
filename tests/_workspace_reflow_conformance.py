@@ -311,10 +311,6 @@ async def preserve_native_state(
     await assert_essential_targets(case, app, pilot, screen)
 
 
-# Content width left at 160 columns when both navigation and chat are open.
-_WIDE_CONTENT_WITH_NAV_AND_CHAT = 89
-
-
 async def assert_visibility_combinations(
     case: ReflowCase,
     app: ServonautApp,
@@ -341,11 +337,18 @@ async def assert_visibility_combinations(
         assert_layout(app, screen)
         assert screen.query_one(Sidebar).display is navigation_visible
         assert case.state(screen) == baseline
-        if chat_open and size == (160, 50) and (
-            not navigation_visible
-            or screen.CHAT_MIN_CONTENT_WIDTH <= _WIDE_CONTENT_WITH_NAV_AND_CHAT
-        ):
-            assert content(screen).display
+        if chat_open:
+            chat_panel = screen.query_one(ChatPanel)
+            available = screen._available_content_width(
+                screen.query_one("#main-layout"), chat_panel,
+            )
+            assert available is not None
+            expected_replace = (
+                screen.CHAT_MIN_CONTENT_WIDTH is not None
+                and available < screen.CHAT_MIN_CONTENT_WIDTH
+            )
+            assert screen.has_class("-chat-replace") is expected_replace
+            assert content(screen).display is (not expected_replace)
         if after_state is not None:
             await after_state(app, pilot, screen, navigation_visible, chat_open)
         if content(screen).display:
