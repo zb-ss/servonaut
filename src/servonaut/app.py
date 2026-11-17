@@ -2696,6 +2696,16 @@ class ServonautApp(App):
                 )
         return result.passphrase
 
+    def suppress_editor_text_selected(self) -> None:
+        """Skip the focused-TextArea fallback on the next TextSelected event.
+
+        Used when a non-editor widget (such as ValueRow) takes focus for a
+        mouse gesture and restores focus afterward: if focus returns to a
+        TextArea before TextSelected is processed, its pre-existing selection
+        must not be auto-copied.
+        """
+        self._suppress_editor_selection = True
+
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
 
@@ -2705,8 +2715,11 @@ class ServonautApp(App):
         import re
         from textual.widgets import TextArea
 
+        suppress_editor = getattr(self, "_suppress_editor_selection", False)
+        self._suppress_editor_selection = False
+
         text = self.screen.get_selected_text()
-        if not text:
+        if not text and not suppress_editor:
             focused = self.focused
             text = focused.selected_text if isinstance(focused, TextArea) else None
 

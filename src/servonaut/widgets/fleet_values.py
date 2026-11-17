@@ -124,9 +124,13 @@ class ValueRow(Horizontal):
             return
         # Taking the focus for the gesture keeps another editor's old
         # selection (the chat composer's) from being copied when the click is
-        # released; the focus then goes back to where it was.
+        # released; the focus then goes back to where it was. Suppress the
+        # TextArea fallback directly too in case focus returns before TextSelected.
         focused = self.screen.focused
         self._returns_to = None if isinstance(focused, ValueRow) else focused
+        suppress = getattr(self.app, "suppress_editor_text_selected", None)
+        if callable(suppress):
+            suppress()
         self.parent.walking = True
         self.focus()
 
