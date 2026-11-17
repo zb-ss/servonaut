@@ -48,9 +48,11 @@ jobs:
         if: matrix.python-version != '3.12'
         run: python -m pytest --tb=short -q -n auto --ignore=tests/snapshots -p tests._ci_shard
 
+      # Coverage makes these shards about 3x slower, so the per-test hang guard
+      # gets matching headroom; a real hang still fails.
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
-        run: python -m pytest --tb=short -q -n auto --ignore=tests/snapshots -p tests._ci_shard --cov=servonaut --cov-report=
+        run: python -m pytest --tb=short -q -n auto --ignore=tests/snapshots -p tests._ci_shard --timeout=180 --cov=servonaut --cov-report=
 
       # overwrite lets a rerun of one shard replace its earlier artifact.
       - name: Upload coverage data

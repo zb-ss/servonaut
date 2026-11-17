@@ -419,3 +419,10 @@ def test_desktop_tests_fail_on_a_missing_host_dependency_when_required(
     result = _collect_desktop_tests(tmp_path, required=True)
     assert result.returncode != 0
     assert "servonaut[desktop-test]" in result.stdout + result.stderr
+
+
+def test_ci_coverage_shards_get_a_longer_per_test_timeout() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    (step,) = [s for s in _steps(jobs["unit"]) if "name: Run tests with coverage" in s]
+    assert "--timeout=180" in step
+    assert "--cov=servonaut" in step
