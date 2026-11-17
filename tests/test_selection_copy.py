@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+import hashlib
+import inspect
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,6 +27,7 @@ from servonaut.utils import platform_utils
 from servonaut.widgets.fleet_values import ValueRow
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.instance_table import InstanceTable
+from servonaut.widgets.safe_header import SafeHeader
 from tests._async_bounds import wait_until
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -322,7 +326,7 @@ async def test_fleet_and_chat_copy_the_fresh_selection_in_either_direction(
     async with app.run_test(size=size) as pilot:
         await wait_until(lambda: bool(_name_value(app, size).value))
         await pilot.press("f2")
-        await wait_until(lambda: bool(app.screen.query(ChatPanel)))
+        await wait_until(lambda: bool(app.screen.query("#chat-input")))
         detail = _name_value(app, size, chat_open=True)
         await wait_until(lambda: detail.display and detail.region.width > 0)
         chat = app.screen.query_one("#chat-input", TextArea)
@@ -350,7 +354,7 @@ async def test_value_row_focus_return_does_not_leak_textarea_selection_under_que
     async with app.run_test(size=(160, 50)) as pilot:
         await wait_until(lambda: bool(_name_value(app, (160, 50)).value))
         await pilot.press("f2")
-        await wait_until(lambda: bool(app.screen.query(ChatPanel)))
+        await wait_until(lambda: bool(app.screen.query("#chat-input")))
         detail = _name_value(app, (160, 50), chat_open=True)
         await wait_until(lambda: detail.display and detail.region.width > 0)
         chat = app.screen.query_one("#chat-input", TextArea)
@@ -385,6 +389,70 @@ async def test_value_row_focus_return_does_not_leak_textarea_selection_under_que
 
 
 @pytest.mark.asyncio
+async def test_clicking_non_focusable_area_with_composer_selection_copies_nothing(
+    clipboard: _Clipboard,
+) -> None:
+    app = _FleetCopyApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: bool(_name_value(app, (160, 50)).value))
+        await pilot.press("f2")
+        await wait_until(lambda: bool(app.screen.query("#chat-input")))
+        chat = app.screen.query_one("#chat-input", TextArea)
+        await wait_until(lambda: app.focused is chat)
+        chat.load_text("old chat draft")
+        chat.selection = Selection((0, 0), (0, 8))
+        clipboard.calls.clear()
+        app.copy_to_clipboard("keep this value")
+
+        header = app.screen.query_one(SafeHeader)
+        assert not header.focusable
+        # Click on the non-focusable header title (away from the command-palette icon at x=0..2).
+        await pilot.click(offset=(20, 0))
+        await pilot.pause()
+
+        assert clipboard.calls == []
+        assert app.clipboard == "keep this value"
+        assert app.focused is chat
+        assert chat.selection == Selection((0, 0), (0, 8))
+
+        # Re-dragging even the exact same range inside the composer still copies.
+        await _drag(pilot, chat, (0, 0), (8, 0))
+        assert clipboard.calls == ["old chat"]
+
+        # Drag-selecting a fresh range inside the composer also copies.
+        clipboard.calls.clear()
+        await _drag(pilot, chat, (4, 0), (14, 0))
+        assert clipboard.calls == ["chat draft"]
+
+        # Selecting a word in the composer (e.g. from cursor to end of word) and releasing copies it.
+        clipboard.calls.clear()
+        chat.selection = Selection.cursor((0, 0))
+        await pilot.press("ctrl+shift+right")
+        await pilot.mouse_up(chat, offset=_offset(chat, 0))
+        await wait_until(lambda: bool(clipboard.calls))
+        assert clipboard.calls == ["old"]
+
+
+# SHA-256 of Textual's Screen._forward_event, wrapped by ServonautApp so
+# MouseDown snapshots run before focus moves (even when Pilot calls _forward_event directly).
+_UPSTREAM_SCREEN_FORWARD_EVENT_SHA256 = (
+    "8098b5a7722cf67d7659ca4b0bf2a09cfdcafa263a64eb77b51d77cd3e033701"
+)
+
+
+def test_upstream_screen_forward_event_matches_copy_gesture_hook() -> None:
+    """Re-verify src/servonaut/app.py if Textual's Screen._forward_event changes."""
+    original = inspect.unwrap(Screen._forward_event)
+    source = textwrap.dedent(inspect.getsource(original))
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert digest == _UPSTREAM_SCREEN_FORWARD_EVENT_SHA256, (
+        "Textual's Screen._forward_event has changed. Re-check _install_copy_gesture_hook "
+        "in src/servonaut/app.py against Screen._forward_event, then update "
+        "_UPSTREAM_SCREEN_FORWARD_EVENT_SHA256 in this file."
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
 @pytest.mark.parametrize("selection_source", ["chat", "outside"])
 async def test_collapsing_chat_retires_only_its_native_screen_copy_target(
@@ -396,7 +464,7 @@ async def test_collapsing_chat_retires_only_its_native_screen_copy_target(
         table = screen.query_one(InstanceTable)
         await wait_until(lambda: isinstance(app.focused, InstanceTable))
         await pilot.press("f2")
-        await wait_until(lambda: bool(screen.query(ChatPanel)))
+        await wait_until(lambda: bool(screen.query("#chat-input")))
         panel = screen.query_one(ChatPanel)
         editor = panel.query_one("#chat-input", TextArea)
         await wait_until(lambda: app.focused is editor)
@@ -462,7 +530,7 @@ async def test_collapsing_chat_retires_native_drag_before_release(
         table = screen.query_one(InstanceTable)
         await wait_until(lambda: app.focused is table)
         await pilot.press("f2")
-        await wait_until(lambda: bool(screen.query(ChatPanel)))
+        await wait_until(lambda: bool(screen.query("#chat-input")))
         panel = screen.query_one(ChatPanel)
         editor = panel.query_one("#chat-input", TextArea)
         await wait_until(lambda: app.focused is editor)
