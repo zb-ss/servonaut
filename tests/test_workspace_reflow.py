@@ -113,45 +113,66 @@ async def test_hidden_navigation_medium_terminal_retains_two_content_columns(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["fleet", "actions"])
-@pytest.mark.parametrize("navigation_visible", [False, True])
 @pytest.mark.parametrize("size", [(160, 50), (120, 40), (100, 30)])
-@pytest.mark.parametrize("chat_state", ["closed", "open", "collapsed"])
 async def test_pilot_reflow_preserves_independent_pane_combinations(
-    family: str, navigation_visible: bool, size: tuple[int, int], chat_state: str,
+    family: str, size: tuple[int, int],
 ) -> None:
-    app = _LayoutHost(navigation_visible=navigation_visible)
+    app = _LayoutHost(navigation_visible=False)
     async with app.run_test(size=size) as pilot:
         screen = await _screen(app, pilot, family)
         content, sidebar = _content(screen), screen.query_one(Sidebar)
         row = screen.query_one("#main-layout")
-        panel = None
-        if chat_state != "closed":
-            panel = await _open_chat(app, pilot)
-            editor = panel.query_one("#chat-input", TextArea)
-            editor.load_text("Keep the same draft")
-            document = editor.document
-            if chat_state == "collapsed":
-                await pilot.press("f2")
-                await pilot.pause()
-                assert panel._collapsed and panel.is_attached
-                assert editor.document is document
-        assert sidebar.display is navigation_visible
-        nav_width = sidebar.region.width if navigation_visible else 0
-        if chat_state != "open":
-            assert content.display and not screen.has_class("-chat-replace")
-            assert content.region.width == row.content_region.width - nav_width
-        elif screen.has_class("-chat-replace"):
-            assert not content.display and content.is_attached
-            assert panel.region.width == row.content_region.width - nav_width
-        else:
-            assert content.display and content.region.right <= panel.region.x
-            assert content.region.width > 0
-        for name in ("workspace_navigation", "workspace_chat"):
-            button = screen.query_one(f"#{name}", Button)
-            assert app.get_widget_at(*button.region.center)[0] is button
-        if panel is not None:
-            end = screen.query_one("#workspace_chat_end", Button)
-            assert app.get_widget_at(*end.region.center)[0] is end
+        panel: ChatPanel | None = None
+
+        def assert_pose(navigation_visible: bool, chat_state: str) -> None:
+            assert sidebar.display is navigation_visible
+            nav_width = sidebar.region.width if navigation_visible else 0
+            if chat_state != "open":
+                assert content.display and not screen.has_class("-chat-replace")
+                assert content.region.width == row.content_region.width - nav_width
+            elif screen.has_class("-chat-replace"):
+                assert not content.display and content.is_attached
+                assert panel is not None
+                assert panel.region.width == row.content_region.width - nav_width
+            else:
+                assert panel is not None
+                assert content.display and content.region.right <= panel.region.x
+                assert content.region.width > 0
+            for name in ("workspace_navigation", "workspace_chat"):
+                button = screen.query_one(f"#{name}", Button)
+                assert app.get_widget_at(*button.region.center)[0] is button
+            if panel is not None:
+                end = screen.query_one("#workspace_chat_end", Button)
+                assert app.get_widget_at(*end.region.center)[0] is end
+
+        assert not list(screen.query(ChatPanel))
+        assert_pose(False, "closed")
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: sidebar.display is True)
+        assert not list(screen.query(ChatPanel))
+        assert_pose(True, "closed")
+        panel = await _open_chat(app, pilot)
+        editor = panel.query_one("#chat-input", TextArea)
+        editor.load_text("Keep the same draft")
+        document = editor.document
+        assert_pose(True, "open")
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: sidebar.display is False)
+        assert editor.document is document
+        assert_pose(False, "open")
+        await pilot.press("f2")
+        await pilot.pause()
+        assert panel._collapsed and panel.is_attached
+        assert editor.document is document
+        assert_pose(False, "collapsed")
+        await _click(pilot, "#workspace_navigation")
+        await pilot.pause()
+        await wait_until(lambda: sidebar.display is True)
+        assert panel._collapsed and panel.is_attached
+        assert editor.document is document
+        assert_pose(True, "collapsed")
 
 
 @pytest.mark.asyncio
@@ -256,17 +277,24 @@ _BOUNDARIES = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
-@pytest.mark.parametrize("delta", [-1, 0, 1])
 @pytest.mark.parametrize("family,navigation_visible,boundary", _BOUNDARIES)
 async def test_native_painted_boundary_keeps_essential_content_usable(
-    theme: str, delta: int, family: str, navigation_visible: bool, boundary: int,
+    family: str, navigation_visible: bool, boundary: int,
 ) -> None:
     app = _LayoutHost(navigation_visible=navigation_visible)
-    app.theme = theme
-    async with app.run_test(size=(boundary + delta, 40)) as pilot:
+    app.theme = "servonaut"
+    async with app.run_test(size=(boundary - 1, 40)) as pilot:
         screen = await _screen(app, pilot, family)
         panel = await _open_chat(app, pilot)
+        await _assert_painted_boundary_deltas(app, pilot, screen, panel, family, boundary)
+
+
+async def _assert_painted_boundary_deltas(
+    app: _LayoutHost, pilot: Pilot, screen: WorkspaceScreen, panel: ChatPanel, family: str, boundary: int,
+) -> None:
+    for delta in (-1, 0, 1):
+        await pilot.resize_terminal(boundary + delta, 40)
+        await wait_until(lambda: screen.has_class("-chat-replace") is (delta < 0))
         await pilot.pause()
         content = _content(screen)
         assert screen.has_class("-chat-replace") is (delta < 0)

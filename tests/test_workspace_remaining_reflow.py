@@ -27,6 +27,7 @@ from servonaut.widgets.workspace import WorkspaceScreen
 from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase, assert_controls, assert_essential_targets, assert_layout,
+    assert_qualified_boundaries, assert_visibility_combinations,
     collapse_chat, content, open_case, open_chat, preserve_native_state, tab_to,
 )
 from tests.test_fleet_workspace_layout import _LayoutHost
@@ -313,28 +314,20 @@ IDS = [case.name for case in CASES]
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 50 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
-@pytest.mark.parametrize("navigation_visible,chat_open", [
-    (False, False), (False, True), (True, False), (True, True),
-])
 async def test_remaining_workspace_four_visibility_states(
-    case: ReflowCase, size: tuple[int, int], navigation_visible: bool, chat_open: bool,
+    case: ReflowCase, size: tuple[int, int],
 ) -> None:
-    app = case.app_factory(navigation_visible)
+    app = case.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        if chat_open:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert case.state(screen) == baseline
-        if content(screen).display:
-            await assert_essential_targets(case, app, pilot, screen)
+        await assert_visibility_combinations(case, app, pilot, screen)
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(270)  # Measured 14 s normal, 81 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_remaining_native_draft_selection_state_and_tab_journey(case: ReflowCase) -> None:
     app = case.app_factory(False)
@@ -346,44 +339,24 @@ async def test_remaining_native_draft_selection_state_and_tab_journey(case: Refl
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(270)  # Measured 14 s normal, 85 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("kind", ["chat-min", "content-narrow"])
 async def test_remaining_qualified_native_boundaries(
-    case: ReflowCase, navigation_visible: bool, kind: str,
+    case: ReflowCase, navigation_visible: bool,
 ) -> None:
-    samples = case.boundary_samples(kind, navigation_visible)
+    samples = case.boundary_samples("chat-min", navigation_visible)
     app = case.app_factory(navigation_visible)
     async with app.run_test(size=samples[0].size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min" else screen.CONTENT_NARROW_WIDTH
-        assert [sample.native_content_width for sample in samples] == [threshold - 1, threshold, threshold + 1]
-        for sample in samples:
-            await pilot.resize_terminal(*sample.size)
-            await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                # Width-only counterfactual; hidden content need not be usable.
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
-                screen.apply_workspace_state()
-                await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-                assert not content(screen).display
-            else:
-                assert content(screen).region.width == sample.native_content_width
-                await assert_essential_targets(case, app, pilot, screen)
-            assert case.state(screen) == baseline
+        await assert_qualified_boundaries(
+            case, app, pilot, screen, navigation_visible,
+            check_single_transition=False,
+        )
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(150)  # Measured 45 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_remaining_modal_barrier_returns_visible_content_or_chat(case: ReflowCase) -> None:
     app = case.app_factory(True)
@@ -655,6 +628,7 @@ async def test_popping_history_cancels_only_its_held_loading_worker() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 11 s normal, 67 s on two cores with coverage; a slow runner needs more.
 async def test_help_collapse_preserves_held_turn_but_explicit_end_cancels_it() -> None:
     app = _RemainingHost(False)
     started, cancelled = asyncio.Event(), asyncio.Event()

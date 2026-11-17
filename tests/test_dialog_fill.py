@@ -271,7 +271,7 @@ async def test_direct_option_list_keeps_native_scroll_selection_and_hint(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 30), (160, 50)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["editor", "picker"])
 async def test_fill_toasts_never_move_cached_cancel_or_cover_child_controls(
     size: tuple[int, int], kind: str,

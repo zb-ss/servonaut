@@ -20,6 +20,8 @@ from textual.events import Resize
 from textual.widget import Widget
 from textual.widgets import Button
 
+from servonaut.widgets._layout_refit import LayoutRefitMixin
+
 ActionRole = Literal["default", "primary", "warning", "error"]
 
 _KEY_GAP = " "
@@ -190,7 +192,7 @@ class ActionButton(Button):
         return self._label(self.compact, hint, short).cell_length + chrome + _MARGIN
 
 
-class ActionRow(Horizontal):
+class ActionRow(LayoutRefitMixin, Horizontal):
     """A row of actions that never clips one.
 
     When the buttons do not fit it saves space in this order: shorter words,
@@ -213,6 +215,9 @@ class ActionRow(Horizontal):
         self._fit_requested = False
 
     def on_resize(self, event: Resize) -> None:
+        self.fit()
+
+    def _refit_for_layout(self) -> None:
         self.fit()
 
     def on_mount(self) -> None:
@@ -259,6 +264,7 @@ class ActionRow(Horizontal):
         buttons = [button for button in self.query(ActionButton) if button.display]
         if width <= 0 or not buttons:
             return
+        self._mark_layout_fitted()
         for short in (False, True):
             if sum(b.natural_width(short=short, hint=True) for b in buttons) <= width:
                 self._apply(buttons, short=short, hint=True, wrap=False)

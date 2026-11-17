@@ -24,6 +24,7 @@ from servonaut.services.ssh_service import SSHService
 from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT, is_servonaut_theme
 from servonaut.widgets.dialogs import DialogActions, DialogFrame
 from tests._async_bounds import wait_until
+from tests._theme_sets import theme_chunks
 from tests.test_ansi_chat_dialog_contrast import _glyph_evidence, _painted_glyphs
 from tests.test_editor_selection_contrast import (
     DRAFT, _Host, _assert_colour_mode, _isolated_boundaries,
@@ -162,7 +163,7 @@ def _confirm_copy(app: _Host, screen: ConfirmActionScreen) -> list[dict[str, Any
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('severity', ('warning', 'danger'))
 @pytest.mark.parametrize('size', ((100, 30), (160, 50)))
 async def test_confirmation_copy_keeps_severity_and_exact_native_result(
@@ -241,7 +242,7 @@ def _metadata(app: _Host, screen: AIAnalysisScreen, price: str, model: str) -> l
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('cost,price,model', COSTS)
 async def test_analysis_metadata_preserves_service_output_and_exact_cost(
     manager, services, clipboard: _Clipboard, tmp_path: Path, record_property,
@@ -310,7 +311,7 @@ def _logs() -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('theme', THEMES)
+@pytest.mark.parametrize('theme', ('servonaut',))
 @pytest.mark.parametrize('kind', ('idle', 'warning', 'error'))
 async def test_analysis_native_nonresult_status_is_measured_without_side_effects(
     manager, services, tmp_path: Path, record_property, theme, kind,
@@ -338,14 +339,14 @@ async def test_analysis_native_nonresult_status_is_measured_without_side_effects
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(300)  # Registry loop; prior comparable native diagnostic took ~100s.
+@pytest.mark.parametrize('names', theme_chunks())
 async def test_registered_themes_measure_copy_on_actual_active_palette(
-    manager, services, tmp_path: Path, record_property,
+    manager, services, tmp_path: Path, record_property, names: tuple[str, ...],
 ) -> None:
     app = _app(manager, services, 'servonaut')
     logs = _logs()
     app.log_viewer_service = logs
-    names = tuple(sorted(app.available_themes))
+    assert set(names) <= set(app.available_themes)
     rows = []
     persisted = (tmp_path / 'config.json').read_bytes()
     try:

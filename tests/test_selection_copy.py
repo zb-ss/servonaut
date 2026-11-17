@@ -343,6 +343,48 @@ async def test_fleet_and_chat_copy_the_fresh_selection_in_either_direction(
 
 
 @pytest.mark.asyncio
+async def test_value_row_focus_return_does_not_leak_textarea_selection_under_queue_shift(
+    clipboard: _Clipboard, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FleetCopyApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: bool(_name_value(app, (160, 50)).value))
+        await pilot.press("f2")
+        await wait_until(lambda: bool(app.screen.query(ChatPanel)))
+        detail = _name_value(app, (160, 50), chat_open=True)
+        await wait_until(lambda: detail.display and detail.region.width > 0)
+        chat = app.screen.query_one("#chat-input", TextArea)
+        await wait_until(lambda: app.focused is chat)
+        chat.load_text("old chat draft")
+        chat.selection = Selection((0, 0), (0, 8))
+        clipboard.calls.clear()
+
+        # Delay TextSelected forwarding by one callback turn to simulate Screen -> App
+        # message dispatch landing after give_focus_back returns focus to TextArea.
+        screen = app.screen
+        orig_post = screen.post_message
+
+        def shifted_post(message):
+            if isinstance(message, events.TextSelected):
+                app.call_later(orig_post, message)
+                return True
+            return orig_post(message)
+
+        monkeypatch.setattr(screen, "post_message", shifted_post)
+
+        target_widget = detail.value_widget
+        assert await pilot.click(target_widget, offset=_offset(target_widget, 0))
+        await wait_until(lambda: app.focused is chat)
+        await pilot.pause()
+        assert clipboard.calls == [detail.value]
+
+        # Normal TextArea drag-copy still works right after the suppressed click.
+        clipboard.calls.clear()
+        await _drag(pilot, chat, (0, 0), (8, 0))
+        assert clipboard.calls == ["old chat"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
 @pytest.mark.parametrize("selection_source", ["chat", "outside"])
 async def test_collapsing_chat_retires_only_its_native_screen_copy_target(

@@ -98,6 +98,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
+        # The screen can be left or the app closed before it has finished composing;
+        # Textual then dismantles it under this handler and its fields are gone.
+        if self.is_being_dismantled():
+            return
         self._render_state()
 
     def action_back(self) -> None:

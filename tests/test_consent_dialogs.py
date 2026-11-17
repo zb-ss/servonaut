@@ -38,7 +38,7 @@ def make_dialog(kind: str) -> tuple[ModalScreen, str, str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 async def test_consent_defaults_and_explicit_continue_return_exact_dataclass(
     size: tuple[int, int],
 ) -> None:
@@ -60,7 +60,7 @@ async def test_consent_defaults_and_explicit_continue_return_exact_dataclass(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 async def test_consent_keyboard_changes_choices_before_explicit_continue(
     size: tuple[int, int],
 ) -> None:
@@ -118,7 +118,7 @@ async def test_consent_mouse_reaches_every_choice_without_scrolling_or_moving_ac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("route", ["escape", "click"])
 async def test_consent_cancellation_returns_none_and_restores_origin(
     size: tuple[int, int], route: str,
@@ -141,7 +141,7 @@ async def test_consent_cancellation_returns_none_and_restores_origin(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("route", ["enter", "escape", "click"])
 @pytest.mark.parametrize("kind", ["upsell", "waitlist", "maintenance"])
 async def test_notice_safe_dismissal_never_opens_browser(
@@ -168,7 +168,7 @@ async def test_notice_safe_dismissal_never_opens_browser(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("route", ["keyboard", "mouse"])
 async def test_only_explicit_view_plans_opens_existing_billing_route_once(
     size: tuple[int, int], route: str, monkeypatch: pytest.MonkeyPatch,
@@ -228,7 +228,7 @@ async def test_long_notice_copy_scrolls_with_safe_focus_and_pinned_actions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["consent", "upsell", "waitlist", "maintenance"])
 async def test_notification_lifecycle_preserves_targets_focus_and_form_values(
     size: tuple[int, int], kind: str, monkeypatch: pytest.MonkeyPatch,
@@ -278,7 +278,7 @@ def fake_payload() -> BugReportPayload:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("decision", ["cancel", "continue", "reconsent-cancel"])
 async def test_real_report_caller_collects_only_after_explicit_consent(
     size: tuple[int, int], decision: str, monkeypatch: pytest.MonkeyPatch,

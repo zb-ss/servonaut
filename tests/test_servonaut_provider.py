@@ -317,12 +317,16 @@ def test_invalid_task_raises_value_error():
 # 5. APIError subclasses propagate (no wrapping)
 # ---------------------------------------------------------------------------
 
-def test_chat_propagates_api_errors():
+def test_chat_propagates_api_errors(monkeypatch):
     """``RateLimitedError`` (and any APIError subclass) propagates verbatim.
 
     The T5 error-handler service owns the UX mapping; the provider must
     not catch and convert errors here.
     """
+    import servonaut.services.ai_providers.servonaut_provider as provider_module
+
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(provider_module.asyncio, "sleep", sleep_mock)
     provider, api, _auth = _make_provider()
     api.post = AsyncMock(side_effect=RateLimitedError(
         code="rate_limited",
@@ -338,6 +342,9 @@ def test_chat_propagates_api_errors():
 
     assert exc_info.value.code == "rate_limited"
     assert exc_info.value.status == 429
+    assert sleep_mock.await_count == provider_module._RATE_LIMIT_MAX_ATTEMPTS - 1
+    for call in sleep_mock.await_args_list:
+        assert 12.0 <= call.args[0] <= 12.0 + provider_module._RATE_LIMIT_JITTER_S
 
 
 # ---------------------------------------------------------------------------

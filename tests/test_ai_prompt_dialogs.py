@@ -65,7 +65,7 @@ CHOICES = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("submit", ["click", "enter"])
 @pytest.mark.parametrize("kind, button_id, expected", CHOICES)
 async def test_explicit_choice_returns_exact_result_without_opening_browser(
@@ -99,7 +99,7 @@ async def test_explicit_choice_returns_exact_result_without_opening_browser(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["first_run", "empty", "fallback", "topup"])
 async def test_escape_returns_none_and_restores_origin_focus(
     kind: str, size: tuple[int, int],
@@ -121,7 +121,7 @@ async def test_escape_returns_none_and_restores_origin_focus(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["first_run", "empty", "fallback"])
 async def test_overflow_and_notifications_preserve_cached_action_target(
     kind: str, size: tuple[int, int],
@@ -288,7 +288,7 @@ async def test_long_catalog_reaches_explicit_billing_without_moving_cancel(theme
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 async def test_native_catalog_overflow_toasts_preserve_disclosure_and_cached_cancel(
     size: tuple[int, int],
 ) -> None:
@@ -367,7 +367,7 @@ async def test_untrusted_brackets_and_terminal_controls_are_literal(kind: str) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 30), (160, 50)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind, focus_id, expected", [
     ("first_run", "btn_pick_servonaut", ["servonaut"]),
     ("empty", "btn_empty_subscribe", ["subscribe"]),

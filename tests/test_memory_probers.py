@@ -56,6 +56,13 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+@pytest.fixture
+def _short_cmd_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from servonaut.services.memory.modules import base
+
+    monkeypatch.setattr(base, "_CMD_TIMEOUT_SECONDS", 0.05)
+
+
 # ---------------------------------------------------------------------------
 # OSProber
 # ---------------------------------------------------------------------------
@@ -94,9 +101,9 @@ class TestOSProber:
         assert obs["kernel"] == "5.15.0-91-generic"
         assert obs["arch"] == "x86_64"
 
-    def test_timeout_returns_result_not_raises(self):
+    def test_timeout_returns_result_not_raises(self, _short_cmd_timeout):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(OSProber().probe(slow_runner))
@@ -192,9 +199,9 @@ class TestRuntimesProber:
         assert obs["ruby"] is None
         assert obs["go"] == "go1.21.5"
 
-    def test_timeout_returns_result_not_raises(self):
+    def test_timeout_returns_result_not_raises(self, _short_cmd_timeout):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(RuntimesProber().probe(slow_runner))
@@ -306,9 +313,9 @@ class TestServicesProber:
         # The fallback parser should pick up services from service --status-all
         assert "cron" in observed["enabled_units"] or len(observed["enabled_units"]) >= 0
 
-    def test_timeout_returns_result_not_raises(self):
+    def test_timeout_returns_result_not_raises(self, _short_cmd_timeout):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(ServicesProber().probe(slow_runner))
@@ -387,9 +394,9 @@ class TestWebStackProber:
         assert obs["nginx"] is None
         assert obs["apache"] is None
 
-    def test_timeout_returns_result_not_raises(self):
+    def test_timeout_returns_result_not_raises(self, _short_cmd_timeout):
         async def slow_runner(cmd: str) -> Tuple[str, str, int]:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
 
         result = _run(WebStackProber().probe(slow_runner))
@@ -1045,9 +1052,9 @@ class TestDatabasesProber:
             port = entry.split(":", 1)[0]
             assert port in ("3306", "5432", "27017", "6379", "9042", "11211", "5984")
 
-    def test_timeout_returns_result_not_raises(self):
+    def test_timeout_returns_result_not_raises(self, _short_cmd_timeout):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(DatabasesProber().probe(slow_runner))
         assert isinstance(result, ModuleResult)
@@ -1146,9 +1153,9 @@ class TestContainersProber:
         result = _run(ContainersProber().probe(_make_runner(responses)))
         assert result.observed["k8s_client_version"] is None
 
-    def test_timeout_returns_result(self):
+    def test_timeout_returns_result(self, _short_cmd_timeout):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(ContainersProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1212,9 +1219,9 @@ class TestNetworkProber:
         assert obs["iptables_rules"] == []
         assert obs["ufw_status"] == "unknown"
 
-    def test_timeout_returns_result(self):
+    def test_timeout_returns_result(self, _short_cmd_timeout):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(NetworkProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1326,9 +1333,9 @@ class TestGitProber:
         assert "/opt/ok" in paths
         assert result.partial is True
 
-    def test_timeout_on_find_returns_result(self):
+    def test_timeout_on_find_returns_result(self, _short_cmd_timeout):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(GitProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output
@@ -1392,9 +1399,9 @@ class TestDiskProber:
         result = _run(DiskProber().probe(runner))
         assert result.observed["filesystems"] == []
 
-    def test_timeout_returns_result(self):
+    def test_timeout_returns_result(self, _short_cmd_timeout):
         async def slow_runner(cmd):
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.0)
             return "", "", 0
         result = _run(DiskProber().probe(slow_runner))
         assert "<timeout>" in result.raw_output

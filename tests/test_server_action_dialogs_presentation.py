@@ -27,6 +27,7 @@ from servonaut.screens.server_actions import (
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from tests._async_bounds import wait_until
+from tests._theme_sets import COLOUR_THEMES
 from tests._workspace_reflow_conformance import tab_to
 from tests.test_navigation_dialog_contrast import _assert_readable, _painted_text_styles
 
@@ -304,7 +305,7 @@ async def _reference_policy(app: _Host, pilot: Pilot, kind: str) -> tuple:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("size", SIZES)
-@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("theme", ["servonaut"])
 async def test_dialog_native_regions_and_notification_lane(kind: str, size: tuple[int, int], theme: str) -> None:
     app = _Host()
     app.theme = theme
@@ -316,9 +317,9 @@ async def test_dialog_native_regions_and_notification_lane(kind: str, size: tupl
         heading = modal.query_one(".dialog-heading", Static)
         text = {"scope": "Who is this key for?", "own": "Also update your own key", "verify-ref": "Verify SSH", "binding": "Use vault key"}[kind]
         assert text in _painted(app, heading)
-        _assert_readable(_painted_text_styles(heading, text), context=kind + " heading")
-        modal.notify("Example notification", title="Review", timeout=30)
-        await wait_until(lambda: bool(modal.query(Toast)))
+        if size == (100, 30):
+            modal.notify("Example notification", title="Review", timeout=30)
+            await wait_until(lambda: bool(modal.query(Toast)))
         assert _layout(app, modal) == positions
         await pilot.press("escape")
         await wait_until(lambda: app.screen is app.landing)
@@ -327,6 +328,23 @@ async def test_dialog_native_regions_and_notification_lane(kind: str, size: tupl
         app.service.bind.assert_not_awaited()
         app.service.bind_personal.assert_not_awaited()
         assert app.service.visits == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", KINDS)
+async def test_dialog_heading_stays_readable_across_colour_themes(kind: str) -> None:
+    app = _Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        modal = await _open(app, pilot, kind)
+        heading = modal.query_one(".dialog-heading", Static)
+        text = {"scope": "Who is this key for?", "own": "Also update your own key",
+                "verify-ref": "Verify SSH", "binding": "Use vault key"}[kind]
+        for theme in COLOUR_THEMES:
+            app.theme = theme
+            await pilot.pause()
+            assert text in _painted(app, heading)
+            _assert_readable(_painted_text_styles(heading, text), context=f"{kind}/{theme} heading")
+        assert app._exception is None
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,15 @@
 """The explicit desktop check must never pass because checks were skipped."""
 
 import math
+import signal
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Button, Input
 
+from scripts.desktop_probe import check
 from scripts.desktop_probe.check import Results
 from scripts.desktop_probe.child import ProbeApp, ProbeStreamScreen
 from scripts.desktop_probe.config import (
@@ -195,3 +198,55 @@ async def test_probe_stream_uses_a_richlog_and_starts_updates() -> None:
         assert app.screen.query_one("#probe_paste_input", Input).has_focus
         await pilot.pause(delay=0.12)
         assert app.screen._stream_index > 0
+
+
+def test_check_passes_a_scaled_timeout_and_the_recorded_timeout_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TIME_SCALE_ENV, "3")
+    arguments = check.pytest_arguments(["tests/example.py"])
+    assert f"--timeout={60 * 3:g}" in arguments
+    expected = "signal" if hasattr(signal, "SIGALRM") else "thread"
+    assert arguments[arguments.index("-o") + 1] == f"timeout_method={expected}"
+    assert arguments[-1] == "tests/example.py"
+
+
+def test_check_uses_the_thread_timeout_method_without_sigalrm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(signal, "SIGALRM", raising=False)
+    arguments = check.pytest_arguments([])
+    assert "timeout_method=thread" in arguments
+
+
+def _check_records_a_timed_out_test_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(check, "BASE_TEST_TIMEOUT_SECONDS", 0.5)
+    probe = tmp_path / "test_slow_probe.py"
+    probe.write_text(
+        "import time\n\n\ndef test_slow():\n    time.sleep(10)\n\n\n"
+        "def test_fast():\n    pass\n",
+        encoding="utf-8",
+    )
+    results = Results()
+    started = time.monotonic()
+    exit_code = check.run_pytest([str(probe)], results)
+    assert time.monotonic() - started < 8
+    assert exit_code != 0
+    assert not results.is_success(exit_code)
+    slow = next(name for name in results.tests if name.endswith("::test_slow"))
+    fast = next(name for name in results.tests if name.endswith("::test_fast"))
+    assert results.tests[slow] == "failed"
+    assert results.tests[fast] == "passed"
+    assert slow in results.failures
+
+
+# The desktop probe runs this file and fails on any skipped test, so on a
+# platform without SIGALRM (Windows) this check is not defined at all rather
+# than skipped. There the probe keeps the thread timeout method, which ends the
+# process, so an in-process overrun cannot be observed.
+if hasattr(signal, "SIGALRM"):
+    test_check_records_a_timed_out_test_as_a_failure = (
+        _check_records_a_timed_out_test_as_a_failure
+    )

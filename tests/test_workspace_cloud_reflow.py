@@ -26,6 +26,8 @@ from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase,
     assert_essential_targets,
     assert_layout,
+    assert_qualified_boundaries,
+    assert_visibility_combinations,
     collapse_chat,
     content,
     one_layout_transition,
@@ -334,23 +336,15 @@ async def _assert_toolbar_exposed(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 @pytest.mark.parametrize("size", [(100, 30), (160, 50)])
-@pytest.mark.parametrize("navigation_visible,chat_open", [
-    (False, False), (False, True), (True, False), (True, True),
-])
 async def test_cloud_reflow_preserves_four_visibility_states_and_loaded_content(
     case: ReflowCase, size: tuple[int, int],
-    navigation_visible: bool, chat_open: bool,
 ) -> None:
-    app = case.app_factory(navigation_visible)
-    async with app.run_test(size=size) as pilot:
-        screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
+    async def check_available(
+        app: ServonautApp, _pilot: Pilot, screen: WorkspaceScreen,
+        _navigation_visible: bool, chat_open: bool,
+    ) -> None:
         if chat_open:
-            panel = await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert case.state(screen) == baseline
-        if chat_open:
+            panel = screen.query_one(ChatPanel)
             available = screen._available_content_width(
                 screen.query_one("#main-layout"), panel,
             )
@@ -359,9 +353,17 @@ async def test_cloud_reflow_preserves_four_visibility_states_and_loaded_content(
             assert screen.has_class("-chat-replace") is expected_replace
             assert content(screen).display is (not expected_replace)
             assert content(screen).is_attached
-        if content(screen).display:
-            await assert_essential_targets(case, app, pilot, screen)
-            await _assert_toolbar_exposed(case, app, pilot, screen)
+
+    app = case.app_factory(False)
+    async with app.run_test(size=size) as pilot:
+        screen = await open_case(case, app, pilot)
+        await assert_visibility_combinations(
+            case, app, pilot, screen,
+            after_state=check_available,
+            after_targets=lambda app, pilot, screen: _assert_toolbar_exposed(
+                case, app, pilot, screen,
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -402,48 +404,19 @@ async def test_cloud_literal_title_copy_survives_replacement_and_restore(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 @pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("kind", ["chat-min", "content-narrow"])
 async def test_cloud_qualified_native_boundary_preserves_painted_fit(
-    case: ReflowCase, navigation_visible: bool, kind: str,
+    case: ReflowCase, navigation_visible: bool,
 ) -> None:
-    samples = case.boundary_samples(kind, navigation_visible)
+    samples = case.boundary_samples("chat-min", navigation_visible)
     app = case.app_factory(navigation_visible)
     async with app.run_test(size=samples[0].size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = (
-            screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
-            else screen.CONTENT_NARROW_WIDTH
+        await assert_qualified_boundaries(
+            case, app, pilot, screen, navigation_visible,
+            after_targets=lambda app, pilot, screen: _assert_toolbar_exposed(
+                case, app, pilot, screen,
+            ),
         )
-        assert [sample.native_content_width for sample in samples] == [
-            threshold - 1, threshold, threshold + 1,
-        ]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                # Probe native width only; real policy replaces this content.
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
-                screen.apply_workspace_state()
-                await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is (
-                    sample.expected_content_narrow
-                )
-                assert not content(screen).display
-            else:
-                assert content(screen).region.width == sample.native_content_width
-                await assert_essential_targets(case, app, pilot, screen)
-                await _assert_toolbar_exposed(case, app, pilot, screen)
-            assert case.state(screen) == baseline
 
 
 @pytest.mark.asyncio
