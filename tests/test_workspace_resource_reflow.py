@@ -421,11 +421,20 @@ async def _assert_all_toolbar_buttons(
 async def test_resource_reflow_retains_four_visibility_states(
     case: ReflowCase, size: tuple[int, int],
 ) -> None:
+    async def _require_wide_content(
+        _app: ServonautApp, _pilot: Pilot, screen: WorkspaceScreen,
+        _navigation: bool, chat_open: bool,
+    ) -> None:
+        if chat_open and size == (160, 50):
+            assert content(screen).display
+
     app = case.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(case, app, pilot)
         await assert_visibility_combinations(
-            case, app, pilot, screen, after_targets=_assert_all_toolbar_buttons,
+            case, app, pilot, screen,
+            after_state=_require_wide_content,
+            after_targets=_assert_all_toolbar_buttons,
         )
 
 
