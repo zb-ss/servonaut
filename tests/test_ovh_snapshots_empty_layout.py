@@ -9,7 +9,11 @@ from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
 from servonaut.widgets.chat_panel import ChatPanel
 from tests._async_bounds import wait_until
-from tests._workspace_reflow_conformance import assert_button_label_painted
+from tests._workspace_reflow_conformance import (
+    assert_button_label_painted,
+    settled_layout,
+    wait_button_label_painted,
+)
 from tests.test_workspace_ovh_resources import _ResourceApp
 from tests.test_workspace_reflow import _painted
 
@@ -44,19 +48,43 @@ async def test_empty_snapshots_expose_guidance_and_actions_before_scrolling(
         })
         await app.push_screen(screen)
         container = screen.query_one("#snapshots_container")
+        table = screen.query_one("#snapshots_table", DataTable)
+        buttons = tuple(
+            screen.query_one(selector, Button)
+            for selector in ("#btn_create", "#btn_restore", "#btn_delete", "#btn_back")
+        )
         loader = service.list_vps_snapshots if provider_type == "vps" else service.list_cloud_snapshots
-        await wait_until(lambda: loader.await_count == 1 and not screen._read_loading.is_busy)
-        await pilot.pause()
+        await wait_until(
+            lambda: loader.await_count == 1
+            and not screen._read_loading.is_busy
+            and screen.has_class("-content-narrow")
+            and container.has_class("-snapshots-empty")
+            and not table.display
+        )
+        await settled_layout(app, screen)
+        # Allow any post-class CSS reflow to finish moving action buttons
+        # before assertions and before Pilot.click() captures region.offset.
+        previous_regions = None
+        for _ in range(5):
+            await pilot.pause()
+            current_regions = tuple(button.region for button in buttons)
+            if current_regions == previous_regions and all(
+                button.region.area > 0
+                and app.get_widget_at(*button.region.offset)[0] is button
+                for button in buttons
+            ):
+                break
+            previous_regions = current_regions
+        for button in buttons:
+            await wait_button_label_painted(app, button)
         loader.assert_awaited_once()
 
         # No focus/reveal/scroll step may conceal an unusable initial layout.
         assert container.scroll_y == 0
-        table = screen.query_one("#snapshots_table", DataTable)
         assert table.is_mounted and table.row_count == 0 and not table.display
         empty = screen.query_one("#snapshot_empty_state", Static)
         assert "No snapshots found." in _painted(app, empty)
-        for selector in ("#btn_create", "#btn_restore", "#btn_delete", "#btn_back"):
-            button = screen.query_one(selector, Button)
+        for button in buttons:
             assert_button_label_painted(app, button)
             assert app.get_widget_at(*button.region.center)[0] is button
 
