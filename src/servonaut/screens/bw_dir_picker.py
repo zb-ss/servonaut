@@ -23,9 +23,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -35,9 +34,10 @@ from servonaut.widgets.dialogs import (
     DialogActions, DialogFrame, DialogNotificationSpace,
 )
 from textual.widgets import Button, DirectoryTree, Input, Static
+from servonaut.widgets.local_path_tree import LocalDirectoryTree
 
 
-class _DirsOnlyTree(DirectoryTree):
+class _DirsOnlyTree(LocalDirectoryTree):
     """A :class:`DirectoryTree` that shows directories only.
 
     Hidden directories are deliberately KEPT — the primary use case is
@@ -50,45 +50,7 @@ class _DirsOnlyTree(DirectoryTree):
     """
 
     def __init__(self, *args, scrub: Optional[Callable[[str], str]] = None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._scrub = scrub
-
-    def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
-        return [path for path in paths if path.is_dir()]
-
-    def render_label(self, node, base_style, style) -> Text:
-        """Render the node label, demo-scrubbed when a scrubber is bound.
-
-        The swap-render-restore dance keeps all of ``DirectoryTree``'s own
-        styling (folder icon, dot-dir dimming) intact — only the text the
-        base implementation copies from ``node._label`` changes.
-        """
-        if self._scrub is not None:
-            original = node._label
-            display = self._demo_label(node, original.plain)
-            if display != original.plain:
-                node._label = Text(display)
-                try:
-                    return super().render_label(node, base_style, style)
-                finally:
-                    node._label = original
-        return super().render_label(node, base_style, style)
-
-    def _demo_label(self, node, plain: str) -> str:
-        """Demo-mode display text for one node.
-
-        The home node's label is the home directory's basename — i.e. the
-        real local username, which ``scrub_stream`` cannot recognise as a
-        bare word — so it is special-cased to ``~``. Every other label goes
-        through the scrubber (catches secret/IP/email-shaped content).
-        """
-        path = getattr(getattr(node, "data", None), "path", None)
-        try:
-            if path is not None and Path(path) == Path.home():
-                return "~"
-        except (OSError, ValueError):  # pragma: no cover - exotic path objects
-            pass
-        return self._scrub(plain)
+        super().__init__(*args, directories_only=True, scrub=scrub, **kwargs)
 
 
 class BwDirPickerModal(ModalScreen[Optional[Path]]):

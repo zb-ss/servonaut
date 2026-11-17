@@ -18,6 +18,7 @@ building a command never waits for it on the UI thread.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -110,6 +111,35 @@ def sftp_source_pattern(path: str) -> str:
     return re.sub(r"([\\*?\[])", r"\\\1", path)
 
 
+def remote_path_value(path: str) -> str:
+    """Give shell probes and SCP the same connected-account home convention."""
+    if '\0' in path:
+        raise ValueError('This remote path contains a control character or a line break (NUL character), which cannot be transferred safely.')
+    if path.startswith('~') and path != '~' and not path.startswith('~/'):
+        raise ValueError('Named-user home paths are not supported. Use ~ for the connected account or an absolute path.')
+    for prefix in ('$HOME', '${HOME}'):
+        if path == prefix or path.startswith(prefix + '/'):
+            return '~' + path[len(prefix):]
+    return path
+
+
+def local_operand(path: str) -> str:
+    """Anchor a local colon name so SCP cannot interpret it as a remote host."""
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded) and not os.path.splitdrive(expanded)[0]:
+        first = expanded.split(os.sep, 1)[0]
+        if os.altsep:
+            first = first.split(os.altsep, 1)[0]
+        if ':' in first:
+            return '.' + os.sep + expanded
+    return expanded
+
+
+def local_source_name(path: str) -> str:
+    """Keep explicit dot components, whose SCP merge target differs from a name."""
+    return os.path.basename(os.path.expanduser(path).rstrip(os.sep + (os.altsep or ''))) or '.'
+
+
 def legacy_remote_path(path: str) -> str:
     """*path* escaped for a remote shell that reads it (the legacy protocol).
 
@@ -125,6 +155,8 @@ def legacy_remote_path(path: str) -> str:
             "This remote path contains a control character or a line break, which this "
             "scp client cannot transfer safely. Rename the file or upgrade OpenSSH to 8.7 or later."
         )
+    if path == '~':
+        return '~'
     prefix = ""
     if path.startswith("~/"):
         prefix, path = "~/", path[2:]

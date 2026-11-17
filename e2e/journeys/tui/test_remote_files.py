@@ -202,20 +202,20 @@ async def test_upload_and_download_with_scp(tui, seed, journey, sshd):
     async with tui() as t:
         await _open(t, "t", "SCPTransferScreen")
         await _paste(t, "#local_path_input", "~/upload.bin")
-        await _paste(t, "#remote_path_input", "/tmp/upload.bin")
+        await _paste(t, "#remote_path_input", "/tmp/upload renamed.bin")
         await t.click("#transfer_button")
         await t.wait_for_toast("^Transfer completed$")
-        assert remote.read_bytes("/tmp/upload.bin") == PAYLOAD
+        assert remote.read_bytes("/tmp/upload renamed.bin") == PAYLOAD
 
         await t.click("#radio_download")
         await _paste(t, "#remote_path_input", "/var/www/html/index.html")
-        await _paste(t, "#local_path_input", "~/index.html")
+        await _paste(t, "#local_path_input", "~/renamed index.html")
         await t.click("#transfer_button")
         await t.wait_until(
             lambda: [m for _, m in t.toasts() if m == "Transfer completed"][1:],
             desc="second transfer",
         )
-        assert (seed.home / "index.html").read_bytes() == remote.read_bytes(
+        assert (seed.home / "renamed index.html").read_bytes() == remote.read_bytes(
             "/var/www/html/index.html"
         )
 
@@ -225,4 +225,322 @@ async def test_upload_and_download_with_scp(tui, seed, journey, sshd):
         assert "No such file" in message
 
     opened = [(e["path"], e["mode"]) for e in sshd.target.sessions("sftp-open")]
-    assert opened[:2] == [("/tmp/upload.bin", "write"), ("/var/www/html/index.html", "read")]
+    assert opened[:2] == [("/tmp/upload renamed.bin", "write"), ("/var/www/html/index.html", "read")]
+
+
+async def _local_picker(t, side: str, path, *, source: bool) -> None:
+    from pathlib import Path
+    from servonaut.widgets.local_path_tree import LocalPathTree
+
+    path = Path(path)
+    await t.click(f'#{side}_path_browse')
+    await t.wait_for_screen('LocalPathPickerModal')
+    parent = path.parent if source else path
+    await _paste(t, '#path_picker_location', str(parent))
+    await t.click('#path_picker_go')
+    tree = t.on_screen('#path_picker_tree', LocalPathTree)
+    await t.wait_until(
+        lambda: Path(tree.path) == parent and not t.screen.is_loading(),
+        desc='local folder listing settled',
+    )
+    if source:
+        node = await t.wait_until(
+            lambda: next((n for n in tree.root.children if n.data.path == path), None),
+            desc='local source entry',
+        )
+        tree.focus()
+        await _cursor_to(t, tree, node)
+        await t.wait_until(lambda: t.screen._selected == str(path) and not t.on_screen('#path_picker_choose').disabled, desc='local source ready')
+        if path.is_file():
+            await t.press('enter')
+        else:
+            await t.click('#path_picker_choose')
+    else:
+        await t.wait_until(lambda: not t.on_screen('#path_picker_choose').disabled, desc='local destination ready')
+        await t.click('#path_picker_choose')
+    await t.wait_for_screen('SCPTransferScreen')
+    await t.wait_until(lambda: t.on_screen(f'#{side}_path_input').has_focus, desc='origin focus restored')
+
+
+async def _remote_picker(t, path: str, *, source: bool, folder: bool = False) -> None:
+    import posixpath
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    await t.click('#remote_path_browse')
+    await t.wait_for_screen('RemotePathPickerModal')
+    parent = posixpath.dirname(path.rstrip('/')) if source else path
+    await _paste(t, '#path_picker_location', parent)
+    await t.click('#path_picker_go')
+    tree = t.on_screen('#path_picker_tree', RemoteTree)
+    await t.wait_until(
+        lambda: tree.root.children and tree.root.children[0].data['path'] == parent and not tree.is_listing,
+        desc='remote folder listing settled',
+    )
+    if source:
+        node = await t.wait_until(
+            lambda: next((n for n in tree.root.children[0].children if n.data and n.data['path'] == path), None),
+            desc='remote source entry',
+        )
+        tree.focus()
+        await _cursor_to(t, tree, node)
+        await t.wait_until(lambda: t.screen._selected == path and not t.on_screen('#path_picker_choose').disabled, desc='remote source ready')
+        if not folder:
+            await t.press('enter')
+        else:
+            await t.click('#path_picker_choose')
+    else:
+        await t.wait_until(lambda: not t.on_screen('#path_picker_choose').disabled, desc='remote destination ready')
+        await t.click('#path_picker_choose')
+    await t.wait_for_screen('SCPTransferScreen')
+    await t.wait_until(lambda: t.on_screen('#remote_path_input').has_focus, desc='remote input focus restored')
+
+
+async def _transfer_completed(t, count: int) -> None:
+    await t.click('#transfer_button')
+    await t.wait_until(
+        lambda: len([message for _, message in t.toasts() if message == 'Transfer completed']) >= count,
+        desc=f'completed copy {count}',
+    )
+
+
+async def test_browse_and_upload_file_and_folder_with_existing_folder_consent(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    file = seed.home / "payload it's [1].bin"
+    file.write_bytes(PAYLOAD)
+    folder = seed.home / 'release folder'
+    (folder / 'nested').mkdir(parents=True)
+    nested = folder / 'nested' / 'part[1].bin'
+    nested.write_bytes(PAYLOAD[::-1])
+    remote = sshd.target.remote
+    remote.write('/tmp/browse-upload/keep.txt', 'keep')
+
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await _local_picker(t, 'local', file, source=True)
+        await _remote_picker(t, '/tmp/browse-upload/', source=False)
+        assert not sshd.target.sessions('sftp-open')
+        await _transfer_completed(t, 1)
+        assert remote.read_bytes('/tmp/browse-upload/' + file.name) == PAYLOAD
+
+        await _local_picker(t, 'local', folder, source=True)
+        await _transfer_completed(t, 2)
+        remote_nested = '/tmp/browse-upload/release folder/nested/part[1].bin'
+        assert remote.read_bytes(remote_nested) == PAYLOAD[::-1]
+
+        nested.write_bytes(b'changed after first copy')
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        opened_before = len(sshd.target.sessions('sftp-open'))
+        await t.click('#scp_folder_cancel')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: not t.on_screen('#transfer_button').disabled, desc='cancel settled')
+        assert len(sshd.target.sessions('sftp-open')) == opened_before
+        assert remote.read_bytes(remote_nested) == PAYLOAD[::-1]
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        await t.click('#scp_folder_confirm')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: remote.read_bytes(remote_nested) == nested.read_bytes(), desc='confirmed folder bytes')
+
+
+async def test_browse_and_download_file_and_folder(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    remote = sshd.target.remote
+    remote.write("/srv/download examples/report it's [1].bin", PAYLOAD)
+    remote.write('/srv/download examples/release folder/nested/part[1].bin', PAYLOAD[::-1])
+    destination = seed.home / 'downloads'
+    destination.mkdir()
+
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await t.click('#radio_download')
+        await _remote_picker(t, "/srv/download examples/report it's [1].bin", source=True)
+        await _local_picker(t, 'local', destination, source=False)
+        assert not sshd.target.sessions('sftp-open')
+        await _transfer_completed(t, 1)
+        assert (destination / "report it's [1].bin").read_bytes() == PAYLOAD
+        await _remote_picker(t, '/srv/download examples/release folder', source=True, folder=True)
+        await _transfer_completed(t, 2)
+        assert (destination / 'release folder' / 'nested' / 'part[1].bin').read_bytes() == PAYLOAD[::-1]
+
+
+async def test_remote_picker_failure_retry_and_cancel_preserves_inputs(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await _paste(t, '#local_path_input', '~/unchanged.bin')
+        await _paste(t, '#remote_path_input', '/srv/unchanged/')
+        await t.click('#remote_path_browse')
+        await t.wait_for_screen('RemotePathPickerModal')
+        await _paste(t, '#path_picker_location', '~')
+        await t.click('#path_picker_go')
+        await t.wait_until(lambda: t.on_screen('#path_picker_tree').current_path == '~' and not t.screen.is_loading(), desc='login home listing')
+        await t.click('#path_picker_up')
+        await t.wait_until(lambda: t.on_screen('#path_picker_tree').current_path == '/home' and not t.screen.is_loading(), desc='resolved parent of login home')
+        await _paste(t, '#path_picker_location', '/srv/retry-folder')
+        await t.wait_until(lambda: not t.on_screen('#path_picker_go').has_class('-active'), desc='Go ready after home navigation')
+        await t.click('#path_picker_go')
+        await t.wait_until(lambda: bool(t.screen._error) and not t.screen.is_loading(), desc='missing-path inline error')
+        assert t.on_screen('#path_picker_choose').disabled
+        sshd.target.remote.write('/srv/retry-folder/recovered.txt', 'recovered')
+        sshd.target.remote.write('/srv/retry-folder/1.1.1.1.txt', 'redaction fixture')
+        await t.click('#path_picker_retry')
+        await t.wait_until(lambda: not t.screen._error and not t.screen.is_loading(), desc='retry listing succeeds')
+        assert not t.on_screen('#path_picker_choose').disabled
+        tree = t.on_screen('#path_picker_tree')
+        sensitive = next(node for node in tree.root.children[0].children if node.data and node.data['path'].endswith('/1.1.1.1.txt'))
+        tree.focus()
+        await _cursor_to(t, tree, sensitive)
+        selected = tree.cursor_node
+        raw = t.on_screen('#path_picker_location').value
+        await t.press('ctrl+shift+d')
+        await t.wait_until(lambda: t.on_screen('#path_picker_location').password, desc='demo masks editable location')
+        assert t.on_screen('#path_picker_location').value == raw and tree.cursor_node is selected
+        assert '1.1.1.1' not in sensitive.label.plain
+        assert sensitive.data['path'] == '/srv/retry-folder/1.1.1.1.txt'
+        await t.press('ctrl+shift+d')
+        await t.press('escape')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: t.on_screen('#remote_path_input').has_focus, desc='focus after cancel')
+        assert t.on_screen('#local_path_input').value == '~/unchanged.bin'
+        assert t.on_screen('#remote_path_input').value == '/srv/unchanged/'
+        assert not sshd.target.sessions('sftp-open')
+
+
+async def test_cancel_remote_picker_while_listing_is_pending(tui, seed, journey, sshd, monkeypatch):
+    import asyncio
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    _seed(seed, sshd)
+    started, release = asyncio.Event(), asyncio.Event()
+    original = RemoteTree._fetch_directory_async
+
+    async def held_listing(self, path):
+        started.set()
+        await release.wait()
+        return await original(self, path)
+
+    monkeypatch.setattr(RemoteTree, '_fetch_directory_async', held_listing)
+    try:
+        async with tui() as t:
+            await _open(t, 't', 'SCPTransferScreen')
+            await t.click('#remote_path_browse')
+            await t.wait_for_screen('RemotePathPickerModal')
+            await t.wait_until(started.is_set, desc='listing pending')
+            assert t.on_screen('#path_picker_choose').disabled
+            await t.press('escape')
+            await t.wait_for_screen('SCPTransferScreen')
+            release.set()
+            await t.wait_until(lambda: t.on_screen('#remote_path_input').has_focus, desc='cancel restores focus')
+            assert t.on_screen('#remote_path_input').value == ''
+            assert not sshd.target.sessions('sftp-open')
+    finally:
+        release.set()
+
+
+async def test_download_through_a_symlinked_picker_root(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    remote = sshd.target.remote
+    remote.write('/srv/releases/1/report.bin', PAYLOAD)
+    remote.path('/srv/current').symlink_to('releases/1', target_is_directory=True)
+    destination = seed.home / 'downloads'
+    destination.mkdir()
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await t.click('#radio_download')
+        await _remote_picker(t, '/srv/current/report.bin', source=True)
+        await _local_picker(t, 'local', destination, source=False)
+        await _transfer_completed(t, 1)
+        assert (destination / 'report.bin').read_bytes() == PAYLOAD
+
+
+async def test_shellless_accounts_keep_file_copy_and_confirm_folder_overwrite(tui, seed, journey, sshd, monkeypatch):
+    _seed(seed, sshd)
+    remote = sshd.target.remote
+    remote.write('/srv/report.bin', PAYLOAD)
+    remote.write('/tmp/uploads/site/payload.bin', b'original')
+    folder = seed.home / 'site'
+    folder.mkdir()
+    (folder / 'payload.bin').write_bytes(PAYLOAD[::-1])
+
+    async def sftp_only(process, user, command):
+        process.stderr.write(b'This service allows sftp connections only\n')
+        return 1
+
+    # SFTP is served separately; refuse actual SSH exec requests as a
+    # ForceCommand internal-sftp account does, while real SCP still uses SFTP.
+    monkeypatch.setattr(sshd.target, '_run', sftp_only)
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await t.click('#radio_download')
+        await _paste(t, '#remote_path_input', '/srv/report.bin')
+        await _paste(t, '#local_path_input', '~/download.bin')
+        await _transfer_completed(t, 1)
+        assert (seed.home / 'download.bin').read_bytes() == PAYLOAD
+        assert 'folder detection was unavailable' in t.on_screen('#status_output').render().plain.lower()
+
+        await t.click('#radio_upload')
+        await _paste(t, '#local_path_input', str(folder))
+        await _paste(t, '#remote_path_input', '/tmp/uploads/')
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        before = len(sshd.target.sessions('sftp-open'))
+        await t.click('#scp_folder_cancel')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: not t.on_screen('#transfer_button').disabled, desc='unknown destination cancel')
+        assert len(sshd.target.sessions('sftp-open')) == before
+        assert remote.read_bytes('/tmp/uploads/site/payload.bin') == b'original'
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        await t.click('#scp_folder_confirm')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: remote.read_bytes('/tmp/uploads/site/payload.bin') == PAYLOAD[::-1], desc='confirmed shellless folder copy')
+
+
+async def test_typed_dot_folder_requires_consent_for_the_destination_itself(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    folder = seed.home / 'site'
+    folder.mkdir()
+    (folder / 'payload.bin').write_bytes(PAYLOAD)
+    remote = sshd.target.remote
+    remote.write('/tmp/merge-root/payload.bin', b'original')
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await _paste(t, '#local_path_input', str(folder) + '/.')
+        await _paste(t, '#remote_path_input', '/tmp/merge-root/')
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        assert not sshd.target.sessions('sftp-open')
+        await t.click('#scp_folder_cancel')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_until(lambda: not t.on_screen('#transfer_button').disabled, desc='dot-source cancel')
+        assert remote.read_bytes('/tmp/merge-root/payload.bin') == b'original'
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        await t.click('#scp_folder_confirm')
+        await t.wait_for_screen('SCPTransferScreen')
+        await t.wait_for_toast('^Transfer completed$')
+        assert remote.read_bytes('/tmp/merge-root/payload.bin') == PAYLOAD
+        assert not remote.path('/tmp/merge-root/site').exists()
+
+
+async def test_folder_copy_onto_an_existing_file_cannot_be_confirmed(tui, seed, journey, sshd):
+    _seed(seed, sshd)
+    folder = seed.home / 'site'
+    folder.mkdir()
+    (folder / 'payload.bin').write_bytes(PAYLOAD)
+    remote = sshd.target.remote
+    remote.write('/tmp/conflict/site', b'keep file')
+    async with tui() as t:
+        await _open(t, 't', 'SCPTransferScreen')
+        await _paste(t, '#local_path_input', str(folder))
+        await _paste(t, '#remote_path_input', '/tmp/conflict/')
+        await t.click('#transfer_button')
+        await t.wait_for_screen('SCPFolderConfirmModal')
+        await t.wait_until(lambda: t.find('#scp_folder_target'), desc='file collision details')
+        assert 'Existing file: /tmp/conflict/site' in t.on_screen('#scp_folder_target').render().plain
+        assert not t.find('#scp_folder_confirm')
+        assert not sshd.target.sessions('sftp-open')
+        await t.press('escape')
+        await t.wait_for_screen('SCPTransferScreen')
+        assert remote.read_bytes('/tmp/conflict/site') == b'keep file'

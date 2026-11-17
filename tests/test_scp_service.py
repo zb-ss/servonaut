@@ -15,6 +15,19 @@ class TestSCPService:
 
 class TestBuildUploadCommand(TestSCPService):
 
+    @pytest.mark.parametrize('direction', ['upload', 'download'])
+    @pytest.mark.parametrize('modern', [True, False])
+    def test_recursive_flag_preserves_paths_and_precedes_operands(self, monkeypatch, direction, modern):
+        from servonaut.utils import scp_client
+        monkeypatch.setattr(scp_client, '_answers', {'scp': modern})
+        build = getattr(self.scp_service, f'build_{direction}_command')
+        kwargs = dict(local_path='/tmp/folder with spaces', remote_path="/srv/it's [a]", host='web-1', username='deploy')
+        recursive = build(**kwargs, recursive=True)
+        plain = build(**kwargs)
+        assert recursive.index('-r') < recursive.index('--')
+        assert [arg for arg in recursive if arg != '-r'] == plain
+        assert recursive[-2:] == plain[-2:]
+
     def test_basic(self):
         cmd = self.scp_service.build_upload_command(
             local_path='/tmp/file.txt',

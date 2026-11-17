@@ -673,6 +673,8 @@ class SSHConfig:
         connect_timeout: Seconds before giving up on the initial TCP
             connection (``ConnectTimeout``). 0 means OS default, which can
             block for minutes on an unreachable host.
+        listing_allowance_seconds: Extra time for a file-browser listing after
+            the initial connection deadline. May be zero; must be finite.
         host_key_checking: How host keys are verified (one of
             ``HOST_KEY_CHECKING_MODES``). ``accept-new`` records a host's
             key on first connect and refuses a changed one; ``yes`` accepts
@@ -692,6 +694,7 @@ class SSHConfig:
     server_alive_count_max: int = 5
     tcp_keepalive: bool = True
     connect_timeout: int = 15
+    listing_allowance_seconds: float = 15.0
     # Live monitoring needs time for both the handshake and the remote sample.
     live_stats_timeout_seconds: float = 20.0
     live_stats_interval_seconds: float = 3.0
@@ -702,6 +705,10 @@ class SSHConfig:
     def __post_init__(self) -> None:
         """Coerce ``host_key_checking`` into a supported mode."""
         self.host_key_checking = normalize_host_key_checking(self.host_key_checking)
+        value = self.listing_allowance_seconds
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            logger.warning('SSHConfig: invalid listing allowance; using the default')
+            self.listing_allowance_seconds = self.__dataclass_fields__['listing_allowance_seconds'].default
 
 
 @dataclass

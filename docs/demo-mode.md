@@ -97,7 +97,6 @@ fake the fleet table shows for that instance.
 | CloudTrail resource *types* | AWS public taxonomy |
 | Memory module names and keys | Taxonomy — scrub would hide which modules ran |
 | Commands the user types in the terminal overlay | User-authored; not a server secret |
-| SCP source/destination paths the user types | User-authored; not a server secret |
 | On-disk chat session content | Session files stay raw; redaction is display-only |
 | 15-digit numbers (GCP project IDs) | Negative-lookaround prevents false positives |
 
@@ -122,6 +121,7 @@ fake the fleet table shows for that instance.
 | OVH Billing | Service names (domains and dashed-IP hostnames) |
 | Log viewer | Every SSH `tail -f` line via `scrub_stream` |
 | Terminal overlay (command output) | `append_output` and `append_error` |
+| SCP transfer and path pickers | Editable paths are masked; selection summaries, listing labels and errors use display redaction. Copies keep using the original paths. Local home paths appear as `~`. Arbitrary file and folder names can remain visible when they do not match a redaction rule |
 | CloudWatch events table | `message` and `log_stream` columns |
 | CloudWatch event detail | Full message text |
 | CloudWatch top-IPs table | IP column (`display_ip`, raw used for network calls) |

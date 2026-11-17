@@ -416,7 +416,7 @@ async def test_restarted_transfer_keeps_spinner_until_current_worker_finishes(
         screen._start_transfer()
         await wait_until(lambda: len(calls) == 2 and predecessor.is_finished)
         await pilot.pause()
-        assert spinner.display and "Transferring" in status.render().plain
+        assert spinner.display and "Checking source and destination" in status.render().plain
         gates[1].set()
         await wait_until(lambda: not spinner.display)
         assert "completed successfully" in status.render().plain

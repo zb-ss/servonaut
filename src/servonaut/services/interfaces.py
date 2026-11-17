@@ -173,6 +173,8 @@ class SCPServiceInterface(ABC):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        *,
+        recursive: bool = False,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -186,6 +188,7 @@ class SCPServiceInterface(ABC):
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
             extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
+            recursive: Copy a folder and its contents.
 
         Returns:
             List of command arguments for subprocess.
@@ -204,6 +207,8 @@ class SCPServiceInterface(ABC):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        *,
+        recursive: bool = False,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -217,6 +222,7 @@ class SCPServiceInterface(ABC):
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
             extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
+            recursive: Copy a folder and its contents.
 
         Returns:
             List of command arguments for subprocess.
