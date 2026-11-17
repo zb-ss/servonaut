@@ -44,13 +44,25 @@ class _KeyHostApp(App):
 async def _open_remove_dialog(app: _KeyHostApp, pilot) -> KeyManagementScreen:
     await wait_until(lambda: isinstance(app.screen, KeyManagementScreen))
     screen = app.screen_under_test
-    await wait_until(lambda: not screen.query_one("#btn_remove_mapping", Button).disabled)
+    await wait_until(
+        lambda: bool(screen.query("#btn_remove_mapping"))
+        and not screen.query_one("#btn_remove_mapping", Button).disabled
+    )
     await click_action(pilot, "#btn_remove_mapping")
-    await wait_until(lambda: isinstance(app.screen, ConfirmActionScreen))
+    await wait_until(
+        lambda: isinstance(app.screen, ConfirmActionScreen)
+        and bool(app.screen.query("#confirm_input"))
+        and bool(app.screen.query("#btn_confirm"))
+    )
     return screen
 
 
 async def _confirm_dialog(app: _KeyHostApp, pilot) -> None:
+    await wait_until(
+        lambda: isinstance(app.screen, ConfirmActionScreen)
+        and bool(app.screen.query("#confirm_input"))
+        and bool(app.screen.query("#btn_confirm"))
+    )
     modal = app.screen
     assert isinstance(modal, ConfirmActionScreen)
     confirm_input = modal.query_one("#confirm_input", Input)
