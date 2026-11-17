@@ -35,11 +35,14 @@ def _run(monkeypatch, value: str | None, items: list) -> tuple[list, _Hook]:
     return items, config.hook
 
 
-def test_four_shards_are_disjoint_and_complete(monkeypatch) -> None:
+@pytest.mark.parametrize("count", [4, 8])
+def test_shards_are_disjoint_and_complete(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
     everything = {item.nodeid for item in _items()}
     seen: list[str] = []
-    for index in range(1, 5):
-        kept, hook = _run(monkeypatch, f"{index}/4", _items())
+    for index in range(1, count + 1):
+        kept, hook = _run(monkeypatch, f"{index}/{count}", _items())
         assert kept, "every shard should receive some tests"
         assert len(kept) + len(hook.deselected) == len(everything)
         seen.extend(item.nodeid for item in kept)
@@ -47,9 +50,10 @@ def test_four_shards_are_disjoint_and_complete(monkeypatch) -> None:
     assert set(seen) == everything
 
 
-def test_assignment_is_deterministic(monkeypatch) -> None:
-    first, _ = _run(monkeypatch, "2/4", _items())
-    second, _ = _run(monkeypatch, "2/4", _items())
+@pytest.mark.parametrize("count", [4, 8])
+def test_assignment_is_deterministic(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+    first, _ = _run(monkeypatch, f"2/{count}", _items())
+    second, _ = _run(monkeypatch, f"2/{count}", _items())
     assert [item.nodeid for item in first] == [item.nodeid for item in second]
 
 

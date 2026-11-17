@@ -345,7 +345,8 @@ def test_ci_test_job_aggregates_every_unit_shard() -> None:
     aggregate = jobs["test"]
     assert "    needs: unit\n" in aggregate
     assert "    if: always()\n" in aggregate
-    assert "for shard in 1 2 3 4" in aggregate
+    assert "count=${{ matrix.count }}" in aggregate
+    assert "shard <= count" in aggregate
     assert "reported no result" in aggregate
     unit_steps = _steps(jobs["unit"])
     for name in ("Record the shard result", "Upload the shard result"):
@@ -357,6 +358,130 @@ def test_ci_test_job_aggregates_every_unit_shard() -> None:
         assert uploads
         for step in uploads:
             assert "overwrite: true" in step
+
+
+def _python_matrix_rows(job: str) -> list[tuple[str, dict[str, int]]]:
+    rows = re.findall(
+        r'^          - python-version: "([^"]+)"\n((?:            [^\n]+\n)*)',
+        job,
+        re.MULTILINE,
+    )
+    return [
+        (version, {
+            key: int(value) for key, value in re.findall(r"(\w+): (\d+)", fields)
+        })
+        for version, fields in rows
+    ]
+
+
+def test_ci_unit_and_aggregate_matrices_agree_on_every_shard() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    # Coverage is collected only on 3.12, so that version gets more shards.
+    counts = {"3.10": 4, "3.12": 8, "3.13": 4}
+    expected = [
+        (version, {"shard": shard, "count": count})
+        for version, count in counts.items()
+        for shard in range(1, count + 1)
+    ]
+    assert _python_matrix_rows(jobs["unit"]) == expected
+    assert _python_matrix_rows(jobs["test"]) == [
+        (version, {"count": count}) for version, count in counts.items()
+    ]
+    assert "SERVONAUT_TEST_SHARD: ${{ matrix.shard }}/${{ matrix.count }}" in jobs["unit"]
+    assert (
+        "unit (${{ matrix.python-version }}, ${{ matrix.shard }}/${{ matrix.count }})"
+        in jobs["unit"]
+    )
+    assert "name: test (${{ matrix.python-version }})" in jobs["test"]
+
+
+def _ci_aggregate_script(version: str, count: int) -> str:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    step = next(
+        step for step in _steps(jobs["test"])
+        if step.startswith("name: Require every shard to have succeeded")
+    )
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    script = script.replace("${{ matrix.count }}", str(count))
+    script = script.replace("${{ matrix.python-version }}", version)
+    assert "${{" not in script
+    return script
+
+
+def _write_shard_results(
+    tmp_path: Path, version: str, count: int, result: str
+) -> None:
+    statuses: dict[int, str | None] = {
+        shard: "success\n" for shard in range(1, count + 1)
+    }
+    if result in {"failure", "cancelled", "skipped"}:
+        statuses[count] = f"{result}\n"
+    elif result == "empty":
+        statuses[count] = ""
+    elif result == "missing":
+        statuses[count] = None
+    elif result == "absent":
+        statuses.clear()
+    if result in {"extra", "misnumbered"}:
+        if result == "misnumbered":
+            del statuses[count]
+        statuses[count + 1] = "success\n"
+    for shard, status in statuses.items():
+        directory = tmp_path / "results" / f"unit-result-{version}-{shard}"
+        directory.mkdir(parents=True)
+        if status is not None:
+            (directory / "shard-result.txt").write_text(
+                status, encoding="utf-8",
+            )
+
+
+@pytest.mark.parametrize("count", [4, 8])
+@pytest.mark.parametrize(
+    "result",
+    [
+        "success", "failure", "cancelled", "skipped", "missing",
+        "absent", "empty", "extra", "misnumbered",
+    ],
+)
+def test_ci_aggregate_executes_with_exactly_the_successful_shards(
+    tmp_path: Path, count: int, result: str
+) -> None:
+    version = "3.12" if count == 8 else "3.10"
+    script = _ci_aggregate_script(version, count)
+    _write_shard_results(tmp_path, version, count, result)
+    completed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert (completed.returncode == 0) == (result == "success"), (
+        completed.stdout + completed.stderr
+    )
+    if result in {"missing", "misnumbered", "absent"}:
+        assert f"shard {count}/{count} reported no result" in completed.stdout
+    if result == "extra":
+        assert f"expected {count} shard results" in completed.stdout
+
+
+def test_ci_combines_coverage_from_every_coverage_shard() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    upload = next(
+        step for step in _steps(jobs["unit"])
+        if "name: Upload coverage data" in step
+    )
+    download = next(
+        step for step in _steps(jobs["test"])
+        if "name: Download the coverage data" in step
+    )
+    combine = next(
+        step for step in _steps(jobs["test"])
+        if "name: Combine the coverage" in step
+    )
+    assert (
+        "name: coverage-data-3.12-${{ matrix.shard }}"
+        in upload
+    )
+    assert "pattern: coverage-data-3.12-*" in download
+    assert "coverage combine coverage-data/*/.coverage" in combine
 
 
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
