@@ -509,7 +509,9 @@ async def test_terminal_escape_sequences_in_names_never_reach_the_terminal() -> 
             action()
             await wait_until(lambda: screen._table_mode == mode and not screen._busy_work)
             await pilot.pause()
-            output = screen._compositor.render_update(full=True).render_segments(Console(width=160))
+            output = screen._compositor.render_update(full=True).render_segments(
+                Console(width=app.size.width, height=app.size.height, force_terminal=True),
+            )
             assert "\x1b]" not in output and "example.invalid\x1b" not in output, mode
             assert "\x1b]8" not in _facts(screen) and "\x07" not in _facts(screen), mode
 
