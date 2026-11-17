@@ -17,6 +17,7 @@ from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES, widen_parse_cache
+from servonaut.styles.parse_cache import install_shared_parse_cache
 from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
 from servonaut.styles.user_themes import LoadResult, ThemeError, UserTheme, load_user_themes
 from servonaut.styles.themes import (
@@ -282,6 +283,7 @@ class ServonautApp(App):
         install_terminal_output_filter()
         install_markup_backstop()
         super().__init__(**kwargs)
+        install_shared_parse_cache(self.stylesheet)
         widen_parse_cache(self.stylesheet)
         from servonaut import get_version
         self.sub_title = f"v{get_version()}"

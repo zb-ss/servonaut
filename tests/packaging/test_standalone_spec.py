@@ -888,7 +888,7 @@ def test_servonaut_hook_collects_only_dynamic_settings_panels() -> None:
     assert calls == [
         (
             "data",
-            ("servonaut", ["*.css", "*.tcss", "styles/**/*.tcss", "data/*.txt"]),
+            ("servonaut", ["*.css", "*.tcss", "styles/**/*.tcss", "styles/cache.json", "data/*.txt"]),
         ),
         ("submodules", "servonaut.screens.settings.panels"),
     ]
