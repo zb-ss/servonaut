@@ -325,6 +325,28 @@ async def _assert_chat_cycle_for_navigation(
 
 
 @pytest.mark.asyncio
+async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
+    case = memory_case("memory-populated")
+    app = case.app_factory(False)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_case(case, app, pilot)
+        assert_layout(app, screen)
+        content(screen).scroll_to(y=16, animate=False)
+        await pilot.pause()
+        content(screen).scroll_to(y=0, animate=False)
+        await pilot.pause()
+        await _click(pilot, "#workspace_navigation")
+        await wait_until(lambda: screen.query_one(Sidebar).display is True)
+        row = screen.query_one("#memory-actions", ActionRow)
+        await wait_until(lambda: row.has_class("-wrap"))
+        await pilot.pause()
+        assert_layout(app, screen)
+        body = content(screen)
+        assert screen.query_one("#btn_clear_module").region.right <= body.region.right
+        assert screen.query_one("#btn_annotate").region.right <= body.region.right
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 async def test_memory_workspace_pane_combinations(
