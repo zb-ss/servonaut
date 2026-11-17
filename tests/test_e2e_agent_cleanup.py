@@ -6,6 +6,9 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import threading
+import re
 from unittest.mock import Mock
 
 import pytest
@@ -14,6 +17,7 @@ if os.name == "nt":
     pytest.skip("OpenSSH agent lifecycle uses POSIX processes", allow_module_level=True)
 
 from e2e.harness import agent_cleanup
+from e2e.harness import openssh_agent_shim
 from servonaut.services.vault.ssh_agent import PrivateSshAgent
 
 
@@ -64,6 +68,63 @@ def test_agents_from_another_journey_are_left_running(tmp_path):
         assert agent_cleanup.process_identity(agent.pid, executable, str(agent.socket_path)) is None
     finally:
         agent.close()
+
+
+def test_teardown_cannot_overtake_a_launch_before_its_pid_is_recorded(monkeypatch):
+    real_run = subprocess.run
+    finished = threading.Event()
+    errors, owned, threads, overtook = [], [], [], []
+    executable = str(Path(shutil.which("ssh-agent")).resolve())
+    with tempfile.TemporaryDirectory(prefix="svt", dir="/tmp") as value:
+        root = Path(value)
+        def cleanup():
+            try:
+                agent_cleanup.stop_owned_agents(root)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        def launch(*args, **kwargs):
+            result = real_run(*args, **kwargs)
+            pid = int(re.search(r"SSH_AGENT_PID=(\d+);", result.stdout)[1])
+            owned.append({"pid": pid, "executable": executable, "socket": str(root / "agent.sock"),
+                          "started": agent_cleanup.process_identity(pid, executable, str(root / "agent.sock"))})
+            worker = threading.Thread(target=cleanup)
+            threads.append(worker)
+            worker.start()
+            # Force cleanup into the native-start/registration boundary.
+            # It must wait for the launch lock, rather than observe no PID.
+            overtook.append(finished.wait(0.2))
+            return result
+
+        monkeypatch.setattr(openssh_agent_shim.subprocess, "run", launch)
+        try:
+            assert openssh_agent_shim._start_agent(str(root / "tools"), executable, str(root),
+                                                  ["-a", str(root / "agent.sock"), "-s"]) == 0
+            assert finished.wait(10), "teardown did not finish after registration"
+            assert not errors
+            assert overtook == [False], "teardown passed the unrecorded native daemon"
+            assert agent_cleanup.process_identity(owned[0]["pid"], executable, owned[0]["socket"]) is None
+        finally:
+            for worker in threads:
+                worker.join(10)
+            for record in owned:
+                agent_cleanup._stop_record(record)
+
+
+@pytest.mark.parametrize("scope", ["root", "journey"])
+def test_closed_owner_refuses_a_late_start_before_launching_a_daemon(tmp_path, monkeypatch, scope):
+    shim_dir = tmp_path / "tools"
+    agent_cleanup.stop_owned_agents(tmp_path, shim_dir=shim_dir if scope == "journey" else None)
+    run = Mock(side_effect=AssertionError("a closed owner must not create another daemon"))
+    monkeypatch.setattr(openssh_agent_shim.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="owner is closing"):
+        openssh_agent_shim._start_agent(str(shim_dir), "/usr/bin/ssh-agent", str(tmp_path),
+                                      ["-a", str(tmp_path / "agent.sock"), "-s"])
+
+    run.assert_not_called()
 
 
 @pytest.mark.parametrize("ending, status", [("success", 0), ("failure", 1), ("interrupt", 2)])
