@@ -42,6 +42,12 @@ def inert_text(text: str) -> str:
     return _UNSAFE_CHARS.sub(_visible_placeholder, text.replace("\r\n", "\n"))
 
 
+def single_line_text(text: str) -> str:
+    """Display a path or label without letting control bytes create extra rows."""
+    visible = text.replace('\r', '\\r').replace('\n', '\\n').replace('\t', '\\t')
+    return inert_text(visible).encode('utf-8', errors='backslashreplace').decode('utf-8')
+
+
 def literal(text: str, style: str = "") -> Content:
     """*text* as styled content that is never parsed as markup.
 

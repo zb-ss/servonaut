@@ -70,6 +70,15 @@ async def _fleet(pilot: Any) -> None:
     del pilot
 
 
+async def _copy_paths(pilot: Any) -> None:
+    await _open_focus_server(pilot, 't', 'SCPTransferScreen')
+
+
+@sizes
+def test_copy_paths(screen_snapshot: Any, size: str) -> None:
+    _capture(screen_snapshot, size, _copy_paths)
+
+
 async def _fleet_selected_stopped(pilot: Any) -> None:
     """A stopped server selected: the inspector shows its state and address."""
     await _harness.select_fleet_row(pilot, "db-1")

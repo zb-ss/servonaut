@@ -1,4 +1,4 @@
-/* Keep direction, two endpoints and the explicit manual action easy to compare. */
+/* Source precedes destination at every width; browsing only fills a path. */
 SCPTransferScreen #transfer_container {
     width: 1fr;
     height: 100%;
@@ -42,7 +42,7 @@ SCPTransferScreen #direction_selector {
     width: 100%;
     height: auto;
     padding: 0;
-    margin: 0 0 1 0;
+    margin: 0;
     border: none;
     background: transparent;
 }
@@ -57,18 +57,38 @@ SCPTransferScreen RadioSet:ansi:enabled:focus > RadioButton.-selected > .toggle-
 }
 
 SCPTransferScreen #transfer_paths {
+    layout: vertical;
     height: auto;
     width: 100%;
 }
 
 SCPTransferScreen .transfer-path-group {
-    width: 1fr;
+    width: 100%;
     height: auto;
-    margin-bottom: 1;
+    margin-bottom: 0;
 }
 
 SCPTransferScreen #local_path_group {
-    margin-right: 1;
+    margin-right: 0;
+}
+
+SCPTransferScreen #local_path_label,
+SCPTransferScreen #remote_path_label { display: none; }
+
+SCPTransferScreen .transfer-path-entry { width: 100%; height: 3; }
+SCPTransferScreen .transfer-path-entry Input { width: 1fr; }
+SCPTransferScreen #local_path_browse,
+SCPTransferScreen #remote_path_browse {
+    width: 14;
+    min-width: 14;
+    height: 3;
+    margin: 0 0 0 1;
+}
+SCPTransferScreen #local_path_summary,
+SCPTransferScreen #remote_path_summary {
+    height: 1;
+    color: $text-muted;
+    display: none;
 }
 
 SCPTransferScreen .transfer-path-heading {
@@ -86,7 +106,7 @@ SCPTransferScreen #remote_path_role {
 
 SCPTransferScreen #local_path_input,
 SCPTransferScreen #remote_path_input {
-    width: 100%;
+    width: 1fr;
     margin-top: 0;
 }
 
@@ -175,7 +195,7 @@ SCPTransferScreen.-content-narrow #remote_path_label {
 
 SCPTransferScreen.-content-narrow #local_path_role,
 SCPTransferScreen.-content-narrow #remote_path_role {
-    width: 1fr;
+    width: 100%;
 }
 
 SCPTransferScreen.-content-narrow #transfer_result {

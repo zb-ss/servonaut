@@ -35,12 +35,14 @@ def get_scan_paths_for_instance(config, instance: dict) -> List[str]:
     for rule in config.scan_rules:
         if matches_conditions(instance, rule.match_conditions):
             paths.extend(rule.scan_paths)
-    unique_paths = list(set(paths))
-    normalized = [p if p.endswith('/') else p + '/' for p in unique_paths]
-    return normalized or ['~']
+    normalized = [p if p.endswith('/') else p + '/' for p in paths]
+    return list(dict.fromkeys(normalized)) or ['~']
 
 
-def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> RemoteTree:
+def build_remote_tree(
+    app, instance: dict, tree_id: str = "remote_tree", *,
+    connection_options: dict | None = None, literal_paths: bool = False, scrub=None,
+) -> RemoteTree:
     """Build a :class:`RemoteTree` for *instance* using *app*'s services.
 
     Username resolution: custom servers use their own ``username``; everything
@@ -67,6 +69,10 @@ def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> Remo
         connection_service=app.connection_service,
         username=username,
         scan_paths=scan_paths,
+        connection_options=connection_options,
+        connection_timeout=config.ssh.connect_timeout + config.ssh.listing_allowance_seconds,
+        literal_paths=literal_paths,
+        scrub=scrub,
         id=tree_id,
     )
 
@@ -194,12 +200,6 @@ class FileBrowserScreen(WorkspaceScreen):
     def action_refresh(self) -> None:
         """Refresh the file tree by clearing cache and reloading."""
         if self._remote_tree:
-            # Clear the cache
-            self._remote_tree._cache.clear()
-
-            # Collapse and re-expand root to trigger reload
-            root = self._remote_tree.root
-            root.collapse()
-            root.expand()
+            self._remote_tree.refresh_paths()
 
             self.app.notify("File tree refreshed", severity="information")
