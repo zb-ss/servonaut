@@ -1,8 +1,8 @@
 """Layout defects found when every screen was looked at, as geometry checks.
 
-Each test runs the same scenario as the screenshot of that screen, with the
-real stylesheets, and asserts what a user would see: nothing clipped, nothing
-scrolled out of view.
+These cases exercise states or sizes not captured by an existing screenshot.
+Exact screenshot matches keep their geometry checks in the screenshot's own
+app run. Every check uses the real stylesheets.
 """
 
 from __future__ import annotations
@@ -13,17 +13,6 @@ import pytest
 from textual.widgets import Tree
 
 from . import _geometry, test_screens
-
-sizes = pytest.mark.parametrize("size", ["160x50", "100x30"])
-
-
-@sizes
-def test_help_topics_show_whole_labels_without_sideways_scroll(size: str) -> None:
-    def check(pilot: Any) -> None:
-        tree = pilot.app.screen.query_one("#help_topics Tree", Tree)
-        assert tree.max_scroll_x == 0, "the topic list scrolls sideways"
-    _geometry.run(test_screens._help, size, check, name="help")
-
 
 def _strip_problems(pilot: Any) -> list:
     """Values the one-line details strip cuts, loses off its edge, or scrolls to."""
@@ -84,58 +73,6 @@ def test_secrets_hub_fits_its_cards_without_scrolling_at_100x30() -> None:
             assert body.region.contains_region(card.region), "a card is cut"
 
     _geometry.run(_secrets_hub_unscrolled, "100x30", check, name="secrets-hub")
-
-
-@pytest.mark.parametrize("rules", ["in_force", "fallback"])
-def test_team_cards_end_above_the_return_lane_at_100x30(rules: str) -> None:
-    from . import test_teams
-
-    scenario = test_teams._agent_rules_card(
-        test_teams._RULES if rules == "in_force" else None, signed=rules == "in_force",
-    )
-
-    def check(pilot: Any) -> None:
-        screen = pilot.app.screen
-        back_row = screen.query_one("#team_return_actions")
-        for card_id in ("configs_section", "agent_rules_section"):
-            card = screen.query_one(f"#{card_id}")
-            assert card.region.bottom <= back_row.region.y, f"{card_id} runs under the Back row"
-
-    _geometry.run(scenario, "100x30", check, name=f"teams-{rules}")
-
-
-def test_appearance_footer_ends_on_whole_labels_at_100x30() -> None:
-    from textual.widgets import Footer
-
-    from . import test_settings_appearance as appearance
-
-    appearance._write_user_themes()
-
-    async def scenario(pilot: Any) -> None:
-        await appearance._open_appearance(pilot)
-        pilot.app.screen.query_one("#theme_card_paper").focus()
-        await pilot.pause()
-
-    def check(pilot: Any) -> None:
-        from textual.widgets._footer import FooterKey
-
-        footer = pilot.app.screen.query_one(Footer)
-        keys = list(footer.query(FooterKey))
-        assert "Help" in [key.description for key in keys]
-        for key in keys:
-            assert key.region.right <= key.parent.region.right, f"{key.description!r} is cut"
-
-    _geometry.run(scenario, "100x30", check, name="appearance-footer")
-
-
-def test_ip_ban_banner_names_the_settings_category_in_sentence_case() -> None:
-    from textual.widgets import Static
-
-    def check(pilot: Any) -> None:
-        hint = pilot.app.screen.query_one("#ip_ban_empty_hint", Static)
-        assert "Settings → IP ban" in hint.visual.plain
-
-    _geometry.run(test_screens._ip_ban, "100x30", check, name="ip-ban-banner")
 
 
 def test_settings_help_text_has_no_title_case_leftovers() -> None:

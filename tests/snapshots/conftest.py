@@ -171,11 +171,14 @@ def snapshot_state(
 @pytest.fixture
 def screen_snapshot(
     request: pytest.FixtureRequest, snapshot_mode: _snapshot.Mode
-) -> Callable[[App, Tuple[int, int], _snapshot.Scenario], None]:
+) -> Callable[..., None]:
     """Capture *app* at a size after a scenario and check it against its snapshot."""
 
-    def check(app: App, size: Tuple[int, int], scenario: _snapshot.Scenario) -> None:
-        svg = _snapshot.capture_svg(app, size, scenario)
+    def capture(
+        app: App, size: Tuple[int, int], scenario: _snapshot.Scenario, *,
+        check: _snapshot.Check | None = None,
+    ) -> None:
+        svg = _snapshot.capture_svg(app, size, scenario, check=check)
         _snapshot.check_snapshot(request.node, svg, snapshot_mode)
 
-    return check
+    return capture
