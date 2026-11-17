@@ -305,6 +305,27 @@ def test_ci_runs_the_desktop_suite_with_its_dependencies_required() -> None:
     assert "pytest --tb=short -q tests/desktop" in job
 
 
+def test_ci_runs_real_fish_in_one_job_with_a_pinned_ubuntu_package() -> None:
+    jobs = _jobs((WORKFLOWS / 'ci.yml').read_text(encoding='utf-8'))
+    installers = [name for name, job in jobs.items() if 'name: Install pinned fish' in job]
+    assert installers == ['desktop-host']
+    job = jobs['desktop-host']
+    assert 'runs-on: ubuntu-24.04' in job and 'matrix:' not in job
+    assert "FISH_VERSION: '3.7.0-1'" in job
+    assert '.github/scripts/apt-install.sh --no-install-recommends "fish=${FISH_VERSION}" "fish-common=${FISH_VERSION}"' in job
+    step = next(step for step in _steps(job) if 'name: Run shell quoting tests with fish' in step)
+    assert 'fish --version' in step
+    assert 'python -m pytest --tb=short -q tests/test_shell_quote.py' in step
+    assert job.index('name: Install pinned fish') < job.index('name: Run shell quoting tests with fish')
+
+
+def test_ci_runs_native_job_object_containment_only_on_windows() -> None:
+    job = _jobs((WORKFLOWS / 'ci.yml').read_text(encoding='utf-8'))['native-runtime']
+    step = next(step for step in _steps(job) if 'name: Run native Windows process containment test' in step)
+    assert "if: runner.os == 'Windows'" in step
+    assert 'tests/desktop/test_process_tree.py::test_windows_native_job_object_reclaims_child_and_grandchild' in step
+
+
 def test_ci_runs_the_browser_journeys_in_their_own_job() -> None:
     jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
     # Together the two end-to-end jobs run every pull-request journey once.

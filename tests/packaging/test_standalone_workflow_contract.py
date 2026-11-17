@@ -92,6 +92,12 @@ def test_existing_ci_keeps_protected_contexts_and_one_312_suite() -> None:
         "test_native_windows_generation_normalizes_full_syft_file_component_path"
         in native_runtime_command
     )
+    job_object = _ci_workflow_step(CI, 'Run native Windows process containment test')
+    assert "if: runner.os == 'Windows'" in job_object
+    assert (
+        'tests/desktop/test_process_tree.py::test_windows_native_job_object_reclaims_child_and_grandchild'
+        in job_object
+    )
 
 
 def test_qualification_workflow_has_only_read_permission_and_native_matrix() -> None:

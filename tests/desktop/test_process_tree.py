@@ -287,36 +287,66 @@ def test_windows_job_process_tree_idempotent_close() -> None:
 @pytest.mark.skipif(
     sys.platform != "win32", reason="Native Windows Job Object execution"
 )
-def test_windows_native_job_object_reclaims_child_and_grandchild() -> None:
-    sock = _bind_loopback()
-    port = sock.getsockname()[1]
-    origin = f"http://127.0.0.1:{port}"
-    token = SecretToken.generate()
+def test_windows_native_job_object_reclaims_child_and_grandchild(tmp_path) -> None:
+    import ctypes
+    from ctypes import wintypes
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "servonaut.desktop.child_process",
-        "--spawn-grandchild",
-        "normal",
-    ]
-
-    tree, ready = launch_and_handshake_desktop_child(
-        cmd,
-        origin=origin,
-        token=token,
-        listener=sock,
-        startup_timeout=5.0,
-        platform_name="win32",
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.TerminateProcess.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    synchronize, terminate = 0x00100000, 0x0001  # Win32 process access rights
+    wait_object_0, wait_timeout = 0, 0x102  # Win32 wait result constants
+    # Spawn only after assignment to the job. The parent exits on stdin EOF
+    # without cleaning up its descendant: only the job can reclaim that child.
+    script = (
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "assert sys.stdin.buffer.read(1) == b'g'\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "pid_file = Path(sys.argv[1])\n"
+        "pid_file.write_text(str(gc.pid), encoding='ascii')\n"
+        "pid_file.replace(pid_file.with_suffix('.ready'))\n"
+        "sys.stdin.buffer.read()\n"
     )
-    assert ready.origin == origin
-    assert tree.poll() is None
+    pid_file = tmp_path / 'grandchild.pid'
+    ready_file = pid_file.with_suffix('.ready')
+    tree = spawn_desktop_child([sys.executable, '-c', script, str(pid_file)], platform_name='win32')
+    grandchild_handle = None
+    try:
+        assert isinstance(tree, WindowsJobProcessTree)
+        assert tree.stdin is not None and tree.stdout is not None
+        tree.stdin.write(b'g')
+        tree.stdin.flush()
+        deadline = time.monotonic() + 5.0
+        while not ready_file.exists() and tree.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), 'child did not report its grandchild'
+        grandchild_pid = int(ready_file.read_text(encoding='ascii'))
+        # Retaining a process handle observes this exact process, even if its
+        # PID is reused, and lets cleanup reclaim it when containment regresses.
+        grandchild_handle = kernel.OpenProcess(synchronize | terminate, False, grandchild_pid)
+        if not grandchild_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert tree.poll() is None
+        assert kernel.WaitForSingleObject(grandchild_handle, 0) == wait_timeout
 
-    # Closing tree terminates the entire Job Object
-    tree.close()
-    sock.close()
+        tree.close()
 
-    assert tree.poll() is not None
+        assert tree.poll() is not None
+        assert kernel.WaitForSingleObject(grandchild_handle, 5000) == wait_object_0, 'grandchild outlived job closure'
+    finally:
+        tree.close()
+        if grandchild_handle:
+            if kernel.WaitForSingleObject(grandchild_handle, 0) == wait_timeout:
+                kernel.TerminateProcess(grandchild_handle, 1)
+                kernel.WaitForSingleObject(grandchild_handle, 5000)
+            kernel.CloseHandle(grandchild_handle)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
