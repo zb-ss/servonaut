@@ -109,8 +109,8 @@ class TestKeyListing:
         svc = _make_cloud_service(keys=[])
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
-            await pilot.pause(0.1)
+            await wait_until(lambda: svc.list_ssh_keys.called)
+            await pilot.pause()
 
         svc.list_ssh_keys.assert_called()
         called_with = svc.list_ssh_keys.call_args.args[0]
@@ -130,8 +130,10 @@ class TestKeyListing:
         ])
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: bool(app.screen.query("#ssh_keys_table"))
+                and app.screen.query_one("#ssh_keys_table", DataTable).row_count == 1,
+            )
             table = app.screen.query_one("#ssh_keys_table", DataTable)
             assert table.row_count == 1
             row = table.get_row_at(0)
@@ -153,8 +155,10 @@ class TestKeyListing:
         ])
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
-            await pilot.pause(0.1)
+            await wait_until(
+                lambda: bool(app.screen.query("#ssh_keys_table"))
+                and app.screen.query_one("#ssh_keys_table", DataTable).row_count == 1,
+            )
             table = app.screen.query_one("#ssh_keys_table", DataTable)
             assert table.row_count == 1
             row = table.get_row_at(0)
@@ -167,7 +171,11 @@ class TestKeyListing:
         svc = _make_cloud_service(keys=[])
         app = _WrapperApp(svc, project_ids=[])
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
+            await wait_until(
+                lambda: isinstance(app.screen, OVHSSHKeysScreen)
+                and bool(app.screen.query("#ssh_keys_table")),
+            )
+            await pilot.pause()
 
         svc.list_ssh_keys.assert_not_called()
 
@@ -185,7 +193,9 @@ class TestAddKey:
         svc = _make_cloud_service(keys=[])
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
+            await wait_until(
+                lambda: isinstance(app.screen, OVHSSHKeysScreen) and svc.list_ssh_keys.called,
+            )
             screen = app.screen
             screen._show_form()
             screen.query_one("#input_key_name", Input).value = "deploy-key"
@@ -193,7 +203,8 @@ class TestAddKey:
                 "#input_public_key", Input,
             ).value = "ssh-rsa AAAA_DEPLOY"
             screen._save_key()
-            await pilot.pause(0.3)
+            await wait_until(lambda: svc.add_ssh_key.called)
+            await pilot.pause()
 
         svc.add_ssh_key.assert_called_once()
         args, _ = svc.add_ssh_key.call_args
@@ -262,7 +273,9 @@ class TestDeleteKey:
         ])
         app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
+            await wait_until(
+                lambda: isinstance(app.screen, OVHSSHKeysScreen) and svc.list_ssh_keys.called,
+            )
             await app.ovh_cloud_service.delete_ssh_key(
                 _DEFAULT_PROJECT_ID, "id-old",
             )

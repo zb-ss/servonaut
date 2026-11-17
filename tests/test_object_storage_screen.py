@@ -19,6 +19,7 @@ from textual.widgets import Input
 
 from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
+from tests._async_bounds import wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +424,7 @@ async def test_object_storage_screen_buckets_pilot() -> None:
             yield ObjectStorageScreen("aws")
 
     async with _Harness().run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: svc.list_buckets.called)
         # Confirm buckets were loaded (list_buckets called)
         svc.list_buckets.assert_called()
         assert pilot.app is not None
@@ -457,13 +458,13 @@ async def test_object_storage_screen_objects_pilot() -> None:
             yield ObjectStorageScreen("aws")
 
     async with _Harness().run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: svc.list_buckets.called)
         screen = pilot.app.query_one(ObjectStorageScreen)
         # Simulate opening a bucket
         screen._current_bucket = "my-bucket"
         screen._view = _VIEW_OBJECTS
         screen.run_worker(screen._load_objects(), exclusive=True, name="s3_load_objects")
-        await pilot.pause(0.2)
+        await wait_until(lambda: svc.list_objects.called)
         assert svc.list_objects.called
         assert pilot.app is not None
 
@@ -509,10 +510,13 @@ async def test_new_bucket_form_region_select_renders_and_populates() -> None:
         "aws", AsyncMock(return_value=["us-east-1", "eu-central-1", "ap-south-1"]),
     )
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: svc.list_buckets.called)
         screen = pilot.app.query_one(ObjectStorageScreen)
         screen._show_new_bucket_form()
-        await pilot.pause(0.3)
+        await wait_until(
+            lambda: screen.query_one("#s3_bucket_region_row").display is True
+            and len(screen.query_one("#s3_select_bucket_region", Select)._options) > 1,
+        )
 
         assert screen.query_one("#s3_bucket_region_row").display is True
         select = screen.query_one("#s3_select_bucket_region", Select)
@@ -526,7 +530,7 @@ async def test_new_bucket_form_region_select_renders_and_populates() -> None:
 
         screen.query_one("#s3_input_bucket_name", Input).value = "new-bucket"
         screen._submit_new_bucket()
-        await pilot.pause(0.3)
+        await wait_until(lambda: svc.create_bucket.await_count >= 1)
         svc.create_bucket.assert_awaited_once_with("new-bucket", "eu-central-1")
 
 
@@ -536,17 +540,17 @@ async def test_new_bucket_form_hides_region_for_endpoint_pinned_provider() -> No
     list_regions = AsyncMock(return_value=["us-east-1"])
     app, svc = _region_harness("hetzner", list_regions)
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: svc.list_buckets.called)
         screen = pilot.app.query_one(ObjectStorageScreen)
         screen._show_new_bucket_form()
-        await pilot.pause(0.3)
+        await pilot.pause()
 
         assert screen.query_one("#s3_bucket_region_row").display is False
         list_regions.assert_not_awaited()
 
         screen.query_one("#s3_input_bucket_name", Input).value = "new-bucket"
         screen._submit_new_bucket()
-        await pilot.pause(0.3)
+        await wait_until(lambda: svc.create_bucket.await_count >= 1)
         svc.create_bucket.assert_awaited_once_with("new-bucket", "")
 
 

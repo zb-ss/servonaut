@@ -12,6 +12,7 @@ from textual.widgets import DataTable
 
 from servonaut.utils.instance_resolver import display_name, row_identity
 from servonaut.services.shared_servers import fold_shared
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 
 # What an empty cell shows.
 _EMPTY = "-"
@@ -133,7 +134,7 @@ def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]
     return [str(value).lower() for value in fields if value]
 
 
-class InstanceTable(DataTable):
+class InstanceTable(LayoutRefitMixin, DataTable):
     """DataTable subclass for displaying EC2 instances."""
 
     ALLOW_SELECT = True
@@ -169,6 +170,12 @@ class InstanceTable(DataTable):
 
     def on_resize(self) -> None:
         """Re-check the scroll hint: the view got wider or narrower."""
+        self._mark_layout_fitted()
+        self._sync_scroll_hint()
+        self.replan()
+
+    def _refit_for_layout(self) -> None:
+        self._mark_layout_fitted()
         self._sync_scroll_hint()
         self.replan()
 

@@ -33,8 +33,8 @@ from servonaut.widgets.workspace import WorkspaceScreen
 from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase, assert_button_label_painted, assert_essential_targets,
-    assert_layout, collapse_chat, content,
-    one_layout_transition, open_case, open_chat, preserve_native_state,
+    assert_layout, assert_qualified_boundaries, assert_visibility_combinations,
+    collapse_chat, content, one_layout_transition, open_case, open_chat, preserve_native_state,
 )
 from tests.test_workspace_pilot import _Host, _click
 
@@ -473,27 +473,22 @@ async def _enter_rail(pilot: Pilot, screen: WorkspaceScreen) -> Sidebar:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-@pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("chat_open", [False, True])
 async def test_browser_workspace_pane_combinations(
-    case: ReflowCase, size: tuple[int, int], navigation_visible: bool, chat_open: bool,
+    case: ReflowCase, size: tuple[int, int],
 ) -> None:
-    app = case.app_factory(navigation_visible)
+    app = case.app_factory(False)
     async with app.run_test(size=size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        if chat_open:
-            await open_chat(app, pilot, screen)
-        assert_layout(app, screen)
-        assert screen.query_one(Sidebar).display is navigation_visible
-        assert case.state(screen) == baseline
-        if content(screen).display:
-            await assert_essential_targets(case, app, pilot, screen)
-            await _assert_whole_toolbars(app, pilot, screen, case.name)
-        assert app._exception is None
+        await assert_visibility_combinations(
+            case, app, pilot, screen,
+            after_targets=lambda app, pilot, screen: _assert_whole_toolbars(
+                app, pilot, screen, case.name,
+            ),
+        )
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(240)  # Measured 13 s normal, 72 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
 async def test_browser_workspace_native_state_survives_reflow(case: ReflowCase) -> None:
     app = case.app_factory(False)
@@ -505,51 +500,23 @@ async def test_browser_workspace_native_state_survives_reflow(case: ReflowCase) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 13 s normal, 59 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=KINDS)
-@pytest.mark.parametrize("kind", ["chat-min", "content-narrow"])
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_browser_workspace_uses_qualified_native_boundaries(
-    case: ReflowCase, kind: str, navigation_visible: bool,
+    case: ReflowCase, navigation_visible: bool,
 ) -> None:
     # Fails closed until qualified native samples exist (boundaries=None).
-    samples = case.boundary_samples(kind, navigation_visible)
+    samples = case.boundary_samples("chat-min", navigation_visible)
     app = case.app_factory(navigation_visible)
     async with app.run_test(size=samples[0].size) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = (
-            screen.CHAT_MIN_CONTENT_WIDTH if kind == "chat-min"
-            else screen.CONTENT_NARROW_WIDTH
+        await assert_qualified_boundaries(
+            case, app, pilot, screen, navigation_visible,
+            after_targets=lambda app, pilot, screen: _assert_whole_toolbars(
+                app, pilot, screen, case.name,
+            ),
         )
-        # Samples straddle the declared threshold by exactly one native cell.
-        assert [sample.native_content_width for sample in samples] == [
-            threshold - 1, threshold, threshold + 1,
-        ]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                # Counterfactual: force the columns the policy hides, measure
-                # the native width, then restore and re-check the real flags.
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
-                screen.apply_workspace_state()
-                await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-                assert not content(screen).display
-            else:
-                assert content(screen).region.width == sample.native_content_width
-                await assert_essential_targets(case, app, pilot, screen)
-                await _assert_whole_toolbars(app, pilot, screen, case.name)
-            assert case.state(screen) == baseline
 
 
 @pytest.mark.asyncio
@@ -607,23 +574,27 @@ async def test_rail_focused_vault_keys_have_no_side_effects(
 
 
 @pytest.mark.asyncio
-async def test_check_action_composes_rail_guard_before_passthrough() -> None:
-    for kind, selector, action in (("s3", "#s3_table", "refresh"),
-                                   ("dns", "#domains_table", "back"),
-                                   ("vault", "#bw_vault_mgr_table", "refresh")):
-        case = _case(kind)
-        app = case.app_factory(True)
-        async with app.run_test(size=(160, 50)) as pilot:
-            screen = await open_case(case, app, pilot)
-            await _focus_table(pilot, screen, selector, 0)
-            assert screen.check_action(action, ()) is True, kind
-            await _enter_rail(pilot, screen)
-            # Printable single-key bindings are muted from the rail; Escape is not.
-            assert screen.check_action("back", ()) is True, kind
-            if action == "refresh":
-                # The guard is keyed by action, so the vault's F5 (which shares
-                # `refresh` with `r`) is muted from the rail too.
-                assert screen.check_action("refresh", ()) is None, kind
+@pytest.mark.parametrize("kind,selector,action", [
+    ("s3", "#s3_table", "refresh"),
+    ("dns", "#domains_table", "back"),
+    ("vault", "#bw_vault_mgr_table", "refresh"),
+])
+async def test_check_action_composes_rail_guard_before_passthrough(
+    kind: str, selector: str, action: str,
+) -> None:
+    case = _case(kind)
+    app = case.app_factory(True)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_case(case, app, pilot)
+        await _focus_table(pilot, screen, selector, 0)
+        assert screen.check_action(action, ()) is True, kind
+        await _enter_rail(pilot, screen)
+        # Printable single-key bindings are muted from the rail; Escape is not.
+        assert screen.check_action("back", ()) is True, kind
+        if action == "refresh":
+            # The guard is keyed by action, so the vault's F5 (which shares
+            # `refresh` with `r`) is muted from the rail too.
+            assert screen.check_action("refresh", ()) is None, kind
 
 
 @pytest.mark.asyncio
@@ -730,6 +701,7 @@ async def test_object_storage_upload_sends_the_typed_target(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 9 s normal, 55 s on two cores with coverage; a slow runner needs more.
 async def test_object_storage_held_listing_survives_chat_reflow() -> None:
     app = _BrowserHost(True)
     app.list_release.clear()

@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 from textual.widgets import Button
 
+from tests._theme_sets import all_themes_enabled
+
 from . import _harness
+
+# Snapshot fixtures clear SERVONAUT_* after collection, before each test body.
+OPEN_ATTEMPTS = 20 if all_themes_enabled() else 5
 
 
 async def _open_appearance_at_once(pilot: Any) -> Any:
@@ -36,7 +41,7 @@ def test_appearance_chosen_at_once_takes_the_layout_its_width_calls_for(size: tu
         async with app.run_test(size=size) as pilot:
             await _harness.wait_for_fleet(pilot)
             pilot.app.workspace_state.navigation_visible = False
-            for attempt in range(20):
+            for attempt in range(OPEN_ATTEMPTS):
                 screen = await _open_appearance_at_once(pilot)
                 layout = screen.query_one("#appearance_layout")
                 assert layout.has_class(expected), (attempt, sorted(layout.classes))

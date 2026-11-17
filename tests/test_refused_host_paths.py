@@ -139,10 +139,7 @@ async def _drive(monkeypatch, tmp_path, action):
     original = app._handle_exception
     app._handle_exception = lambda error: (errors.append(f"{type(error).__name__}: {error}"), original(error))
     async with app.run_test(size=(160, 50), notifications=True) as pilot:
-        for _ in range(60):
-            await pilot.pause(0.1)
-            if any(r.get("name") == "bad-1" for r in app.instances):
-                break
+        await wait_until(lambda: any(r.get("name") == "bad-1" for r in app.instances))
         row = next(r for r in app.instances if r.get("name") == "bad-1")
         await action(app, pilot, row)
         try:
@@ -162,24 +159,31 @@ async def _log_viewer_pick(app, pilot, row):
 
     screen = LogViewerScreen(row)
     app.push_screen(screen)
-    await pilot.pause(1.0)
+    await wait_until(lambda: app.screen is screen and _refusal_visible(app))
+    app._notifications.clear()
     screen._switch_to_log("/var/log/syslog")
 
 
 async def _log_viewer_open(app, pilot, row):
     from servonaut.screens.log_viewer import LogViewerScreen
 
-    app.push_screen(LogViewerScreen(row))
-    await pilot.pause(1.0)
+    screen = LogViewerScreen(row)
+    app.push_screen(screen)
+    await wait_until(lambda: app.screen is screen)
 
 
 async def _file_browser(app, pilot, row):
     from servonaut.screens.file_browser import FileBrowserScreen
 
-    app.push_screen(FileBrowserScreen(row))
-    await pilot.pause(1.0)
+    screen = FileBrowserScreen(row)
+    app.push_screen(screen)
+    await wait_until(
+        lambda: app.screen is screen
+        and bool(screen.query("#remote_tree"))
+        and len(screen.query_one("#remote_tree").root.children) > 0
+        and screen.focused is not None,
+    )
     await pilot.press("down", "enter")
-    await pilot.pause(1.0)
 
 
 async def _command_overlay(app, pilot, row):
@@ -187,20 +191,40 @@ async def _command_overlay(app, pilot, row):
 
     overlay = CommandOverlay(row)
     app.push_screen(overlay)
-    await pilot.pause(0.5)
+    await wait_until(
+        lambda: app.screen is overlay and getattr(overlay, "_host", None) is not None,
+    )
     overlay._execute_command("uptime")
 
 
 async def _scp_upload(app, pilot, row):
+    from textual.errors import NoWidget
+    from textual.widgets import Button
+
     from servonaut.screens.scp_transfer import SCPTransferScreen
 
     screen = SCPTransferScreen(row)
     app.push_screen(screen)
-    await pilot.pause(0.5)
+    await wait_until(
+        lambda: app.screen is screen
+        and bool(screen.query("#local_path_input"))
+        and bool(screen.query("#transfer_button"))
+        and screen.focused is not None,
+    )
     screen.query_one("#local_path_input").value = str(Path.home() / ".servonaut" / "config.json")
     screen.query_one("#remote_path_input").value = "/tmp/x"
-    if screen.query("#transfer_button"):
-        await pilot.click("#transfer_button")
+    button = screen.query_one("#transfer_button", Button)
+
+    def _transfer_button_clickable() -> bool:
+        if button.disabled or button.region.width <= 0 or button.region.height <= 0:
+            return False
+        try:
+            return app.get_widget_at(*button.region.center)[0] is button
+        except NoWidget:
+            return False
+
+    await wait_until(_transfer_button_clickable)
+    assert await pilot.click("#transfer_button")
 
 
 async def _server_actions_connect(app, pilot, row):

@@ -8,13 +8,17 @@ import io
 import json
 import os
 import platform
+import signal
 import sys
 import tempfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from .config import time_scale
+from .config import scaled_seconds, time_scale
+
+# Matches the repository-wide per-test ceiling; scaled up on slow runners.
+BASE_TEST_TIMEOUT_SECONDS = 60
 
 
 class Results:
@@ -106,9 +110,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_tests(args: argparse.Namespace, results_dir: Path, results: Results) -> int:
+def pytest_arguments(files: list[str]) -> list[str]:
+    """Build the pytest command line, with a per-test timeout that is recorded.
+
+    pytest-timeout's ``thread`` method (the repository default) ends the whole
+    process with ``os._exit`` when a test overruns. Here pytest runs in-process
+    with its output discarded, so that exit would leave no report and no
+    message. The ``signal`` method raises inside the test instead, so the
+    overrun becomes an ordinary recorded failure. Windows has no SIGALRM and
+    keeps the thread method.
+    """
+    method = "signal" if hasattr(signal, "SIGALRM") else "thread"
+    timeout = scaled_seconds(BASE_TEST_TIMEOUT_SECONDS)
+    return [
+        "-q",
+        "--tb=no",
+        "--show-capture=no",
+        f"--timeout={timeout:g}",
+        "-o",
+        f"timeout_method={method}",
+        *files,
+    ]
+
+
+def run_pytest(files: list[str], results: Results) -> int:
     import pytest
 
+    # Failure representations can contain WS headers/bootstrap scripts.
+    # Neither raw pytest output nor locals belong in public CI artifacts.
+    with (
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
+        return int(pytest.main(pytest_arguments(files), plugins=[results]))
+
+
+def run_tests(args: argparse.Namespace, results_dir: Path, results: Results) -> int:
     files = ["tests/test_desktop_probe.py", "tests/test_desktop_probe_check.py"]
     environment = {
         "SERVONAUT_PROBE_RESULTS": str(results_dir),
@@ -135,17 +172,7 @@ def run_tests(args: argparse.Namespace, results_dir: Path, results: Results) -> 
     previous = {name: os.environ.get(name) for name in environment}
     try:
         os.environ.update(environment)
-        # Failure representations can contain WS headers/bootstrap scripts.
-        # Neither raw pytest output nor locals belong in public CI artifacts.
-        with (
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
-        ):
-            return int(
-                pytest.main(
-                    ["-q", "--tb=no", "--show-capture=no", *files], plugins=[results]
-                )
-            )
+        return run_pytest(files, results)
     finally:
         for name, value in previous.items():
             if value is None:

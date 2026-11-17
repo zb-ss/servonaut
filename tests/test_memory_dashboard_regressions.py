@@ -13,6 +13,7 @@ from textual.app import App
 from textual.widgets import Button, DataTable, Static
 
 from servonaut.screens.memory import MemoryScreen
+from tests._async_bounds import wait_until
 
 
 _INSTANCE = {
@@ -130,7 +131,10 @@ async def test_fresh_scan_is_distinct_from_never_synced_cloud_state() -> None:
     app = _MemoryApp(modules, sync_service=_never_synced_service())
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-local-status"))
+            and "Memory scan: ● Fresh" in str(app.screen.query_one("#memory-local-status", Static).render()),
+        )
 
         local_status = app.screen.query_one("#memory-local-status", Static)
         cloud_status = app.screen.query_one("#memory-sync-status", Static)
@@ -151,16 +155,16 @@ async def test_sync_this_server_backfills_and_drains_only_that_server() -> None:
     app = _MemoryApp(modules, sync_service=sync)
 
     async with app.run_test(headless=True, size=(160, 50)) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: bool(app.screen.query("#btn_sync_now")))
         button = app.screen.query_one("#btn_sync_now", ActionButton)
         assert button.words == "Sync this server"
         assert str(button.label) == "Sync this server \u2590S\u258c"
 
         await pilot.click("#btn_sync_now")
-        for _ in range(20):
-            if not getattr(app, "_memory_manual_sync_in_progress", False):
-                break
-            await pilot.pause(0.05)
+        await wait_until(
+            lambda: len(sync.drain_instance_ids) >= 2
+            and not getattr(app, "_memory_manual_sync_in_progress", False),
+        )
 
         assert sync.backfill_instance_ids == [_INSTANCE["id"]]
         assert sync.drain_instance_ids == [
@@ -181,7 +185,10 @@ async def test_fleet_scan_refresh_hook_reloads_status_and_module_rows() -> None:
     app = _MemoryApp(modules)
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(
+            lambda: bool(app.screen.query("#memory-local-status"))
+            and "Not probed" in str(app.screen.query_one("#memory-local-status", Static).render()),
+        )
         screen = app.screen
         table = screen.query_one("#memory-table", DataTable)
         status = screen.query_one("#memory-local-status", Static)
@@ -217,7 +224,7 @@ async def test_ai_summary_rechecks_account_override_before_upsell() -> None:
     app = _MemoryApp({}, auth_service=auth)
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         screen = app.screen
         flow = AsyncMock()
         screen._do_ai_summary_flow = flow
@@ -246,7 +253,7 @@ async def test_ai_summary_still_upsells_unentitled_solo_after_refresh() -> None:
     app = _MemoryApp({}, auth_service=auth)
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         app.screen.action_build_ai_summary()
         for _ in range(20):
             await pilot.pause(0.01)
@@ -277,7 +284,7 @@ async def test_ai_summary_rechecks_cached_access_before_proceeding() -> None:
     app = _MemoryApp({}, auth_service=auth)
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         app.screen.action_build_ai_summary()
         for _ in range(20):
             await pilot.pause(0.01)
@@ -299,7 +306,7 @@ async def test_ai_summary_refresh_failure_does_not_show_false_upsell() -> None:
     app.notify = MagicMock()
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         screen = app.screen
         await screen._start_ai_summary_flow()
 
@@ -327,7 +334,7 @@ async def test_ai_summary_server_denial_explains_entitlement_projection() -> Non
     app.notify = MagicMock()
 
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause(0.2)
+        await wait_until(lambda: isinstance(app.screen, MemoryScreen))
         await app.screen._start_ai_summary_flow()
 
         app.notify.assert_called_once_with(

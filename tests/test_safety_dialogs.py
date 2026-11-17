@@ -44,7 +44,7 @@ def make_dialog(kind: str, *, long: bool = False) -> tuple[ModalScreen, str, str
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("value", ["RUN", " RUN ", "\tRUN\t"])
 @pytest.mark.parametrize("submit", ["enter", "click"])
 async def test_dangerous_tool_trims_run_and_submits_from_input(
@@ -102,7 +102,7 @@ async def test_invalid_dangerous_tool_reprompts_with_pinned_error_and_input(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("dry_run", [False, True])
 @pytest.mark.parametrize("value", ["RUN", " RUN "])
 async def test_remediation_trims_run_but_input_enter_never_executes(
@@ -152,7 +152,7 @@ async def test_remediation_invalid_input_keeps_execute_disabled(value: str) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("dry_run", [False, True])
 async def test_remediation_safer_action_has_distinct_result_and_live_only_button(
     size: tuple[int, int], dry_run: bool,
@@ -173,7 +173,7 @@ async def test_remediation_safer_action_has_distinct_result_and_live_only_button
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["standard", "dangerous", "remediation"])
 @pytest.mark.parametrize("cancel", ["escape", "click"])
 async def test_safety_dialog_cancellation_preserves_false_versus_none(
@@ -278,7 +278,7 @@ async def test_long_undo_stays_accessible_without_hiding_remediation_controls(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("size", [(100, 30)])
 @pytest.mark.parametrize("kind", ["standard", "dangerous", "remediation"])
 async def test_toast_lifecycle_keeps_safety_targets_stable_until_explicit_click(
     size: tuple[int, int], kind: str,

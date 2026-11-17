@@ -75,7 +75,8 @@ def _write_shell_stub(path: Path, script: str) -> Path:
 
 def test_existing_ci_keeps_protected_contexts_and_one_312_suite() -> None:
     assert "name: test (${{ matrix.python-version }})" in CI
-    assert 'python-version: ["3.10", "3.12", "3.13"]' in CI
+    for version in ("3.10", "3.12", "3.13"):
+        assert f'- python-version: "{version}"' in CI
     assert "if: matrix.python-version != '3.12'" in CI
     assert "if: matrix.python-version == '3.12'" in CI
     ordinary_test_section = CI.split("- name: Run tests with coverage", 1)[0]

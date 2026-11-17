@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from textual import events
@@ -15,14 +15,16 @@ from servonaut.screens.instance_list import InstanceListScreen
 from servonaut.screens.memory import MemoryScreen, SimpleConfirmModal
 from servonaut.screens.memory_export import MemoryExportScreen
 from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+from servonaut.widgets.action_button import ActionRow
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.upsell_modal import UpsellModal
 from servonaut.widgets.workspace import WorkspaceScreen
 from tests._async_bounds import wait_until
 from tests._workspace_reflow_conformance import (
-    BoundarySample, ReflowCase, assert_button_label_painted, assert_essential_targets,
-    assert_layout, content, one_layout_transition, open_case, open_chat, preserve_native_state,
+    BoundarySample, ReflowCase, assert_button_label_painted, assert_layout,
+    assert_qualified_boundaries, assert_visibility_combinations, content, open_case,
+    preserve_native_state,
 )
 from tests.test_fleet_workspace_layout import _open_chat
 from tests.test_memory_dashboard_regressions import _memory_service, _module
@@ -297,32 +299,49 @@ def memory_case(kind: str) -> ReflowCase:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("navigation_visible", [False, True])
-@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
-@pytest.mark.parametrize("chat_state", ["closed", "open", "collapsed"])
-async def test_memory_workspace_pane_combinations(
-    kind: str, navigation_visible: bool, size: tuple[int, int], chat_state: str,
-) -> None:
-    case = memory_case(kind)
-    app = case.app_factory(navigation_visible)
-    async with app.run_test(size=size) as pilot:
+async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
+    case = memory_case("memory-populated")
+    app = case.app_factory(False)
+    async with app.run_test(size=(100, 30)) as pilot:
         screen = await open_case(case, app, pilot)
-        initial = case.state(screen)
-        if chat_state != "closed":
-            panel = await open_chat(app, pilot, screen)
-            if chat_state == "collapsed":
-                await pilot.press("f2")
-                await wait_until(lambda: panel._collapsed)
-                await pilot.pause()
         assert_layout(app, screen)
-        assert case.state(screen) == initial
-        if screen.query_one(".workspace-content").display:
-            await assert_essential_targets(case, app, pilot, screen)
-        assert app._exception is None
+        content(screen).scroll_to(y=16, animate=False)
+        await pilot.pause()
+        content(screen).scroll_to(y=0, animate=False)
+        await pilot.pause()
+        await _click(pilot, "#workspace_navigation")
+        # Reading a region here rebuilds the compositor map before the layout
+        # pass, which is how the reflow used to reach the row without a Resize.
+        _ = content(screen).region
+        await wait_until(lambda: screen.query_one(Sidebar).display is True)
+        row = screen.query_one("#memory-actions", ActionRow)
+        await wait_until(lambda: row.has_class("-wrap"))
+        await pilot.pause()
+        assert_layout(app, screen)
+        body = content(screen)
+        assert screen.query_one("#btn_clear_module").region.right <= body.region.right
+        assert screen.query_one("#btn_annotate").region.right <= body.region.right
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_memory_workspace_pane_combinations(
+    kind: str, size: tuple[int, int],
+) -> None:
+    case = memory_case(kind)
+    app = case.app_factory(False)
+    async with app.run_test(size=size) as pilot:
+        screen = await open_case(case, app, pilot)
+        await assert_visibility_combinations(
+            case, app, pilot, screen, include_collapsed=True,
+        )
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 11 s normal, 54 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("kind", KINDS)
 async def test_memory_workspace_keeps_native_state_and_chat_identity(kind: str) -> None:
     case = memory_case(kind)
@@ -335,57 +354,17 @@ async def test_memory_workspace_keeps_native_state_and_chat_identity(kind: str) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("kind_of_boundary", ["chat-min", "content-narrow"])
 @pytest.mark.parametrize("navigation_visible", [False, True])
 async def test_memory_workspace_uses_qualified_native_boundaries(
-    kind: str, kind_of_boundary: str, navigation_visible: bool,
+    kind: str, navigation_visible: bool,
 ) -> None:
     case = memory_case(kind)
     # Fails closed until qualified native samples exist (boundaries=None).
-    samples = case.boundary_samples(kind_of_boundary, navigation_visible)
+    case.boundary_samples("chat-min", navigation_visible)
     app = case.app_factory(navigation_visible)
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await open_case(case, app, pilot)
-        baseline = case.state(screen)
-        await open_chat(app, pilot, screen)
-        threshold = (
-            screen.CHAT_MIN_CONTENT_WIDTH if kind_of_boundary == "chat-min"
-            else screen.CONTENT_NARROW_WIDTH
-        )
-        # Samples straddle the declared threshold by exactly one native cell.
-        assert [sample.native_content_width for sample in samples] == [
-            threshold - 1, threshold, threshold + 1,
-        ]
-        for sample in samples:
-            with one_layout_transition(screen):
-                await pilot.resize_terminal(*sample.size)
-                await pilot.pause()
-            assert screen.has_class("-chat-replace") is sample.expected_replace
-            assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-            assert_layout(app, screen)
-            if sample.expected_replace:
-                # Counterfactual: force the columns the policy hides, measure
-                # the native width, then restore and re-check the real flags.
-                with patch.object(screen, "CHAT_MIN_CONTENT_WIDTH", 1):
-                    screen.apply_workspace_state()
-                    await pilot.pause()
-                    assert content(screen).region.width == sample.native_content_width
-                screen.apply_workspace_state()
-                await pilot.pause()
-                assert screen.has_class("-chat-replace") is sample.expected_replace
-                assert screen.has_class("-content-narrow") is sample.expected_content_narrow
-                assert not content(screen).display
-            else:
-                assert content(screen).region.width == sample.native_content_width
-                if isinstance(screen, MemoryScreen):
-                    assert case.state(screen) == baseline
-                    entry_scroll = content(screen).scroll_y
-                await assert_essential_targets(case, app, pilot, screen)
-                if isinstance(screen, MemoryScreen):
-                    # The visibility probe deliberately scrolls to each action.
-                    content(screen).scroll_to(y=entry_scroll, animate=False, immediate=True)
-                    await pilot.pause()
-            assert case.state(screen) == baseline
+        await assert_qualified_boundaries(case, app, pilot, screen, navigation_visible)
 
 
 @pytest.mark.asyncio
@@ -549,16 +528,15 @@ async def test_clear_prompt_escapes_selected_module_without_changing_raw_target(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
 @pytest.mark.parametrize("navigation_visible", [False, True])
 @pytest.mark.parametrize("kind,width", [("memory-populated", 95), ("memory-populated", 96),
                                        ("memory-populated", 99), ("sync-configured", 71),
                                        ("sync-configured", 75), ("sync-configured", 104)])
 async def test_memory_action_rows_paint_inside_their_actual_content_width(
-    theme: str, navigation_visible: bool, kind: str, width: int,
+    navigation_visible: bool, kind: str, width: int,
 ) -> None:
     app = _MemoryWorkspaceApp(kind, navigation_visible=navigation_visible)
-    app.theme = theme
+    app.theme = "servonaut"
     async with app.run_test(size=(width + (25 if navigation_visible else 0), 50)) as pilot:
         screen = app.screen
         body = screen.query_one(

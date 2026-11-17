@@ -12,25 +12,25 @@
       "max_archive_bytes": 70030610,
       "max_expanded_bytes": 130615702,
       "measurement": {
-        "measured_on": "2026-10-19",
-        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
-        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
+        "measured_on": "2026-11-17",
+        "source_commit": "d2cea25e5bdfc936c71d7e6fef6efcfd4f3b5051",
+        "wheel_sha256": "6bdd6c03c4498cdfe074a25c4b317271d2c9a7a7c3c6fa2c6a46142486064282"
       },
       "observed": {
-        "archive_bytes": 62980981,
-        "directory_count": 999,
-        "expanded_regular_bytes": 118213703,
-        "regular_file_count": 2198,
+        "archive_bytes": 63862340,
+        "directory_count": 1000,
+        "expanded_regular_bytes": 119294112,
+        "regular_file_count": 2225,
         "symlink_count": 0
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for linux-x64-ubuntu-22.04 with 15% headroom.",
       "requirements_lock_sha256": "8ff8757dc1dd75b168d32389837a64ff385222fa036cd57e734882bfb7f5ed3a",
       "schema_version": 1,
-      "source_date_epoch": 1792445179,
+      "source_date_epoch": 1794914236,
       "target": "linux-x64-ubuntu-22.04",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
-        "hooks_sha256": "c1ebb854ddca83f9dfd82c963b01c10949bca907cf8f05787a7b0a757a342231",
+        "hooks_sha256": "04168fd8b2df999e8eeb27bc7c8ab006f9bb88d53e2b167b72e08ff4ce400580",
         "pyinstaller_hooks_version": "2026.7",
         "pyinstaller_version": "6.22.3",
         "python_implementation": "CPython",
@@ -52,25 +52,25 @@
       "max_archive_bytes": 51173343,
       "max_expanded_bytes": 87183817,
       "measurement": {
-        "measured_on": "2026-10-19",
-        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
-        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
+        "measured_on": "2026-11-17",
+        "source_commit": "d2cea25e5bdfc936c71d7e6fef6efcfd4f3b5051",
+        "wheel_sha256": "6bdd6c03c4498cdfe074a25c4b317271d2c9a7a7c3c6fa2c6a46142486064282"
       },
       "observed": {
-        "archive_bytes": 46072556,
-        "directory_count": 1002,
-        "expanded_regular_bytes": 78666990,
-        "regular_file_count": 2194,
+        "archive_bytes": 46963382,
+        "directory_count": 1003,
+        "expanded_regular_bytes": 79754007,
+        "regular_file_count": 2221,
         "symlink_count": 4
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for macos-arm64 with 15% headroom.",
       "requirements_lock_sha256": "3a2d25c164b01e45420b87313040bfa7f792b7ade17bec6ec3baeee58a6e75b4",
       "schema_version": 1,
-      "source_date_epoch": 1792445179,
+      "source_date_epoch": 1794914236,
       "target": "macos-arm64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
-        "hooks_sha256": "c1ebb854ddca83f9dfd82c963b01c10949bca907cf8f05787a7b0a757a342231",
+        "hooks_sha256": "04168fd8b2df999e8eeb27bc7c8ab006f9bb88d53e2b167b72e08ff4ce400580",
         "pyinstaller_hooks_version": "2026.7",
         "pyinstaller_version": "6.22.3",
         "python_implementation": "CPython",
@@ -92,25 +92,25 @@
       "max_archive_bytes": 52408664,
       "max_expanded_bytes": 88489807,
       "measurement": {
-        "measured_on": "2026-10-19",
-        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
-        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
+        "measured_on": "2026-11-17",
+        "source_commit": "d2cea25e5bdfc936c71d7e6fef6efcfd4f3b5051",
+        "wheel_sha256": "6bdd6c03c4498cdfe074a25c4b317271d2c9a7a7c3c6fa2c6a46142486064282"
       },
       "observed": {
-        "archive_bytes": 47167836,
-        "directory_count": 1002,
-        "expanded_regular_bytes": 79799930,
-        "regular_file_count": 2194,
+        "archive_bytes": 48053948,
+        "directory_count": 1003,
+        "expanded_regular_bytes": 80886963,
+        "regular_file_count": 2221,
         "symlink_count": 4
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for macos-x64 with 15% headroom.",
       "requirements_lock_sha256": "629d61b75fd9fec266bf248d63a0401477c22a90801d887cf27b314b2292794b",
       "schema_version": 1,
-      "source_date_epoch": 1792445179,
+      "source_date_epoch": 1794914236,
       "target": "macos-x64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
-        "hooks_sha256": "c1ebb854ddca83f9dfd82c963b01c10949bca907cf8f05787a7b0a757a342231",
+        "hooks_sha256": "04168fd8b2df999e8eeb27bc7c8ab006f9bb88d53e2b167b72e08ff4ce400580",
         "pyinstaller_hooks_version": "2026.7",
         "pyinstaller_version": "6.22.3",
         "python_implementation": "CPython",
@@ -132,25 +132,25 @@
       "max_archive_bytes": 53668631,
       "max_expanded_bytes": 85270643,
       "measurement": {
-        "measured_on": "2026-10-19",
-        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
-        "wheel_sha256": "2277d48bdfc5cca2137be02c108f66b1d43bfe4cb6fa6fba71ed0799e4331bc1"
+        "measured_on": "2026-11-17",
+        "source_commit": "d2cea25e5bdfc936c71d7e6fef6efcfd4f3b5051",
+        "wheel_sha256": "713a0ea3c9718ab4ea8601dcd1543481058a354e5515c976a6228e6632cb1b31"
       },
       "observed": {
-        "archive_bytes": 48248751,
-        "directory_count": 1020,
-        "expanded_regular_bytes": 76919479,
-        "regular_file_count": 2817,
+        "archive_bytes": 49147217,
+        "directory_count": 1021,
+        "expanded_regular_bytes": 78009124,
+        "regular_file_count": 2844,
         "symlink_count": 0
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for windows-x64 with 15% headroom.",
       "requirements_lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
       "schema_version": 1,
-      "source_date_epoch": 1792445179,
+      "source_date_epoch": 1794914236,
       "target": "windows-x64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
-        "hooks_sha256": "c0b98ca3d201b32998b92bebfe6e6016dca4f04caa051f17da6aef06a464c4b2",
+        "hooks_sha256": "9c86be6165d24d7c260bdb4809a570d72635ef2102d9a4681c57d0998dc84a13",
         "pyinstaller_hooks_version": "2026.7",
         "pyinstaller_version": "6.22.3",
         "python_implementation": "CPython",

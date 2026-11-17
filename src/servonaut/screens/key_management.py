@@ -333,22 +333,34 @@ class KeyManagementScreen(WorkspaceScreen):
                 confirm_text="remove",
                 action_label="Remove override",
             ),
-            lambda confirmed: self._remove_confirmed(confirmed, row_key, shown_id),
+            lambda confirmed: self._remove_confirmed(confirmed, instance_id, shown_id),
         )
 
-    def _remove_confirmed(self, confirmed: Optional[bool], row_key, shown_id: str) -> None:
-        instance_id = self._mapping_ids.get(row_key)
-        if not confirmed or instance_id is None:
+    def _remove_confirmed(
+        self, confirmed: Optional[bool], instance_id: str, shown_id: str,
+    ) -> None:
+        if not confirmed:
             return
         config = self.app.config_manager.get()
-        if instance_id in config.instance_keys:
-            del config.instance_keys[instance_id]
-            self.app.config_manager.save(config)
+        display_id = literal(shown_id).plain
+        if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+            display_id = literal(
+                self.app.redaction_service.redact_instance_id(instance_id)
+            ).plain
+        if instance_id not in config.instance_keys:
             self._load_instance_mappings()
             self.notify(
-                f"Removed key mapping for {literal(shown_id).plain}",
-                severity="information", markup=False,
+                f"Key override for {display_id} is no longer configured",
+                severity="warning", markup=False,
             )
+            return
+        del config.instance_keys[instance_id]
+        self.app.config_manager.save(config)
+        self._load_instance_mappings()
+        self.notify(
+            f"Removed key mapping for {display_id}",
+            severity="information", markup=False,
+        )
 
     def _add_key_to_agent(self) -> None:
         """Add a key to SSH agent (in worker thread)."""

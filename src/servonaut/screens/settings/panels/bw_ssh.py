@@ -25,16 +25,24 @@ from textual.widgets import Button, Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.forms import setting_row
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 
 logger = logging.getLogger(__name__)
 
 
-class _VaultFormActions(Horizontal):
+class _VaultFormActions(LayoutRefitMixin, Horizontal):
     """Keep the inline action captions intact at the actual form width."""
 
     def on_resize(self, event: events.Resize) -> None:
+        self._apply_width(event.size.width)
+
+    def _refit_for_layout(self) -> None:
+        self._apply_width(self._size.width)
+
+    def _apply_width(self, width: int) -> None:
+        self._mark_layout_fitted()
         # Two equal columns need Cancel's 6 cells, borders/line padding, and a gap.
-        self.set_class(event.size.width < 21, "-stacked")
+        self.set_class(width < 21, "-stacked")
 
 
 class BwSshPanel(SettingsPanel):
