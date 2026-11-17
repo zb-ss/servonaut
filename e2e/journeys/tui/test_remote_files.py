@@ -129,7 +129,12 @@ async def test_a_missing_root_folder_is_reported(tui, seed, journey, sshd):
         tree = t.on_screen("#remote_tree")
         await t.click(tree)
         gone = await _expand(t, tree, tree.root, "📁 /srv/gone/")
-        assert _labels(gone) == ["📭 Path not found on server"]
+        # The ordinary Files browser retains the server's diagnostic; the
+        # copy picker uses its shorter friendly message instead.
+        assert len(_labels(gone)) == 1
+        message = _labels(gone)[0]
+        assert message.startswith("❌ ")
+        assert "/srv/gone/" in message and "No such file or directory" in message
 
 
 async def _browse_for_a_log(t):

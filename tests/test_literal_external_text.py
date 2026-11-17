@@ -564,7 +564,7 @@ async def test_remote_tree_names_do_not_reach_the_markup_parser() -> None:
 
     class TreeOnly(RemoteTree):
         def __init__(self) -> None:
-            Tree.__init__(self, "~/uploads", id="rt")
+            RemoteTree.__init__(self, {"id": "web-1"}, MagicMock(), MagicMock(), "deploy", [], id="rt")
 
         def on_mount(self, event):
             event.prevent_default()

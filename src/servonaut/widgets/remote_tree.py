@@ -18,7 +18,6 @@ from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.remote_shell import shell_path, posix_command
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
-from servonaut.services.remote_paths import path_error_message
 
 if TYPE_CHECKING:
     from servonaut.services.ssh_service import SSHService
@@ -166,7 +165,7 @@ class RemoteTree(Tree):
             if node.data:
                 data = node.data
                 if data.get('type') == 'error':
-                    node.set_label(self._label(self._error_label(data['error'])))
+                    node.set_label(self._label(self._error_label(data['error'], refused=data.get('refused', False))))
                     return
                 name = data.get('name', data['path'])
                 prefix = '📁' if data['type'] == 'directory' else '📄'
@@ -327,14 +326,15 @@ class RemoteTree(Tree):
         node.remove_children()
         error = str(event.worker.error) if event.worker.error else ''
         if error:
+            refused = isinstance(event.worker.error, SSHRefusal)
             self._errors[path] = error
             logger.warning('Could not list remote folder %s: %s', path, error)
             node.add(
-                self._label(self._error_label(error)),
-                data={'path': path, 'type': 'error', 'error': error},
+                self._label(self._error_label(error, refused=refused)),
+                data={'path': path, 'type': 'error', 'error': error, 'refused': refused},
             ).allow_expand = False
-            if isinstance(event.worker.error, SSHRefusal):
-                self.app.notify(path_error_message(error), severity='error', markup=False)
+            if refused:
+                self.app.notify(error, severity='error', markup=False)
         else:
             self._cache[path] = event.worker.result
             self._populate_node_from_cache(node, path)
@@ -351,8 +351,11 @@ class RemoteTree(Tree):
             node = parent
         return True
 
-    @staticmethod
-    def _error_label(error: str) -> str:
+    def _error_label(self, error: str, *, refused: bool = False) -> str:
+        if refused:
+            return error
+        if not self._literal_paths:
+            return f'❌ {error}'
         lowered = error.lower()
         if 'permission denied' in lowered:
             return '🔒 Permission denied'
