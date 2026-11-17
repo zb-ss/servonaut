@@ -516,6 +516,10 @@ async def test_the_cue_follows_the_scroll_position_without_moving_the_layout(mod
 
     app = _ModalHost(modal_cls("run_command", _long_args("newlines")))
     async with app.run_test(size=(120, 40)) as pilot:
+        await wait_until(
+            lambda: bool(app.screen.query(f"#{prefix}_confirm_more"))
+            and bool(app.screen.query(f"#{prefix}_confirm_scroll")),
+        )
         scroll = app.screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
         cue = app.screen.query_one(f"#{prefix}_confirm_more", Static)
 
