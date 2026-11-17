@@ -529,6 +529,11 @@ async def test_many_notifications_show_newest_and_allow_reading_earlier_alerts(
             app.notify(f"Example operation {index + 1} completed.", timeout=60)
         await pilot.pause()
         rack = screen.query_one("ToastRack")
+        # A slow runner can apply the scroll to the newest toast after the pause.
+        await wait_until(lambda: (
+            len(rack.query("Toast")) == 8 and rack.max_scroll_y > 0
+            and rack.scroll_y == rack.max_scroll_y
+        ))
         toasts = list(rack.query("Toast"))
         assert len(toasts) == 8 and rack.max_scroll_y > 0
         assert rack.scroll_y == rack.max_scroll_y

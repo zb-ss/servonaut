@@ -186,6 +186,9 @@ def _aws_proxy_failure():
     (_aws_proxy_failure, "failed"),
 ])
 def test_aws_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error, expected):
+    # Build one error up front so the provider library imports happen here, not
+    # inside the time-budgeted listing, where a cold import could use up the budget.
+    make_error()
     config.aws.regions = ["r-1", "r-2"]
     (tmp_path / "cache.json").unlink()
 
@@ -213,6 +216,9 @@ def test_aws_no_answer_and_error_response(config, tmp_path, monkeypatch, make_er
 ])
 def test_hetzner_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error,
                                               expected):
+    # Build one error up front so the provider library imports happen here, not
+    # inside the time-budgeted listing, where a cold import could use up the budget.
+    make_error()
     config.hetzner = HetznerConfig(enabled=True, api_token="token", cache_ttl_seconds=120,
                                    cache_path=str(tmp_path / "hetzner_cache.json"))
 
@@ -246,6 +252,9 @@ def _ovh_http_error():
     (lambda: __import__("ovh").exceptions.InvalidCredential("Invalid credential"), "failed"),
 ])
 def test_ovh_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error, expected):
+    # Build one error up front so the provider library imports happen here, not
+    # inside the time-budgeted listing, where a cold import could use up the budget.
+    make_error()
     config.ovh = OVHConfig(enabled=True, application_key="k", application_secret="s",
                            consumer_key="c", include_dedicated=False, include_cloud=False)
     monkeypatch.setattr(ovh_service, "_OVH_CACHE_PATH", tmp_path / "ovh_cache.json")
