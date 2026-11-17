@@ -65,7 +65,7 @@ def test_a_client_with_the_sftp_flag_gets_it_and_the_raw_path(modern_client) -> 
 def test_a_client_without_it_gets_an_escaped_path_and_no_flag(legacy_client) -> None:
     for command in (_upload("/srv/x;y z.log"), _download("/srv/x;y z.log")):
         assert "-s" not in command
-        assert "deploy@9.9.9.9:/srv/x\;y\\ z.log" in command
+        assert "deploy@9.9.9.9:/srv/x\\;y\\ z.log" in command
     assert _upload("~/my dir/a.log")[-1] == "deploy@9.9.9.9:~/my\\ dir/a.log"
 
 
@@ -83,7 +83,7 @@ def test_plain_paths_are_unchanged_in_both_modes(modern_client, legacy_client) -
 @pytest.mark.parametrize(
     ("path", "escaped"),
     [
-        ("x;touch marker;.log", "x\;touch\\ marker\;.log"),
+        ("x;touch marker;.log", "x\\;touch\\ marker\\;.log"),
         ("$(id).log", "\\$\\(id\\).log"),
         ("a`b`", "a\\`b\\`"),
         ("it's", "it\\'s"),
