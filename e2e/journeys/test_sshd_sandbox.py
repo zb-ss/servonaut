@@ -374,6 +374,19 @@ def test_scp_copies_only_to_or_from_a_server(journey, sshd):
     assert not (journey.directory / "copy.txt").exists()
 
 
+def test_scp_usage_probe_reads_the_real_client_without_connecting(journey, sshd):
+    from servonaut.utils import scp_client
+
+    result = subprocess.run(
+        ['scp'], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        timeout=30, check=False,
+    )
+    assert result.returncode != 0
+    assert 'usage: scp ' in result.stderr and 'e2e:' not in result.stderr
+    assert scp_client._probe('scp') == scp_client.parse_sftp_flag(result.stderr)
+    assert sshd.target.sessions() == [] and sshd.bastion.sessions() == []
+
+
 def test_the_real_client_starts_only_as_the_pass_through_allows(journey, sshd):
     real_ssh, config = sshd.openssh["ssh"], str(sshd.config_path)
     other = str(journey.directory / "other_config")
