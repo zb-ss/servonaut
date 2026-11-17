@@ -40,6 +40,7 @@ from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.action_button import ActionButton, ActionRow
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.dialogs import (
@@ -835,7 +836,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         })
 
 
-class _ActionsBody(Vertical):
+class _ActionsBody(LayoutRefitMixin, Vertical):
     """The content column; tells the screen when its own width changes.
 
     The cards stack by the room this column has, and that changes when the
@@ -843,6 +844,13 @@ class _ActionsBody(Vertical):
     """
 
     def on_resize(self) -> None:
+        self._sync_layout()
+
+    def _refit_for_layout(self) -> None:
+        self._sync_layout()
+
+    def _sync_layout(self) -> None:
+        self._mark_layout_fitted()
         sync = getattr(self.screen, "_sync_card_layout", None)
         if sync is not None:
             self.call_after_refresh(sync)

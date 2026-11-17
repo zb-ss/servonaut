@@ -17,6 +17,7 @@ from textual.widgets import Static
 from servonaut.utils.instance_resolver import display_name
 from servonaut.utils.markup import literal
 from servonaut.utils.platform_utils import CopyOutcome, copy_text
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 from servonaut.widgets.instance_table import InstanceTable
 
 # How long a copied value shows its confirmation in place of itself (seconds).
@@ -262,7 +263,7 @@ _LINE_COLUMN_CHOICES = (4, 3, 2)
 _LINE_MAX_LINES = 3
 
 
-class FleetValueLine(_ValueWalker, Grid):
+class FleetValueLine(_ValueWalker, LayoutRefitMixin, Grid):
     """The values as a short block under the table (left and right)."""
 
     compact = True
@@ -272,6 +273,9 @@ class FleetValueLine(_ValueWalker, Grid):
         self.fit_columns()
 
     def on_resize(self) -> None:
+        self.fit_columns()
+
+    def _refit_for_layout(self) -> None:
         self.fit_columns()
 
     def fit_columns(self) -> None:
@@ -284,6 +288,7 @@ class FleetValueLine(_ValueWalker, Grid):
         width = self.content_size.width
         if not rows or width <= 0:
             return
+        self._mark_layout_fitted()
         needed = [cell_len(row.label) + 1 + cell_len(row.value) for row in rows]
         chosen = "-flexible"
         for count in _LINE_COLUMN_CHOICES:
