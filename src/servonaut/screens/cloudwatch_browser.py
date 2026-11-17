@@ -19,6 +19,7 @@ from textual.content import Content
 from textual.css.query import NoMatches
 
 from servonaut.utils.markup import literal
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -84,10 +85,17 @@ _STREAM_COLUMN_MAX = 32
 _TOP_IPS_HEADING = "Top IPs"
 
 
-class _IpsHeader(Horizontal):
+class _IpsHeader(LayoutRefitMixin, Horizontal):
     """The Top IPs header row; tells the screen when its own width is known or changes."""
 
     def on_resize(self) -> None:
+        self._sync_header()
+
+    def _refit_for_layout(self) -> None:
+        self._sync_header()
+
+    def _sync_header(self) -> None:
+        self._mark_layout_fitted()
         fit = getattr(self.screen, "_fit_ips_header", None)
         if fit is not None:
             fit()

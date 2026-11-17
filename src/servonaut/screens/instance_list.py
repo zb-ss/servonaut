@@ -27,6 +27,7 @@ from servonaut.screens._fleet_filter import (
 )
 from servonaut.screens._fleet_load import FleetLoad, format_ago, render_load
 from servonaut.screens._footer_fit import fit_footer
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 from servonaut.widgets.action_button import ActionButton, ActionRole, action_label
 from servonaut.widgets.fleet_skeleton import FleetSkeleton
 from servonaut.widgets.fleet_values import FleetValueLine, FleetValues, ValueRow, instance_values
@@ -80,7 +81,7 @@ class FleetSearchInput(Input):
         return super().check_consume_key(key, character)
 
 
-class FleetSummaryLine(Static):
+class FleetSummaryLine(LayoutRefitMixin, Static):
     """The summary under the table: the key reminder goes first when the line is too narrow."""
 
     def __init__(self, *args, **kwargs) -> None:
@@ -96,8 +97,12 @@ class FleetSummaryLine(Static):
         """Choose the wording again for the new width."""
         self._draw()
 
+    def _refit_for_layout(self) -> None:
+        self._draw()
+
     def _draw(self) -> None:
         """Show the full wording when it fits, the short one otherwise."""
+        self._mark_layout_fitted()
         full, short = self._texts
         width = self.size.width
         self.update(full if width == 0 or cell_len(full) <= width else short)

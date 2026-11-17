@@ -27,6 +27,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.events import Resize
 from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Static,
 )
@@ -62,10 +63,15 @@ logger = logging.getLogger(__name__)
 class _ProjectKeysTable(PlannedTable):
     """Keep the selected key visible after the catalog's native rows reflow."""
 
-    def on_resize(self) -> None:
+    def on_resize(self, event: Resize) -> None:
+        super().on_resize(event)
         # A content-sized table can shrink after its rows are populated.
         # Textual retains its old scroll offset across that resize, which
         # otherwise leaves the selected key below the shorter viewport.
+        self.call_after_refresh(self._restore_cursor_visibility)
+
+    def _refit_for_layout(self) -> None:
+        super()._refit_for_layout()
         self.call_after_refresh(self._restore_cursor_visibility)
 
     def on_focus(self) -> None:

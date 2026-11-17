@@ -48,6 +48,7 @@ from servonaut.styles.user_themes import (
     themes_dir,
 )
 from servonaut.utils.markup import literal
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.utils.platform_utils import open_path
 
@@ -302,7 +303,7 @@ class ThemeErrorCard(Vertical):
             yield Static("This file is a link, so it cannot be opened from here.", classes="theme-card-detail")
 
 
-class AppearancePanel(SettingsPanel):
+class AppearancePanel(LayoutRefitMixin, SettingsPanel):
     """Colour themes: built-in, yours, and the files that did not load."""
 
     PANEL_ID = "appearance"
@@ -390,6 +391,9 @@ class AppearancePanel(SettingsPanel):
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout(event.size.width)
 
+    def _refit_for_layout(self) -> None:
+        self._apply_layout_to_size()
+
     def _apply_layout_to_size(self) -> None:
         """Lay the panel out for the width it has now (nothing until it has one)."""
         if self.size.width > 0:
@@ -397,6 +401,7 @@ class AppearancePanel(SettingsPanel):
 
     def _apply_layout(self, width: int) -> None:
         """Put the preview beside the cards when there is room, below them otherwise."""
+        self._mark_layout_fitted()
         wide = width >= SIDE_DETAILS_MIN_WIDTH
         layout = self.query_one("#appearance_layout", Container)
         layout.set_class(wide, "-side")

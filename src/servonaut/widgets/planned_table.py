@@ -7,8 +7,10 @@ from typing import Callable, Optional
 from textual.events import Resize
 from textual.widgets import DataTable
 
+from servonaut.widgets._layout_refit import LayoutRefitMixin
 
-class PlannedTable(DataTable):
+
+class PlannedTable(LayoutRefitMixin, DataTable):
     """A ``DataTable`` whose owner plans its columns from the table's own room.
 
     The owner is called once the table has its final width, whatever made it
@@ -26,7 +28,14 @@ class PlannedTable(DataTable):
         self._plan_handler = handler
 
     def on_resize(self, event: Resize) -> None:
-        width = event.size.width
+        self._mark_layout_fitted()
+        self._schedule_plan(event.size.width)
+
+    def _refit_for_layout(self) -> None:
+        self._mark_layout_fitted()
+        self._schedule_plan(self._size.width)
+
+    def _schedule_plan(self, width: int) -> None:
         if width == self._planned_width:
             return
         self._planned_width = width
