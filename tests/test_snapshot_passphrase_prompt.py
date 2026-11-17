@@ -1,7 +1,7 @@
 """Regression tests for the snapshot-manager passphrase prompt mode.
 
-Bug: ``_prompt_passphrase_then`` chose "Set Sync Passphrase" (type-it-twice)
-vs "Enter Sync Passphrase" based on the *local probe file*. A brand-new
+Bug: ``_prompt_passphrase_then`` chose "Set sync passphrase" (type-it-twice)
+vs "Enter sync passphrase" based on the *local probe file*. A brand-new
 machine restoring an existing snapshot has no probe, so it was mis-prompted to
 SET a brand-new passphrase — which could never decrypt the existing snapshot.
 
@@ -43,14 +43,14 @@ def test_restore_always_prompts_enter_on_fresh_machine():
     modal = _captured_modal(screen)  # restore path: no allow_set
     assert modal is not None
     assert modal._confirm is False
-    assert modal._title == "Enter Sync Passphrase"
+    assert modal._title == "Enter sync passphrase"
 
 
 def test_restore_prompts_enter_even_with_probe():
     screen = _make_screen(has_probe=True)
     modal = _captured_modal(screen)
     assert modal._confirm is False
-    assert modal._title == "Enter Sync Passphrase"
+    assert modal._title == "Enter sync passphrase"
 
 
 def test_first_push_no_probe_prompts_set():
@@ -58,7 +58,7 @@ def test_first_push_no_probe_prompts_set():
     screen = _make_screen(has_probe=False)
     modal = _captured_modal(screen, allow_set=True)
     assert modal._confirm is True
-    assert modal._title == "Set Sync Passphrase"
+    assert modal._title == "Set sync passphrase"
 
 
 def test_allow_set_is_overridden_by_existing_probe():
@@ -66,7 +66,7 @@ def test_allow_set_is_overridden_by_existing_probe():
     screen = _make_screen(has_probe=True)
     modal = _captured_modal(screen, allow_set=True)
     assert modal._confirm is False
-    assert modal._title == "Enter Sync Passphrase"
+    assert modal._title == "Enter sync passphrase"
 
 
 def test_subsequent_push_prompts_enter():
@@ -74,7 +74,7 @@ def test_subsequent_push_prompts_enter():
     screen = _make_screen(has_probe=False)
     modal = _captured_modal(screen, allow_set=False)
     assert modal._confirm is False
-    assert modal._title == "Enter Sync Passphrase"
+    assert modal._title == "Enter sync passphrase"
 
 
 def test_cached_passphrase_skips_modal():

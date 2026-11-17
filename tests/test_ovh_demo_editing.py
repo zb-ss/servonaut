@@ -294,7 +294,7 @@ class DNSLayoutApp(App):
 async def test_rdns_editor_remains_visible_when_reopened() -> None:
     app = DNSLayoutApp()
     with (
-        patch("servonaut.screens.ovh_dns.Sidebar", side_effect=lambda: Static(id="sidebar")),
+        patch.object(OVHDNSScreen, "workspace_sidebar", new=lambda self: Static(id="sidebar")),
         patch.object(OVHDNSScreen, "_load_domains", new_callable=AsyncMock),
     ):
         async with app.run_test(size=(166, 47)) as pilot:

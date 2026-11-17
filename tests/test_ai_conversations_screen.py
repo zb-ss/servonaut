@@ -61,7 +61,7 @@ def _make_summary(
     )
 
 
-def _mocked_screen() -> tuple[AIConversationsScreen, MagicMock, MagicMock]:
+def _mocked_screen(monkeypatch: pytest.MonkeyPatch) -> tuple[AIConversationsScreen, MagicMock, MagicMock]:
     """Build a screen with a mocked ``app`` and ``ai_conversations_client``.
 
     Returns ``(screen, app_mock, client_mock)``. The screen's
@@ -83,7 +83,7 @@ def _mocked_screen() -> tuple[AIConversationsScreen, MagicMock, MagicMock]:
     app.run_worker = MagicMock()
 
     # Replace the read-only Screen.app descriptor for the duration of the test.
-    type(screen).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(screen), "app", property(lambda self, _a=app: _a))
     return screen, app, client
 
 
@@ -120,9 +120,9 @@ async def test_screen_renders_sidebar_and_table():
         )
 
 
-def test_load_page_calls_client_list_with_correct_args():
+def test_load_page_calls_client_list_with_correct_args(monkeypatch: pytest.MonkeyPatch):
     """``_load_page()`` issues ``client.list(limit=25, before=None, status='active')``."""
-    screen, _app, client = _mocked_screen()
+    screen, _app, client = _mocked_screen(monkeypatch)
     # _load_page touches the ProgressIndicator widget through query_one, but
     # the screen isn't mounted in this test — neutralise those lookups.
     screen.query_one = MagicMock()  # type: ignore[assignment]
@@ -135,9 +135,9 @@ def test_load_page_calls_client_list_with_correct_args():
     client.list.assert_awaited_once_with(limit=25, before=None, status="active")
 
 
-def test_archive_calls_patch_after_confirmation():
+def test_archive_calls_patch_after_confirmation(monkeypatch: pytest.MonkeyPatch):
     """A confirmed archive flow ends with ``client.patch(uuid, status='archived')``."""
-    screen, app, client = _mocked_screen()
+    screen, app, client = _mocked_screen(monkeypatch)
 
     conv = _make_summary()
     screen._conversations = [conv]
@@ -160,9 +160,9 @@ def test_archive_calls_patch_after_confirmation():
     assert screen._conversations == []
 
 
-def test_delete_pushes_confirm_modal():
+def test_delete_pushes_confirm_modal(monkeypatch: pytest.MonkeyPatch):
     """``action_delete`` pushes a danger-styled confirm modal before any network call."""
-    screen, app, client = _mocked_screen()
+    screen, app, client = _mocked_screen(monkeypatch)
 
     conv = _make_summary()
     screen._conversations = [conv]
@@ -177,13 +177,13 @@ def test_delete_pushes_confirm_modal():
     client.delete.assert_not_called()
 
 
-def test_export_path_traversal_surfaces_as_toast():
+def test_export_path_traversal_surfaces_as_toast(monkeypatch: pytest.MonkeyPatch):
     """A path-traversal ``ValueError`` from the client becomes a notify, not a crash.
 
     A5 — also asserts the notify uses ``markup=False`` so a server-supplied
     Rich-markup payload in the exception message can't hijack the toast.
     """
-    screen, app, client = _mocked_screen()
+    screen, app, client = _mocked_screen(monkeypatch)
     client.export_md = AsyncMock(
         side_effect=ValueError("Export path must be inside CWD or ~/Downloads")
     )
@@ -202,7 +202,7 @@ def test_export_path_traversal_surfaces_as_toast():
     assert kwargs.get("markup") is False
 
 
-def test_archive_apierror_with_markup_uses_markup_false():
+def test_archive_apierror_with_markup_uses_markup_false(monkeypatch: pytest.MonkeyPatch):
     """A5 — Archive failure surfaces with ``markup=False``.
 
     Drives ``_do_archive`` against a client whose ``patch`` raises an
@@ -211,7 +211,7 @@ def test_archive_apierror_with_markup_uses_markup_false():
     """
     from servonaut.services.api_client import APIError
 
-    screen, app, client = _mocked_screen()
+    screen, app, client = _mocked_screen(monkeypatch)
     client.patch = AsyncMock(
         side_effect=APIError(
             code="rate_limited",
@@ -228,9 +228,9 @@ def test_archive_apierror_with_markup_uses_markup_false():
     assert kwargs.get("markup") is False
 
 
-def test_export_action_pushes_path_modal():
+def test_export_action_pushes_path_modal(monkeypatch: pytest.MonkeyPatch):
     """``action_export`` prompts for a destination path before downloading."""
-    screen, app, _client = _mocked_screen()
+    screen, app, _client = _mocked_screen(monkeypatch)
     conv = _make_summary(title="My Investigation")
     screen._selected = MagicMock(return_value=conv)  # type: ignore[assignment]
 
@@ -241,9 +241,9 @@ def test_export_action_pushes_path_modal():
     assert isinstance(pushed_modal, _ExportPathModal)
 
 
-def test_archive_without_selection_warns_and_returns():
+def test_archive_without_selection_warns_and_returns(monkeypatch: pytest.MonkeyPatch):
     """Pressing 'a' with no row selected must warn — not crash, not call client."""
-    screen, app, client = _mocked_screen()
+    screen, app, client = _mocked_screen(monkeypatch)
     screen._selected = MagicMock(return_value=None)  # type: ignore[assignment]
 
     screen.action_archive()
@@ -262,6 +262,7 @@ def test_archive_without_selection_warns_and_returns():
 
 
 def _mocked_screen_with_chat_service(
+    monkeypatch: pytest.MonkeyPatch,
     *,
     authenticated: bool = True,
     premium: bool = True,
@@ -293,38 +294,41 @@ def _mocked_screen_with_chat_service(
     app.pop_screen = MagicMock()
     app.run_worker = MagicMock()
 
-    type(screen).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(screen), "app", property(lambda self, _a=app: _a))
     return screen, app, client, chat_service
 
 
-def test_initial_tab_is_cloud_for_premium_user():
+def test_initial_tab_is_cloud_for_premium_user(monkeypatch: pytest.MonkeyPatch):
     screen, _, _, _ = _mocked_screen_with_chat_service(
+        monkeypatch,
         authenticated=True, premium=True,
     )
     assert screen._initial_tab() == "tab_cloud"
     assert screen._active_tab == "tab_cloud"
 
 
-def test_initial_tab_is_local_for_logged_out_user():
+def test_initial_tab_is_local_for_logged_out_user(monkeypatch: pytest.MonkeyPatch):
     screen, _, _, _ = _mocked_screen_with_chat_service(
+        monkeypatch,
         authenticated=False, premium=False,
     )
     assert screen._initial_tab() == "tab_local"
     assert screen._active_tab == "tab_local"
 
 
-def test_initial_tab_is_local_for_authenticated_non_premium():
+def test_initial_tab_is_local_for_authenticated_non_premium(monkeypatch: pytest.MonkeyPatch):
     screen, _, _, _ = _mocked_screen_with_chat_service(
+        monkeypatch,
         authenticated=True, premium=False,
     )
     assert screen._initial_tab() == "tab_local"
 
 
-def test_local_delete_paired_session_also_deletes_remote():
+def test_local_delete_paired_session_also_deletes_remote(monkeypatch: pytest.MonkeyPatch):
     """Deleting a Local row that has a remote_conversation_id must drop
     both the local file AND the paired Cloud row, otherwise the user
     sees zombie rows on the Cloud tab."""
-    screen, _, client, chat_service = _mocked_screen_with_chat_service()
+    screen, _, client, chat_service = _mocked_screen_with_chat_service(monkeypatch)
 
     row = {
         "id": "local-1",
@@ -342,10 +346,10 @@ def test_local_delete_paired_session_also_deletes_remote():
     chat_service.delete_session.assert_called_once_with("local-1")
 
 
-def test_local_delete_unpaired_session_skips_remote_call():
+def test_local_delete_unpaired_session_skips_remote_call(monkeypatch: pytest.MonkeyPatch):
     """Unpaired Local rows have no Cloud counterpart — the server delete
     must not fire, otherwise we'd 404 on every local-only delete."""
-    screen, _, client, chat_service = _mocked_screen_with_chat_service()
+    screen, _, client, chat_service = _mocked_screen_with_chat_service(monkeypatch)
 
     row = {
         "id": "local-2",
@@ -360,11 +364,11 @@ def test_local_delete_unpaired_session_skips_remote_call():
     chat_service.delete_session.assert_called_once_with("local-2")
 
 
-def test_local_delete_remote_failure_still_removes_local():
+def test_local_delete_remote_failure_still_removes_local(monkeypatch: pytest.MonkeyPatch):
     """A 5xx on the paired remote delete must NOT block the local file
     delete — the user explicitly asked to remove the row, and we
     surface the cloud-side failure as a non-fatal warning."""
-    screen, app, client, chat_service = _mocked_screen_with_chat_service()
+    screen, app, client, chat_service = _mocked_screen_with_chat_service(monkeypatch)
     client.delete = AsyncMock(side_effect=RuntimeError("boom"))
 
     row = {
@@ -384,10 +388,10 @@ def test_local_delete_remote_failure_still_removes_local():
     assert "warning" in notify_severities
 
 
-def test_archive_on_local_tab_is_a_no_op_with_hint():
+def test_archive_on_local_tab_is_a_no_op_with_hint(monkeypatch: pytest.MonkeyPatch):
     """Archive is a Cloud-only feature — pressing 'a' on the Local tab
     must surface a hint, not crash on missing state."""
-    screen, app, _, _ = _mocked_screen_with_chat_service()
+    screen, app, _, _ = _mocked_screen_with_chat_service(monkeypatch)
     screen._active_tab = "tab_local"
 
     screen.action_archive()
@@ -397,8 +401,8 @@ def test_archive_on_local_tab_is_a_no_op_with_hint():
     assert "Cloud-only" in args.args[0]
 
 
-def test_export_on_local_tab_is_a_no_op_with_hint():
-    screen, app, _, _ = _mocked_screen_with_chat_service()
+def test_export_on_local_tab_is_a_no_op_with_hint(monkeypatch: pytest.MonkeyPatch):
+    screen, app, _, _ = _mocked_screen_with_chat_service(monkeypatch)
     screen._active_tab = "tab_local"
 
     screen.action_export()
@@ -408,7 +412,7 @@ def test_export_on_local_tab_is_a_no_op_with_hint():
     assert "Cloud-only" in args.args[0]
 
 
-def test_local_filter_narrows_visible_slice():
+def test_local_filter_narrows_visible_slice(monkeypatch: pytest.MonkeyPatch):
     """The Local-tab filter input must filter by title, case-insensitive."""
     sessions = [
         {"id": "a", "title": "Why is nginx 502ing", "updated_at": "2026-05-04",
@@ -418,7 +422,7 @@ def test_local_filter_narrows_visible_slice():
          "message_count": 2, "last_provider": "ollama",
          "remote_conversation_id": None},
     ]
-    screen, _, _, _ = _mocked_screen_with_chat_service(local_sessions=sessions)
+    screen, _, _, _ = _mocked_screen_with_chat_service(monkeypatch, local_sessions=sessions)
     screen._local_sessions = sessions
 
     screen._local_filter = "nginx"

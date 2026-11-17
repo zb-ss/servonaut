@@ -35,6 +35,8 @@ dependencies = [
     "keyring>=24",
     # Searches team agent rules' blocked patterns with a time limit.
     "regex>=2025.9.18",
+    # Reads user theme files; Python 3.11+ ships tomllib.
+    'tomli>=2 ; python_version < "3.11"',
 ]
 
 [project.optional-dependencies]
@@ -43,6 +45,8 @@ test = [
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.3",
+    # Spreads the unit and screenshot suites across CPU cores (-n auto).
+    "pytest-xdist>=3.8,<4",
     # Freezes the wall clock for the screenshot tests in tests/snapshots.
     "time-machine>=2.16,<4",
 ]
@@ -171,4 +175,5 @@ markers = [
     "e2e_quarantine: known-flaky end-to-end journey, excluded from pull requests",
     "needs_browser: end-to-end journey that drives headless Chromium (desktop frontend)",
     "needs_sshd: end-to-end journey against the loopback SSH servers (needs the OpenSSH client)",
+    "stock_parse_cache: keep Textual's stock stylesheet parse cache (tests/conftest.py widens it otherwise)",
 ]

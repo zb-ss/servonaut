@@ -17,19 +17,27 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
-from textual.widgets import Footer, Input, Static
+from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.db_coverage import filter_names
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class SecretsListScreen(Screen):
+class SecretsListScreen(WorkspaceScreen):
     """Read-only listing of the active provider's secret names."""
+
+    AUTO_FOCUS = "#secrets_list_filter"
+
+    CHAT_REFLOW = True
+    # Body and card padding, border and scrollbar (14) plus a readable
+    # secret-name column under the filter field.
+    CHAT_MIN_CONTENT_WIDTH = 48
+    # The name list has no content-width style variant.
+    CONTENT_NARROW_WIDTH = 48
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -42,29 +50,39 @@ class SecretsListScreen(Screen):
         self._provider_label: str = ""
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(
-                    "🔐 Stored secrets",
-                    id="secrets_list_title",
-                ),
-                Static(
-                    "Names of secrets in the active provider. Values are "
-                    "NEVER displayed in the TUI — fetch via the provider "
-                    "directly when you need them.",
-                    id="secrets_list_subtitle",
-                ),
-                Input(placeholder="Filter names…", id="secrets_list_filter"),
-                Static("", id="secrets_list_summary"),
-                VerticalScroll(id="secrets_list_body"),
-                id="secrets_list_container",
-            )
+        yield WorkspaceControls("Stored secrets")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="secrets_list_container", classes="workspace-content"):
+                with Vertical(classes="secrets_list_heading"):
+                    yield Static("Stored secrets", id="secrets_list_title", classes="screen-title")
+                    yield Static(
+                        "Only secret names are listed. Values are never fetched or displayed.",
+                        id="secrets_list_subtitle",
+                        classes="screen-description",
+                    )
+                with Vertical(id="secrets_list_records"):
+                    with Horizontal(id="secrets_list_toolbar"):
+                        yield Static("Secret names", classes="secrets_section_title")
+                        yield Button("Refresh", id="secrets_names_refresh")
+                        yield Button("Back", id="secrets_names_back")
+                    yield Static("Filter names", classes="secrets_names_filter_label")
+                    yield Input(placeholder="Type part of a name…", id="secrets_list_filter")
+                    yield Static("", id="secrets_list_summary")
+                    yield VerticalScroll(id="secrets_list_body")
         yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "secrets_names_refresh":
+            self.action_refresh()
+        elif event.button.id == "secrets_names_back":
+            self.action_back()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "secrets_list_filter":

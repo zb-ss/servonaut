@@ -77,6 +77,30 @@ def _signed_rules(fake_cloud) -> dict:
     return json.loads(policy.canonical_rules)
 
 
+def test_default_scenario_team_identity_matches_its_signed_settings(fake_cloud, journey):
+    # Use the unconfigured scenario row, not a managed-team replacement.
+    listed = _get(fake_cloud, "/api/v1/teams")
+    assert listed.status_code == 200
+    team = next(row for row in listed.json()["teams"] if row["slug"] == SLUG)
+    assert isinstance(team["id"], str) and team["id"]
+    detail = _get(fake_cloud, f"/api/v1/teams/{team['slug']}")
+    assert detail.status_code == 200
+    assert (detail.json()["slug"], detail.json()["id"]) == (team["slug"], team["id"])
+
+    for suffix in ("policy", "mcp-policy"):
+        response = _get(fake_cloud, f"/api/v1/teams/{team['slug']}/{suffix}")
+        assert response.status_code == 200
+        status = _store(journey, f"scenario-{suffix}").apply_response(
+            team, response.json(), server_date=response.headers.get("Date"),
+        )
+        assert status.problem is None and status.team_id == team["id"]
+        assert status.rules.role_levels == fake.default_agent_rules()["role_levels"]
+
+    repeated = _get(fake_cloud, "/api/v1/teams")
+    assert repeated.status_code == 200
+    assert next(row for row in repeated.json()["teams"] if row["slug"] == team["slug"])["id"] == team["id"]
+
+
 def test_a_member_reads_the_signed_defaults(fake_cloud, journey):
     from servonaut.services.team_policy import format_1_default_agent_rules
 

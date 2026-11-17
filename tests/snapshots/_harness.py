@@ -488,3 +488,85 @@ def freeze_cursors(app: Any) -> None:
         for widget in screen.query("Input, TextArea"):
             if isinstance(widget, (Input, TextArea)):
                 widget.cursor_blink = False
+
+
+# ---------------------------------------------------------------------------
+# Loading: providers that answer when the test lets them
+# ---------------------------------------------------------------------------
+
+
+class GatedProvider:
+    """A provider inventory that answers when the test lets it."""
+
+    last_fetch_partial = False
+
+    def __init__(
+        self, rows: List[dict], bindings: int = 1, cached: bool = True,
+        account: Optional[str] = None,
+    ) -> None:
+        self._rows = rows
+        self._cached = cached
+        # Rows of a real inventory carry their account; the gate does the same.
+        self._account = account
+        self.bindings = [object()] * bindings
+        self.last_fetch_error: Optional[str] = None
+        self.gate = asyncio.Event()
+        self.failure: Optional[BaseException] = None
+
+    def release(self, rows: Optional[List[dict]] = None, error: Optional[str] = None) -> None:
+        if rows is not None:
+            self._rows = rows
+        self.last_fetch_error = error
+        self.gate.set()
+
+    def fail(self, error: BaseException) -> None:
+        self.failure = error
+        self.gate.set()
+
+    def _tagged(self) -> List[dict]:
+        rows = copy.deepcopy(self._rows)
+        for row in rows:
+            if self._account:
+                row["account"] = self._account
+        return rows
+
+    def get_cached_instances(self) -> List[dict]:
+        return self._tagged() if self._cached else []
+
+    def is_cache_fresh(self) -> bool:
+        return False
+
+    async def fetch_instances_cached(self, force_refresh: bool = False) -> List[dict]:
+        del force_refresh
+        await self.gate.wait()
+        if self.failure is not None:
+            raise self.failure
+        return self._tagged()
+
+
+def gate_providers(app: Any, *, cached: bool = True) -> Dict[str, GatedProvider]:
+    """Route the fleet's three providers through gates; nothing answers yet.
+
+    With ``cached=False`` a provider has no cached rows to fall back on.
+    """
+    account = next(
+        (row.get("account") for row in getattr(app, "instances", []) if row.get("account")), None,
+    )
+    gates = {
+        "aws": GatedProvider(AWS_ROWS, bindings=2, cached=cached, account=account),
+        "ovh": GatedProvider(OVH_ROWS, cached=cached),
+        "hetzner": GatedProvider(HETZNER_ROWS, cached=cached),
+    }
+    app.provider_inventory = lambda provider: gates.get(provider)
+    return gates
+
+
+async def empty_fleet(pilot: Any) -> None:
+    """The first run: nothing cached, nothing listed."""
+    from servonaut.screens._demo_resolve import replace_instances
+
+    screen = pilot.app.screen
+    replace_instances(pilot.app, None, [])
+    screen._instances = []
+    screen._update_table()
+    await pilot.pause()

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
 
 from servonaut.config.schema import CustomServer
@@ -17,8 +17,15 @@ from servonaut.screens._demo_resolve import reconcile_team_memory, replace_insta
 from servonaut.utils.markup import cell
 
 
-class CustomServersScreen(Screen):
+class CustomServersScreen(WorkspaceScreen):
     """CRUD screen for managing non-AWS custom servers."""
+
+    CHAT_REFLOW = True
+    # Body padding and scrollbar (4) plus the Add / Remove Selected / Back
+    # button row at the global button minimum and Back's own margins.
+    CHAT_MIN_CONTENT_WIDTH = 58
+    # Two labelled form columns need room beyond the single-column minimum.
+    CONTENT_NARROW_WIDTH = 80
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -27,76 +34,74 @@ class CustomServersScreen(Screen):
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        """Compose the custom servers UI."""
+        """Keep the saved inventory and connection editor visually distinct."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static("[bold $text-accent]Custom Servers[/bold $text-accent]", id="custom_servers_header"),
-            Static(
-                "[dim]Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal, etc.)[/dim]",
-                classes="note",
-            ),
-
-            # Server table
-            DataTable(id="custom_servers_table"),
-
-            # Action buttons
-            Horizontal(
-                Button("Add Server", id="btn_add_server", variant="primary"),
-                Button("Remove Selected", id="btn_remove_server", variant="error"),
-                Button("Back", id="btn_back", variant="default"),
-                classes="add_row",
-            ),
-
-            # Add/Edit form (hidden by default). The Save/Cancel row is
-            # NOT inside this Container — it's a sibling below, docked
-            # to the screen bottom so it stays visible no matter how
-            # far the user has scrolled through the form fields. Pre-
-            # restructure, the action row sat at the end of the form
-            # and was clipped on small terminals (#1387).
-            Container(
-                Static("[bold]Server Details[/bold]", classes="section_header"),
-                Label("Name:"),
-                Input(placeholder="my-vps", id="input_name"),
-                Label("Host (IP or hostname):"),
-                Input(placeholder="192.168.1.1", id="input_host"),
-                Label("Username:"),
-                Input(placeholder="root", id="input_username"),
-                Label("SSH Key Path:"),
-                Input(placeholder="~/.ssh/id_rsa", id="input_ssh_key"),
-                Label("SSH Port:"),
-                Input(placeholder="22", id="input_port"),
-                Label("Provider:"),
-                Input(placeholder="DigitalOcean", id="input_provider"),
-                Label("Group:"),
-                Input(placeholder="web-servers", id="input_group"),
-                Label("Extra SSH options (one per line, KEY=VALUE):"),
-                TextArea(
-                    "",
-                    id="input_extra_ssh_options",
-                    classes="extra_ssh_options",
-                ),
-                Static(
-                    "[dim]Used verbatim as ssh -o. Example: "
-                    "HostKeyAlgorithms=+ssh-rsa for legacy hosts.[/dim]",
-                    classes="note",
-                ),
-                id="add_form",
-            ),
-
-            # Bottom-docked action row, visible only while #add_form is.
-            Horizontal(
-                Button("Save", id="btn_save_server", variant="primary"),
-                Button("Cancel", id="btn_cancel_form", variant="default"),
-                id="add_form_actions",
-            ),
-
-            id="custom_servers_container",
-        )
+        yield WorkspaceControls("Custom servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="custom_servers_workspace", classes="workspace-content"):
+                with ScrollableContainer(id="custom_servers_container"):
+                    yield Static("Custom servers", id="custom_servers_header")
+                    yield Static(
+                        "Your SSH hosts, available alongside cloud servers in Instances.",
+                        id="custom_servers_intro",
+                    )
+                    with Container(id="custom_servers_records"):
+                        with Horizontal(id="custom_servers_toolbar"):
+                            yield Static("Saved hosts", classes="custom-section-title")
+                            with ActionRow(classes="add_row"):
+                                yield ActionButton("Add server", "n", role="primary", id="btn_add_server")
+                                yield ActionButton(
+                                    "Remove selected", "d", short="Remove", role="error", id="btn_remove_server"
+                                )
+                                yield ActionButton("Back", "esc", id="btn_back")
+                        yield DataTable(id="custom_servers_table")
+                        yield Static(
+                            "Use the arrow keys to choose a host. Scroll sideways for all connection fields.",
+                            classes="custom-record-note",
+                        )
+                    with Container(id="add_form"):
+                        yield Static("Server details", classes="custom-section-title")
+                        yield Static("Connection", classes="custom-form-group-title")
+                        with Grid(classes="custom-field-grid"):
+                            with Vertical(classes="custom-field"):
+                                yield Label("Name")
+                                yield Input(placeholder="web-1", id="input_name")
+                            with Vertical(classes="custom-field"):
+                                yield Label("Host or IP address")
+                                yield Input(placeholder="192.168.1.1", id="input_host")
+                            with Vertical(classes="custom-field"):
+                                yield Label("Username")
+                                yield Input(placeholder="root", id="input_username")
+                            with Vertical(classes="custom-field"):
+                                yield Label("SSH key path")
+                                yield Input(placeholder="~/.ssh/id_rsa", id="input_ssh_key")
+                            with Vertical(classes="custom-field"):
+                                yield Label("SSH port")
+                                yield Input(placeholder="22", id="input_port")
+                        yield Static("Organization", classes="custom-form-group-title")
+                        with Grid(classes="custom-field-grid"):
+                            with Vertical(classes="custom-field"):
+                                yield Label("Provider")
+                                yield Input(placeholder="Hosting provider", id="input_provider")
+                            with Vertical(classes="custom-field"):
+                                yield Label("Group")
+                                yield Input(placeholder="web-servers", id="input_group")
+                        yield Static("Advanced SSH", classes="custom-form-group-title")
+                        yield Label("Extra SSH options, one KEY=VALUE per line")
+                        yield TextArea("", id="input_extra_ssh_options", classes="extra_ssh_options")
+                        yield Static(
+                            "Passed to ssh -o. Example: HostKeyAlgorithms=+ssh-rsa for legacy hosts.",
+                            classes="note",
+                        )
+                with ActionRow(id="add_form_actions"):
+                    yield ActionButton("Save", role="primary", id="btn_save_server")
+                    yield ActionButton("Cancel", id="btn_cancel_form")
         yield Footer()
 
     def on_mount(self) -> None:

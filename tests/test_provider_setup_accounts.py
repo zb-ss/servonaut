@@ -393,7 +393,7 @@ class TestHetznerPrimary:
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
             screen = app.screen
-            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save & Enable"
+            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save & enable"
             keep_off = screen.query_one("#btn_hetzner_disable", Button)
             assert str(keep_off.label) == "Save"
             _fill(screen, {
@@ -571,7 +571,7 @@ class TestOvhAddAccount:
             app.screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert ovh_service.built == []
-            assert "Enter the Client ID and Client Secret to test." in app.messages
+            assert "Enter the Client ID and Client secret to test." in app.messages
 
     async def test_an_incomplete_key_set_is_not_tested(self, tmp_path, ovh_service) -> None:
         app = Host(_manager(tmp_path, _ovh_config()), lambda: OVHSetupScreen(add_extra=True))
@@ -581,7 +581,7 @@ class TestOvhAddAccount:
             app.screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert ovh_service.built == []
-            assert any("Consumer Key" in m for m in app.messages)
+            assert any("Consumer key" in m for m in app.messages)
         assert _reread(tmp_path).ovh.accounts == []
 
     async def test_refused_credentials_are_not_saved(self, tmp_path, ovh_service) -> None:
@@ -723,7 +723,7 @@ class TestOvhPrimary:
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
             screen = app.screen
-            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save & Enable"
+            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save & enable"
             keep_off = screen.query_one("#btn_ovh_disable", Button)
             assert str(keep_off.label) == "Save"
             _fill(screen, {

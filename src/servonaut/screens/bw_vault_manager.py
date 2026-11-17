@@ -24,18 +24,21 @@ import webbrowser
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Static
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
+from servonaut.screens._compact_actions import sync_compact_buttons
 from servonaut.screens.bw_unlock_modal import BwUnlockModal
 from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.theme_text import follow_theme, themed_text
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -48,14 +51,21 @@ _VERIFIED = "verified"
 _FAILED_STATUSES = {"not_found", "auth_failed"}
 
 
-class BwVaultManagerScreen(Screen):
+class BwVaultManagerScreen(WorkspaceScreen):
     """Fleet view of Bitwarden SSH-key items joined with referencing servers."""
+
+    CHAT_REFLOW = True
+    # Container padding and scrollbar plus the item and server columns beside
+    # the chat column (as the provider managers).
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # Keep the full action row only where labels, spacing and scrollbar fit.
+    CONTENT_NARROW_WIDTH = 83
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("f5", "refresh", "Refresh", show=True),
         Binding("r", "refresh", "Refresh", show=False),
-        Binding("o", "open_in_bw", "Open in BW", show=True),
+        Binding("o", "open_in_bw", "Open in Bitwarden", show=True),
         Binding("e", "edit_ref", "Manage ref", show=True),
         Binding("a", "import_keys", "Import keys", show=True),
     ]
@@ -82,30 +92,55 @@ class BwVaultManagerScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static("[bold $text-accent]Bitwarden SSH Vault[/bold $text-accent]", id="bw_vault_mgr_header"),
-                Static(
-                    "[dim]SSH-key items in your Servonaut vault folder, joined with the "
-                    "servers that reference them. Local-only — your vault never leaves this "
-                    "machine. [o] Open in Bitwarden · [e] Manage ref for the selected key.[/dim]",
-                    id="bw_vault_mgr_hint",
-                ),
-                DataTable(id="bw_vault_mgr_table", zebra_stripes=True, cursor_type="row"),
-                Static("", id="bw_vault_mgr_status"),
-                Horizontal(
-                    Button("Refresh (F5)", id="btn_bw_vault_refresh"),
-                    Button("Open in BW (o)", id="btn_bw_vault_open"),
-                    Button("Manage ref (e)", id="btn_bw_vault_edit"),
-                    Button("Import keys (a)", id="btn_bw_vault_import"),
-                    id="bw_vault_mgr_actions",
-                ),
-                id="bw_vault_mgr_container",
-            )
+        yield WorkspaceControls("Bitwarden SSH vault")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with ScrollableContainer(id="bw_vault_mgr_container", classes="workspace-content"):
+                with Vertical(classes="bw_vault_mgr_overview"):
+                    yield Static("Bitwarden SSH vault", id="bw_vault_mgr_header", classes="screen-title")
+                    yield Static(
+                        "SSH-key items in your Servonaut vault folder, joined with the "
+                        "servers that reference them. Local-only — your vault never leaves this "
+                        "machine. [b]o[/b] Open in Bitwarden · [b]e[/b] Manage ref for the selected key.",
+                        id="bw_vault_mgr_hint",
+                        classes="screen-description",
+                    )
+                yield Static("", id="bw_vault_mgr_status")
+                with Horizontal(id="bw_vault_mgr_workspace"):
+                    with Vertical(id="bw_vault_mgr_catalog"):
+                        with Vertical(id="bw_vault_mgr_records"):
+                            yield Static("SSH keys & server references", classes="secrets_section_title")
+                            yield DataTable(id="bw_vault_mgr_table", zebra_stripes=True, cursor_type="row")
+                        yield TextArea(
+                            "Select an SSH-key item to inspect its complete reference details.",
+                            read_only=True,
+                            soft_wrap=True,
+                            tab_behavior="focus",
+                            id="bw_vault_mgr_detail",
+                        )
+                    with Horizontal(id="bw_vault_mgr_actions"):
+                        with Vertical(classes="credential_task_group"):
+                            yield Static("Catalog", classes="credential_action_heading")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Refresh", "F5", id="btn_bw_vault_refresh")
+                        with Vertical(classes="credential_task_group"):
+                            yield Static("Selected key", classes="credential_action_heading")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Open in Bitwarden", "o", short="Open", id="btn_bw_vault_open")
+                                yield ActionButton("Manage ref", "e", id="btn_bw_vault_edit")
+                        with Vertical(classes="credential_task_group"):
+                            yield Static("Add keys", classes="credential_action_heading")
+                            with ActionRow(keep_hints=True):
+                                yield ActionButton("Import keys", "a", id="btn_bw_vault_import")
         yield Footer()
 
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        sync_compact_buttons(self)
+
     def on_mount(self) -> None:
+        follow_theme(self, "#bw_vault_mgr_table", self._render_table)
+        sync_compact_buttons(self)
         table = self.query_one("#bw_vault_mgr_table", DataTable)
         table.add_columns("Name", "Item ID", "Servers", "Verify")
         self._refresh()
@@ -272,6 +307,7 @@ class BwVaultManagerScreen(Screen):
         table.clear()
         if not self._rows:
             table.add_row("[dim]No SSH-key items in this folder[/dim]", "", "", "", key="__empty__")
+            self._show_selected_item()
             return
         # Demo-mode: vault item names and server names can reveal real identity,
         # so scrub them before they reach the rendered row.
@@ -288,6 +324,46 @@ class BwVaultManagerScreen(Screen):
                 self._verify_cell(row["refs"]),
                 key=row["item_id"],
             )
+
+        self._show_selected_item()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "bw_vault_mgr_table":
+            self._show_selected_item()
+
+    def _show_selected_item(self) -> None:
+        """Read complete metadata already loaded for the selected SSH-key item."""
+        detail = self.query_one("#bw_vault_mgr_detail", TextArea)
+        row = self._selected_row()
+        if row is None:
+            detail.load_text("Select an SSH-key item to inspect its complete reference details.")
+            return
+        redactor = (
+            getattr(self.app, "redaction_service", None)
+            if getattr(self.app, "demo_mode", False) else None
+        )
+        name = str(row.get("name") or "")
+        item_id = str(row.get("item_id") or "")
+        if redactor is not None:
+            name = redactor.redact_name(name)
+            item_id = redactor.redact_identifier(item_id)
+        lines = [f"Name: {name or '(unnamed)'}", f"Item ID: {item_id}"]
+        refs = row.get("refs") or []
+        lines.append(f"Server references: {len(refs)}")
+        for ref in refs:
+            instance_id = str(ref.get("instance_id") or "")
+            server_name = str(ref.get("name") or "")
+            if redactor is not None:
+                instance_id = redactor.redact_identifier(instance_id)
+                server_name = redactor.redact_name(server_name)
+            lines.extend([
+                "",
+                f"Server: {server_name or instance_id or '?'}",
+                f"Provider: {ref.get('provider') or ''}",
+                f"Instance ID: {instance_id}",
+                f"Verify: {ref.get('verify_status') or 'unverified'}",
+            ])
+        detail.load_text(self._demo_safe("\n".join(lines)))
 
     @staticmethod
     def _short_id(item_id: str) -> str:
@@ -308,17 +384,16 @@ class BwVaultManagerScreen(Screen):
             shown += f" +{len(names) - 3}"
         return f"{len(refs)}: {shown}"
 
-    @staticmethod
-    def _verify_cell(refs: List[dict]) -> str:
+    def _verify_cell(self, refs: List[dict]) -> Text:
         if not refs:
-            return "[dim]—[/dim]"
+            return themed_text(self.app, "—", "dim")
         statuses = [r.get("verify_status") for r in refs]
         if all(s == _VERIFIED for s in statuses):
-            return "[green]verified[/green]"
+            return themed_text(self.app, "verified", "$text-success")
         failed = next((s for s in statuses if s in _FAILED_STATUSES), None)
         if failed is not None:
-            return f"[red]{escape(str(failed))}[/red]"
-        return "[yellow]unverified[/yellow]"
+            return themed_text(self.app, str(failed), "$text-error")
+        return themed_text(self.app, "unverified", "$text-warning")
 
     # ------------------------------------------------------------------
     # Selection + actions

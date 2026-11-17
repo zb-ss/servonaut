@@ -44,6 +44,10 @@ def test_the_editor_gets_a_private_copy_not_the_notes_file(tmp_path, monkeypatch
 
 
 def test_a_change_made_meanwhile_is_not_overwritten_and_the_edit_is_kept(tmp_path, monkeypatch, capsys):
+    # Model under-home storage independently of pytest's basetemp location.
+    fake_home = tmp_path
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
     rc, service, notes = _run(
         tmp_path, monkeypatch, 'printf "other writer\\n" > NOTES; printf "my edit\\n" > "$1"'
     )
@@ -53,6 +57,9 @@ def test_a_change_made_meanwhile_is_not_overwritten_and_the_edit_is_kept(tmp_pat
     assert [d.read_text() for d in drafts] == ["my edit\n"]
     err = capsys.readouterr().err
     assert drafts[0].name in err and "/home/" not in err.replace(os.path.expanduser("~"), "~")
+    shown_draft = "~/" + drafts[0].relative_to(fake_home).as_posix()
+    assert f"Your edit is kept in {shown_draft}." in err
+    assert str(fake_home) not in err
 
 
 def test_the_sync_enqueue_happens_only_after_a_successful_write(tmp_path, monkeypatch):

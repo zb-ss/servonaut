@@ -42,9 +42,10 @@ def test_all_css_files_under_styles_root():
     assert outside == [], f"CSS files outside styles/ root: {outside}"
 
 
-def test_css_files_list_has_expected_count():
-    """CSS_FILES must list the 33 maintained split stylesheet slices."""
-    assert len(CSS_FILES) == 33, f"Expected 33 CSS files, got {len(CSS_FILES)}"
+def test_css_files_list_has_no_duplicates_or_unregistered_styles():
+    """Every maintained stylesheet is loaded exactly once."""
+    assert len(CSS_FILES) == len(set(CSS_FILES)), "Duplicate stylesheet registration"
+    assert set(CSS_FILES) == set(STYLES_ROOT.rglob("*.tcss"))
 
 
 # ---------------------------------------------------------------------------

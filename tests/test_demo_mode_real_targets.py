@@ -384,7 +384,9 @@ async def test_manager_redraw_keeps_the_cursor_on_the_same_server() -> None:
             self.push_screen(HetznerManagerScreen())
 
     app = Host()
-    with patch("servonaut.screens.hetzner_manager.Sidebar", side_effect=lambda: Static()):
+    with patch.object(
+        HetznerManagerScreen, "workspace_sidebar", side_effect=lambda: Static(),
+    ):
         async with app.run_test(size=(160, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()

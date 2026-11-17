@@ -108,12 +108,12 @@ class TestRowShowsReason:
         )
         screen._populate_table()
         cells = table.add_row.call_args.args
-        assert text in cells[-1]
+        assert text in str(cells[-1])
 
     def test_a_row_without_a_failure_shows_a_dash(self) -> None:
         screen, table = _screen({}, [{"id": "web-1", "name": "web-1", "provider": "aws"}])
         screen._populate_table()
-        assert table.add_row.call_args.args[-1] == "—"
+        assert str(table.add_row.call_args.args[-1]) == "—"
 
     def test_reason_text_never_names_the_server(self) -> None:
         screen, table = _screen(
@@ -121,7 +121,7 @@ class TestRowShowsReason:
             [{"id": "web-1", "name": "web-1", "provider": "aws"}],
         )
         screen._populate_table()
-        assert "web-1" not in table.add_row.call_args.args[-1]
+        assert "web-1" not in str(table.add_row.call_args.args[-1])
 
 
 class TestDemoModeReasons:
@@ -147,12 +147,12 @@ class TestDemoModeReasons:
             screen._populate_table_from_merged(
                 [{"id": real_id, "name": "web", "provider": "aws", "source": "local"}]
             )
-        assert "stopped" in table.add_row.call_args.args[-1]
+        assert "stopped" in str(table.add_row.call_args.args[-1])
 
     def test_the_local_table_still_finds_it_by_the_listed_id(self) -> None:
         screen, table, _ = self._demo_screen("i-real")
         screen._populate_table()
-        assert "stopped" in table.add_row.call_args.args[-1]
+        assert "stopped" in str(table.add_row.call_args.args[-1])
 
 
 class TestAllStoppedFleet:

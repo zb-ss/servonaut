@@ -66,7 +66,7 @@ START_SESSION_JS = """async () => {
       const lines = [];
       for (let row = 0; row < terminal.rows; row++) {
         const line = buffer.getLine(buffer.viewportY + row);
-        lines.push(line ? line.translateToString(true) : '');
+        lines.push(line ? line.translateToString(true, 0, terminal.cols) : '');
       }
       return lines.join('\\n');
     },

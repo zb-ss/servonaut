@@ -3,227 +3,282 @@
    upsell modals, passphrase enrol.
    =================================================================== */
 
-/* --- Sync / AI action rows in MemoryScreen --- */
-#memory-local-status,
-#memory-sync-row,
-#memory-ai-row {
-    height: auto;
-    align: left middle;
-    padding: 0 1;
-    margin-top: 1;
-    border-top: wide $panel;
+/* Which teams the server is shared with takes the accent, as a status line. */
+MemoryScreen #memory-share-state {
+    color: $text-accent;
 }
 
-#memory-local-status,
-#memory-sync-status,
-#memory-ai-status {
+/* Full memory views keep records and decisions close to their context. */
+MemoryDriftScreen .memory-secondary-heading,
+MemoryExportScreen .memory-secondary-heading,
+ShareInstanceScreen .memory-secondary-heading {
     width: 1fr;
-    content-align: left middle;
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    color: $text;
+    text-style: bold;
 }
 
-/* The local summary is the primary insight surface, distinct from export. */
-#memory-summary-row {
+MemoryDriftScreen #drift-context,
+MemoryExportScreen #export-context,
+ShareInstanceScreen #share-context {
     height: auto;
-    border: round $primary;
-    background: $primary 8%;
-    padding: 0 1;
     margin-bottom: 1;
-    align: left middle;
+    padding: 0 1;
 }
 
-#memory-summary-status {
+/* Drift: compact review controls above the change ledger. */
+MemoryDriftScreen #drift-container {
     width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+MemoryDriftScreen #drift-filter-label {
     height: auto;
+    margin: 0;
 }
 
-/* The status text beside each row's buttons is as tall as a button with
-   the text centred, so it reads on the same line as the button labels
-   rather than level with their top borders. */
-#memory-summary-status,
-#memory-sync-status,
-#memory-ai-status {
-    min-height: 3;
-    content-align-vertical: middle;
+MemoryDriftScreen #drift-records {
+    height: 1fr;
+    min-height: 10;
+    border: round $panel;
+    background: transparent;
 }
 
-#memory-summary-row Button {
-    margin-left: 1;
+MemoryDriftScreen #drift-table {
+    height: 1fr;
+    background: $surface;
 }
 
-#btn_view_summary,
-#btn_enhance_ai {
-    min-width: 18;
-}
-
-#memory-sync-row,
-#memory-ai-row {
+MemoryDriftScreen #drift-tools {
     height: auto;
-    align: left middle;
-}
-
-#memory-sync-row {
     margin-bottom: 1;
 }
 
-#memory-sync-status,
-#memory-ai-status {
-    width: 1fr;
+MemoryDriftScreen #drift-actions {
+    width: 100%;
     height: auto;
 }
 
-#memory-hosted-status {
-    width: 1fr;
+MemoryDriftScreen #drift-empty-state {
     height: auto;
-    margin: 0 0 1 0;
-    padding: 0 1;
-    content-align: right middle;
+    padding: 1;
     color: $text-muted;
-    border-right: thick $panel;
 }
 
-#memory-sync-row Button,
-#memory-ai-row Button {
-    margin-left: 1;
+/* Export: a bounded form beside its verification document. */
+MemoryExportScreen #export-scroll {
+    width: 1fr;
+    height: 1fr;
 }
 
-#memory-sync-row Button,
-#memory-ai-row Button {
-    min-width: 18;
-}
-
-.memory-row-buttons {
-    width: auto;
+MemoryExportScreen #export-container {
+    padding: 0 1;
+    width: 1fr;
     height: auto;
 }
 
-/* Narrow terminals (see MemoryScreen.HORIZONTAL_BREAKPOINTS): beside the
-   buttons the status text would be squeezed into a sliver, so it takes the
-   full width and the buttons sit together underneath it. */
-MemoryScreen.-narrow #memory-summary-row,
-MemoryScreen.-narrow #memory-sync-row,
-MemoryScreen.-narrow #memory-ai-row {
+MemoryExportScreen #export-description {
+    height: auto;
+    max-width: 96;
+    margin: 0;
+}
+
+MemoryExportScreen #export-workspace {
+    height: auto;
+    min-height: 16;
+}
+
+MemoryExportScreen #export-range-panel,
+MemoryExportScreen #export-result-panel {
+    height: auto;
+    min-height: 16;
+    border: round $panel;
+    background: transparent;
+}
+
+MemoryExportScreen #export-range-panel {
+    width: 2fr;
+    margin-right: 1;
+}
+
+MemoryExportScreen #export-result-panel {
+    width: 3fr;
+}
+
+MemoryExportScreen #export-date-fields {
+    layout: vertical;
+    height: auto;
+    padding: 1 1 0 1;
+}
+
+MemoryExportScreen .export-field-row {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+}
+
+MemoryExportScreen #export-status {
+    height: auto;
+    min-height: 3;
+    padding: 1 1;
+}
+
+MemoryExportScreen #export-btn-row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 2fr 1fr;
+    grid-gutter: 0 1;
+    /* Auto-row measurement must retain space for native borders and line padding during reflow. */
+    min-width: 16;
+    height: auto;
+    padding: 0 1;
+}
+
+MemoryExportScreen #export-btn-row Button {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+MemoryExportScreen.-content-narrow #export-workspace {
     layout: vertical;
 }
 
-MemoryScreen.-narrow #memory-summary-status,
-MemoryScreen.-narrow #memory-sync-status,
-MemoryScreen.-narrow #memory-ai-status {
-    min-height: 1;
+MemoryExportScreen.-content-narrow #export-range-panel,
+MemoryExportScreen.-content-narrow #export-result-panel {
+    width: 100%;
+    margin-right: 0;
 }
 
-MemoryScreen.-narrow #memory-summary-row .memory-row-buttons Button:first-child,
-MemoryScreen.-narrow #memory-sync-row .memory-row-buttons Button:first-child,
-MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
-    margin-left: 0;
+MemoryExportScreen.-content-narrow #export-range-panel {
+    margin-bottom: 1;
 }
 
-/* --- Drift screen --- */
-#drift-container {
+MemoryExportScreen.-content-narrow #export-result-panel {
+    min-height: 8;
+}
+
+/* Sharing: the editable records scroll; the explicit decision stays visible. */
+ShareInstanceScreen #share_outer {
     width: 1fr;
     height: 1fr;
-    padding: 1 2;
-    overflow: auto;
+    padding: 0 1;
 }
 
-#drift-title {
-    margin-bottom: 1;
-}
-
-#drift-filter-label {
-    margin-bottom: 1;
-    height: 1;
-}
-
-#drift-actions {
-    height: auto;
-    margin-top: 1;
-    align: left middle;
-}
-
-#drift-actions Button {
-    margin-right: 1;
-}
-
-/* --- Memory Export screen --- */
-#export-scroll {
+ShareInstanceScreen #share-container {
     width: 1fr;
     height: 1fr;
-}
-
-#export-container {
-    padding: 1 2;
-    width: 1fr;
-}
-
-#export-title {
-    margin-bottom: 1;
-}
-
-#export-description {
-    margin-bottom: 1;
-}
-
-.export-field-row {
-    height: auto;
-    margin-bottom: 1;
-}
-
-#export-status {
-    height: 1;
-    margin-bottom: 1;
-}
-
-#export-btn-row {
-    height: auto;
-    margin-top: 1;
-    align: left middle;
-}
-
-#export-btn-row Button {
-    margin-right: 1;
-}
-
-/* --- Share modal --- */
-#share-container {
-    width: 70;
-    height: auto;
-    max-height: 100%;
-    border: round $primary;
-    background: $surface;
-    padding: 0 2;
-}
-
-#share-title {
-    margin-bottom: 1;
 }
 
 /* No room kept while empty: at 100x30 every row counts. */
-#share-status {
+ShareInstanceScreen #share-status {
     height: auto;
 }
 
-.share-field-row {
+ShareInstanceScreen #share-form-scroll {
+    height: 1fr;
+    min-height: 6;
+    overflow-y: auto;
+}
+
+ShareInstanceScreen #share-access-fields {
     height: auto;
+}
+
+ShareInstanceScreen #share-access-panel,
+ShareInstanceScreen #share-modules-panel {
+    height: auto;
+    margin-bottom: 1;
+    border: round $panel;
+    background: transparent;
+}
+
+ShareInstanceScreen #share-access-panel {
+    width: 2fr;
+    margin-right: 1;
+}
+
+ShareInstanceScreen #share-modules-panel {
+    width: 3fr;
+}
+
+ShareInstanceScreen .share-field-row {
+    height: auto;
+    margin: 0 1 1 1;
+}
+
+ShareInstanceScreen #share-readers,
+ShareInstanceScreen #share-existing-text {
+    height: auto;
+    padding: 0 1;
     margin-bottom: 1;
 }
 
-#share-form-scroll {
-    max-height: 30;
+ShareInstanceScreen #share-modules-list {
+    height: 12;
+    margin: 0 1 1 1;
 }
 
-#share-btn-row {
+ShareInstanceScreen #share-existing {
+    display: none;
     height: auto;
-    align: right middle;
+    margin-bottom: 1;
+    border: round $panel;
+    background: transparent;
+}
+
+ShareInstanceScreen #share-existing.-shown {
+    display: block;
+}
+
+ShareInstanceScreen #share-existing-row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 0 1;
+}
+
+ShareInstanceScreen #share-existing-row Button,
+ShareInstanceScreen #share-btn-row Button {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+ShareInstanceScreen #share-btn-row {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
     margin-top: 1;
 }
 
-#share-btn-keys,
-#share-btn-add {
-    min-width: 16;
+ShareInstanceScreen.-content-narrow #share-access-fields {
+    layout: vertical;
 }
 
-#share-btn-cancel {
-    margin-right: 1;
+ShareInstanceScreen.-content-narrow #share-access-panel,
+ShareInstanceScreen.-content-narrow #share-modules-panel {
+    width: 100%;
+    margin-right: 0;
+}
+
+ShareInstanceScreen.-content-narrow #share-existing-row {
+    grid-size: 1;
+    grid-columns: 1fr;
 }
 
 /* --- Upsell modal --- */
@@ -305,50 +360,29 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 }
 
 /* --- Passphrase enrol modal --- */
-#enrol-container {
-    width: 66;
-    max-width: 95%;
-    height: auto;
-    max-height: 100%;
-    border: round $primary;
-    background: $surface;
-    padding: 0 2;
-}
-
-#enrol-container.enrol-mode {
-    height: 28;
-}
-
-#enrol-body {
-    height: auto;
-    max-height: 100%;
-    min-height: 0;
-}
-
-#enrol-container.enrol-mode #enrol-body {
-    height: 1fr;
-}
-
-PassphraseEnrolModal ToastRack {
-    layer: default;
-    margin: 0;
-}
-
-PassphraseEnrolModal Toast {
-    width: auto;
-    max-width: 100%;
-    margin: 0;
-    padding: 0 1;
+/* On shorter terminals the shared dialog chrome tightens; this dialog also
+   gives up the spacing between its stacked sections so they stay in view. */
+PassphraseEnrolModal.-dialog-minimal #enrol-blurb,
+PassphraseEnrolModal.-dialog-tight #enrol-blurb,
+PassphraseEnrolModal.-dialog-minimal #enrol-rules,
+PassphraseEnrolModal.-dialog-tight #enrol-rules,
+PassphraseEnrolModal.-dialog-minimal #enrol-pass1_field,
+PassphraseEnrolModal.-dialog-tight #enrol-pass1_field {
+    margin-bottom: 0;
 }
 
 #enrol-title {
     text-style: bold;
-    margin-bottom: 1;
 }
 
 #enrol-blurb {
     margin-bottom: 1;
-    color: $warning;
+    color: auto 100%;
+}
+
+PassphraseEnrolModal:ansi #enrol-blurb,
+PassphraseEnrolModal:ansi #enrol-mismatch {
+    color: $foreground;
 }
 
 #enrol-rules {
@@ -362,6 +396,7 @@ PassphraseEnrolModal Toast {
 
 #enrol-mismatch {
     color: $text-error;
+    text-style: bold;
     height: auto;
     margin-bottom: 1;
 }
@@ -380,7 +415,6 @@ PassphraseEnrolModal Toast {
 }
 
 #enrol-btn-row {
-    dock: bottom;
     height: auto;
     align: right middle;
 }
@@ -418,150 +452,164 @@ PassphraseEnrolModal Toast {
 
 
 
-/* ===================================================================
-   Memory Sync Setup screen — central setup/explainer/status hub.
-   Visual language: rounded $primary borders for context cards, rounded
-   $accent borders for the primary CTA card, $surface backgrounds.
-   =================================================================== */
-
-#msync_container {
+/* Memory Sync: a device ledger with separate key and sync controls. */
+MemorySyncSetupScreen #msync_container {
     width: 1fr;
-    height: 100%;
-    padding: 1 2;
-}
-
-#msync_title {
-    text-align: center;
-    color: $accent;
-}
-
-#msync_subtitle {
-    text-align: center;
-    margin-bottom: 1;
-    color: $text-muted;
-}
-
-#msync_status {
-    text-align: center;
-    margin-bottom: 1;
-    height: 1;
-}
-
-#msync_body {
     height: 1fr;
     padding: 0 1;
 }
 
-.msync_card_stack {
-    layout: vertical;
+MemorySyncSetupScreen #msync_context {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+MemorySyncSetupScreen #msync_heading_row {
+    height: auto;
+}
+
+MemorySyncSetupScreen #msync_title,
+MemorySyncSetupScreen #msync_subtitle,
+MemorySyncSetupScreen #msync_status {
+    height: auto;
+    margin: 0;
+    text-align: left;
+}
+
+MemorySyncSetupScreen #msync_title {
+    width: 1fr;
+    color: $text;
+    text-style: bold;
+}
+
+MemorySyncSetupScreen #msync_subtitle {
+    color: $text-muted;
+    max-width: 96;
+}
+
+MemorySyncSetupScreen #msync_status {
+    width: auto;
+    max-width: 50%;
+    min-height: 1;
+    text-align: right;
+}
+
+MemorySyncSetupScreen #msync_body {
+    height: 1fr;
+    min-height: 6;
+}
+
+MemorySyncSetupScreen .msync_card_stack {
+    layout: horizontal;
     height: auto;
     width: 1fr;
 }
 
-.msync_card {
-    border: round $primary;
-    background: $surface;
-    padding: 1 2;
+MemorySyncSetupScreen .msync_card {
+    border: round $panel;
+    background: transparent;
+    padding: 0 1;
     margin: 0 0 1 0;
     height: auto;
-    width: 1fr;
+    width: 100%;
 }
 
-.msync_card_primary {
-    border: round $accent;
+MemorySyncSetupScreen .msync_card_stack > .msync_card {
+    width: 2fr;
 }
 
-.msync_card_title {
-    color: $accent;
+MemorySyncSetupScreen .msync_card_stack > .msync_card:first-child {
+    width: 3fr;
+    margin-right: 1;
+}
+
+MemorySyncSetupScreen .msync_card_title {
+    height: auto;
+    color: $text;
     text-style: bold;
-    padding: 0 0 1 0;
+    margin-bottom: 1;
 }
 
-.msync_card_body {
+MemorySyncSetupScreen .msync_card_body {
     padding: 0 0 1 0;
     color: $text;
     height: auto;
 }
 
-.msync_card_warning {
-    color: $warning;
+MemorySyncSetupScreen .msync_card_warning {
+    color: $text-warning;
 }
 
-.msync_card_actions {
-    layout: horizontal;
+MemorySyncSetupScreen .msync_card_actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
     height: auto;
     align: left middle;
     padding: 0;
 }
 
-.msync_card_actions Button {
-    margin-right: 1;
-    min-width: 18;
+MemorySyncSetupScreen .msync_card_actions Button {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
 }
 
-#msync_btn_remember {
-    min-width: 18;
-}
-
-.msync_benefits {
+MemorySyncSetupScreen .msync_benefits {
     height: auto;
     padding: 0 0 1 0;
 }
 
-.msync_benefit_row {
-    height: 1;
+MemorySyncSetupScreen .msync_benefit_row {
+    height: auto;
     color: $text;
 }
 
-.msync_kv_grid {
+MemorySyncSetupScreen .msync_kv_grid {
     height: auto;
-    padding: 0 0 0 0;
 }
 
-.msync_kv_row {
-    height: 1;
+MemorySyncSetupScreen .msync_kv_row {
+    height: auto;
     layout: horizontal;
+    padding: 0 1;
+    margin-bottom: 1;
+    background: $boost;
 }
 
-.msync_kv_label {
-    width: 24;
-    height: 1;
+MemorySyncSetupScreen .msync_kv_label {
+    width: 18;
+    height: auto;
     color: $text-muted;
 }
 
-.msync_kv_value,
-#msync_last_sync_value,
-#msync_quota_value,
-#msync_pending_value {
+MemorySyncSetupScreen .msync_kv_value {
     width: 1fr;
-    height: 1;
+    height: auto;
     color: $text;
 }
 
-/* Per-instance Memory screen — inline cloud-sync info banner. */
-#memory-cloud-banner {
-    layout: horizontal;
-    height: auto;
-    padding: 0 1;
-    margin: 0 0 1 0;
-    border: round $accent;
-    background: $surface;
+MemorySyncSetupScreen .msync_configured_actions {
+    layout: vertical;
 }
 
-#memory-cloud-banner.hidden {
-    display: none;
-    height: 0;
+MemorySyncSetupScreen.-content-narrow .msync_card_stack {
+    layout: vertical;
 }
 
-#memory-cloud-banner-text {
-    width: 1fr;
-    height: auto;
-    padding: 1 1 0 1;
+MemorySyncSetupScreen.-content-narrow .msync_card_stack > .msync_card,
+MemorySyncSetupScreen.-content-narrow .msync_card {
+    width: 100%;
+    margin-right: 0;
 }
 
-#memory-cloud-banner Button {
-    margin: 0 1 0 1;
-    min-width: 12;
+MemorySyncSetupScreen.-content-narrow .msync_card_actions {
+    layout: vertical;
 }
 
 /* The "Probe server now" call to action. A Container's default height is
@@ -626,7 +674,7 @@ MemoryScreen #memory-empty-state {
 #memory-finding-scroll {
     height: 1fr;
     border: round $primary;
-    background: $surface;
+    background: transparent;
     padding: 0 1;
 }
 
@@ -642,4 +690,54 @@ MemoryScreen #memory-empty-state {
     height: auto;
     align: right middle;
     padding: 1 0;
+}
+
+/* Fleet Memory: one action row above the records; an empty fleet shows a card. */
+FleetMemoryScreen #memory-actions {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+FleetMemoryScreen #fleet-memory-empty {
+    width: 64;
+    max-width: 90%;
+    height: auto;
+    margin: 0;
+    padding: 0 2;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+FleetMemoryScreen #fleet-memory-table-card {
+    align: center middle;
+}
+
+FleetMemoryScreen #fleet-memory-banner {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+FleetMemoryScreen #fleet-banner-text {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
+}
+
+FleetMemoryScreen #fleet-empty-title {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-accent;
+    text-style: bold;
+}
+
+FleetMemoryScreen #fleet-empty-text {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
 }

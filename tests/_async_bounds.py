@@ -27,12 +27,17 @@ async def wait_until(
     timeout: float = STEP_TIMEOUT_SECONDS,
 ) -> None:
     """Yield to the loop until ``predicate()`` holds, failing after ``timeout``."""
-
-    async def poll() -> None:
-        while not predicate():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(poll(), timeout=timeout)
+    # Poll inline rather than in a child task: a child's completion resumes
+    # the caller one loop turn later, and work queued in that turn (a widget
+    # recompose, for instance) can undo the condition before it is read.
+    # ``asyncio.TimeoutError`` is raised because on Python 3.10 it is not the
+    # builtin ``TimeoutError``.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(0.005)
 
 
 def run_within(coroutine: Coroutine[Any, Any, T], seconds: float) -> T:

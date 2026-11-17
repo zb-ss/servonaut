@@ -5,6 +5,9 @@ that the ``src/servonaut/styles/`` CSS bundle contains at least one ``#id`` CSS 
 (anchored on following whitespace or punctuation so ``#foo_bar`` does not
 match ``#foo_bar_baz``).
 
+Direct DialogFrame regions use the shared type/class rules, so their stable
+IDs do not require duplicate per-ID layout rules. Unrelated containers do.
+
 IDs that intentionally rely on global widget styling (Button, Input,
 DataTable default rules, etc.) are listed in ``ACCEPTABLE_UNSTYLED`` with a
 one-line reason comment.  Do NOT add IDs here silently — use a reason comment
@@ -12,8 +15,11 @@ that distinguishes "intentionally inherits global" from a genuine oversight.
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
+
+import pytest
 
 from servonaut.styles import CSS_FILES
 
@@ -26,6 +32,184 @@ SCREENS_DIR = (
 # ---------------------------------------------------------------------------
 ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
     [
+        # These stable IDs use the explicit shared selectors below; no
+        # duplicate per-ID declarations are needed.
+        # key_management.tcss: KeyManagementScreen .key-section
+        "agent_key_section",
+        "available_key_section",
+        "instance_key_section",
+        # key_management.tcss: KeyManagementScreen .setting_row
+        "key_mapping_fields",
+        # provider_managers.tcss: .provider-manager-content .provider-manager-overview
+        "aws_mgr_overview",
+        "hetzner_mgr_overview",
+        "ovh_mgr_overview",
+        # provider_managers.tcss: .provider-manager-content .provider-manager-selection-name
+        "aws_mgr_selection",
+        "hetzner_mgr_selection",
+        "ovh_mgr_selection",
+        # provider_managers.tcss: .provider-manager-content .provider-manager-selection-identity
+        "aws_mgr_identity",
+        "hetzner_mgr_identity",
+        "ovh_mgr_identity",
+        # components/screen_header.tcss: .screen-title / .screen-description / .screen-status
+        "aws_create_title",
+        "btn_live_refresh",
+        "aws_mgr_header",
+        "bw_vault_mgr_header",
+        "bw_vault_mgr_hint",
+        "ca_description",
+        "ca_title",
+        "cloudtrail_context",
+        "cloudtrail_title",
+        "cloudwatch_context",
+        "cloudwatch_title",
+        "hetzner_mgr_header",
+        "hetzner_ssh_keys_header",
+        "keys_header",
+        "bulk-title",
+        "drift-title",
+        "export-title",
+        "findings_title",
+        "keychange-title",
+        "share-title",
+        "keys_intro",
+        "ovh_mgr_header",
+        "s3_title",
+        "secrets_subtitle",
+        "secrets_title",
+        "team_workspace_summary",
+        "vault_title",
+        # action_button.tcss: ActionButton in an ActionRow at natural width
+        "ca_audit",
+        "ca_break_glass_scan",
+        "ca_enable",
+        "ca_enroll",
+        "ca_krl",
+        "ca_refresh",
+        # link_button.tcss: Button.link-button (LinkButton)
+        "fleet_copy_row",
+        "fleet_refresh",
+        # components/action_button.tcss: ActionButton (shared action style)
+        "btn-drift-diff",
+        # components/action_button.tcss: ActionButton (shared action style)
+        "btn_enhance_ai",
+        "btn_view_summary",
+        # main_menu.tcss: MainMenuScreen #dashboard-content .action-card
+        "card_keys",
+        # command_overlay.tcss: CommandOverlay #command_tools Button
+        "command_close",
+        "command_copy",
+        "command_pick",
+        "command_save",
+        "command_select",
+        "command_stop",
+        # db_vault.tcss: DbCoverageScreen .db-review-workspace
+        "db_cov_workspace",
+        # db_vault.tcss: DbCoverageScreen .db-review-tools
+        "db_cov_review",
+        # db_vault.tcss: DbCredentialScanScreen .db-review-workspace
+        "db_scan_workspace",
+        # db_vault.tcss: DbCredentialScanScreen .db-review-tools
+        "db_scan_review",
+        # db_vault.tcss: DbFleetScanScreen .db-review-workspace
+        "fleet_db_workspace",
+        # db_vault.tcss: DbFleetScanScreen .db-review-tools
+        "fleet_db_review",
+        # provider_account_resources.tcss: .provider-account-workspace .provider-account-selection
+        "ip_selected_context",
+        # memory_key_change.tcss: MemberKeyChangeScreen #keychange-btn-row Button
+        "keychange-btn-cancel",
+        "keychange-btn-confirm",
+        # memory_summary.py: MemorySummaryScreen .memory-summary-heading
+        "memory-summary-reader-heading",
+        # memory.tcss: MemorySyncSetupScreen .msync_card_actions Button
+        "msync_btn_remember",
+        # provider_key_registry.tcss: .provider-key-workspace .provider-key-selection
+        "provider_key_selection",
+        # scp_transfer.tcss: SCPTransferScreen .transfer-path-group
+        "remote_path_group",
+        # resource_workspaces.tcss: .provider-aux-workspace .provider-aux-selection
+        "s3_selected_resource",
+        "storage_selected_resource",
+        # secrets.tcss: SecretsListScreen #secrets_list_toolbar Button
+        "secrets_names_back",
+        "secrets_names_refresh",
+        # provider_lifecycle.tcss: .provider-lifecycle-workspace .provider-lifecycle-selection
+        "snapshot_selected_context",
+        # backup_workspaces.tcss: SnapshotManagerScreen .backup-action-panel
+        "snapshots_cloud_actions",
+        # vault.tcss: VaultScreen #vault_actions Button
+        "vault_add_device",
+        "vault_approve",
+        "vault_auto_bind",
+        "vault_confirm_identity",
+        "vault_create",
+        "vault_delete_key",
+        "vault_delete_keys",
+        "vault_devices",
+        "vault_exposures",
+        "vault_grants",
+        "vault_import",
+        "vault_recover",
+        "vault_recovery_rotate",
+        "vault_rename_key",
+        "vault_reset",
+        "vault_resolve_exposure",
+        "vault_reveal",
+        "vault_roster",
+        "vault_rotate",
+        "vault_rotate_exposure",
+        "vault_setup",
+
+        # Shared dialog type/region rules style these widgets; IDs remain
+        # stable for callers and interaction tests without per-ID CSS.
+        "discard-box",
+        "discard-buttons",
+        "discard-title",
+        "power_confirm_container",
+        "power_confirm_title",
+        "power_confirm_message",
+        "power_confirm_buttons",
+        "confirm_clear_container",
+        "confirm_clear_text",
+        "confirm_clear_buttons",
+        "vmc_container",
+        "vmc_title",
+        "vmc_body",
+        "vmc_total",
+        "vmc_buttons",
+        "bkp_confirm_container",
+        "bkp_confirm_title",
+        "bkp_confirm_message",
+        "bkp_confirm_buttons",
+        "confirm_modal_container",
+        "confirm_modal_title",
+        "confirm_modal_message",
+        "confirm_modal_buttons",
+        "label_modal_container",
+        "label_modal_title",
+        "label_modal_hint",
+        "label_input",
+        "label_modal_error",
+        "label_modal_buttons",
+        "remediation_confirm_container",
+        "remediation_confirm_header",
+        "remediation_confirm_scroll",
+        "remediation_confirm_command",
+        "remediation_confirm_revert",
+        "remediation_confirm_input",
+        "remediation_confirm_buttons",
+        "bw_passphrase_container",  # DialogFrame supplies bounded frame styling.
+        "bw_passphrase_prompt",     # DialogBody supplies scrollable copy styling.
+        "bw_passphrase_title",      # DialogFrame heading role supplies styling.
+        "bw_unlock_container",      # DialogFrame supplies bounded frame styling.
+        "bw_unlock_title",          # DialogFrame heading role supplies styling.
+        "vault_rename_key_modal",    # DialogFrame supplies bounded frame styling.
+        "vault_rename_key_input",    # DialogFrame status Input rule supplies styling.
+        "vault_rename_key_buttons",  # DialogActions supplies the pinned button row.
+        "vault_rename_key_cancel",   # DialogActions Button rule supplies styling.
+        "vault_rename_key_save",     # DialogActions Button rule supplies styling.
         # ---- Account / profile widgets ----
         "account_info",         # Reason: Static label; inherits global Static styling
         "account_info_header",  # Reason: Static header; inherits global Static styling
@@ -188,7 +372,19 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_finding_resolve",
         "btn_finding_revert",   # Undo button; inherits .finding_remediation_run + global Button styling
         "btn_finding_suppress",
-        "btn_findings",         # Reason: server-actions rail Button; inherits #action_buttons styling
+        "btn_findings",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_use_vault_key",    # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_banner_scan",      # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
+        "btn_empty_scan",       # Reason: Fleet Memory ActionButton; styled by components/action_button.tcss
+        "auto_bind_all",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_apply",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_back",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_fetch_keys",       # Reason: ActionButton; styled by components/action_button.tcss
+        "auto_bind_none",       # Reason: ActionButton; styled by components/action_button.tcss
+        "btn_db_creds",         # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_copy_id",          # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_copy_summary",     # Reason: server-actions ActionButton; styled by components/action_button.tcss
+        "btn_live",             # Reason: server-actions ActionButton; styled by components/action_button.tcss
         "btn_findings_open",
         "btn_findings_refresh",
         "btn_findings_scan",
@@ -374,8 +570,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "confirm_prompt",
         "confirm_yes_btn",
         # ---- Remediation confirm modal (Phase 3) ----
-        # All three Buttons are styled by the descendant rule
-        # ``#remediation_confirm_buttons Button`` in findings.tcss.
+        # Shared DialogActions rules style all three remediation buttons.
         "remediation_confirm_cancel",
         "remediation_confirm_dry_run",
         "remediation_confirm_run",
@@ -400,6 +595,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "convs_table",
         "convs_tabs",
         "convs_title",
+        "help_navigation_hint",  # Reason: Static; styled by the shared .screen-description class
         # ---- Copy-mode overlay ----
         "copy-mode-container",  # Reason: Container; styled by parent screen
         "copy-mode-hint",       # Reason: Static hint; inherits global Static
@@ -766,7 +962,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "tool_confirm_args",
         "tool_confirm_body",
         "tool_confirm_buttons",
-        "tool_confirm_container", # Reason: Modal container; styled by parent ModalScreen
+        "tool_confirm_container", # Reason: Shared DialogFrame styling
         "tool_confirm_title",
         # ---- Transfer widgets ----
         "transfer_button",      # Reason: Button; inherits global Button styling
@@ -865,6 +1061,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # itself through BusyIndicator.DEFAULT_CSS.
         "btn_remove_servers",
         "team_servers_busy",
+        # Read spinners use BusyIndicator.DEFAULT_CSS for height, color and
+        # active/idle display; their ID is only a BusyWork lookup hook.
+        "read_loading",
         # ---- Settings refactor (master/detail panels, screens/settings/**) ----
         # Panel root containers carry the .settings-panel class (styled in
         # app.css); form Inputs/Selects/Switches sit in .setting_row and inherit
@@ -895,6 +1094,8 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ai_provider_servonaut_status',
         'ai_provider_temperature',
         'ai_provider_upgrade',
+        'appearance_busy',  # Reason: BusyIndicator; styled by its own DEFAULT_CSS
+        'appearance',  # Reason: settings panel root; sized by .settings-panel
         'aws',
         'aws_audit_path',
         'aws_cache_path',
@@ -958,7 +1159,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'general_cache_ttl',
         'general_default_key',
         'general_terminal',
-        'general_theme',
         'general_username',
         'hetzner',
         'hetzner_audit_path',
@@ -1048,8 +1248,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ssh_keys',
         'ssh_keys_count',
         'ssh_keys_open',
-        # Reason: Buttons in the voice-model cleanup modal; inherit global
-        # Button styling, positioned by the #vmc_buttons row rule.
+        # Reason: Shared DialogActions rules style the cleanup buttons.
         'vmc_keep',
         'vmc_remove',
         'voice',
@@ -1182,14 +1381,495 @@ def _css_text() -> str:
     return "\n".join(parts)
 
 
+def _nonempty_style(css: str, selector: str) -> bool:
+    """Match only an audited flat selector with actual declarations."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for header, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        selectors = {" ".join(part.split()) for part in header.split(",")}
+        if selector in selectors and re.search(r"[\w-]+\s*:\s*[^;{}]+;", body):
+            return True
+    return False
+
+
+class _AuditedStyleProof:
+    """Small source proof for the explicitly audited screen composition shapes."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.tree = tree
+        self.parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        imports = [(node.module, alias.name, alias.asname or alias.name)
+                   for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names]
+        self.names = {(module, name): local for module, name, local in imports
+                      if sum(local == other for _, _, other in imports) == 1}
+        self.shadowed = {node.id for node in ast.walk(tree)
+                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+        self.shadowed.update(node.name for node in ast.walk(tree)
+                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+        self.shadowed.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
+
+    def named(self, node: ast.AST, module: str, name: str) -> bool:
+        local = self.names.get((module, name))
+        return (local is not None and local not in self.shadowed and isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == local)
+
+    @staticmethod
+    def literal(node: ast.Call, keyword: str) -> str | None:
+        return next((item.value.value for item in node.keywords if item.arg == keyword
+                     and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)), None)
+
+    def enclosing(self, node: ast.AST, kind: type) -> ast.AST | None:
+        while (node := self.parents.get(node)) is not None:
+            if isinstance(node, kind):
+                return node
+        return None
+
+    def owner(self, node: ast.AST) -> str | None:
+        owner = self.enclosing(node, ast.ClassDef)
+        local = self.names.get(("servonaut.widgets.workspace", "WorkspaceScreen"))
+        if (owner is not None and local is not None and local not in self.shadowed
+                and any(isinstance(base, ast.Name) and base.id == local for base in owner.bases)):
+            return owner.name
+        return None
+
+    def containers(self, node: ast.Call) -> list[ast.Call] | None:
+        """Only positional constructors and with-block containers in compose."""
+        result = []
+        yielded = False
+        while True:
+            child, node = node, self.parents.get(node)
+            if node is None:
+                return None
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return result if node.name == "compose" and yielded else None
+            if isinstance(node, ast.Yield):
+                yielded = True
+            if isinstance(node, (ast.List, ast.Tuple, ast.Dict, ast.Starred, ast.Assign, ast.AnnAssign)):
+                return None
+            if isinstance(node, ast.Call) and child not in node.args:
+                return None
+            if isinstance(node, ast.With) and len(node.items) != 1:
+                return None
+            calls = [node] if isinstance(node, ast.Call) else (
+                [item.context_expr for item in node.items] if isinstance(node, ast.With) else []
+            )
+            for call in calls:
+                if not any(self.named(call, "textual.containers", name)
+                           for name in ("Container", "Horizontal", "Vertical", "VerticalScroll", "ScrollableContainer")):
+                    return None
+                result.append(call)
+
+
+# Exact screen/type/class/ancestor contracts; this is not a selector engine.
+# Ancestor tokens run from nearest to farthest. A plain/global Button never
+# satisfies these contracts merely by being a Button.
+_AUDITED_SCOPED_RULES = (
+    ("VaultScreen", "Button", None, (("id", "vault_actions"),), "VaultScreen #vault_actions Button"),
+    ("BrowseRemoteScreen", "Button", None, (("id", "browse_actions"),), "BrowseRemoteScreen #browse_actions Button"),
+    ("LoginScreen", "Button", None, (("id", "login_actions"),), "LoginScreen #login_actions Button"),
+    ("DbCoverageScreen", "Button", None, (("classes", "db-action-row"),), "DbCoverageScreen .db-action-row Button"),
+    ("IPBanScreen", "Button", None, (("id", "ip_ban_selection_actions"),), "IPBanScreen #ip_ban_selection_actions Button"),
+    ("LogViewerScreen", "Button", None, (("id", "log_actions"),), "#log_actions Button"),
+    ("ShareInstanceScreen", "Button", None, (("id", "share-btn-row"),), "ShareInstanceScreen #share-btn-row Button"),
+    ("ShareInstanceScreen", "Button", None, (("id", "share-existing-row"),), "ShareInstanceScreen #share-existing-row Button"),
+    ("ServerActionsScreen", "Static", "sa-section", (("id", "sa-detail"),), "#sa-detail .sa-section"),
+    ("OVHResizeScreen", "Static", "provider_instance_context", (), "OVHResizeScreen .provider_instance_context"),
+    ("OVHReinstallScreen", "Static", "provider_instance_context", (), "OVHReinstallScreen .provider_instance_context"),
+    ("MemoryScreen", "Button", None, (("classes", "memory-row-buttons"), ("id", "memory-summary-row")), "MemoryScreen #memory-summary-row .memory-row-buttons Button"),
+    ("MemoryScreen", "Button", None, (("classes", "memory-row-buttons"), ("id", "memory-ai-row")), "MemoryScreen #memory-ai-row .memory-row-buttons Button"),
+)
+
+
+def _declared_memory_css(py_file: pathlib.Path, proof: _AuditedStyleProof) -> str:
+    """Honor only the two screens' literal, declared extra CSS_PATH entry."""
+    owner = {"memory.py": "MemoryScreen", "fleet_memory.py": "FleetMemoryScreen"}.get(py_file.name)
+    path_name = proof.names.get(("pathlib", "Path"))
+    bundle_name = proof.names.get(("servonaut.styles", "CSS_FILES"))
+    if (owner is None or path_name is None or bundle_name is None
+            or {path_name, bundle_name} & proof.shadowed):
+        return ""
+    expected = ast.parse(
+        f'[*{bundle_name}, {path_name}(__file__).parent.parent / "memory_screen.tcss"]', mode="eval"
+    ).body
+    classes = [node for node in proof.tree.body if isinstance(node, ast.ClassDef) and node.name == owner]
+    if len(classes) != 1:
+        return ""
+    declarations = [node.value for node in classes[0].body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "CSS_PATH" for target in node.targets)]
+    if len(declarations) != 1 or ast.dump(declarations[0]) != ast.dump(expected):
+        return ""
+    return (py_file.parent.parent / "memory_screen.tcss").read_text(encoding="utf-8")
+
+
+def _sync_factory_calls(proof: _AuditedStyleProof, css: str) -> set[ast.Call]:
+    """Prove only the three named values and one optional status-card action."""
+    styled: set[ast.Call] = set()
+    owners = [node for node in proof.tree.body if isinstance(node, ast.ClassDef)
+              and node.name == "MemorySyncSetupScreen"]
+    if len(owners) != 1:
+        return styled
+    owner = owners[0]
+    helpers = [node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "_kv_row"]
+    if (len(helpers) == 1 and len(helpers[0].body) == 1
+            and any(arg.arg == "value_id" for arg in helpers[0].args.kwonlyargs)
+            and not any(isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+                        and node.attr == "_kv_row" for node in ast.walk(proof.tree))):
+        returned = helpers[0].body[0]
+        value = returned.value if isinstance(returned, ast.Return) else None
+        if (proof.named(value, "textual.containers", "Horizontal") and len(value.args) == 2
+                and proof.named(value.args[1], "textual.widgets", "Static")
+                and proof.literal(value.args[1], "classes") == "msync_kv_value"
+                and any(item.arg == "id" and isinstance(item.value, ast.Name) and item.value.id == "value_id"
+                        for item in value.args[1].keywords)
+                and _nonempty_style(css, "MemorySyncSetupScreen .msync_kv_value")):
+            for call in ast.walk(owner):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name) and call.func.value.id == "self"
+                        and call.func.attr == "_kv_row"
+                        and proof.owner(call) == "MemorySyncSetupScreen"
+                        and proof.literal(call, "value_id") in {
+                            "msync_last_sync_value", "msync_quota_value", "msync_pending_value"}):
+                    styled.add(call)
+
+    methods = [node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "_build_status_card"]
+    if len(methods) != 1 or not _nonempty_style(css, "MemorySyncSetupScreen .msync_configured_actions Button"):
+        return styled
+    method = methods[0]
+    names = [node for node in ast.walk(method) if isinstance(node, ast.Name) and node.id == "actions_children"]
+    stores = [node for node in names if isinstance(node.ctx, ast.Store)]
+    if len(stores) != 1:
+        return styled
+    assignment = proof.parents[stores[0]]
+    if not (isinstance(assignment, (ast.Assign, ast.AnnAssign)) and isinstance(assignment.value, ast.List)
+            and all(proof.named(child, "textual.widgets", "Button") for child in assignment.value.elts)):
+        return styled
+    allowed = {stores[0]}
+    appended = []
+    expanded = 0
+    for name in names:
+        parent = proof.parents[name]
+        if isinstance(parent, ast.Attribute) and parent.value is name and parent.attr == "append":
+            call = proof.parents[parent]
+            if (isinstance(call, ast.Call) and len(call.args) == 1 and not call.keywords
+                    and proof.named(call.args[0], "textual.widgets", "Button")):
+                appended.append(call.args[0])
+                allowed.add(name)
+        elif isinstance(parent, ast.Starred):
+            call = proof.parents[parent]
+            if (proof.named(call, "textual.containers", "Horizontal")
+                    and proof.literal(call, "classes") == "msync_card_actions msync_configured_actions"):
+                expanded += 1
+                allowed.add(name)
+        elif isinstance(parent, ast.For) and parent.iter is name:
+            # The only extra list read disables the existing actions while busy.
+            if (isinstance(parent.target, ast.Name) and len(parent.body) == 1
+                    and isinstance(parent.body[0], ast.Assign)
+                    and ast.unparse(parent.body[0]) == f"{parent.target.id}.disabled = True"):
+                allowed.add(name)
+    if set(names) == allowed and expanded == 1:
+        styled.update(call for call in appended if proof.literal(call, "id") == "msync_btn_remember"
+                      and proof.owner(call) == "MemorySyncSetupScreen")
+    return styled
+
+
+def _audited_style_ids(tree: ast.Module, css: str, extra_css: str = "", busy_css: str = "") -> set[str]:
+    proof = _AuditedStyleProof(tree)
+    styled = _sync_factory_calls(proof, css)
+    occurrences: dict[str, set[ast.Call]] = {}
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        for item in call.keywords:
+            if (item.arg is not None and (item.arg == "id" or item.arg.endswith("_id"))
+                    and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)):
+                occurrences.setdefault(item.value.value, set()).add(call)
+        owner, chain = proof.owner(call), proof.containers(call)
+        if owner is None or chain is None:
+            continue
+        wid = proof.literal(call, "id")
+        if (owner in {"MemoryScreen", "FleetMemoryScreen"} and wid is not None
+                and _nonempty_style(extra_css, f"{owner} #{wid}")
+                and any(proof.named(call, module, name) for module, names in (
+                    ("textual.widgets", ("Static", "DataTable", "TextArea")),
+                    ("textual.containers", ("Container", "Horizontal")),
+                ) for name in names)):
+            styled.add(call)
+        for screen, widget, own_class, tokens, selector in _AUDITED_SCOPED_RULES:
+            if (owner != screen or not proof.named(call, "textual.widgets", widget)
+                    or (own_class is not None and own_class not in (proof.literal(call, "classes") or "").split())
+                    or not _nonempty_style(css + "\n" + extra_css, selector)):
+                continue
+            remaining = list(tokens)
+            for parent in chain:
+                if remaining:
+                    key, value = remaining[0]
+                    actual = proof.literal(parent, key)
+                    if actual == value or (key == "classes" and value in (actual or "").split()):
+                        remaining.pop(0)
+            if not remaining:
+                styled.add(call)
+        if (owner == "TeamManagementScreen" and wid in {"team_list_busy", "team_detail_busy"}
+                and proof.named(call, "servonaut.widgets.busy_indicator", "BusyIndicator")
+                and _nonempty_style(busy_css, "BusyIndicator")
+                and _nonempty_style(busy_css, "BusyIndicator.-active")):
+            styled.add(call)
+        if (owner == "DbCoverageScreen" and wid == "db_cov_refresh"
+                and proof.named(call, "textual.widgets", "Button")
+                and chain and proof.named(chain[0], "textual.containers", "Horizontal")
+                and "db-filter-row" in (proof.literal(chain[0], "classes") or "").split()
+                and _nonempty_style(css, "Button")
+                and _nonempty_style(css, "DbCoverageScreen .db-filter-row")):
+            # This one ordinary Refresh intentionally needs no ID override.
+            styled.add(call)
+    return {wid for wid, calls in occurrences.items() if calls <= styled}
+
+
+def _shared_scoped_style_ids(css: str) -> set[str]:
+    covered: set[str] = set()
+    unproved: set[str] = set()
+    busy_file = SCREENS_DIR.parent / "widgets" / "busy_indicator.py"
+    busy_css = ""
+    if busy_file.is_file():
+        busy_tree = ast.parse(busy_file.read_text(encoding="utf-8"))
+        for node in busy_tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "BusyIndicator":
+                for assignment in node.body:
+                    if (isinstance(assignment, ast.Assign) and isinstance(assignment.value, ast.Constant)
+                            and isinstance(assignment.value.value, str)
+                            and any(isinstance(target, ast.Name) and target.id == "DEFAULT_CSS" for target in assignment.targets)):
+                        busy_css = assignment.value.value
+    for py_file in SCREENS_DIR.rglob("*.py"):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        proof = _AuditedStyleProof(tree)
+        styled = _audited_style_ids(tree, css, _declared_memory_css(py_file, proof), busy_css)
+        covered.update(styled)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for item in node.keywords:
+                    if (item.arg is not None and (item.arg == "id" or item.arg.endswith("_id"))
+                            and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)
+                            and item.value.value not in styled):
+                        unproved.add(item.value.value)
+    return covered - unproved
+
+
+def _dialog_slot_ids(tree: ast.Module, css: str) -> set[str]:
+    """Recognize only literal IDs whose every use is a styled dialog slot."""
+    imports = {
+        (node.module, alias.name): alias.asname or alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    shadowed = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    } | {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    } | {
+        node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
+    }
+    frame = imports.get(("servonaut.widgets.dialogs", "DialogFrame"))
+    actions = imports.get(("servonaut.widgets.dialogs", "DialogActions"))
+    button = imports.get(("textual.widgets", "Button"))
+    static = imports.get(("textual.widgets", "Static"))
+    input_widget = imports.get(("textual.widgets", "Input"))
+    containers = [imports.get(key) for key in (
+        ("textual.containers", "Vertical"),
+        ("servonaut.widgets.dialogs", "DialogBody"),
+        ("servonaut.widgets.dialogs", "DialogContent"),
+    )]
+    occurrences: dict[str, set[ast.Call]] = {}
+    styled: set[ast.Call] = set()
+
+    def named(node: ast.AST, name: str | None) -> bool:
+        return (name is not None and name not in shadowed and isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == name)
+
+    def cover(node: ast.AST, selector: str) -> None:
+        pattern = r"(?m)^\s*" + re.escape(selector).replace(r"\ ", r"\s*") + r"\s*\{"
+        if isinstance(node, ast.Call) and re.search(pattern, css):
+            styled.add(node)
+
+    def cover_leaf_children(node: ast.AST, leaf: str | None, selector: str) -> None:
+        # A known container's literal children inherit the proven slot rules;
+        # arbitrary factories and nested layout containers remain unproved.
+        if (not isinstance(node, ast.Call) or node not in styled
+                or not any(named(node, name) for name in containers)):
+            return
+        for child in node.args:
+            if named(child, leaf):
+                cover(child, selector)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if (keyword.arg is not None
+                    and (keyword.arg == "id" or keyword.arg.endswith("_id"))
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)):
+                occurrences.setdefault(keyword.value.value, set()).add(node)
+        if not named(node, frame):
+            continue
+        cover(node, "DialogFrame")
+        slots = {keyword.arg: keyword.value for keyword in node.keywords}
+        for slot in ("heading", "body", "status"):
+            if slot in slots:
+                parent = "DialogFrame > .dialog-footer >" if slot == "status" else "DialogFrame >"
+                cover(slots[slot], parent + " .dialog-" + slot)
+        if "heading" in slots:
+            cover_leaf_children(slots["heading"], static, "Static")
+        if "body" in slots:
+            cover_leaf_children(slots["body"], static, "DialogFrame .dialog-body Static")
+        if "status" in slots:
+            cover_leaf_children(slots["status"], static, "DialogFrame .dialog-status Static")
+            cover_leaf_children(slots["status"], input_widget, "DialogFrame .dialog-status Input")
+        row = slots.get("actions")
+        if isinstance(row, ast.Call) and named(row, actions):
+            cover(row, "DialogFrame > .dialog-footer > DialogActions")
+            for child in row.args:
+                if named(child, button):
+                    cover(child, "DialogFrame > .dialog-footer > DialogActions > Button")
+    return {wid for wid, calls in occurrences.items() if calls <= styled}
+
+
+def _shared_dialog_ids(css: str) -> set[str]:
+    covered: set[str] = set()
+    unproved: set[str] = set()
+    for py_file in SCREENS_DIR.rglob("*.py"):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        styled = _dialog_slot_ids(tree, css)
+        covered.update(styled)
+        # Preserve forwarded *_id uses and recognize either literal quote style.
+        ids = {
+            keyword.value.value
+            for node in ast.walk(tree) if isinstance(node, ast.Call)
+            for keyword in node.keywords
+            if keyword.arg is not None
+            and (keyword.arg == "id" or keyword.arg.endswith("_id"))
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, str)
+        }
+        unproved.update(ids - styled)
+    # A shared slot in one screen must not hide an unstyled use in another.
+    return covered - unproved
+
+
+def test_shared_dialog_slots_do_not_exempt_plain_layout_containers(tmp_path, monkeypatch) -> None:
+    source = '''
+from servonaut.widgets.dialogs import DialogFrame, DialogActions
+from textual.widgets import Button, Static
+from textual.containers import Vertical
+frame = DialogFrame(
+    heading=Static("Title", id="heading"),
+    body=Vertical(Vertical(id="nested"), id="body"),
+    actions=DialogActions(Button("Cancel", id="cancel"), id="actions"),
+    id="frame",
+)
+plain = Vertical(id="plain")
+'''
+    selectors = ("DialogFrame", "DialogFrame > .dialog-heading", "DialogFrame > .dialog-body",
+                 "DialogFrame > .dialog-footer > DialogActions",
+                 "DialogFrame > .dialog-footer > DialogActions > Button")
+    css = "\n".join(selector + " { height: auto; }" for selector in selectors)
+    tree = ast.parse(source)
+    assert _dialog_slot_ids(tree, css) == {"frame", "heading", "body", "actions", "cancel"}
+    assert _dialog_slot_ids(tree, "") == set()
+    assert "body" not in _dialog_slot_ids(tree, css.replace(selectors[2] + " { height: auto; }", ""))
+    (tmp_path / "dialog.py").write_text(source)
+    monkeypatch.setitem(globals(), "SCREENS_DIR", tmp_path)
+    monkeypatch.setitem(globals(), "_css_text", lambda: css)
+    for quote in ('"', "'"):
+        duplicate = f"plain = Vertical(id={quote}frame{quote})\n"
+        (tmp_path / "plain.py").write_text(
+            "from textual.containers import Vertical\n" + duplicate
+        )
+        assert _shared_dialog_ids(css) == {"heading", "body", "actions", "cancel"}
+        with pytest.raises(AssertionError, match="frame"):
+            test_css_covers_all_screen_widget_ids()
+    # Remove the cross-file duplicate so this checks the local occurrence set.
+    (tmp_path / "plain.py").write_text("")
+    forwarded = source + '\nforwarded = build(input_id="frame")\n'
+    (tmp_path / "dialog.py").write_text(forwarded)
+    assert _dialog_slot_ids(ast.parse(forwarded), css) == {"heading", "body", "actions", "cancel"}
+    assert _shared_dialog_ids(css) == {"heading", "body", "actions", "cancel"}
+    with pytest.raises(AssertionError, match="frame"):
+        test_css_covers_all_screen_widget_ids()
+    parameter_shadow = source + "\ndef builder(DialogFrame):\n    return None\n"
+    assert _dialog_slot_ids(ast.parse(parameter_shadow), css) == set()
+
+
+def test_shared_dialog_leaf_rules_require_known_slots_and_matching_styles(tmp_path, monkeypatch) -> None:
+    source = '''
+from servonaut.widgets.dialogs import DialogFrame, DialogBody, DialogActions
+from textual.widgets import Button, Input, Static
+from textual.containers import Vertical
+frame = DialogFrame(
+    heading=Vertical(Static("Title", id="heading-copy"), id="heading"),
+    body=DialogBody(Static("Detail", id="body-copy"), Vertical(id="nested"), id="body"),
+    status=Vertical(Input(id="field"), Static("Status", id="status-copy"), id="status"),
+    actions=DialogActions(Button("Cancel", id="cancel"), id="actions"),
+    id="frame",
+)
+plain = Static("Unrelated", id="plain-copy")
+'''
+    selectors = (
+        "DialogFrame", "DialogFrame > .dialog-heading", "DialogFrame > .dialog-body",
+        "DialogFrame > .dialog-footer > .dialog-status",
+        "DialogFrame > .dialog-footer > DialogActions",
+        "DialogFrame > .dialog-footer > DialogActions > Button",
+        "Static", "DialogFrame .dialog-body Static",
+        "DialogFrame .dialog-status Static", "DialogFrame .dialog-status Input",
+    )
+    css = "\n".join(selector + " { height: auto; }" for selector in selectors)
+    expected = {"frame", "heading", "heading-copy", "body", "body-copy", "status",
+                "status-copy", "field", "actions", "cancel"}
+    assert _dialog_slot_ids(ast.parse(source), css) == expected
+    # Unrelated containers/leaves still need explicit CSS or an existing reason.
+    explicit = "\n#nested { height: auto; }\n#plain-copy { height: auto; }"
+    current_css = css + explicit
+    fixture = tmp_path / "dialog.py"
+    fixture.write_text(source)
+    monkeypatch.setitem(globals(), "SCREENS_DIR", tmp_path)
+    monkeypatch.setitem(globals(), "_css_text", lambda: current_css)
+    test_css_covers_all_screen_widget_ids()
+    for selector, wid in (("Static", "heading-copy"),
+                          ("DialogFrame .dialog-body Static", "body-copy"),
+                          ("DialogFrame .dialog-status Input", "field")):
+        missing_rule = "\n".join(line for line in css.splitlines()
+                                 if line != selector + " { height: auto; }")
+        assert wid not in _dialog_slot_ids(ast.parse(source), missing_rule)
+        current_css = missing_rule + explicit
+        with pytest.raises(AssertionError, match=re.escape(wid)):
+            test_css_covers_all_screen_widget_ids()
+    current_css = css + explicit
+    unknown_factory = source.replace('body=DialogBody(', 'body=build(')
+    assert "body-copy" not in _dialog_slot_ids(ast.parse(unknown_factory), css)
+    fixture.write_text(unknown_factory)
+    with pytest.raises(AssertionError, match="body-copy"):
+        test_css_covers_all_screen_widget_ids()
+    duplicate = source + '\nforwarded = build(input_id="body-copy")\n'
+    assert "body-copy" not in _dialog_slot_ids(ast.parse(duplicate), css)
+    fixture.write_text(duplicate)
+    with pytest.raises(AssertionError, match="body-copy"):
+        test_css_covers_all_screen_widget_ids()
+    shadowed = source + "\ndef builder(Static):\n    return None\n"
+    assert "body-copy" not in _dialog_slot_ids(ast.parse(shadowed), css)
+    fixture.write_text(shadowed)
+    with pytest.raises(AssertionError, match="body-copy"):
+        test_css_covers_all_screen_widget_ids()
+
+
 def test_css_covers_all_screen_widget_ids() -> None:
-    """Every widget ID used in screens must have a CSS rule OR be in ACCEPTABLE_UNSTYLED."""
+    """Every widget ID needs an explicit/shared rule or an explained exception."""
     css = _css_text()
     screen_ids = _collect_screen_ids()
+    shared_dialog_ids = _shared_dialog_ids(css)
+    scoped_style_ids = _shared_scoped_style_ids(css)
 
     missing: list[str] = []
     for wid in screen_ids:
-        if wid in ACCEPTABLE_UNSTYLED:
+        if wid in ACCEPTABLE_UNSTYLED or wid in shared_dialog_ids or wid in scoped_style_ids:
             continue
         # Check for #id followed by CSS-selector punctuation.
         pattern = r"#" + re.escape(wid) + r"[\s,{:.>\[~]"

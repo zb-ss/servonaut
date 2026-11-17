@@ -223,7 +223,7 @@ async def test_delete_needs_the_typed_word(tui, seed, providers):
         # Escape backs out without deleting anything.
         await t.click("#btn_hetzner_mgr_delete")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Delete Hetzner Server", doomed.name, screen_only=True)
+        await t.wait_for_text("Delete Hetzner server", doomed.name, screen_only=True)
         assert not _enabled(t, "#btn_confirm")
         await t.press("escape")
         await t.wait_for_screen("HetznerManagerScreen")
@@ -318,7 +318,7 @@ async def test_the_next_key_acts_on_the_server_the_action_was_for(tui, seed, pro
 
         await t.press("d")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Delete Hetzner Server", build.name, screen_only=True)
+        await t.wait_for_text("Delete Hetzner server", build.name, screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("HetznerManagerScreen")
 

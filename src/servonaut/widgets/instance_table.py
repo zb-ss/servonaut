@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from rich.cells import cell_len
 from rich.text import Text
+from textual.color import Color, ColorParseError
 from textual.widgets import DataTable
 
-from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.instance_resolver import display_name, row_identity
 from servonaut.services.shared_servers import fold_shared
 
 # What an empty cell shows.
@@ -37,7 +39,8 @@ class _Column:
 # Every column is as wide as its longest value, up to its maximum, so short
 # values leave room for the rest. Most important first: when the terminal is
 # too narrow, the table scrolls sideways and the last columns are the ones
-# out of view.
+# out of view. The private address, the id, the key and the memory status are
+# in the fleet inspector, not here.
 COLUMNS: Sequence[_Column] = (
     _Column("index", "#"),
     _Column("name", "Name", max_width=32),
@@ -46,17 +49,18 @@ COLUMNS: Sequence[_Column] = (
     _Column("public_ip", "Public IP", max_width=24),
     _Column("type", "Type", max_width=20),
     _Column("region", "Region", max_width=16),
-    _Column("private_ip", "Private IP", max_width=24),
-    # 25 fits an OVH VPS service name; AWS ids are 19.
-    _Column("id", "ID", max_width=25),
-    _Column("key", "Key", max_width=20),
     # SSH verify status — at-a-glance BW probe result badge. Shown once any
     # server has a result, so a fleet that never verifies keeps the room.
     _Column("ssh", "SSH", optional=True),
-    # Memory discoverability — at-a-glance status so users learn the
-    # feature exists without needing to drill into a server.
-    _Column("memory", "Mem"),
 )
+
+# When the room is short, columns give way in this order before the table
+# scrolls. Region and Type are in the fleet inspector's Details, so they only
+# give way while the inspector sits beside the table. The Name column then
+# gives up width, never below the minimum (the full name is in the inspector
+# or the value line). #, Name, State, Provider and Public IP never leave.
+_GIVE_WAY_ORDER = ("ssh", "region", "type")
+_NAME_MINIMUM = 16
 
 # Shown in the table's bottom border while some columns are out of view.
 SCROLL_HINT = "← → more columns"
@@ -70,11 +74,17 @@ def _fit(value: str, max_width: Optional[int]) -> Text:
     return text
 
 
+# Appended to the State cell of a row a refresh added or changed.
+MARK_NEW = "new"
+MARK_WAS = "was {state}"
+
 # Marks one of the user's own servers that a team shares too.
 SHARED_MARK = " · shared"
 
 
-def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False) -> Text:
+def _name_cell(
+    instance: dict, max_width: Optional[int], *, shared: bool = False, marked: bool = False,
+) -> Text:
     """The Name cell: ``account/name`` when the provider has several accounts.
 
     The account part is dimmed so the server name stays the eye's anchor;
@@ -84,8 +94,11 @@ def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False
     shown = display_name(instance)
     name = str(instance.get("name") or "")
     if shown == name and not shared:
-        return _fit(name or _EMPTY, max_width)
-    text = Text(no_wrap=True, end="")
+        text = _fit(name or _EMPTY, max_width)
+        if marked:
+            text.stylize("bold")
+        return text
+    text = Text(no_wrap=True, end="", style="bold" if marked else "")
     if shown == name:
         text.append(name or _EMPTY)
     else:
@@ -120,19 +133,6 @@ def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]
     return [str(value).lower() for value in fields if value]
 
 
-def _key_label(key: str) -> str:
-    """A key as the table lists it: the file name of a key file path.
-
-    Custom servers name a key file (``~/.ssh/web1_ed25519``); cloud servers
-    name a key pair. The directory rarely tells servers apart, so the table
-    keeps to the file name and the detail panel shows the full path.
-    """
-    if "/" in key or "\\" in key:
-        name = key.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-        return name or key
-    return key
-
-
 class InstanceTable(DataTable):
     """DataTable subclass for displaying EC2 instances."""
 
@@ -145,7 +145,20 @@ class InstanceTable(DataTable):
         self._filtered_instances: List[dict] = []
         # id() of an own row -> the teams that share it too (see fold_shared).
         self._shared_by: Dict[int, List[str]] = {}
+        self._query = ""
+        self._row_filter: Optional[Callable[[dict], bool]] = None
+        # Row identity -> what the last refresh did to it (see ``set_marks``).
+        self._marks: Dict[str, str] = {}
         self._shown_columns: List[_Column] = []
+        # Which columns have given way, and the Name cap, for the room there is.
+        self._given_way: frozenset = frozenset()
+        self._name_cap: Optional[int] = None
+        self.inspector_beside = False
+        # The widths the whole fleet needs, until its rows or marks change; the
+        # room the plan was last made for; and a redraw already queued.
+        self._widths_cache: Optional[tuple[tuple, Dict[str, int]]] = None
+        self._planned_for: Optional[tuple[int, bool]] = None
+        self._redraw_queued = False
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
     def _setup_columns(self, columns: Sequence[_Column]) -> None:
@@ -157,6 +170,80 @@ class InstanceTable(DataTable):
     def on_resize(self) -> None:
         """Re-check the scroll hint: the view got wider or narrower."""
         self._sync_scroll_hint()
+        self.replan()
+
+    def replan(self) -> None:
+        """Fit the columns to the room there is now; redraw only when the plan changes.
+
+        Cheap to call on every resize: nothing is measured while the room and
+        the inspector's place are the ones the plan was made for.
+        """
+        room = (self.scrollable_content_region.width, self.inspector_beside)
+        if room == self._planned_for:
+            return
+        self._planned_for = room
+        if self._plan_columns() != (self._given_way, self._name_cap) and not self._redraw_queued:
+            self._redraw_queued = True
+            self.call_after_refresh(self._run_queued_redraw)
+
+    def _run_queued_redraw(self) -> None:
+        self._redraw_queued = False
+        self.redraw()
+
+    def _wanted_columns(self) -> List[_Column]:
+        """The columns this fleet shows when there is room for all of them."""
+        return [
+            column for column in COLUMNS
+            if not column.optional
+            or any(self._optional_cell(column.key, i) for i in self._all_instances)
+        ]
+
+    def _natural_widths(self, columns: Sequence[_Column]) -> Dict[str, int]:
+        """The width each column takes for its longest value over the whole fleet, padding included.
+
+        The columns keep the widths of every row, filtered out or not, so the
+        plan must measure every row too. The result is kept until the rows or
+        the marks change.
+        """
+        stamp = (id(self._all_instances), len(self._all_instances), len(self._marks),
+                 self.cell_padding, tuple(column.key for column in columns))
+        if self._widths_cache is not None and self._widths_cache[0] == stamp:
+            return self._widths_cache[1]
+        padding = 2 * self.cell_padding
+        widths = {column.key: cell_len(column.label) for column in columns}
+        for index, instance in enumerate(self._all_instances):
+            cells = self._row_cells(index, instance, name_cap=None)
+            for column in columns:
+                cell = cells[column.key]
+                text = Text.from_markup(cell) if isinstance(cell, str) else cell
+                widths[column.key] = max(widths[column.key], text.cell_len)
+        measured = {key: width + padding for key, width in widths.items()}
+        self._widths_cache = (stamp, measured)
+        return measured
+
+    def _plan_columns(self) -> tuple[frozenset, Optional[int]]:
+        """Which columns give way, and the Name cap, so the table needs no sideways scroll."""
+        available = self.scrollable_content_region.width
+        columns = self._wanted_columns()
+        if available <= 0 or not columns:
+            return self._given_way, self._name_cap
+        widths = self._natural_widths(columns)
+        total = sum(widths.values())
+        wanted = {column.key for column in columns}
+        given_way = set()
+        for key in _GIVE_WAY_ORDER:
+            if total <= available:
+                break
+            if key in wanted and (key == "ssh" or self.inspector_beside):
+                given_way.add(key)
+                total -= widths[key]
+        cap = None
+        if total > available and "name" in wanted:
+            content = widths["name"] - 2 * self.cell_padding
+            cap = max(_NAME_MINIMUM, content - (total - available))
+            if cap >= content:
+                cap = None
+        return frozenset(given_way), cap
 
     def _sync_scroll_hint(self) -> None:
         """Say so in the bottom border while columns are out of view."""
@@ -193,14 +280,19 @@ class InstanceTable(DataTable):
         """Populate table with instances.
 
         A team's shared server that is also one of the user's own is listed
-        once, as the user's own row marked as shared.
+        once, as the user's own row marked as shared. The search and the row
+        filter stay applied, and the cursor stays on its server (or, when
+        that server is gone, on the row at the same place).
 
         Args:
             instances: List of instance dictionaries.
         """
+        previous = self._cursor_anchor()
         self._all_instances, self._shared_by = fold_shared(instances)
-        self._filtered_instances = self._all_instances.copy()
+        self._widths_cache = None
+        self._apply_filters()
         self._refresh_table()
+        self._restore_cursor(previous)
 
     def _shared_with(self, instance: dict) -> List[str]:
         """The teams sharing *instance*: its own team, or the teams sharing an own row."""
@@ -208,39 +300,96 @@ class InstanceTable(DataTable):
             return [str(instance.get("team_name") or instance.get("team_slug") or "")]
         return self._shared_by.get(id(instance), [])
 
-    def filter(self, query: str) -> None:
-        """Filter table rows by query string.
+    def filter(
+        self, query: str, row_filter: Optional[Callable[[dict], bool]] = None,
+    ) -> None:
+        """Filter table rows by query string and an optional row predicate.
 
         Case-insensitive substring match on name, type, id, provider and,
         when the provider has several accounts, the account label — so
-        ``prod/`` lists that account's servers.
+        ``prod/`` lists that account's servers. *row_filter* narrows the
+        matches further (the screen's state and provider chips).
 
         Args:
             query: Search query string.
+            row_filter: Keeps only the rows it returns True for.
         """
-        if not query:
-            self._filtered_instances = self._all_instances.copy()
-        else:
-            query_lower = query.lower()
-            self._filtered_instances = [
-                inst for inst in self._all_instances
-                if any(
-                    query_lower in value
-                    for value in _search_fields(inst, self._shared_with(inst))
-                )
-                or query_lower in display_name(inst).lower()
-            ]
+        previous = self._cursor_anchor()
+        self._query = query
+        self._row_filter = row_filter
+        self._apply_filters()
         self._refresh_table()
+        self._restore_cursor(previous)
 
-    def refresh_memory_status(self) -> None:
-        """Re-render rows so the memory status column recomputes, keeping cursor.
+    def searched_rows(self) -> List[dict]:
+        """The rows the search text lets through, before any row filter."""
+        return [row for row in self._all_instances if self._matches_query(row)]
 
-        Called (via the screen) after a background fleet auto-scan cycle so the
-        "Mem" column reflects freshly-probed servers immediately.  Re-renders
-        from the current ``_filtered_instances`` (so the active filter is
-        preserved) and restores the cursor row so a background refresh never
-        yanks the user's selection to the top.  A no-op when the table is empty.
+    def _matches_query(self, inst: dict) -> bool:
+        if not self._query:
+            return True
+        query_lower = self._query.lower()
+        return any(
+            query_lower in value
+            for value in _search_fields(inst, self._shared_with(inst))
+        ) or query_lower in display_name(inst).lower()
+
+    def _apply_filters(self) -> None:
+        keep = self._row_filter
+        self._filtered_instances = [
+            inst for inst in self._all_instances
+            if self._matches_query(inst) and (keep is None or keep(inst))
+        ]
+
+    def configure_filters(
+        self, query: str, row_filter: Optional[Callable[[dict], bool]],
+    ) -> None:
+        """Set the search and row filter the next ``populate`` applies, without redrawing."""
+        self._query = query
+        self._row_filter = row_filter
+
+    def set_marks(self, marks: Dict[str, str], *, redraw: bool = True) -> None:
+        """Mark servers a refresh added (``MARK_NEW``) or changed (``MARK_WAS``).
+
+        Keyed by ``row_identity``. Pass ``{}`` to clear them. Unless *redraw* is
+        False the rows redraw now, with the cursor kept.
         """
+        if marks == self._marks:
+            return
+        self._marks = dict(marks)
+        self._widths_cache = None
+        if redraw:
+            self.redraw()
+
+    def _cursor_anchor(self) -> tuple[Optional[str], int]:
+        """The selected server's id and row, to put the cursor back after a redraw."""
+        selected = self.get_selected_instance()
+        return (row_identity(selected) if selected else None), self.cursor_row
+
+    def _restore_cursor(self, anchor: tuple[Optional[str], int]) -> None:
+        """Move the cursor back to its server, else to the nearest row."""
+        instance_id, row = anchor
+        if not self._filtered_instances:
+            return
+        target = min(max(row, 0), len(self._filtered_instances) - 1)
+        if instance_id:
+            target = next(
+                (
+                    index for index, inst in enumerate(self._filtered_instances)
+                    if row_identity(inst) == instance_id
+                ),
+                target,
+            )
+        self.move_cursor(row=target, animate=False)
+
+    def redraw(self) -> None:
+        """Re-render the rows from ``_filtered_instances``, keeping the cursor.
+
+        The active filter is preserved and the cursor row restored, so a
+        background change never yanks the selection to the top. A no-op when
+        the table is empty.
+        """
+        self._widths_cache = None
         if not self._filtered_instances:
             return
         saved_row = self.cursor_row
@@ -283,27 +432,31 @@ class InstanceTable(DataTable):
 
     def _refresh_table(self) -> None:
         """Refresh table display with current filtered instances."""
-        memory_service = getattr(self.app, "memory_service", None)
         # Judged on the whole fleet, not the filtered rows, so a search does
         # not make an optional column come and go.
-        columns = [
-            column
-            for column in COLUMNS
-            if not column.optional
-            or any(self._optional_cell(column.key, i) for i in self._all_instances)
-        ]
-        if columns == self._shown_columns:
-            self.clear()
-        else:
-            self.clear(columns=True)
-            self._setup_columns(columns)
+        self._given_way, self._name_cap = self._plan_columns()
+        self._planned_for = (self.scrollable_content_region.width, self.inspector_beside)
+        columns = [c for c in self._wanted_columns() if c.key not in self._given_way]
+        # The columns are rebuilt every time: a column left in place keeps the
+        # widest width it ever had (a mark that has expired, a long name that
+        # is gone), which would bring the sideways scroll back.
+        self.clear(columns=True)
+        self._setup_columns(columns)
         for idx, instance in enumerate(self._filtered_instances):
-            cells = self._row_cells(idx, instance, memory_service)
+            cells = self._row_cells(idx, instance)
             self.add_row(*(cells[column.key] for column in columns))
 
-    def _row_cells(self, idx: int, instance: dict, memory_service: Any) -> Dict[str, Any]:
+    def _row_cells(
+        self, idx: int, instance: dict, *, name_cap: Optional[int] = -1,
+    ) -> Dict[str, Any]:
         """Every column's cell for one server, by column key."""
+        # The screens package imports this table, so the import waits.
+        from servonaut.screens._fleet_filter import provider_label
+
         limits = {column.key: column.max_width for column in COLUMNS}
+        cap = self._name_cap if name_cap == -1 else name_cap
+        if cap is not None:
+            limits["name"] = cap
 
         def plain(key: str, value: Any) -> Text:
             return _fit(str(value or "") or _EMPTY, limits[key])
@@ -312,21 +465,47 @@ class InstanceTable(DataTable):
         coloured = self._colorize_state(state)
         return {
             "index": str(idx + 1),
-            "name": _name_cell(
+            "name": self._tinted(_name_cell(
                 instance, limits["name"], shared=id(instance) in self._shared_by,
-            ),
+                marked=row_identity(instance) in self._marks,
+            ), instance),
             # A state without a colour is provider text: never read as markup.
-            "state": coloured if coloured != state else plain("state", state),
-            "provider": plain("provider", instance.get("provider", "AWS")),
+            "state": self._state_cell(instance, coloured, plain("state", state), state),
+            "provider": plain("provider", provider_label(instance)),
             "public_ip": plain("public_ip", instance.get("public_ip")),
             "type": plain("type", instance.get("type")),
             "region": plain("region", instance.get("region")),
-            "private_ip": plain("private_ip", instance.get("private_ip")),
-            "id": plain("id", instance.get("id")),
-            "key": plain("key", _key_label(instance.get("key_name") or "")),
             "ssh": self._ssh_verify_cell(instance),
-            "memory": self._memory_icon(instance, memory_service),
         }
+
+    def _state_cell(self, instance: dict, coloured: str, plain_cell: Text, state: str) -> Any:
+        """The State cell, followed by what the last refresh did to the server."""
+        cell = coloured if coloured != state else plain_cell
+        mark = self._marks.get(row_identity(instance) or "")
+        if not mark:
+            return cell
+        text = Text.from_markup(cell) if isinstance(cell, str) else cell.copy()
+        text.append(f" {mark}", style="dim")
+        return self._tinted(text, instance)
+
+    def _tinted(self, text: Text, instance: dict) -> Text:
+        """*text* on a faint row tint when a refresh added or changed the server.
+
+        The tint blends the theme's success (new) or warning (changed) colour
+        into its background; a theme whose colours are not plain values (the
+        terminal-colour themes) keeps just the bold name and the note.
+        """
+        mark = self._marks.get(row_identity(instance) or "")
+        if not mark:
+            return text
+        token = "success" if mark == MARK_NEW else "warning"
+        try:
+            colours = self.app.get_css_variables()
+            tint = Color.parse(colours[token]).blend(Color.parse(colours["background"]), 0.8)
+        except (KeyError, ColorParseError):
+            return text
+        text.stylize(f"on {tint.hex}")
+        return text
 
     def _optional_cell(self, key: str, instance: dict) -> Optional[str]:
         """The cell an optional column shows for *instance*, or None if nothing."""
@@ -347,33 +526,8 @@ class InstanceTable(DataTable):
         return format_ssh_verify_state(
             instance.get("ssh_verify_status"),
             instance.get("ssh_verified_at"),
+            compact=True,
         )
-
-    def _memory_icon(self, instance: dict, memory_service) -> str:
-        """Return a compact Rich-markup icon for the memory column.
-
-        Delegates to :func:`compute_memory_status` from the fleet screen so
-        the instance list and fleet view stay in lockstep on status vocabulary.
-        """
-        if memory_service is None:
-            return "[dim]—[/dim]"
-        try:
-            from servonaut.screens.fleet_memory import (
-                compute_memory_status,
-                STATUS_FRESH,
-                STATUS_STALE,
-                STATUS_OPT_OUT,
-            )
-            status = compute_memory_status(instance, memory_service)
-        except Exception:
-            return "[dim]—[/dim]"
-        if status == STATUS_FRESH:
-            return "[green]●[/green]"
-        if status == STATUS_STALE:
-            return "[yellow]●[/yellow]"
-        if status == STATUS_OPT_OUT:
-            return "[red]⛔[/red]"
-        return "[dim]○[/dim]"
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.

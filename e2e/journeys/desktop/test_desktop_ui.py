@@ -98,8 +98,8 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
     async with desktop.in_process() as app, desktop.browser() as browser:
         page = await open_session(browser, app)
         tour = [
-            ("nav_custom_servers", "CustomServersScreen", "Custom Servers"),
-            ("nav_keys", "KeyManagementScreen", "SSH Key Management"),
+            ("nav_custom_servers", "CustomServersScreen", "Custom servers"),
+            ("nav_keys", "KeyManagementScreen", "Connection keys"),
             # Settings sits in a section that starts collapsed.
             ("nav_settings", "SettingsScreen", "Settings"),
             ("nav_list", "InstanceListScreen", FLEET_NAMES[0]),
@@ -176,14 +176,14 @@ async def test_keyboard_search_help_and_command_palette(desktop, seed):
         # The command palette: ctrl+p, a query, Enter.
         await page.press("Control+p")
         await tui.wait_for_screen("CommandPalette")
-        await page.type("Go to SSH Keys")
+        await page.type("Go to SSH keys")
         await tui.wait_until(
-            lambda: _palette_highlight(tui).startswith("Go to SSH Keys"), desc="palette entry"
+            lambda: _palette_highlight(tui).startswith("Go to SSH keys"), desc="palette entry"
         )
         mark = page.output_mark()
         await page.press("Enter")
         await tui.wait_for_screen("KeyManagementScreen")
-        await page.wait_for_text("SSH Key Management", since=mark)
+        await page.wait_for_text("Connection keys", since=mark)
         await page.press("Escape")
         await tui.wait_for_screen("InstanceListScreen")
         assert page.errors() == []

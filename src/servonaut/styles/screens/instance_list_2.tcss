@@ -1,6 +1,3 @@
-
-
-
 #instance_list_container {
     width: 1fr;
     height: 100%;
@@ -9,17 +6,220 @@
     background: $surface;
 }
 
-#instance_list_container InstanceTable {
+#instance_list_container #fleet_workspace_row {
+    width: 100%;
     height: 1fr;
-    margin-top: 1;
+    margin-top: 0;
 }
 
-#instance_detail {
+#fleet_table_column {
+    width: 1fr;
+    height: 100%;
+}
+
+#instance_list_container InstanceTable {
+    width: 1fr;
+    height: 1fr;
+    margin-top: 0;
+}
+
+/* The first listing: the table is only as tall as the servers listed so far,
+   and the placeholder rows continue its frame down to the bottom. */
+#instance_list_container InstanceTable.--loading {
+    height: auto;
+    max-height: 100%;
+    border-bottom: none;
+}
+
+#fleet_skeleton {
+    display: none;
+    width: 1fr;
+    height: 1fr;
+    margin: 0;
+    padding: 0 1;
+    border: round $panel-lighten-2;
+    border-top: none;
+    background: transparent;
+}
+
+#fleet_inspector {
+    width: 38;
+    height: 100%;
+    margin-left: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    overflow-y: auto;
+}
+
+InstanceListScreen.-narrow #fleet_inspector,
+InstanceListScreen.-content-narrow #fleet_inspector,
+InstanceListScreen.-chat-open #fleet_inspector {
+    display: none;
+}
+
+#fleet_inspector_header {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    border-bottom: solid $surface-lighten-1;
+    margin-bottom: 0;
+}
+
+#fleet_inspector Button {
+    width: 100%;
+    min-width: 0;
     height: 3;
     min-height: 3;
-    background: $panel;
-    border: none;
-    color: $text;
+    padding: 0;
+    margin: 0;
+}
+
+#fleet_inspector_grid {
+    width: 100%;
+    height: auto;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3 3 3;
+    grid-gutter: 0 1;
+    margin: 0;
+}
+
+#fleet_inspector_grid Button {
+    margin: 0;
+}
+
+#fleet_btn_ssh,
+#fleet_btn_browse,
+#fleet_btn_scp,
+#fleet_btn_command,
+#fleet_btn_logs,
+#fleet_btn_memory,
+#fleet_btn_ai,
+#fleet_btn_actions {
+    width: 100%;
+}
+
+#fleet_values_heading {
+    width: 100%;
+    height: 1;
     margin-top: 1;
 }
 
+#fleet_values_title {
+    width: 1fr;
+    height: 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+/* The inspector's blanket button size would stretch the link. */
+#fleet_inspector Button.fleet-copy-row {
+    width: auto;
+    height: 1;
+    min-height: 1;
+}
+
+#fleet_inspector #fleet_values {
+    width: 100%;
+    height: 1fr;
+    min-height: 3;
+    scrollbar-size-vertical: 1;
+}
+
+.value-row {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    color: $text;
+}
+
+.value-label {
+    width: 11;
+    height: auto;
+    color: $text-muted;
+}
+
+.value-text {
+    width: 1fr;
+    height: auto;
+}
+
+.value-row:hover {
+    background: $boost;
+}
+
+.value-row:focus {
+    background: $boost;
+    text-style: bold;
+}
+
+#fleet_values_hint {
+    width: 100%;
+    height: 1;
+    color: $text-muted;
+}
+
+#fleet-bottom {
+    dock: bottom;
+    width: 100%;
+    height: auto;
+}
+
+#fleet-bottom > StatusBar,
+#fleet-bottom > Footer {
+    dock: none;
+}
+
+/* The one-line form replaces the inspector's list wherever the inspector is
+   hidden. */
+#fleet_value_bar {
+    display: none;
+    width: 100%;
+    height: auto;
+    max-height: 2;
+}
+
+InstanceListScreen.-narrow #fleet_value_bar,
+InstanceListScreen.-content-narrow #fleet_value_bar,
+InstanceListScreen.-chat-open #fleet_value_bar {
+    display: block;
+}
+
+#fleet_value_line {
+    width: 1fr;
+    height: auto;
+    max-height: 3;
+    grid-size: 4;
+    grid-columns: auto;
+    grid-rows: 1;
+    grid-gutter: 0 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* The widget picks how many columns the values fit in (see fit_columns). */
+#fleet_value_line.-columns-3 { grid-size: 3; }
+#fleet_value_line.-columns-2 { grid-size: 2; }
+
+/* Even two do not fit: equal columns, long values cut with an ellipsis. */
+#fleet_value_line.-flexible { grid-columns: 1fr; }
+#fleet_value_line.-flexible .value-row,
+#fleet_value_line.-flexible .value-text { width: 1fr; }
+
+#fleet_value_line .value-row {
+    width: auto;
+    height: 1;
+}
+
+#fleet_value_line .value-label {
+    width: auto;
+    margin-right: 1;
+}
+
+#fleet_value_line .value-text {
+    width: auto;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}

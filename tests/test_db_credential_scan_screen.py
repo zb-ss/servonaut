@@ -14,16 +14,21 @@ import pytest
 from textual.app import App
 from textual.widgets import Input, OptionList, Static
 
+from servonaut.styles import CSS_FILES
 from servonaut.screens.db_credential_scan import (
     DbCredentialScanScreen,
     _DbLabelPromptModal,
 )
+
+from tests._native_actions import click_action
 
 _SECRET_PW = "s3cr3t-passw0rd-xyz"
 _STORE = "the local secret store (~/.servonaut/secrets.json)"
 
 
 class _WrapperApp(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, *, tools, config=None, **kwargs):
         super().__init__(**kwargs)
         self.demo_mode = False
@@ -142,6 +147,41 @@ async def test_scan_populates_list_without_plaintext():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("long_roots,long_error", [(True, False), (False, True), (True, True)])
+async def test_long_scan_context_keeps_results_and_actions_reachable(long_roots, long_error):
+    from servonaut.config.schema import AppConfig
+
+    # Long remote paths and multiline tool failures must remain complete while
+    # native focus scrolling still reaches the review list and scan actions.
+    roots = [f"/srv/{'application/' * 18}{index}" for index in range(3)] if long_roots else []
+    error = "\n".join(f"Remote diagnostic line {index}: unable to inspect settings" for index in range(25))
+    tools = _tools_with_candidates()
+    if long_error:
+        tools.db_scan_stage.return_value = {"error": error, "candidates": []}
+    config = AppConfig(db_scan_roots={"i-1": roots})
+    app = _WrapperApp(tools=tools, config=config)
+
+    async with app.run_test(headless=True, size=(100, 30)) as pilot:
+        await _settle(pilot)
+        rendered = _rendered(app.screen)
+        for root in roots:
+            assert root in rendered
+        if long_error:
+            assert error in rendered
+
+        candidates = app.screen.query_one("#db_scan_candidates", OptionList)
+        candidates.focus()
+        await pilot.wait_for_scheduled_animations()
+        assert app.screen.region.contains_region(candidates.region)
+        hit = app.get_widget_at(*candidates.content_region.center)[0]
+        assert hit is candidates or candidates in hit.ancestors
+
+        await click_action(pilot, "#db_scan_rescan")
+        await _settle(pilot)
+        assert tools.db_scan_stage.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_copy_is_plain_and_engines_are_named_like_the_cli():
     tools = _tools_with_two_labeled_candidates()
     app = _WrapperApp(tools=tools)
@@ -186,8 +226,21 @@ async def test_highlighted_row_is_what_the_store_button_stores():
     async with app.run_test(headless=True) as pilot:
         await _settle(pilot)
         await pilot.press("down")
+        candidates = app.screen.query_one("#db_scan_candidates", OptionList)
+        assert candidates.highlighted == 1
+        assert app.screen._selected_token == "dbstg_blog"
+        # The review pane is a native scroll stop before its Store action.
         await pilot.press("tab")
-        assert app.focused is app.screen.query_one("#db_scan_store")
+        assert app.focused is app.screen.query_one("#db_scan_review")
+        await pilot.press("tab")
+        store = app.screen.query_one("#db_scan_store")
+        assert app.focused is store
+        assert candidates.highlighted == 1
+        assert app.screen._selected_token == "dbstg_blog"
+        await pilot.wait_for_scheduled_animations()
+        assert app.screen.region.contains_region(store.region)
+        hit = app.get_widget_at(*store.content_region.center)[0]
+        assert hit is store or store in hit.ancestors
         await pilot.press("enter")
         await pilot.pause(0.05)
         assert isinstance(app.screen, _DbLabelPromptModal)
@@ -270,11 +323,11 @@ async def test_store_without_label_names_the_connection():
     app = _WrapperApp(tools=tools)
     async with app.run_test(headless=True) as pilot:
         await _settle(pilot)
-        await pilot.click("#db_scan_store")
+        await click_action(pilot, "#db_scan_store")
         await pilot.pause(0.05)
         # Store prompts for a name first; confirm the derived (empty) default.
         assert isinstance(app.screen, _DbLabelPromptModal)
-        await pilot.click("#btn_db_label_store")
+        await click_action(pilot, "#btn_db_label_store")
         await _settle(pilot)
         text = _rendered(app.screen)
         prompt = _rows(app.screen)["dbstg_abc123"]
@@ -294,12 +347,12 @@ async def test_store_label_override_passed_to_save():
     app = _WrapperApp(tools=tools)
     async with app.run_test(headless=True) as pilot:
         await _settle(pilot)
-        await pilot.click("#db_scan_store")
+        await click_action(pilot, "#db_scan_store")
         await pilot.pause(0.05)
         assert isinstance(app.screen, _DbLabelPromptModal)
         # Operator types a custom name (e.g. to separate prod vs staging).
         app.screen.query_one("#db_label_input", Input).value = "storefront-prod"
-        await pilot.click("#btn_db_label_store")
+        await click_action(pilot, "#btn_db_label_store")
         await pilot.pause(0.05)
     tools.db_setup_save.assert_awaited_once()
     assert tools.db_setup_save.call_args.kwargs["label"] == "storefront-prod"
@@ -311,7 +364,7 @@ async def test_label_prompt_is_plain():
     app = _WrapperApp(tools=tools)
     async with app.run_test(headless=True) as pilot:
         await _settle(pilot)
-        await pilot.click("#db_scan_store")
+        await click_action(pilot, "#db_scan_store")
         await pilot.pause(0.05)
         text = _rendered(app.screen)
     assert "Name this database" in text
@@ -325,10 +378,10 @@ async def test_store_cancel_label_modal_skips_save():
     app = _WrapperApp(tools=tools)
     async with app.run_test(headless=True) as pilot:
         await _settle(pilot)
-        await pilot.click("#db_scan_store")
+        await click_action(pilot, "#db_scan_store")
         await pilot.pause(0.05)
         assert isinstance(app.screen, _DbLabelPromptModal)
-        await pilot.click("#btn_db_label_cancel")
+        await click_action(pilot, "#btn_db_label_cancel")
         await pilot.pause(0.05)
         prompt = _rows(app.screen)["dbstg_abc123"]
     tools.db_setup_save.assert_not_awaited()

@@ -1,7 +1,7 @@
-"""Provider-pick modal: T10 fallback AND user-driven session switch.
+"""Provider picker for automatic fallback and user-driven session switches.
 
-Originally built for the T10 watcher (second ``upstream_unavailable``
-within 60s), this modal is also reused by the chat panel's provider
+Originally built for a second ``upstream_unavailable`` error
+within 60s, this modal is also reused by the chat panel's provider
 button for a deliberate, user-initiated session-scope switch. The
 ``title``/``body`` constructor arguments let callers tailor the copy
 so the user-driven path doesn't read like a failure (the previous
@@ -13,15 +13,20 @@ do you want to use for THIS session"), so a Modal is the right fit.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from typing import List, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Static
+from textual.widgets import Button, Footer, Label, Static
 
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 
 
@@ -58,54 +63,18 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss_none", "Cancel", show=True),
     ]
 
+    CSS_PATH = Path(__file__).parent.parent / "styles/screens/ai_choice_dialogs.tcss"
+
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    AIFallbackPromptModal {
-        align: center middle;
-    }
-
-    AIFallbackPromptModal #ai_fallback_container {
-        width: 76;
-        height: auto;
-        border: round $warning;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    AIFallbackPromptModal #ai_fallback_title {
-        height: auto;
-        text-style: bold;
-        color: $warning;
-        margin-bottom: 1;
-    }
-
-    AIFallbackPromptModal #ai_fallback_reason {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    AIFallbackPromptModal #ai_fallback_body {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    AIFallbackPromptModal #ai_fallback_no_alternate {
-        height: auto;
-        margin-bottom: 1;
-    }
-
     AIFallbackPromptModal #ai_fallback_buttons {
         height: auto;
-        align: center middle;
     }
 
     AIFallbackPromptModal #ai_fallback_buttons Button {
-        margin: 0 1;
-    }
-
-    AIFallbackPromptModal #ai_fallback_keep {
-        height: auto;
-        margin-top: 1;
-        align: center middle;
+        width: 100%;
+        margin-bottom: 1;
     }
     """
 
@@ -130,7 +99,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
                 clean.append(normalised)
         self._available = clean
         self._reason = (reason or "").strip()
-        # Defaults preserve the original T10 copy for the auto-fallback
+        # Defaults preserve the automatic fallback copy for that
         # caller; the chat panel's manual switcher overrides all three.
         # Strip BEFORE the OR so a whitespace-only override falls back
         # to the default instead of rendering an empty header / button.
@@ -144,23 +113,21 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        children = [
-            Static(
-                f"[bold $text-warning]{escape(self._title)}[/bold $text-warning]",
-                id="ai_fallback_title",
-            ),
-        ]
+        yield DialogNotificationSpace()
+        children = []
         if self._reason:
             children.append(
                 Static(
                     f"[dim]{escape(self._reason)}[/dim]",
                     id="ai_fallback_reason",
+                    classes="dialog-description",
                 )
             )
         children.append(
             Static(
                 escape(self._body),
                 id="ai_fallback_body",
+                classes="dialog-description",
             )
         )
 
@@ -176,7 +143,10 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
                     )
                 )
             children.append(
-                Horizontal(*buttons, id="ai_fallback_buttons")
+                Label("Available providers", id="ai_fallback_options_label")
+            )
+            children.append(
+                Vertical(*buttons, id="ai_fallback_buttons")
             )
         else:
             # No fallback configured — show a hint instead of buttons.
@@ -191,14 +161,20 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
                 )
             )
 
-        children.append(
-            Vertical(
+        yield DialogFrame(
+            heading=Static(
+                f"[bold $text-warning]{escape(self._title)}[/bold $text-warning]",
+                id="ai_fallback_title",
+            ),
+            body=DialogBody(*children),
+            actions=DialogActions(
                 Button(escape(self._keep_label), id="btn_fallback_keep", variant="default"),
                 id="ai_fallback_keep",
-            )
+            ),
+            id="ai_fallback_container",
+            size="standard",
+            severity="warning",
         )
-
-        yield Container(*children, id="ai_fallback_container")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

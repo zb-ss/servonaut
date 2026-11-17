@@ -1,0 +1,464 @@
+"""Shared control styling, checked on widgets laid out with the real stylesheet."""
+
+from __future__ import annotations
+
+import pytest
+from rich.cells import cell_len
+from textual.app import App, ComposeResult
+from textual.color import Color
+from textual.containers import Vertical
+from textual.geometry import Region
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    MaskedInput,
+    RadioButton,
+    RadioSet,
+    Select,
+    Static,
+    TextArea,
+)
+
+from servonaut.screens.instance_list import FleetChip
+from servonaut.styles import CSS_FILES
+from servonaut.styles.themes import SERVONAUT_THEMES
+from servonaut.widgets.action_button import ActionButton
+from servonaut.widgets.link_button import LinkButton
+from servonaut.widgets.workspace import WorkspaceControls
+
+FRAMED = ("#select_box", "#input_box", "#masked_box", "#area_box", "#check_box", "#radio_box")
+
+
+class _ControlsApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield Select([("One", 1), ("Two", 2)], id="select_box")
+        yield Input(id="input_box")
+        yield MaskedInput("999", id="masked_box")
+        yield TextArea(id="area_box")
+        yield Checkbox("Check", id="check_box")
+        yield RadioSet(RadioButton("Radio"), id="radio_box")
+
+
+def _edges(widget) -> list[str]:
+    return [edge[0] for edge in widget.styles.border]
+
+
+def _frame(app: App, selector: str):
+    widget = app.query_one(selector)
+    return widget.query_one("SelectCurrent") if isinstance(widget, Select) else widget
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", FRAMED)
+async def test_framed_controls_use_round_borders_idle_and_focused(selector: str) -> None:
+    app = _ControlsApp()
+    async with app.run_test(size=(80, 60)) as pilot:
+        await pilot.pause()
+        assert _edges(_frame(app, selector)) == ["round"] * 4
+        app.query_one(selector).focus()
+        await pilot.pause()
+        assert _edges(_frame(app, selector)) == ["round"] * 4
+
+
+@pytest.mark.asyncio
+async def test_select_keeps_its_height_and_rounds_the_open_list() -> None:
+    app = _ControlsApp()
+    async with app.run_test(size=(80, 60)) as pilot:
+        select = app.query_one(Select)
+        select.focus()
+        await pilot.pause()
+        assert select.region.height == 3
+        await pilot.press("enter")
+        await pilot.pause()
+        overlay = select.query_one("SelectOverlay")
+        assert select.expanded
+        assert _edges(overlay) == ["round"] * 4
+        assert _edges(select.query_one("SelectCurrent")) == ["round"] * 4
+        assert select.region.height == 3
+
+
+def _underlined_cells(widget) -> tuple[str, int]:
+    """The widget's rendered text and how many of its cells carry an underline."""
+    text, underlined = "", 0
+    for strip in widget.render_lines(Region(0, 0, widget.size.width, widget.size.height)):
+        for segment in strip:
+            text += segment.text
+            if segment.style is not None and segment.style.underline:
+                underlined += cell_len(segment.text)
+    return text, underlined
+
+
+def _words_underlined(widget, label: str) -> bool:
+    """True when exactly the label's cells are underlined and nothing else."""
+    text, underlined = _underlined_cells(widget)
+    return text.strip() == label and underlined == cell_len(label)
+
+
+class _LinkApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield Button("Plain", id="spacer_button")
+        yield LinkButton("Refresh (r)", id="link_idle")
+        yield LinkButton("Copy row", id="link_disabled", disabled=True)
+        yield LinkButton("Update to v1.2.3", id="link_with_classes", classes="extra")
+        yield WorkspaceControls("Fleet")
+
+
+LINK_IDS = ("#link_idle", "#link_disabled", "#link_with_classes", "#workspace_navigation", "#workspace_chat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", LINK_IDS)
+async def test_link_controls_underline_only_their_words(selector: str) -> None:
+    app = _LinkApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        link = app.query_one(selector, Button)
+        label = link.label.plain
+        text, underlined = _underlined_cells(link)
+        assert link.size.height == 1
+        assert text.strip() == label
+        assert underlined == cell_len(label)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", ("#link_idle", "#workspace_chat"))
+async def test_link_controls_keep_words_only_underline_when_hovered_or_focused(selector: str) -> None:
+    app = _LinkApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        link = app.query_one(selector, Button)
+        label = link.label.plain
+        await pilot.hover(selector)
+        await pilot.pause()
+        assert link.mouse_hover
+        assert _words_underlined(link, label)
+        link.can_focus = True
+        link.focus()
+        await pilot.hover("#spacer_button")
+        await pilot.pause()
+        assert link.has_focus
+        assert _words_underlined(link, label)
+        assert link.region.height == 1
+
+
+BORDER_GLYPHS = set("╭╮╰╯─│━┃┏┓┗┛▔▁▏▕▀▄█")
+
+
+class _HoverApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield Button("Away", id="away_button")
+        yield FleetChip("state", "running", "Running")
+        yield FleetChip("provider", "aws", "AWS")
+        yield Button("Compact", id="compact_button", compact=True)
+        yield ActionButton("Action", id="compact_action", compact=True)
+        yield LinkButton("Refresh (r)", id="link_button")
+
+
+BORDERLESS = ("#chip_state_running", "#chip_provider_aws", "#compact_button", "#compact_action", "#link_button")
+
+
+def _top_row_text(widget) -> str:
+    strip = widget.render_lines(Region(0, 0, widget.size.width, 1))[0]
+    return "".join(segment.text for segment in strip)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", BORDERLESS)
+async def test_borderless_buttons_gain_no_border_on_hover_or_focus(selector: str) -> None:
+    app = _HoverApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        widget = app.query_one(selector, Button)
+        app.query_one("#away_button").focus()
+        await pilot.hover("#away_button")
+        await pilot.pause()
+        idle = widget.region
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+        await pilot.hover(selector)
+        await pilot.pause()
+        assert widget.mouse_hover
+        assert widget.region == idle
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+        widget.focus()
+        await pilot.hover("#away_button")
+        await pilot.pause()
+        assert widget.has_focus
+        assert widget.region == idle
+        assert not (set(_top_row_text(widget)) & BORDER_GLYPHS)
+
+
+class _BackApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Focus holder", id="holder")
+        yield ActionButton("Back", "esc", id="btn_back")
+        yield ActionButton("Refresh", "r", id="other_action")
+
+
+def _word_colour(widget, word: str):
+    """The foreground the label's words are painted with."""
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if word in segment.text and segment.style is not None:
+                return segment.style.color
+    raise AssertionError(f"{word!r} is not painted")
+
+
+@pytest.mark.asyncio
+async def test_back_action_words_are_not_muted() -> None:
+    app = _BackApp()
+    async with app.run_test(size=(60, 12)) as pilot:
+        app.query_one("#holder").focus()
+        await pilot.pause()
+        back = app.query_one("#btn_back", ActionButton)
+        other = app.query_one("#other_action", ActionButton)
+        assert _word_colour(back, "Back") == _word_colour(other, "Refresh")
+
+
+class _PanelApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="bar"):
+            yield Input(id="bar_input")
+            yield Select([("One", 1)], id="bar_select")
+            yield Checkbox("Check", id="bar_check")
+            yield TextArea(id="bar_area")
+
+
+def _luminance(colour) -> float:
+    def linear(value: int) -> float:
+        channel = value / 255
+        return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(colour.r) + 0.7152 * linear(colour.g) + 0.0722 * linear(colour.b)
+
+
+def _frame_contrast(frame, backdrop) -> float:
+    lighter, darker = sorted((_luminance(frame), _luminance(backdrop)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+async def test_idle_frames_stay_visible_on_a_panel_backdrop(theme: str) -> None:
+    app = _PanelApp()
+    app.theme = theme
+    async with app.run_test(size=(80, 40)) as pilot:
+        app.query_one("#bar").styles.background = app.theme_variables["panel"]
+        app.set_focus(None)
+        await pilot.pause()
+        backdrop = app.query_one("#bar").styles.background
+        input_frame = app.query_one("#bar_input").styles.border.top[1]
+        for selector in ("#bar_select > SelectCurrent", "#bar_check", "#bar_area"):
+            frame = app.query_one(selector).styles.border.top[1]
+            assert frame != backdrop, selector
+            assert frame == input_frame, selector
+            if frame.ansi is None and backdrop.ansi is None:
+                assert _frame_contrast(frame, backdrop) >= 1.3, selector
+
+
+@pytest.mark.asyncio
+async def test_command_palette_list_stays_unframed() -> None:
+    app = _ControlsApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        await pilot.pause()
+        palette_list = app.screen.query_one("CommandList")
+        assert palette_list.styles.border.left[0] in ("", "none")
+        assert palette_list.styles.border.right[0] in ("", "none")
+
+
+class _HintedLinkApp(App):
+    CSS_PATH = CSS_FILES
+
+    def compose(self) -> ComposeResult:
+        yield LinkButton("Copy row", key="y", id="hinted")
+        yield LinkButton("Hide navigation", id="plain")
+
+
+@pytest.mark.asyncio
+async def test_link_key_hint_is_quiet_and_not_underlined() -> None:
+    app = _HintedLinkApp()
+    async with app.run_test(size=(60, 8)) as pilot:
+        await pilot.pause()
+        link = app.query_one("#hinted", LinkButton)
+        underlined, hint_styles, word_colours = "", [], set()
+        for strip in link.render_lines(Region(0, 0, link.size.width, link.size.height)):
+            for segment in strip:
+                if segment.style is not None and segment.style.underline:
+                    underlined += segment.text
+                    word_colours.add(segment.style.color)
+                elif segment.text.strip():
+                    hint_styles.append((segment.text.strip(), segment.style))
+        assert underlined == "Copy row"
+        assert [text for text, _ in hint_styles] == ["\u2590", "y", "\u258c"]
+        assert hint_styles[1][1].color not in word_colours  # dimmer than the words
+        assert link.label.plain == "Copy row \u2590y\u258c"
+
+
+class _HintColourApp(App):
+    CSS_PATH = CSS_FILES
+    CSS = "#muted { color: $text-muted; }"
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield Static("muted words", id="muted")
+        yield ActionButton("Refresh", "r", compact=True, id="action")
+        yield LinkButton("Copy row", key="y", id="link")
+
+
+def _hex_of(widget, text: str) -> str:
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if text == segment.text.strip() and segment.style is not None and segment.style.color is not None:
+                return segment.style.color.get_truecolor().hex.lower()
+    raise AssertionError(f"{text!r} is not painted")
+
+
+def _key_colours(widget, text: str) -> tuple:
+    """(text colour, fill colour) of the key *text* as painted, as 0-255 triples."""
+    for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+        for segment in strip:
+            if text == segment.text.strip() and segment.style is not None:
+                return (
+                    segment.style.color.get_truecolor(), segment.style.bgcolor.get_truecolor(),
+                )
+    raise AssertionError(f"{text!r} is not painted")
+
+
+def _lum(colour) -> float:
+    def channel(value: int) -> float:
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(colour.red) + 0.7152 * channel(colour.green) + 0.0722 * channel(colour.blue)
+
+
+def _key_ratio(first, second) -> float:
+    light, dark = sorted((_lum(first), _lum(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light"])
+async def test_key_caps_are_a_quiet_key_on_a_raised_fill(theme: str) -> None:
+    app = _HintColourApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 10)) as pilot:
+        app.set_focus(None)
+        await pilot.pause()
+        words = _hex_of(app.query_one("#action"), "Refresh")
+        for selector, key in (("#action", "r"), ("#link", "y")):
+            colour, fill = _key_colours(app.query_one(selector), key)
+            # Readable on its fill, and quieter than the words beside it.
+            assert _key_ratio(colour, fill) >= 3.0, selector
+            assert colour.hex.lower() != words, selector
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+async def test_key_caps_are_reversed_in_the_terminal_colour_themes(theme: str) -> None:
+    app = _HintColourApp()
+    app.theme = theme
+    async with app.run_test(size=(60, 10)) as pilot:
+        app.set_focus(None)
+        await pilot.pause()
+        for selector, key, words in (("#action", "r", "Refresh"), ("#link", "y", "Copy row")):
+            widget = app.query_one(selector)
+            styles = {}
+            for strip in widget.render_lines(Region(0, 0, widget.outer_size.width, widget.outer_size.height)):
+                for segment in strip:
+                    if segment.text.strip() in (key, words) and segment.style is not None:
+                        styles[segment.text.strip()] = segment.style
+            assert styles[key].reverse and not styles[words].reverse, selector
+
+
+class _DisabledApp(App):
+    CSS_PATH = CSS_FILES
+
+    def __init__(self) -> None:
+        super().__init__()
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+
+    def compose(self) -> ComposeResult:
+        yield ActionButton("Holder", id="holder")
+        yield ActionButton("Primary", role="primary", disabled=True, id="d_primary")
+        yield ActionButton("Error", role="error", disabled=True, id="d_error")
+        yield ActionButton("Neutral", disabled=True, id="d_default")
+        yield ActionButton("Live", role="primary", id="e_primary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["servonaut", "servonaut-light", "ansi-dark", "ansi-light"])
+async def test_disabled_actions_use_the_disabled_border_in_every_role(theme: str) -> None:
+    app = _DisabledApp()
+    app.theme = theme
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        edges = {
+            name: app.query_one(f"#{name}").styles.border.top[1]
+            for name in ("d_primary", "d_error", "d_default")
+        }
+        assert len({str(colour) for colour in edges.values()}) == 1
+        enabled = app.query_one("#e_primary").styles.border.top[1]
+        assert edges["d_primary"] != enabled
+        if theme in ("servonaut", "servonaut-light"):
+            assert edges["d_primary"] == Color.parse(app.theme_variables["border-blurred"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "ansi-light"])
+@pytest.mark.parametrize("compact", [False, True])
+async def test_disabled_actions_are_dimmed_and_do_not_react_to_hover_in_terminal_themes(
+    theme: str, compact: bool,
+) -> None:
+    class _App(_DisabledApp):
+        def compose(self) -> ComposeResult:
+            yield ActionButton("Holder", id="holder", compact=compact)
+            yield ActionButton("Primary", role="primary", disabled=True, id="d_primary", compact=compact)
+            yield ActionButton("Neutral", id="e_default", compact=compact)
+
+    app = _App()
+    app.theme = theme
+    async with app.run_test(size=(60, 12)) as pilot:
+        await pilot.pause()
+        disabled = app.query_one("#d_primary")
+
+        def word_style():
+            for strip in disabled.render_lines(Region(0, 0, disabled.outer_size.width, disabled.outer_size.height)):
+                for segment in strip:
+                    if "Primary" in segment.text:
+                        return segment.style
+            raise AssertionError("label not painted")
+
+        idle = word_style()
+        assert idle.dim and not idle.bold and not idle.underline
+        await pilot.hover("#d_primary")
+        await pilot.pause()
+        assert word_style() == idle
+        enabled = app.query_one("#e_default")
+        for strip in enabled.render_lines(Region(0, 0, enabled.outer_size.width, enabled.outer_size.height)):
+            for segment in strip:
+                if "Neutral" in segment.text:
+                    assert not segment.style.dim

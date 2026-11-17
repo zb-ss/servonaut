@@ -21,8 +21,12 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 from textual.widgets import Button, Checkbox, DataTable, Input, Static
 
 from servonaut.screens.bw_unlock_modal import BwUnlockModal
@@ -45,6 +49,8 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
 
     Dismisses the chosen ref dict, or ``None`` on cancel / unentitled / error.
     """
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -88,12 +94,17 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
         return resolved_bw_vault_folder(self.app)
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold $text-accent]Pick SSH key from Bitwarden[/bold $text-accent]", id="bw_picker_title"),
-            Vertical(
+        yield DialogNotificationSpace()
+        actions = DialogActions()
+        actions.display = False  # Each dynamic state retains its own actions.
+        yield DialogFrame(
+            heading=Static("[bold $text-accent]Pick SSH key from Bitwarden[/bold $text-accent]", id="bw_picker_title"),
+            body=DialogContent(
                 Static("[dim]Loading…[/dim]"),
                 id="bw_picker_body",
             ),
+            actions=actions,
+            size="large",
             id="bw_picker_container",
         )
 
@@ -200,7 +211,7 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
                 "The Bitwarden SSH key picker is available on the Solo and Teams plans."
             ),
             Static(f"[dim]{escape(reason)}[/dim]"),
-            Static("[dim][u] Pricing   ·   [o] Docs[/dim]"),
+            Static("[dim][b]u[/b] Pricing   ·   [b]o[/b] Docs[/dim]"),
             Horizontal(Button("Close", variant="default", id="bw_picker_close")),
         )
 

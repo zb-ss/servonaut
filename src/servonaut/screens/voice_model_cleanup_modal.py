@@ -18,11 +18,16 @@ from typing import List
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from servonaut.services.voice_engines import human_bytes
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 class VoiceModelCleanupModal(ModalScreen[bool]):
@@ -38,39 +43,11 @@ class VoiceModelCleanupModal(ModalScreen[bool]):
         Binding("escape", "keep", "Keep", show=True),
     ]
 
+    AUTO_FOCUS = "#vmc_keep"
+
     DEFAULT_CSS = """
-    VoiceModelCleanupModal {
-        align: center middle;
-    }
-    VoiceModelCleanupModal #vmc_container {
-        width: 68;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-    VoiceModelCleanupModal #vmc_title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    VoiceModelCleanupModal #vmc_body {
-        margin-bottom: 1;
-    }
     VoiceModelCleanupModal .vmc-model {
-        padding-left: 2;
         color: $text-muted;
-    }
-    VoiceModelCleanupModal #vmc_total {
-        margin-top: 1;
-        text-style: bold;
-    }
-    VoiceModelCleanupModal #vmc_buttons {
-        height: auto;
-        align: right middle;
-        margin-top: 1;
-    }
-    VoiceModelCleanupModal #vmc_keep {
-        margin-right: 1;
     }
     """
 
@@ -83,7 +60,7 @@ class VoiceModelCleanupModal(ModalScreen[bool]):
             active_label: Name of the model now in use, so the user can see
                 what is being kept.
         """
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._stale = list(stale_models)
         self._active_label = active_label
 
@@ -93,25 +70,30 @@ class VoiceModelCleanupModal(ModalScreen[bool]):
         rows = [
             Static(
                 f"  • {escape(model.label)} — {escape(model.human_size)}",
-                classes="vmc-model",
+                classes="vmc-model dialog-consequence",
             )
             for model in self._stale
         ]
 
-        yield Container(
-            Static("Remove the unused speech model?", id="vmc_title"),
-            Static(
-                f"Voice input now uses [bold]{escape(self._active_label)}[/bold]. "
-                "These downloads are no longer used:",
-                id="vmc_body",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("Remove the unused speech model?", id="vmc_title"),
+            body=DialogBody(
+                Static(
+                    f"Voice input now uses [bold]{escape(self._active_label)}[/bold]. "
+                    "These downloads are no longer used:",
+                    id="vmc_body",
+                    classes="dialog-description",
+                ),
+                *rows,
             ),
-            *rows,
-            Static(
+            status=Static(
                 f"Removing them frees {escape(human_bytes(total))}. "
                 "Keep them to switch back without downloading again.",
                 id="vmc_total",
+                classes="dialog-emphasis",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Keep both", variant="default", id="vmc_keep"),
                 Button(
                     f"Remove and free {human_bytes(total)}",
@@ -121,6 +103,7 @@ class VoiceModelCleanupModal(ModalScreen[bool]):
                 id="vmc_buttons",
             ),
             id="vmc_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:

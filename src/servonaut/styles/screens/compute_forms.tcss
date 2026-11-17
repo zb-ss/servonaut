@@ -1,0 +1,165 @@
+/* Identity and location form one decision column beside the provider's
+   native catalogs. Confirmation remains the final, docked step. */
+AWSCreateScreen #aws_create_container,
+HetznerCreateScreen #hetzner_create_container,
+OVHCloudCreateScreen #cloud_create_container {
+    padding: 0 2 2 2;
+}
+
+.compute-workflow .compute-workflow-heading {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.compute-workflow .compute-form-context {
+    height: auto;
+    margin: 0;
+    color: $text-muted;
+}
+
+.compute-workflow .compute-decision-workspace {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+.compute-workflow .compute-catalog-column {
+    width: 1fr;
+    height: auto;
+}
+
+.compute-workflow .compute-form-section {
+    height: auto;
+    width: 1fr;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.compute-workflow .compute-identity-section {
+    width: 34;
+    margin-right: 1;
+    background: transparent;
+}
+
+.compute-workflow .compute-section-title {
+    height: auto;
+    margin: 0 0 1 0;
+    text-style: bold;
+    color: $text-accent;
+}
+
+.compute-workflow .compute-form-section .section_header {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0;
+    border: none;
+    color: $text;
+}
+
+.compute-workflow .compute-form-section .note {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text-muted;
+    text-style: none;
+}
+
+.compute-workflow .compute-form-section Input,
+.compute-workflow .compute-form-section Select {
+    width: 1fr;
+    margin: 0 0 1 0;
+}
+
+.compute-workflow .compute-form-section AccountPicker {
+    width: 1fr;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.compute-workflow .compute-form-section AccountPicker > Label,
+AWSCreateScreen #aws_create_account > Label {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    border: none;
+    color: $text;
+    text-style: bold;
+}
+
+AWSCreateScreen #aws_create_container DataTable,
+HetznerCreateScreen #hetzner_create_container DataTable,
+OVHCloudCreateScreen #cloud_create_container DataTable {
+    height: auto;
+    min-height: 4;
+    max-height: 8;
+    margin: 0 0 1 0;
+    border: none;
+}
+
+.compute-workflow .compute-submit-region {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+.compute-workflow .compute-review-note {
+    height: auto;
+    color: $text-muted;
+}
+
+AWSCreateScreen #aws_create_actions,
+HetznerCreateScreen #hetzner_create_actions,
+OVHCloudCreateScreen #cloud_create_actions {
+    dock: none;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+AWSCreateScreen #aws_create_actions Button,
+HetznerCreateScreen #hetzner_create_actions Button,
+OVHCloudCreateScreen #cloud_create_actions Button {
+    min-width: 0;
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0;
+}
+
+OVHCloudCreateScreen .compute-workflow > BusyIndicator.read-loading {
+    dock: top;
+    height: 1;
+}
+
+AWSCreateScreen.-content-narrow .compute-decision-workspace,
+HetznerCreateScreen.-content-narrow .compute-decision-workspace,
+OVHCloudCreateScreen.-content-narrow .compute-decision-workspace {
+    layout: vertical;
+}
+
+AWSCreateScreen.-content-narrow .compute-identity-section,
+HetznerCreateScreen.-content-narrow .compute-identity-section,
+OVHCloudCreateScreen.-content-narrow .compute-identity-section {
+    width: 1fr;
+    margin-right: 0;
+}
+
+/* Keep the catalog viewport above Hetzner's fixed confirmation controls. */
+HetznerCreateScreen .compute-workflow .compute-decision-workspace {
+    height: 1fr;
+    overflow-y: auto;
+}

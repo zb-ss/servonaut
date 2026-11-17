@@ -474,12 +474,17 @@ class RedactionService:
             return f"i-{digest[:17]}"
         if "/" in instance_id:
             # OVH Public Cloud composite "<project_id>/<instance_id>".
+            # Both halves are replaced: a half of an unknown shape gets a
+            # hexadecimal stand-in rather than passing through, so no real
+            # part of the composite reaches the screen.
             parts = [
-                (self._fake_instance_id(part, salt, extra_width) or part) if part else part
+                (
+                    self._fake_instance_id(part, salt, extra_width)
+                    or hashlib.sha256((part + salt).encode()).hexdigest()[: max(8, min(len(part), 32))]
+                ) if part else part
                 for part in instance_id.split("/")
             ]
-            composite = "/".join(parts)
-            return None if composite == instance_id and not salt else composite
+            return "/".join(parts)
         if re.fullmatch(r"[0-9a-fA-F]{32}", instance_id):
             # Public Cloud project identifiers are compact hexadecimal IDs.
             return digest[:32]

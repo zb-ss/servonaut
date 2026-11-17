@@ -8,8 +8,12 @@ from typing import Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 from textual.widgets import Button, Collapsible, Input, Label, Static
 
 from servonaut.screens.bw_item_picker import BwItemPickerModal
@@ -32,6 +36,8 @@ class SshRefEditorModal(ModalScreen[bool]):
     Returns True if a ref was saved or deleted (so the caller can refresh
     the instance table). Returns False if the user cancelled.
     """
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -108,10 +114,13 @@ class SshRefEditorModal(ModalScreen[bool]):
             buttons.append(Button("Delete", variant="error", id="delete_btn"))
         buttons.append(Button("Save", variant="primary", id="save_btn"))
 
-        yield Container(
-            Static(title, id="ssh_ref_editor_title"),
-            Static(_HELP_TEXT, id="ssh_ref_editor_help"),
-            Vertical(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(title, id="ssh_ref_editor_title"),
+                Static(_HELP_TEXT, id="ssh_ref_editor_help"),
+            ),
+            body=DialogBody(
                 Static(self._selected_text(), id="ssh_ref_selected"),
                 Horizontal(
                     Button("Pick from vault…", variant="primary", id="pick_btn"),
@@ -142,7 +151,8 @@ class SshRefEditorModal(ModalScreen[bool]):
                 ),
                 id="ssh_ref_fields",
             ),
-            Horizontal(*buttons, classes="ssh_ref_actions_row"),
+            actions=DialogActions(*buttons, classes="ssh_ref_actions_row"),
+            size="large",
             id="ssh_ref_editor_container",
         )
 

@@ -109,6 +109,12 @@ async def test_seeded_home_shows_the_fleet_at_once(tui, seed):
 async def test_sidebar_tour_reaches_every_destination(tui, seed, size, leg):
     _seed_fleet(seed)
     async with tui(size=size) as t:
+        if size == SMALL_SIZE:
+            # Below about 110 columns the navigation starts hidden: the user
+            # opens it with the "Show navigation" control.
+            assert not t.nav_reachable("nav_list")
+            await t.click(t.on_screen("#workspace_navigation"))
+            await t.wait_until(lambda: t.nav_reachable("nav_list"), desc="navigation shown")
         for nav_id in HIDDEN_WHEN_SIGNED_OUT + HIDDEN_WITHOUT_PROVIDERS:
             assert not t.nav_reachable(nav_id), f"{nav_id} should be hidden"
 
@@ -137,7 +143,7 @@ async def test_sidebar_tour_reaches_every_destination(tui, seed, size, leg):
 async def test_palette_reaches_screens_and_respects_sign_in_gates(tui, seed):
     _seed_fleet(seed)
     async with tui() as t:
-        await t.palette("Go to Custom Servers")
+        await t.palette("Go to Custom servers")
         await t.wait_for_screen("CustomServersScreen")
 
         # Teams needs a Teams subscription: the user is told and stays put.
@@ -146,7 +152,7 @@ async def test_palette_reaches_screens_and_respects_sign_in_gates(tui, seed):
         assert t.screen_name() == "CustomServersScreen"
 
         # Config snapshots need an account: the user is sent to sign in.
-        await t.palette("Go to Sync Config")
+        await t.palette("Go to Sync config")
         await t.wait_for_toast("Sign in to manage config snapshots")
         await t.wait_for_screen("LoginScreen")
 
@@ -163,7 +169,7 @@ async def test_help_back_to_root_and_quit(tui, seed):
         await t.wait_for_screen("InstanceListScreen")
 
         # Leaving a top-level screen returns to the fleet, never to nothing.
-        await t.palette("Go to SSH Keys")
+        await t.palette("Go to SSH keys")
         await t.wait_for_screen("KeyManagementScreen")
         await t.press("escape")
         await t.wait_for_screen("InstanceListScreen")

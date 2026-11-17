@@ -138,6 +138,26 @@ async def _screen(page) -> str:
     return await page.page.evaluate("() => window.servonautQa.text()")
 
 
+# The fleet list says how fresh it is ("just now", "14 s ago", "6 min ago",
+# "2 h ago") and keeps that current by itself, so two reads of an otherwise
+# unchanged screen can differ in the age alone.
+_RELATIVE_AGE = re.compile(r"(?:just now|\d+ (?:s|min|h) ago)")
+
+
+def _without_relative_ages(screen: str) -> str:
+    """*screen* with each relative age replaced by one marker.
+
+    The words change width ("just now" to "12 s ago"), so the blanks around an
+    age are collapsed too; everything else must still match exactly.
+    """
+    lines = []
+    for line in screen.splitlines():
+        if _RELATIVE_AGE.search(line):
+            line = re.sub(r" {2,}", " ", _RELATIVE_AGE.sub("<age>", line))
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def _screen_until(page, predicate, desc: str, timeout: float = 20.0) -> str:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -219,7 +239,7 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
             " catch (error) { return error.message; } }"
         )
         assert rerun.startswith("this page already started its session")
-        assert await _screen(page) == screen
+        assert _without_relative_ages(await _screen(page)) == _without_relative_ages(screen)
         await page.page.evaluate("() => window.servonautQa.focus()")
         await _screen_until(page, lambda text: "o Actions" in text, "the fleet table focused again")
         # Without a captured terminal, waitForText says so at once.
@@ -255,6 +275,44 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
         center = await page.page.evaluate(client.cell_center_js(3, 2))
         assert center["x"] == pytest.approx(box["x"] + 3.5 * box["width"] / size["columns"])
         assert center["y"] == pytest.approx(box["y"] + 2.5 * box["height"] / size["rows"])
+
+        # Xterm's alternate screen retains allocated cells when the window
+        # shrinks. The observation helper must read only visible cell columns.
+        viewport = page.page.viewport_size
+        assert viewport is not None
+        grown = await page.resize(viewport["width"] + 400, viewport["height"])
+        assert grown["width"] > started["columns"]
+        await page.page.wait_for_function(
+            """columns => {
+              const t = window.servonautQa.terminal, b = t.buffer.active;
+              return t.cols > columns && Array.from({length:t.rows}, (_, y) =>
+                b.getLine(b.viewportY + y)?.translateToString(true, columns, t.cols) || ''
+              ).some(text => text.trim().length > 0);
+            }""",
+            arg=started["columns"],
+        )
+        shrunk = await page.resize(viewport["width"], viewport["height"])
+        assert shrunk == {"width": started["columns"], "height": started["rows"]}
+        observed = await page.page.evaluate(
+            """() => {
+              const qa = window.servonautQa, t = qa.terminal, b = t.buffer.active;
+              const lines = Array.from({length:t.rows}, (_, y) => b.getLine(b.viewportY + y));
+              return {
+                columns:t.cols, rows:t.rows, qaColumns:qa.columns, qaRows:qa.rows,
+                allocated:lines.map(line => line ? line.length : 0),
+                unbounded:lines.map(line => line ? line.translateToString(true) : '').join('\\n'),
+                visible:lines.map(line => line ? line.translateToString(true, 0, t.cols) : '').join('\\n'),
+                actual:qa.text(),
+              };
+            }"""
+        )
+        assert observed["columns"] == observed["qaColumns"] == shrunk["width"]
+        assert observed["rows"] == observed["qaRows"] == shrunk["height"]
+        assert max(observed["allocated"]) > observed["columns"], observed
+        assert observed["unbounded"] != observed["visible"], observed
+        assert observed["actual"] == observed["visible"], observed
+        assert len(observed["actual"].splitlines()) == observed["rows"]
+        assert "cache-1" in observed["actual"]
         assert page.errors() == []
 
     guard_log = Path(current["logs"]["guard"])

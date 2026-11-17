@@ -920,9 +920,9 @@ def test_relay_status_screen_shows_the_refusal_reason(tmp_path, monkeypatch):
 
     screen._refresh_local()
 
-    text = widget.update.call_args.args[0]
+    text = str(widget.update.call_args.args[0])
     assert "error" in text
-    assert "relay.base_url must be an https:// URL \\[not markup]" in text
+    assert "relay.base_url must be an https:// URL [not markup]" in text
 
 
 def test_tui_relay_toast_is_plain_text_and_stays_up(monkeypatch):

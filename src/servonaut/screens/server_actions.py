@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Mapping
+from dataclasses import replace
+from datetime import datetime
 from typing import Any, Dict, Optional, Union
 
 from rich.markup import escape
@@ -12,10 +14,10 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Checkbox, Footer, Input, Label, OptionList, Select, Static,
 )
@@ -37,9 +39,13 @@ from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.markup import literal, scrub
 from servonaut.utils.memory_panel import render_memory_panel
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._busy_work import BusyJob, BusyWork
 from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
 from servonaut.screens._demo_resolve import (
@@ -56,12 +62,28 @@ from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
 
 #: Per-action one-line help shown in the detail pane on focus.
+# How many findings the count looks at, and the statuses that no longer count as open.
+_FINDINGS_COUNT_LIMIT = 100
+_FINDINGS_SHOWN_MAX = 99
+_CLOSED_FINDING_STATUSES = ("resolved", "suppressed")
+
+# Footer keys that appear only on a wide terminal.
+_WIDE_FOOTER_KEYS = ("6", "8")
+
+# The cards stack into one column when the content column is narrower than this.
+_STACK_CARDS_BELOW = 96
+
+_LIVE_ALREADY_UPDATING = "Monitoring is already updating"
+
+# Seconds a failed one-off sample stays on the live card before it clears.
+_SAMPLE_ERROR_SECONDS = 6.0
+
 _ACTION_HELP: dict[str, str] = {
     "btn_browse": "Browse the remote filesystem in a tree view (over SSH).",
     "btn_command": "Run a one-off command on this server in an overlay panel.",
     "btn_ssh": "Open a full SSH session in a new terminal window.",
     "btn_memory": "Build / view the AI-queryable fact cache, notes and agent findings for this server.",
-    "btn_findings": "View proactive monitoring findings for this server and trigger a scan.",
+    "btn_findings": "Open this server's findings inbox: proactive monitoring findings and their triage.",
     "btn_logs": "Stream live log files via SSH (tail -f).",
     "btn_scan": "View keyword scan results collected from this server.",
     "btn_db_creds": "Scan this server for DB credentials and store them in your secret vault.",
@@ -76,9 +98,18 @@ _ACTION_HELP: dict[str, str] = {
     "btn_ovh_snapshots": "Create, restore, or delete snapshots.",
     "btn_ovh_firewall": "Manage VPS firewall rules.",
     "btn_back": "Return to the instance list.",
+    "btn_live": "Start or stop live CPU, memory and disk polling over SSH.",
+    "btn_live_refresh": "Take one CPU, memory, disk and uptime sample over SSH, without starting the poll.",
+    "btn_copy_id": "Copy this server's instance ID to the clipboard.",
+    "btn_copy_summary": "Copy the identity and connection details shown here.",
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _tip(button_id: str) -> str:
+    """The tooltip that says what an action button does."""
+    return _ACTION_HELP[button_id]
 
 #: Display names of the credential sources a binding can name.
 _CREDENTIAL_SOURCE_LABELS: dict[str, str] = {
@@ -121,17 +152,24 @@ def _team_key_label(row: Mapping[str, Any]) -> str:
     return f"Team key for {row.get('team_name') or row.get('team_slug') or 'team'}"
 
 
+def _card_actions(*buttons: ActionButton) -> ActionRow:
+    """The row of actions that belong to one card."""
+    # A card row shortens its words, then drops its hints, before it wraps onto a
+    # second line of buttons.
+    return ActionRow(*buttons, classes="sa-card-actions", prefer_one_line=True)
+
+
+def _card(card_id: str, body: Static, *buttons: ActionButton) -> Vertical:
+    """An overview card: its facts, then the actions that act on them."""
+    return Vertical(body, _card_actions(*buttons), id=card_id, classes="sa-section")
+
+
 class VaultBindingScopeModal(ModalScreen[Optional[str]]):
     """Choose a sharing team, personal access (''), or cancel (None)."""
 
+    DEFAULT_CLASSES = "dialog-screen"
     DEFAULT_CSS = """
-    VaultBindingScopeModal { align: center middle; }
-    #vault_scope_modal {
-        width: 76; max-width: 92%; height: auto; max-height: 88%;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    #vault_scope_choices { max-height: 12; margin: 1 0; }
-    #vault_scope_cancel { dock: bottom; }
+    VaultBindingScopeModal #vault_scope_choices { height: auto; max-height: 12; }
     """
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
@@ -167,10 +205,11 @@ class VaultBindingScopeModal(ModalScreen[Optional[str]]):
         return options
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold]Who is this key for?[/bold]"),
-            OptionList(*self._options(), id="vault_scope_choices"),
-            Button("Cancel", id="vault_scope_cancel"),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Who is this key for?[/bold]"),
+            body=OptionList(*self._options(), id="vault_scope_choices"),
+            actions=DialogActions(Button("Cancel", id="vault_scope_cancel")),
             id="vault_scope_modal",
         )
 
@@ -204,16 +243,7 @@ class OwnKeyUpdateModal(ModalScreen[bool]):
     on an explicit Update.
     """
 
-    DEFAULT_CSS = """
-    OwnKeyUpdateModal { align: center middle; }
-    #own_key_modal {
-        width: 76; max-width: 92%; height: auto; max-height: 88%;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    #own_key_body { margin: 1 0; }
-    #own_key_buttons { height: auto; }
-    #own_key_keep, #own_key_update { min-width: 12; margin-right: 1; }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
     BINDINGS = [Binding("escape", "keep", "Keep mine", show=False)]
 
     def __init__(self, body: str) -> None:
@@ -221,11 +251,12 @@ class OwnKeyUpdateModal(ModalScreen[bool]):
         self._body = body
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("[bold]Also update your own key for this server?[/bold]"),
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Also update your own key for this server?[/bold]"),
             # Logins and names come from servers and other users: inert text.
-            Static(Text(self._body), id="own_key_body"),
-            Horizontal(
+            body=DialogBody(Static(Text(self._body), id="own_key_body")),
+            actions=DialogActions(
                 Button("Keep mine", id="own_key_keep"),
                 Button("Update mine", id="own_key_update", variant="primary"),
                 id="own_key_buttons",
@@ -250,6 +281,8 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
     Per the project convention: ModalScreen for brief blocking prompts.
     Per style constraints: round $accent border, fixed height, Cancel button.
     """
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     BINDINGS = [
         Binding("escape", "action_cancel", "Cancel", show=False),
@@ -299,10 +332,11 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
             )
             confirm_label = "Add SSH Ref"
 
-        yield Container(
-            Static("[bold]Verify SSH[/bold]", id="ssh_verify_modal_title"),
-            Static(body_text, id="ssh_verify_modal_body"),
-            Horizontal(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Verify SSH[/bold]", id="ssh_verify_modal_title"),
+            body=DialogBody(Static(body_text, id="ssh_verify_modal_body")),
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="btn_ssh_verify_cancel"),
                 Button(confirm_label, variant="primary", id="btn_ssh_verify_confirm"),
                 classes="ssh_verify_actions_row",
@@ -334,15 +368,13 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     are listed by name and fingerprint, and the result carries identifiers only.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
     DEFAULT_CSS = """
     #vault_bind_scope { color: $text-muted; }
     #vault_bind_trusted { margin: 1 0 0 0; }
     #vault_bind_use_trusted { margin: 0 0 1 0; }
     #vault_bind_message { color: $warning; margin: 1 0 0 0; }
     #vault_bind_match { color: $text-muted; display: none; }
-    /* Bind stays in reach, and what is loading in view, however far the form scrolls. */
-    #vault_bind_footer { dock: bottom; height: auto; margin-top: 1; }
-    #vault_bind_footer > Horizontal { height: auto; }
     #vault_bind_busy { margin: 0; }
     #vault_bind_use_trusted.-hidden { display: none; }
     #vault_bind_fetch_host_key { margin: 0 0 1 0; }
@@ -393,7 +425,6 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             login = self._suggested_login()
         self._login = login
         rows: list[Any] = [
-            Static("[bold]Use vault key[/bold]"),
             Static(escape(self.scrub_for_display(self._scope_text())), id="vault_bind_scope"),
             Label("Vault"),
             Input(placeholder="Search vaults…", id="vault_bind_vault_search"),
@@ -418,18 +449,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             rows.append(
                 Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
             )
-        rows.extend((
-            Static("", id="vault_bind_message"),
-            Vertical(
-                BusyIndicator(id="vault_bind_busy"),
-                Horizontal(
-                    Button("Cancel", id="vault_bind_cancel"),
-                    Button("Bind", variant="primary", id="vault_bind_confirm"),
-                ),
+        rows.append(Static("", id="vault_bind_message"))
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Use vault key[/bold]"),
+            body=DialogBody(*rows),
+            status=BusyIndicator(id="vault_bind_busy"),
+            actions=DialogActions(
+                Button("Cancel", id="vault_bind_cancel"),
+                Button("Bind", variant="primary", id="vault_bind_confirm"),
                 id="vault_bind_footer",
             ),
-        ))
-        yield Container(*rows, id="vault_bind_modal")
+            size="large",
+            id="vault_bind_modal",
+        )
 
     def on_mount(self) -> None:
         self.run_worker(self._load_vaults(), group="vault_bind_choices", exclusive=True)
@@ -802,7 +835,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         })
 
 
-class ServerActionsScreen(ServerAccountMixin, Screen):
+class _ActionsBody(Vertical):
+    """The content column; tells the screen when its own width changes.
+
+    The cards stack by the room this column has, and that changes when the
+    navigation shows or hides without the screen itself being resized.
+    """
+
+    def on_resize(self) -> None:
+        sync = getattr(self.screen, "_sync_card_layout", None)
+        if sync is not None:
+            self.call_after_refresh(sync)
+
+
+class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     """Screen displaying available actions for a selected EC2 instance.
 
     Shows server information and action buttons:
@@ -817,25 +863,42 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
     9. Back - Return to instance list
     """
 
+    # The footer shows the four main keys and "? All keys"; Logs and Ban IP join
+    # them on a wide terminal (see ``_sync_footer_keys``). Every other key works
+    # but stays out of the footer.
     BINDINGS = [
-        Binding("1", "action_1", "Browse Files", show=True),
-        Binding("2", "action_2", "Run Command", show=True),
-        Binding("3", "action_3", "SSH Connect", show=True),
-        Binding("4", "action_4", "SCP Transfer", show=True),
-        Binding("5", "action_5", "Scan Results", show=True),
-        Binding("6", "action_6", "View Logs", show=True),
-        Binding("7", "action_7", "AI Analysis", show=True),
-        Binding("8", "action_8", "Ban IP", show=True),
-        Binding("m", "open_memory", "Memory", show=True),
-        Binding("d", "scan_db_creds", "Scan DB", show=True),
-        Binding("f", "open_findings", "Monitoring", show=True),
-        Binding("l", "toggle_live", "Live", show=True),
-        Binding("L", "toggle_live", "Live", show=False),
-        Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
-        Binding("v", "verify_ssh", "Verify SSH", show=True),
-        Binding("9", "back", "Back", show=True),
+        Binding("1", "action_1", "Browse", show=True),
+        Binding("2", "action_2", "Command", show=True),
+        Binding("3", "action_3", "SSH", show=True),
+        Binding("4", "action_4", "SCP", show=True),
+        Binding("5", "action_5", "Keyword scan", show=False),
+        Binding("6", "action_6", "Logs", show=False),
+        Binding("7", "action_7", "AI analysis", show=False),
+        Binding("8", "action_8", "Ban IP", show=False),
+        Binding("m", "open_memory", "Memory", show=False),
+        Binding("d", "scan_db_creds", "Scan DB", show=False),
+        Binding("f", "open_findings", "Findings", show=False),
+        Binding("l", "toggle_live", "Monitoring", show=False),
+        Binding("L", "toggle_live", "Monitoring", show=False),
+        Binding("R", "refresh_live", "Refresh stats", show=False),
+        Binding("r", "manage_ssh_ref", "SSH ref", show=False),
+        Binding("v", "verify_ssh", "Verify SSH", show=False),
+        Binding("u", "use_vault_key", "Vault key", show=False),
+        Binding("question_mark", "app.show_help", "All keys", show=True),
+        Binding("9", "back", "Back", show=False),
         Binding("escape", "back", "Back", show=False),
     ]
+
+    # Defaults the layout hooks read before (or without) ``__init__``.
+    _short_cards = False
+    _sampling = False
+    _sample_timer = None
+    _findings_count = 0
+
+    AUTO_FOCUS = "#btn_browse"
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 105
 
     # The screen gets -narrow / -wide and -short / -tall classes by terminal
     # size; the stylesheet lays the action rail out two to a row only when
@@ -857,12 +920,15 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         self._instance = instance
         self._reverse_dns = ""
         self._live_on = False
-        # Id of the action button the focus-help line currently describes, so a
-        # click on that (otherwise passive) line can re-dispatch to the button.
-        self._focused_action_id: Optional[str] = None
+        self._sampling = False
+        self._findings_count = 0
+        # Whether the cards show their short form (two facts, no blank row).
+        self._short_cards = False
         # Which read-only view is mounted inline in the detail pane, if any:
         # None | "browse" | "logs".
         self._inline_view: Optional[str] = None
+        self._overview_scroll_y = 0.0
+        self._inline_return_focus = "btn_browse"
         # Markup source of #server_info, so later additions (reverse DNS)
         # edit the text we wrote instead of reading it back from the widget.
         self._server_info_text: Content = Content("")
@@ -885,17 +951,29 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
             if self._instance.get('public_ip'):
                 self.run_worker(self._fetch_rdns(), exclusive=False)
-        # Dynamically add OVH action buttons for OVH instances
+        # Provider extras live in their own card, never in the main toolbar.
         if self._instance.get('is_ovh'):
-            action_buttons = self.query_one("#action_buttons")
-            action_buttons.mount(
-                Static("OVH", classes="section_label"),
-                Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
-                Button("Resize / Upgrade", id="btn_ovh_resize"),
-                Button("Snapshots", id="btn_ovh_snapshots"),
-                Button("Firewall", id="btn_ovh_firewall"),
-                before=self.query_one("#btn_back"),
+            self.query_one("#sa-overview").mount(
+                Vertical(
+                    Static("[bold]OVH[/bold]", classes="sa-card-title"),
+                    _card_actions(
+                        ActionButton("Reinstall OS", id="btn_ovh_reinstall", role="error", tooltip=_tip("btn_ovh_reinstall")),
+                        ActionButton("Resize / upgrade", short="Resize", id="btn_ovh_resize", tooltip=_tip("btn_ovh_resize")),
+                        ActionButton("Snapshots", id="btn_ovh_snapshots", tooltip=_tip("btn_ovh_snapshots")),
+                        ActionButton("Firewall", id="btn_ovh_firewall", tooltip=_tip("btn_ovh_firewall")),
+                    ),
+                    id="sa-provider",
+                    classes="sa-section",
+                ),
             )
+        # A team's shared server shows no instance ID, so there is nothing to copy.
+        if self._instance.get('is_shared') is True or not self._instance.get('id'):
+            self.query_one("#btn_copy_id").display = False
+        self._sync_compact_buttons()
+        self._sync_vault_button_role()
+        self.call_after_refresh(self._sync_compact_buttons)
+        if getattr(self.app, "findings_service", None) is not None:
+            self.run_worker(self._load_findings_count(), group="findings_count", exclusive=True)
         # Populate the cached-memory snapshot pane.
         self._render_memory_panel()
 
@@ -903,6 +981,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """Redraw the identity and memory panes for the new demo-mode state."""
         self._render_server_info()
         self._render_memory_panel()
+        for controls in self.query(WorkspaceControls):
+            controls.set_context(self._workspace_context())
+
+    def _workspace_context(self) -> str:
+        name = display_name(self._instance) or self._instance.get("id") or "server"
+        return f"Server actions · {log_safe(self.app, name)}"
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -911,10 +995,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             event: Key event.
         """
         if event.key in ("up", "down"):
-            # Only cycle the action rail when a rail button already has focus.
+            # Only cycle the actions when one of them already has focus.
             # When focus is inside the inline view (file tree) or elsewhere,
             # leave arrow keys alone so that widget can handle them.
-            buttons = list(self.query("#action_buttons Button"))
+            buttons = [button for button in self.query(ActionButton) if button.display]
             if not buttons:
                 return
             focused = self.focused
@@ -926,45 +1010,84 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             else:
                 next_idx = (idx - 1) % len(buttons)
             buttons[next_idx].focus()
+            # The overview's own scroll bindings must not also move the view.
+            event.stop()
+            event.prevent_default()
+            self.call_after_refresh(buttons[next_idx].scroll_visible, animate=False)
 
     def compose(self) -> ComposeResult:
-        """Compose the server actions UI (narrow action rail + detail pane)."""
+        """Compose the server actions UI (context header + action toolbar + detail workspace)."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Horizontal(id="sa-body"):
-                # --- Left: sectioned action rail ---
-                yield Vertical(
-                    Static("CONNECT", classes="section_label"),
-                    Button("1. Browse Files", id="btn_browse", variant="primary"),
-                    Button("2. Run Command", id="btn_command"),
-                    Button("3. SSH Connect", id="btn_ssh"),
-                    Static("INSPECT", classes="section_label"),
-                    # Memory promoted to the top of INSPECT — highest-leverage
-                    # feature for AI / MCP workflows.
-                    Button("M. Memory", id="btn_memory"),
-                    Button("F. Monitoring", id="btn_findings"),
-                    Button("6. View Logs", id="btn_logs"),
-                    Button("5. Scan Results", id="btn_scan"),
-                    Button("D. Scan DB Creds", id="btn_db_creds"),
-                    Button("7. AI Analysis", id="btn_ai_analysis"),
-                    Static("OPERATE", classes="section_label"),
-                    Button("4. SCP Transfer", id="btn_scp"),
-                    Button("8. Ban IP", id="btn_ban_ip"),
-                    Static("MANAGE", classes="section_label"),
-                    Button("Use Vault Key", id="btn_use_vault_key"),
-                    Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
-                    Button("V. Verify SSH", id="btn_verify_ssh"),
-                    Button("9. Back", id="btn_back", variant="error"),
-                    id="action_buttons",
+        yield WorkspaceControls(self._workspace_context())
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with _ActionsBody(id="sa-body", classes="workspace-content"):
+                heading, identity, connection = self._server_info_sections()
+                self._server_info_text = Content("\n\n").join((heading, identity, connection))
+                # One row of context: name, state, provider and facts, route
+                yield VerticalScroll(
+                    Static(heading, id="server_context", classes="screen-title"),
+                    id="sa-context",
                 )
-                # --- Right: identity + live + memory + focus help + inline view ---
-                self._server_info_text = self._build_server_info()
+                # Toolbar: the primary actions, always one row
+                yield ActionRow(
+                    ActionButton("← Fleet", "esc", short="← Fleet", id="btn_back", tooltip=_tip("btn_back")),
+                    Static("", classes="sa-toolbar-spacer"),
+                    ActionButton("Browse files", "1", short="Browse", id="btn_browse", tooltip=_tip("btn_browse")),
+                    ActionButton("SCP transfer", "4", short="SCP", id="btn_scp", tooltip=_tip("btn_scp")),
+                    ActionButton("Run command", "2", short="Command", id="btn_command", tooltip=_tip("btn_command")),
+                    ActionButton("SSH connect", "3", id="btn_ssh", role="primary", tooltip=_tip("btn_ssh")),
+                    id="action_buttons",
+                    prefer_one_line=True,
+                )
+                # Main detail workspace
                 yield Vertical(
-                    Static(self._server_info_text, id="server_info"),
-                    Static(self._live_stats_idle_text(), id="live_stats"),
-                    Static("", id="memory_panel"),
-                    Static("", id="action_help"),
+                    VerticalScroll(
+                        Horizontal(
+                            _card(
+                                "card_identity",
+                                Static(identity, id="server_identity"),
+                                ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id", tooltip=_tip("btn_copy_id")),
+                                ActionButton("Copy summary", id="btn_copy_summary", tooltip=_tip("btn_copy_summary")),
+                            ),
+                            _card(
+                                "card_network",
+                                Static(connection, id="server_info"),
+                                ActionButton("Use vault key", "u", short="Vault key", id="btn_use_vault_key", tooltip=_tip("btn_use_vault_key")),
+                                ActionButton("SSH ref", "r", id="btn_manage_ssh_ref", tooltip=_tip("btn_manage_ssh_ref")),
+                                ActionButton("Verify SSH", "v", short="Verify", id="btn_verify_ssh", tooltip=_tip("btn_verify_ssh")),
+                            ),
+                            id="sa-facts",
+                        ),
+                        Horizontal(
+                            _card(
+                                "card_live",
+                                Static(self._live_stats_idle_text(), id="live_stats"),
+                                ActionButton("Start monitoring", "l", id="btn_live", tooltip=_tip("btn_live")),
+                                ActionButton("Refresh", id="btn_live_refresh", tooltip=_tip("btn_live_refresh")),
+                            ),
+                            _card(
+                                "card_memory",
+                                Static("[bold]Memory[/bold]\n\n[dim]Loading cached facts…[/dim]", id="memory_panel"),
+                                ActionButton("Open memory", "m", short="Memory", id="btn_memory", tooltip=_tip("btn_memory")),
+                                ActionButton("Findings", "f", id="btn_findings", tooltip=_tip("btn_findings")),
+                                ActionButton("Scan DB", "d", id="btn_db_creds", tooltip=_tip("btn_db_creds")),
+                            ),
+                            id="sa-monitoring",
+                        ),
+                        Vertical(
+                            Static("[bold]Diagnostics & security[/bold]", classes="sa-card-title"),
+                            _card_actions(
+                                ActionButton("Stream logs", "6", short="Logs", id="btn_logs", tooltip=_tip("btn_logs")),
+                                ActionButton("AI log analysis", "7", short="AI analysis", id="btn_ai_analysis", tooltip=_tip("btn_ai_analysis")),
+                                ActionButton("Keyword scan", "5", id="btn_scan", tooltip=_tip("btn_scan")),
+                                ActionButton("Ban IP…", "8", id="btn_ban_ip", role="error", tooltip=_tip("btn_ban_ip")),
+                            ),
+                            id="sa-diagnostics",
+                            classes="sa-section",
+                        ),
+                        id="sa-overview",
+                    ),
                     # Mount target for inline read-only views (Browse / Logs).
                     # Hidden until an action opens it (see _open_inline).
                     Vertical(id="sa-inline"),
@@ -975,121 +1098,129 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         yield Footer()
 
     def _build_server_info(self) -> Content:
-        """Build the server information display.
+        """The complete overview, also useful to non-layout consumers."""
+        return Content("\n\n").join(self._server_info_sections())
 
-        Every value comes from a provider or from the user's server list, so
-        each is shown literally: a name like ``web-[b]1`` shows as typed.
+    def _server_info_sections(self, short: bool = False) -> tuple[Content, Content, Content]:
+        """Build the header and the two card texts from displayed records.
 
-        Returns:
-            Content with the server details.
+        With *short*, each card keeps its two most useful facts and no blank
+        row after its title, so every card fits a short terminal.
+
+        Resolve connection rules against the real record, but render only the
+        displayed row and redacted connection details. Every value comes from
+        a provider or the user's server list, so each is shown literally: a
+        name like ``web-[b]1`` shows as typed.
         """
         def field(key: str, default: str) -> str:
             return str(self._instance.get(key) or default)
 
-        def line(label: str, value: Union[str, Content]) -> Content:
+        def line(label: str, value: str | Content) -> Content:
             shown = literal(value) if isinstance(value, str) else value
-            return Content.assemble(Content.styled(f"{label}:", "dim"), " ", shown, "\n")
+            return Content.assemble(Content.styled(f"{label}:", "dim"), " ", shown)
 
-        def title(prefix: str) -> Content:
-            return Content.assemble(
-                literal(f"{prefix}: {name}", "bold $text-accent"), "\n\n",
-            )
-
-        def connection(info: Content, target: str) -> Content:
-            # The pane ends at the target: no trailing newline, so the panels
-            # below it sit where they always did.
-            return Content.assemble(info, "\n", line("Target", target)).right_crop(1)
-
-        name = display_name(self._instance) or 'Unnamed'
-        public_ip = field('public_ip', 'N/A')
-        direct = Content.styled("Direct Connection", "$text-accent")
-        # With several accounts of this provider, say which one it is in.
-        account_line = (
-            line("Account", field('account', '-'))
-            if self._instance.get('account_qualified') else Content("")
-        )
-        credential_line = Content.assemble(
-            self._credential_source_line(), self._shared_with_line(),
-        )
-
-        if self._instance.get('is_shared') is True:
-            return Content.assemble(
-                title("Team server"),
-                line("Team", field('team_name', '-')),
+        name = display_name(self._instance) or "Unnamed"
+        public_ip = field("public_ip", "N/A")
+        identity: list[Content] = []
+        network: list[Content] = []
+        state: Content = self._colorize_state(self._instance.get("state", "unknown"))
+        provider = field("provider", "AWS")
+        facts: list[str] = []
+        if self._instance.get("is_shared") is True:
+            provider = field("provider", "Team")
+            state = Content.styled("N/A (shared by the team)", "dim")
+            facts = [field("team_name", "-")]
+            identity.append(line("Team", field("team_name", "-")))
+            network.extend([
                 line("Host", public_ip),
-                line("Port", str(self._instance.get('port') or 22)),
-                line("Team login", field('login_user', '-')),
-                line("State", Content.styled("N/A (shared by the team)", "dim")),
-                "\n",
-                credential_line,
-                connection(direct, public_ip),
-            )
-
-        if self._instance.get('is_ovh'):
-            provider_type = str(self._instance.get('provider_type', 'unknown'))
-            reverse_dns = self._display_reverse_dns()
-            rdns_line = line("Reverse DNS", reverse_dns) if reverse_dns else Content("")
-            return Content.assemble(
-                title("OVH Server"),
-                account_line,
-                line("ID", field('id', 'unknown')),
-                line("Type", f"{provider_type.upper()} — {field('type', '-')}"),
-                line("Public IP", public_ip),
-                rdns_line,
-                line("Private IP", field('private_ip', 'N/A')),
-                line("Region", field('region', '-')),
-                line("State", self._colorize_state(self._instance.get('state', 'unknown'))),
-                line("OS", field('os', '-')),
+                line("Port", field("port", "22")),
+                line("Team login", field("login_user", "-")),
+            ])
+        elif self._instance.get("is_ovh"):
+            provider = "OVH"
+            kind = field("provider_type", "unknown").upper()
+            facts = [f"{kind} {field('type', '-')}", field("region", "-")]
+            identity.extend([
+                line("ID", field("id", "unknown")),
+                line("Type", f"{kind} — {field('type', '-')}"),
+                line("Region", field("region", "-")),
+                line("OS", field("os", "-")),
                 line("RAM", f"{field('ram_gb', '-')} GB"),
-                "\n",
-                credential_line,
-                connection(direct, public_ip),
-            )
-
-        if self._instance.get('is_custom'):
-            return Content.assemble(
-                title("Server"),
+            ])
+            network.append(line("Public IP", public_ip))
+            reverse_dns = self._display_reverse_dns()
+            if reverse_dns:
+                network.append(line("Reverse DNS", reverse_dns))
+            network.append(line("Private IP", field("private_ip", "N/A")))
+        elif self._instance.get("is_custom"):
+            provider = field("provider", "custom")
+            state = Content.styled("N/A (custom server)", "dim")
+            facts = [field("group", "-")]
+            identity.extend([
+                line("ID", field("id", "unknown")),
+                line("Provider", provider),
+                line("Group", field("group", "-")),
+            ])
+            network.extend([
                 line("Host", public_ip),
-                line("Port", str(self._instance.get('port', 22))),
-                line("Username", field('username', 'root')),
-                line("Provider", field('provider', 'custom')),
-                line("Group", field('group', '-')),
-                line("State", Content.styled("N/A (custom server)", "dim")),
-                "\n",
-                credential_line,
-                connection(direct, public_ip),
-            )
-
-        private_ip = field('private_ip', 'N/A')
-
-        # Resolve connection method for AWS instances. Connection rules match
-        # the real record (names, tags); the bastion is shown redacted.
-        profile = self.app.connection_service.resolve_profile(
-            connection_instance(self.app, self._instance)
-        )
-        if profile and profile.bastion_host:
-            bastion = str(profile.bastion_host)
-            if self.app.demo_mode and self.app.redaction_service:
-                bastion = self.app.redaction_service.redact_host(bastion)
-            connection_info = Content.assemble(
-                Content.styled("via Bastion:", "$text-accent"), " ", literal(bastion),
-            )
-            target_ip = private_ip
+                line("Port", field("port", "22")),
+                line("Username", field("username", "root")),
+            ])
         else:
-            connection_info = direct
-            target_ip = public_ip
+            facts = [field("type", "-"), field("region", "unknown")]
+            identity.extend([
+                line("Instance ID", field("id", "unknown")),
+                line("Type", field("type", "-")),
+                line("Region", field("region", "unknown")),
+            ])
+            network.extend([
+                line("Public IP", public_ip),
+                line("Private IP", field("private_ip", "N/A")),
+            ])
 
-        return Content.assemble(
-            title("Server"),
-            account_line,
-            line("Instance ID", field('id', 'unknown')),
-            line("Public IP", public_ip),
-            line("Private IP", private_ip),
-            line("Region", field('region', 'unknown')),
-            line("State", self._colorize_state(self._instance.get('state', 'unknown'))),
-            "\n",
-            credential_line,
-            connection(connection_info, target_ip),
+        path = Content.styled("Direct connection", "dim")
+        path_is_bastion = False
+        target = public_ip
+        if not any(self._instance.get(key) for key in ("is_shared", "is_custom", "is_ovh")):
+            profile = self.app.connection_service.resolve_profile(connection_instance(self.app, self._instance))
+            if profile and profile.bastion_host:
+                bastion = str(profile.bastion_host)
+                if self.app.demo_mode and self.app.redaction_service:
+                    bastion = self.app.redaction_service.redact_host(bastion)
+                path = Content.assemble(Content.styled("via", "dim"), " ", literal(bastion))
+                path_is_bastion = True
+                target = field("private_ip", "N/A")
+        if short:
+            network = [
+                Content.assemble(line("Target", target), Content.styled(" · ", "dim"), path),
+                self._credential_source_line(),
+            ]
+        else:
+            network.extend([
+                Content(""), path, line("Target", target),
+                self._credential_source_line(),
+            ])
+        if short:
+            identity = identity[:2]
+        shared_with = self._shared_with_line()
+        if shared_with.plain and not short:
+            identity.append(shared_with)
+
+        route = Content.assemble(
+            Content.styled(" · ", "dim"), path,
+        ) if path_is_bastion else Content("")
+        heading = [Content.assemble(
+            literal(name, "bold"), "  ", Content.styled("● ", "dim"), state,
+            Content.styled(" · ", "dim"), literal(" · ".join([provider, *facts]), "dim"),
+            route,
+        )]
+        if self._instance.get("account_qualified"):
+            heading.append(line("Account", field("account", "-")))
+        gap = "\n" if short else "\n\n"
+        return (
+            Content("\n").join(heading),
+            Content.assemble(Content.styled("Identity", "bold"), gap, Content("\n").join(identity)),
+            Content.assemble(Content.styled("Network · SSH", "bold"), gap, Content("\n").join(network)),
         )
 
     def _shared_with_line(self) -> Content:
@@ -1101,7 +1232,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if not teams:
             return Content("")
         label = scrub_for_display(self.app, ", ".join(teams))
-        return Content.assemble(Content.styled("Also shared with:", "dim"), " ", literal(label), "\n")
+        return Content.assemble(Content.styled("Also shared with:", "dim"), " ", literal(label))
 
     def _sharing_teams(self) -> list[dict[str, Any]]:
         """The real shared row for each team also sharing this own server."""
@@ -1131,7 +1262,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             if isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE:
                 scope = scrub_for_display(self.app, _team_key_label(row))
                 label += f"; {scope} (Servonaut Vault)"
-        return Content.assemble(Content.styled("SSH credential:", "dim"), " ", literal(label), "\n")
+        return Content.assemble(Content.styled("SSH credential:", "dim"), " ", literal(label))
 
     def _binding_source(self) -> Optional[str]:
         """The credential source this screen bound or looked up, else the row's (team servers)."""
@@ -1185,20 +1316,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             self._render_server_info()
 
     def _colorize_state(self, state: str) -> Content:
-        """Instance state, colored when it is one the pane knows.
-
-        Args:
-            state: Instance state string.
-
-        Returns:
-            The state as styled content.
-        """
+        """Instance state, coloured when it is one the pane knows."""
         state_styles = {
-            'running': '$text-success',
-            'stopped': '$text-error',
-            'stopping': '$text-warning',
-            'pending': '$text-accent',
-            'terminated': 'dim',
+            "running": "$text-success",
+            "stopped": "$text-error",
+            "stopping": "$text-warning",
+            "pending": "$text-accent",
+            "terminated": "dim",
         }
         return literal(str(state), state_styles.get(state, ""))
 
@@ -1238,45 +1362,16 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         Rebuilt from its source rather than edited in place, so a demo-mode
         toggle and a late reverse-DNS answer both land in one consistent text.
         """
-        self._server_info_text = self._build_server_info()
-        self.query_one("#server_info", Static).update(self._server_info_text)
+        self._server_info_text = Content("\n\n").join(self._server_info_sections())
+        heading, identity, connection = self._server_info_sections(self._short_cards)
+        self.query_one("#server_context", Static).update(heading)
+        self.query_one("#server_identity", Static).update(identity)
+        self.query_one("#server_info", Static).update(connection)
+        self._sync_vault_button_role()
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
     # ------------------------------------------------------------------
-
-    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        """Update the focus-driven help line when an action button gains focus.
-
-        The line is also a clickable proxy for the focused button (see
-        :meth:`on_click`), so it reads as actionable rather than a dead label.
-        """
-        widget_id = getattr(event.widget, "id", None)
-        if not widget_id:
-            return
-        help_text = _ACTION_HELP.get(widget_id)
-        if help_text is None:
-            return
-        self._focused_action_id = widget_id
-        try:
-            self.query_one("#action_help", Static).update(
-                f"[dim]▸[/dim] [u]{escape(help_text)}[/u]  [dim]· click to run[/dim]"
-            )
-        except Exception:  # noqa: BLE001 — pane may not be mounted yet
-            pass
-
-    def on_click(self, event: events.Click) -> None:
-        """Treat a click on the focus-help line as activating the focused action."""
-        widget = getattr(event, "widget", None)
-        if widget is None or getattr(widget, "id", None) != "action_help":
-            return
-        btn_id = self._focused_action_id
-        if not btn_id:
-            return
-        try:
-            self.query_one(f"#{btn_id}", Button).press()
-        except Exception:  # noqa: BLE001
-            pass
 
     def _provider_for_memory(self) -> str:
         """Best-effort provider slug for memory lookups.
@@ -1296,14 +1391,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
-            panel.update("[dim]Server memory is unavailable.[/dim]")
+            panel.update("[bold]Memory[/bold]\n\n[dim]Server memory is unavailable.[/dim]")
             return
 
         instance_id = str(self._instance.get("id") or "")
         instance_name = self._instance.get("name") or ""
         try:
             if memory_service.is_memory_disabled(instance_id, instance_name):
-                panel.update("[dim]Memory is disabled for this server.[/dim]")
+                panel.update("[bold]Memory[/bold]\n\n[dim]Memory is disabled for this server.[/dim]\n[dim]Press m to review its settings.[/dim]")
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -1312,14 +1407,18 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             modules = memory_service.get_all_modules(instance_id, self._provider_for_memory())
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
-            modules = {}
+            panel.update("[bold]Memory[/bold]\n\n[$text-warning]Could not load cached facts.[/$text-warning]\n[dim]Press m to open memory and try again.[/dim]")
+            return
 
-        text = render_memory_panel(modules)
+        text = render_memory_panel(modules, title="Memory")
         # Demo mode: the snapshot can embed paths / hostnames / versions from
         # the probed server — scrub before rendering, same posture as the
         # Memory screen and log viewer.
         if self.app.demo_mode and getattr(self.app, "redaction_service", None):
             text = scrub(text, self.app.redaction_service.scrub_stream)
+        if self._short_cards:
+            lines = [line for line in text.split("\n") if line.plain.strip()]
+            text = Content("\n").join(lines[:3])
         panel.update(text)
 
     # ------------------------------------------------------------------
@@ -1342,6 +1441,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
         inline.remove_children()
         inline.remove_class("visible")
+        self.remove_class("-inline-open")
+        self.query_one("#sa-detail").remove_class("-inline-open")
+        if self._inline_view is not None:
+            overview = self.query_one("#sa-overview", VerticalScroll)
+            self.call_after_refresh(
+                lambda: overview.scroll_to(y=self._overview_scroll_y, animate=False, force=True)
+            )
         self._inline_view = None
 
     def _open_inline_browse(self) -> None:
@@ -1365,6 +1471,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             self.app.notify("Could not open file browser.", severity="error", markup=False)
             return
 
+        self._overview_scroll_y = self.query_one("#sa-overview", VerticalScroll).scroll_y
+        focused = getattr(self.focused, "id", None)
+        self._inline_return_focus = focused if focused in _ACTION_HELP else "btn_browse"
         self._inline_view = "browse"
         inline.mount(
             Static(
@@ -1379,15 +1488,127 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             ),
         )
         inline.add_class("visible")
+        self.add_class("-inline-open")
+        self.query_one("#sa-detail").add_class("-inline-open")
         self.call_after_refresh(lambda: self._safe_focus("#remote_tree"))
 
     # ------------------------------------------------------------------
     # Live stats (opt-in, SSH-polled)
     # ------------------------------------------------------------------
 
+    def _has_vault_key_bound(self) -> bool:
+        """Whether a vault key already covers this server (own binding or a sharing team's)."""
+        if self._binding_source() is not None:
+            return True
+        return any(
+            isinstance(row.get("credential_binding"), Mapping)
+            and row["credential_binding"].get("source") == _VAULT_SOURCE
+            for row in self._sharing_teams()
+        )
+
+    def _sync_vault_button_role(self) -> None:
+        """Highlight Use vault key only while binding a key is the real next step."""
+        try:
+            button = self.query_one("#btn_use_vault_key", ActionButton)
+        except NoMatches:
+            return
+        suggested = self._vault_runtime_for_lookup() is not None and not self._has_vault_key_bound()
+        button.set_role("primary" if suggested else "default")
+
+    def _sync_live_button(self) -> None:
+        """Show whether live polling is running on its button."""
+        try:
+            button = self.query_one("#btn_live", ActionButton)
+        except NoMatches:
+            return
+        button.set_text("Stop monitoring" if self._live_on else "Start monitoring")
+        self._sync_refresh_button()
+
+    def sync_workspace_controls(self) -> None:
+        super().sync_workspace_controls()
+        self._sync_compact_buttons()
+        self._sync_card_layout()
+
+    def _sync_footer_keys(self) -> None:
+        """Show Logs and Ban IP in the footer only on a wide terminal."""
+        wide = self.has_class("-wide")
+        changed = False
+        for key in _WIDE_FOOTER_KEYS:
+            bindings = self._bindings.key_to_bindings.get(key, [])
+            if any(binding.show != wide for binding in bindings):
+                # A new list: the one in the map may be shared with the class.
+                self._bindings.key_to_bindings[key] = [replace(b, show=wide) for b in bindings]
+                changed = True
+        if changed:
+            self.refresh_bindings()
+
+    def _sync_card_layout(self) -> None:
+        """Stack the cards only when the content is narrow; shorten them on a short terminal.
+
+        Compact buttons follow the terminal width; the card columns follow the
+        room the content column has, so 100 columns with the navigation hidden
+        keeps two columns.
+        """
+        try:
+            width = self.query_one("#sa-body").size.width
+        except NoMatches:
+            return
+        if width <= 0:
+            return
+        self.set_class(width < _STACK_CARDS_BELOW, "-stack-cards")
+        self._sync_footer_keys()
+        short = self.has_class("-short")
+        if short != self._short_cards:
+            self._short_cards = short
+            self._render_server_info()
+            self._render_memory_panel()
+            self._restore_live_idle()
+
+    def _sync_compact_buttons(self) -> None:
+        """One-row borderless buttons whenever the layout is narrow."""
+        compact = self.has_class("-narrow") or self.has_class("-content-narrow")
+        for button in self.query(ActionButton):
+            button.compact = compact
+        for row in self.query(ActionRow):
+            row.fit()
+
+    def _displayed_identity_lines(self) -> list[str]:
+        """The identity card as plain text, exactly as it is displayed."""
+        _, identity, _ = self._server_info_sections()
+        return identity.plain.splitlines()
+
+    def _copy_to_clipboard(self, text: str, what: str) -> None:
+        from servonaut.utils.platform_utils import copy_to_clipboard
+
+        if copy_to_clipboard(text):
+            self.app.notify(f"Copied {what} to the clipboard.", markup=False)
+            return
+        # Only the terminal's clipboard sequence ran: nothing confirms it arrived.
+        self.app.copy_to_clipboard(text)
+        self.app.notify(f"Sent {what} to the terminal clipboard (via terminal).", markup=False)
+
+    def action_copy_instance_id(self) -> None:
+        """Copy the instance ID as displayed (so demo mode stays redacted)."""
+        for line in self._displayed_identity_lines():
+            label, _, value = line.partition(":")
+            if label.strip() in ("Instance ID", "ID") and value.strip():
+                self._copy_to_clipboard(value.strip(), "the instance ID")
+                return
+        self.app.notify("This server has no instance ID to copy.", severity="warning", markup=False)
+
+    def action_copy_summary(self) -> None:
+        """Copy the identity and connection details shown on the cards."""
+        self._copy_to_clipboard(self._server_info_text.plain, "the server summary")
+
     def _live_stats_idle_text(self) -> str:
         """Text shown in the live-stats pane while polling is off."""
-        return "[dim]Live stats: off — press [b]L[/b] to start (SSH-polled).[/dim]"
+        if self._short_cards:
+            return "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n[dim]CPU, memory, disk, uptime[/dim]"
+        return (
+            "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n\n"
+            "[dim]CPU, memory, load, disk and uptime appear here.\n"
+            "Press [b]l[/b] to start monitoring over SSH.[/dim]"
+        )
 
     def action_toggle_live(self) -> None:
         """Toggle the live resource-stats poller on/off."""
@@ -1406,8 +1627,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
 
         self._live_on = True
+        self._sync_live_button()
         try:
-            self.query_one("#live_stats", Static).update("[$text-accent]Live stats: connecting…[/$text-accent]")
+            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press l to cancel.[/dim]")
         except Exception:  # noqa: BLE001
             pass
         self.run_worker(
@@ -1416,9 +1638,73 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             exclusive=True,
         )
 
+    def action_refresh_live(self) -> None:
+        """Take one live sample without starting the poll."""
+        if self._live_on or self._sampling:
+            return
+        if getattr(self.app, "live_stats_service", None) is None:
+            self.app.notify("SSH monitoring is unavailable.", severity="warning", markup=False)
+            return
+        if not self._validate_instance_connection():
+            return
+        self._cancel_sample_timer()
+        self._sampling = True
+        self._sync_refresh_button()
+        self._set_live_text(Content.assemble(
+            Content.styled("Live via SSH", "bold"), "\n\n", Content.styled("Sampling…", "$text-accent"),
+        ))
+        self.run_worker(self._sample_once(), group="live_sample", exclusive=True)
+
+    async def _sample_once(self) -> None:
+        """One collect() over SSH; errors show briefly, then the idle text returns."""
+        service = self.app.live_stats_service
+        try:
+            with self._busy.running("Sampling over SSH…"):
+                stats = await service.collect(self._instance)
+            text = format_live_stats(stats, note=f"sampled {datetime.now().strftime('%H:%M:%S')}")
+        except LiveStatsError as exc:
+            self._show_sample_error(str(exc))
+        except Exception as exc:  # noqa: BLE001 - a sample must never take the app down
+            logger.warning("Live stats sample failed: %s", type(exc).__name__, exc_info=True)
+            self._show_sample_error("The sample failed. See the log for details.")
+        else:
+            self._cancel_sample_timer()
+            self._set_live_text(text)
+        finally:
+            self._sampling = False
+            if self.is_attached:
+                self._sync_refresh_button()
+
+    def _show_sample_error(self, message: str) -> None:
+        """Show a failed sample's error literally, then clear it after a moment."""
+        self._cancel_sample_timer()
+        self._set_live_text(literal(message, "$text-error"))
+        self._sample_timer = self.set_timer(_SAMPLE_ERROR_SECONDS, self._restore_live_idle)
+
+    def _cancel_sample_timer(self) -> None:
+        """A newer sample owns the pane: the old error's clear-up must not fire."""
+        if self._sample_timer is not None:
+            self._sample_timer.stop()
+            self._sample_timer = None
+
+    def _restore_live_idle(self) -> None:
+        self._sample_timer = None
+        if not self._live_on and not self._sampling:
+            self._set_live_text(self._live_stats_idle_text())
+
+    def _sync_refresh_button(self) -> None:
+        """Refresh is off while a sample runs or the poll already keeps the card current."""
+        try:
+            button = self.query_one("#btn_live_refresh", ActionButton)
+        except NoMatches:
+            return
+        button.disabled = self._sampling or self._live_on
+        button.tooltip = _LIVE_ALREADY_UPDATING if self._live_on else _tip("btn_live_refresh")
+
     def _stop_live_stats(self) -> None:
         """Stop the poller and reset the pane to its idle text."""
         self._live_on = False
+        self._sync_live_button()
         self.workers.cancel_group(self, "live_stats")
         try:
             self.query_one("#live_stats", Static).update(self._live_stats_idle_text())
@@ -1434,15 +1720,31 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             async for stats in service.watch(self._instance):
                 self._set_live_text(format_live_stats(stats))
         except LiveStatsError as exc:
-            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press L to retry.[/dim]")
+            self._set_live_text(Content.assemble(
+                literal(str(exc), "$text-error"), "\n", Content.styled("Press l to retry.", "dim"),
+            ))
             self._live_on = False
+            self._sync_live_button()
+        except Exception as exc:  # noqa: BLE001 - a poll must never take the app down
+            logger.warning("Live stats poll failed: %s", type(exc).__name__, exc_info=True)
+            self._set_live_text(Content.assemble(
+                literal("The poll failed. See the log for details.", "$text-error"),
+                "\n", Content.styled("Press l to retry.", "dim"),
+            ))
+            self._live_on = False
+            self._sync_live_button()
 
-    def _set_live_text(self, markup: str) -> None:
+    def _set_live_text(self, markup: "str | Content") -> None:
         """Update the live-stats pane defensively (screen may be torn down)."""
         try:
             self.query_one("#live_stats", Static).update(markup)
         except Exception:  # noqa: BLE001
             pass
+
+    def on_screen_resume(self) -> None:
+        """Count the open findings again: the inbox may have changed them."""
+        if getattr(self.app, "findings_service", None) is not None:
+            self.run_worker(self._load_findings_count(), group="findings_count", exclusive=True)
 
     def on_screen_suspend(self) -> None:
         """Stop live polling when navigating away (no background SSH traffic)."""
@@ -1509,6 +1811,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             self.action_use_vault_key()
         elif button_id == "btn_verify_ssh":
             self.action_verify_ssh()
+        elif button_id == "btn_live":
+            self.action_toggle_live()
+        elif button_id == "btn_live_refresh":
+            self.action_refresh_live()
+        elif button_id == "btn_copy_id":
+            self.action_copy_instance_id()
+        elif button_id == "btn_copy_summary":
+            self.action_copy_summary()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -2137,6 +2447,37 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
         from servonaut.screens.db_credential_scan import DbCredentialScanScreen
         self.app.push_screen(DbCredentialScanScreen(self._instance))
+
+    async def _load_findings_count(self) -> None:
+        """Show how many findings are still open on this server on the Findings button."""
+        service = getattr(self.app, "findings_service", None)
+        instance_id = connection_instance(self.app, self._instance).get("id")
+        if service is None or not instance_id:
+            return
+        try:
+            data = await service.list_findings(instance=str(instance_id), limit=_FINDINGS_COUNT_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - the button keeps its plain label
+            logger.debug("Findings count unavailable: %s", type(exc).__name__)
+            return
+        rows = data.get("findings") if isinstance(data, Mapping) else None
+        if not isinstance(rows, list):
+            return
+        open_count = sum(
+            1 for row in rows
+            if isinstance(row, Mapping) and row.get("status") not in _CLOSED_FINDING_STATUSES
+        )
+        self._findings_count = open_count
+        self._sync_findings_button()
+
+    def _sync_findings_button(self) -> None:
+        try:
+            button = self.query_one("#btn_findings", ActionButton)
+        except NoMatches:
+            return
+        count = self._findings_count
+        shown = "99+" if count > _FINDINGS_SHOWN_MAX else str(count)
+        label = f"Findings {shown}" if count else "Findings"
+        button.set_text(label, short=label)
 
     def action_open_findings(self) -> None:
         """Open the findings inbox scoped to this instance."""
@@ -2822,7 +3163,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """
         if self._inline_view is not None:
             self._clear_inline()
-            self._safe_focus("#btn_browse")
+            self._safe_focus(f"#{self._inline_return_focus}")
             return
         self.app.pop_screen()
 

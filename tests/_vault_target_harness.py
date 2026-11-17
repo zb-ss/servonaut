@@ -14,6 +14,7 @@ from textual.app import App
 from textual.widgets import Button, DataTable
 
 from servonaut.screens.vault import VaultScreen
+from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
 VAULT_A = "11111111-1111-4111-8111-111111111111"
@@ -150,6 +151,9 @@ class FakeVaultService:
 
 
 class VaultHost(App):
+    # The real stylesheet, so geometry (what is under a click) is as users see it.
+    CSS_PATH = CSS_FILES
+
     def __init__(self, service: Any) -> None:
         self.vault_command_service = service
         self.vault_available = True

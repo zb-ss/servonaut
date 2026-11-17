@@ -128,9 +128,15 @@ answer. Other providers speak the reply once it is complete.
 
 Conversation mode turns the two halves into a hands-free loop. Toggle it
 with `ctrl+n` in the chat panel, or switch on **Hands-free conversation on
-open** so the loop starts whenever the chat panel opens and everything is
+open** so the loop starts when a new chat panel opens and voice setup is
 ready. It needs the small voice-detection model on top of the transcription
 model (plus the speech model when replies are spoken).
+
+`F2` or `Ctrl+G` collapses chat and stops listening and playback while keeping
+your draft and any text reply in progress. Restoring the same panel does not
+restart listening or playback; use `Ctrl+N` in chat to start hands-free mode
+again. After **End chat**, opening a new panel can apply the on-open setting
+again.
 
 The chat panel shows the loop's state:
 

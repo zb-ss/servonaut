@@ -5,9 +5,8 @@ The user selects which categories to include and where to send the
 report.  A preview of the exact payload is shown on the next screen
 (BugReportScreen) before anything leaves the machine.
 
-Per the project ModalScreen convention: brief blocking choice — dismiss to
-return.  BugReportScreen is the multi-step content-heavy counterpart
-that carries the Sidebar.
+This brief blocking choice returns to the report when dismissed.
+BugReportScreen carries the report preview and submission controls.
 """
 
 from __future__ import annotations
@@ -16,11 +15,17 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, RadioButton, RadioSet, Static
 
 from servonaut.services.bug_report_service import BugReportConsent
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 
 
 class BugReportConsentModal(ModalScreen[Optional[BugReportConsent]]):
@@ -38,40 +43,17 @@ class BugReportConsentModal(ModalScreen[Optional[BugReportConsent]]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#chk-include-logs"
+
     DEFAULT_CSS = """
-    BugReportConsentModal {
-        align: center middle;
-    }
-
-    BugReportConsentModal #consent-container {
-        width: 88;
-        height: auto;
-        max-height: 44;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    BugReportConsentModal #consent-title {
-        height: auto;
-        text-style: bold;
-        color: $accent;
-        text-align: center;
-        margin-bottom: 1;
-    }
-
-    BugReportConsentModal #consent-copy {
-        height: auto;
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-
     BugReportConsentModal #checkboxes {
         height: auto;
         margin-bottom: 1;
     }
 
     BugReportConsentModal Checkbox {
+        width: 100%;
         height: auto;
         margin-bottom: 0;
     }
@@ -88,61 +70,68 @@ class BugReportConsentModal(ModalScreen[Optional[BugReportConsent]]):
         margin-bottom: 1;
     }
 
-    BugReportConsentModal #footer-buttons {
-        height: auto;
-        align-horizontal: center;
-        margin-top: 1;
-    }
-
-    BugReportConsentModal Button {
-        margin: 0 1;
-        min-width: 14;
-    }
-
-    BugReportConsentModal #continue {
-        background: $primary;
-        color: $text;
-    }
     """
 
     def compose(self) -> ComposeResult:
-        with Container(id="consent-container"):
-            yield Static("Report a bug", id="consent-title")
-            yield Static(
-                "Choose what to include in your report. You'll see exactly what will be "
-                "sent before anything leaves your machine.",
-                id="consent-copy",
-            )
-            with Vertical(id="checkboxes"):
-                yield Checkbox(
-                    "Last 200 lines of ~/.servonaut/logs/servonaut.log (secrets are scrubbed)",
-                    value=True,
-                    id="chk-include-logs",
-                )
-                yield Checkbox(
-                    "Configuration snapshot (api keys & secrets are removed)",
-                    value=True,
-                    id="chk-include-config",
-                )
-                yield Checkbox(
-                    "Anonymous instance counts by provider (no names, no ids)",
-                    value=True,
-                    id="chk-include-telemetry",
-                )
-            yield Static("Send report via:", id="channel-label")
-            with RadioSet(id="channel-selector"):
-                yield RadioButton(
-                    "Open prefilled GitHub issue (opens in browser)",
-                    value=True,
-                    id="radio-github",
-                )
-                yield RadioButton(
-                    "Submit via Servonaut backend (you can be anonymous)",
-                    id="radio-backend",
-                )
-            with Horizontal(id="footer-buttons"):
-                yield Button("Continue", id="continue", variant="primary")
-                yield Button("Cancel", id="cancel", variant="default")
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
+                "[bold $text-accent]Report a bug[/bold $text-accent]",
+                id="consent-title",
+            ),
+            body=DialogBody(
+                Static(
+                    "Choose what to include in your report. You'll see exactly what will be "
+                    "sent before anything leaves your machine.",
+                    id="consent-copy",
+                    classes="dialog-description dialog-muted",
+                ),
+                Vertical(
+                    Checkbox(
+                        "Last 200 lines of ~/.servonaut/logs/servonaut.log (secrets are scrubbed)",
+                        value=True,
+                        compact=True,
+                        id="chk-include-logs",
+                    ),
+                    Checkbox(
+                        "Configuration snapshot (api keys & secrets are removed)",
+                        value=True,
+                        compact=True,
+                        id="chk-include-config",
+                    ),
+                    Checkbox(
+                        "Anonymous instance counts by provider (no names, no ids)",
+                        value=True,
+                        compact=True,
+                        id="chk-include-telemetry",
+                    ),
+                    id="checkboxes",
+                ),
+                Static("Send report via:", id="channel-label"),
+                RadioSet(
+                    RadioButton(
+                        "Open prefilled GitHub issue (opens in browser)",
+                        value=True,
+                        compact=True,
+                        id="radio-github",
+                    ),
+                    RadioButton(
+                        "Submit via Servonaut backend (you can be anonymous)",
+                        compact=True,
+                        id="radio-backend",
+                    ),
+                    compact=True,
+                    id="channel-selector",
+                ),
+            ),
+            actions=DialogActions(
+                Button("Continue", id="continue", variant="primary"),
+                Button("Cancel", id="cancel", variant="default"),
+                id="footer-buttons",
+            ),
+            id="consent-container",
+            size="large",
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "continue":

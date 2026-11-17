@@ -26,15 +26,21 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING, Union
 
+from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.content import Content
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.utils.markup import cell, literal, with_bold_values
+from servonaut.utils.markup import inert_text, literal, with_bold_values
+from servonaut.utils.theme_text import follow_theme, themed_text
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_actions import (
+    ActionSpec, ProviderActionsMixin, action_rail, action_unavailable,
+)
 from servonaut.screens._demo_resolve import (
     DemoRowsMixin,
     display_text,
@@ -51,7 +57,7 @@ from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -110,8 +116,14 @@ _POWER_TEXT = {
 }
 
 
-class HetznerManagerScreen(DemoRowsMixin, Screen):
+class HetznerManagerScreen(ProviderActionsMixin, DemoRowsMixin, WorkspaceScreen):
     """Hetzner Cloud server manager — list + lifecycle toolbar."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 117
+    # Short terminals get a compact action rail, so the title and table fit.
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -128,6 +140,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         return super().app  # type: ignore[return-value]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -143,65 +157,89 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield ScrollableContainer(
-                Static(
-                    "[bold $text-accent]Hetzner Cloud Manager[/bold $text-accent]",
-                    id="hetzner_mgr_header",
-                ),
-                Static(
-                    "[dim]Click a row, then use the keys below or the action "
-                    "buttons. State-aware: Start only enables on stopped "
-                    "servers, Stop/Reboot only on running ones.[/dim]",
-                    id="hetzner_mgr_hint",
-                ),
+        yield WorkspaceControls("Hetzner servers")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            inventory_panel = Vertical(
+                Static("", id="hetzner_mgr_status"),
                 DataTable(
                     id="hetzner_mgr_table",
                     zebra_stripes=True,
                     cursor_type="row",
                 ),
-                Static("", id="hetzner_mgr_status"),
+                classes="provider-manager-inventory",
+            )
+            inventory_panel.border_title = "Cloud inventory"
+            selection = Vertical(
+                Static("Selected resource", classes="provider-manager-selection-label"),
+                Static(
+                    "No server selected", id="hetzner_mgr_selection",
+                    classes="provider-manager-selection-name", markup=False,
+                ),
+                Static(
+                    "Choose a row to see its full ID and address.",
+                    id="hetzner_mgr_identity",
+                    classes="provider-manager-selection-identity", markup=False,
+                ),
+                classes="provider-manager-selection",
+            )
+            actions = action_rail(
+                "hetzner_mgr_actions",
+                inventory=(
+                    ActionSpec("btn_hetzner_mgr_refresh", "Refresh", "f5", disabled=False),
+                    ActionSpec("btn_hetzner_mgr_new", "+ New", "n", role="primary", disabled=False),
+                ),
+                selection=selection,
+                power=(
+                    ActionSpec("btn_hetzner_mgr_power_on", "Start", "s", role="primary"),
+                    ActionSpec("btn_hetzner_mgr_shutdown", "Shutdown", "t"),
+                    ActionSpec("btn_hetzner_mgr_reboot", "Reboot", "b"),
+                    ActionSpec(
+                        "btn_hetzner_mgr_power_off", "Power off", role="warning",
+                        tooltip="Hard power cut (like pulling the plug).",
+                    ),
+                ),
+                danger=(
+                    ActionSpec("btn_hetzner_mgr_delete", "Delete", "d", role="error"),
+                ),
+            )
+            actions.border_title = "Resource actions"
+            rail = Vertical(actions, classes="provider-manager-rail")
+            rail.border_title = "Resource workspace"
+            yield ScrollableContainer(
+                Vertical(
+                    Horizontal(
+                        Static("Hetzner Cloud servers", id="hetzner_mgr_header", classes="screen-title"),
+                        Static(
+                            "Inventory", id="hetzner_mgr_overview",
+                            classes="provider-manager-overview", markup=False,
+                        ),
+                        classes="provider-manager-heading-row",
+                    ),
+                    Static(
+                        "Select a server to manage its power. Start requires a "
+                        "stopped server; Shutdown, Power off and Reboot require "
+                        "a running one.",
+                        id="hetzner_mgr_hint",
+                    ),
+                    classes="provider-manager-heading",
+                ),
                 Horizontal(
-                    Button("Refresh (F5)", id="btn_hetzner_mgr_refresh"),
-                    Button(
-                        "+ New (n)", variant="primary",
-                        id="btn_hetzner_mgr_new",
-                    ),
-                    Button(
-                        "Start (s)", id="btn_hetzner_mgr_power_on",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Shutdown (t)", id="btn_hetzner_mgr_shutdown",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Power off",
-                        id="btn_hetzner_mgr_power_off",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Reboot (b)", id="btn_hetzner_mgr_reboot",
-                        disabled=True,
-                    ),
-                    Button(
-                        "Delete (d)", variant="error",
-                        id="btn_hetzner_mgr_delete",
-                        disabled=True,
-                    ),
-                    id="hetzner_mgr_actions",
+                    inventory_panel, rail, classes="provider-manager-body",
                 ),
                 id="hetzner_mgr_container",
+                classes="workspace-content provider-manager-content",
             )
         yield Footer()
 
     def on_mount(self) -> None:
+        follow_theme(self, "#hetzner_mgr_table", self._render_table)
         table = self.query_one("#hetzner_mgr_table", DataTable)
         table.add_columns(
             "#", "Name", "ID", "Type", "State", "Public IP",
             "Region", "Created",
         )
+        self.sync_compact_actions()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -271,36 +309,67 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             for idx, inst in enumerate(self._instances, start=1):
                 table.add_row(
                     str(idx),
-                    cell(display_name(inst)),
-                    cell(inst.get("id", "")),
-                    cell(inst.get("type", "")),
+                    Text(inert_text(display_name(inst))),
+                    Text(inert_text(str(inst.get("id", "")))),
+                    Text(inert_text(str(inst.get("type", "")))),
                     self._colorize_state(str(inst.get("state", ""))),
-                    str(inst.get("public_ip", "") or "—"),
-                    str(inst.get("region", "")),
-                    str(inst.get("created_at", "") or "—")[:19],
+                    Text(inert_text(str(inst.get("public_ip", "") or "—"))),
+                    Text(inert_text(str(inst.get("region", "")))),
+                    Text(inert_text(str(inst.get("created_at", "") or "—")[:19])),
                     key=str(inst.get("id", idx)),
                 )
         self._sync_action_buttons()
+        self._update_resource_context()
 
-    @staticmethod
-    def _colorize_state(state: str) -> str:
+    def _colorize_state(self, state: str) -> Text:
         s = state.lower()
         if s in _RUNNING:
-            return f"[green]{state}[/green]"
+            return themed_text(self.app, state, "$text-success")
         if s in _STOPPED:
-            return f"[yellow]{state}[/yellow]"
+            return themed_text(self.app, state, "$text-warning")
         if s in {"pending", "starting", "stopping", "rebuilding"}:
-            return f"[blue]{state}[/blue]"
+            return themed_text(self.app, state, "$text-accent")
         if s == "error":
-            return f"[red]{state}[/red]"
-        return state
+            return themed_text(self.app, state, "$text-error")
+        return Text(inert_text(state))
 
     # ------------------------------------------------------------------
     # Selection-driven button enablement
     # ------------------------------------------------------------------
 
+    def _update_resource_context(self) -> None:
+        """Show the drawn row's identity beside its existing resource actions."""
+        try:
+            selection = self.query_one("#hetzner_mgr_selection", Static)
+            identity = self.query_one("#hetzner_mgr_identity", Static)
+            overview = self.query_one("#hetzner_mgr_overview", Static)
+        except NoMatches:
+            return
+        count = len(self._instances)
+        accounts = {str(row.get("account") or "") for row in self._instances}
+        summary = f"{count} server{'s' if count != 1 else ''}"
+        if len(accounts) > 1:
+            summary += f" across {len(accounts)} projects"
+        overview.update(summary)
+        instance = self._selected_instance()
+        if instance is None:
+            selection.update("No server selected")
+            identity.update("Choose a row to see its full ID and address.")
+            return
+        selection.update(Text(self._row_label(instance), style="bold"))
+        details = Text()
+        for index, (label, key) in enumerate((
+            ("State", "state"), ("ID", "id"), ("Address", "public_ip"),
+        )):
+            if index:
+                details.append("\n")
+            details.append(f"{label}: ", style="dim")
+            details.append(str(instance.get(key) or "—"))
+        identity.update(details)
+
     def on_data_table_row_highlighted(self, event) -> None:
         self._sync_action_buttons()
+        self._update_resource_context()
 
     def _selected_instance(self) -> Optional[dict]:
         table = self.query_one("#hetzner_mgr_table", DataTable)
@@ -348,33 +417,29 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         return literal(f"\n⚠ {error}", "$text-warning")
 
     def _sync_action_buttons(self) -> None:
-        """Toggle button enabled state based on the selected row's state.
+        self.sync_action_buttons()
 
-        State machine (Hetzner statuses):
-        * ``running``  → shutdown / power_off / reboot enabled
-        * ``stopped``  → power_on enabled
-        * other        → only delete enabled (and not always — pending
-                         servers reject delete with a transient error,
-                         but we let the user try; the audit row will
-                         capture the failure cleanly).
+    def unavailable_actions(self) -> dict[str, str | None]:
+        """Why each action cannot run on the selected row, from its Hetzner status.
+
+        * ``running`` -> shutdown / power off / reboot
+        * ``stopped`` / ``off`` -> power on
+        * anything else (transient) -> only delete; a server being created or
+          deleted may reject it, and the audit row records the failure.
         """
         inst = self._selected_instance()
         state = (inst.get("state", "") if inst else "").lower()
-
-        is_running = state in _RUNNING
-        is_stopped = state in _STOPPED
-
-        for btn_id, enable in (
-            ("btn_hetzner_mgr_power_on", inst is not None and is_stopped),
-            ("btn_hetzner_mgr_shutdown", inst is not None and is_running),
-            ("btn_hetzner_mgr_power_off", inst is not None and is_running),
-            ("btn_hetzner_mgr_reboot", inst is not None and is_running),
-            ("btn_hetzner_mgr_delete", inst is not None),
-        ):
-            try:
-                self.query_one(f"#{btn_id}", Button).disabled = not enable
-            except Exception:  # pragma: no cover - defensive
-                pass
+        has_row = inst is not None
+        running = state in _RUNNING
+        return {
+            "btn_hetzner_mgr_power_on": action_unavailable(has_row, state in _STOPPED, "Start needs a stopped server."),
+            "btn_hetzner_mgr_shutdown": action_unavailable(has_row, running, "Shutdown needs a running server."),
+            "btn_hetzner_mgr_power_off": action_unavailable(
+                has_row, running, "Power off needs a running server.",
+            ),
+            "btn_hetzner_mgr_reboot": action_unavailable(has_row, running, "Reboot needs a running server."),
+            "btn_hetzner_mgr_delete": action_unavailable(has_row, True, ""),
+        }
 
     # ------------------------------------------------------------------
     # Actions
@@ -416,16 +481,20 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             self._refresh()
 
     def action_power_on(self) -> None:
-        self._run_lifecycle("power_on")
+        if not self.refuse_unavailable("btn_hetzner_mgr_power_on"):
+            self._run_lifecycle("power_on")
 
     def action_shutdown(self) -> None:
-        self._run_lifecycle("shutdown")
+        if not self.refuse_unavailable("btn_hetzner_mgr_shutdown"):
+            self._run_lifecycle("shutdown")
 
     def action_power_off(self) -> None:
-        self._run_lifecycle("power_off")
+        if not self.refuse_unavailable("btn_hetzner_mgr_power_off"):
+            self._run_lifecycle("power_off")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot")
+        if not self.refuse_unavailable("btn_hetzner_mgr_reboot"):
+            self._run_lifecycle("reboot")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()
@@ -505,7 +574,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Hetzner Server",
+                title="Delete Hetzner server",
                 description=with_bold_values(
                     "Delete {} ({}) in {}?",
                     label, inst.get('type', ''), inst.get('region', ''),
@@ -516,7 +585,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
                     "Billing for this server stops immediately",
                 ],
                 confirm_text="delete",
-                action_label="Delete Server",
+                action_label="Delete server",
                 severity="danger",
             )
         )

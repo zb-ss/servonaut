@@ -7,12 +7,12 @@ from importlib.metadata import version as pkg_version
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, Grid
-from textual.screen import Screen
 from textual.widgets import Static, Button, Footer
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._demo_resolve import (
     connection_instance,
     real_instance_id,
@@ -21,17 +21,21 @@ from servonaut.screens._demo_resolve import (
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
 
 
-class MainMenuScreen(Screen):
+class MainMenuScreen(WorkspaceScreen):
     """Modern Dashboard screen with sidebar navigation."""
 
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 76
+    CONTENT_NARROW_WIDTH = 96
+
     BINDINGS = [
-        Binding("1", "option_1", "List Instances", show=False),
-        Binding("2", "option_2", "SSH Keys", show=False),
-        Binding("3", "option_3", "Scan Servers", show=False),
+        Binding("1", "option_1", "List instances", show=False),
+        Binding("2", "option_2", "SSH keys", show=False),
+        Binding("3", "option_3", "Scan servers", show=False),
         Binding("4", "option_4", "Settings", show=False),
-        Binding("5", "option_5", "Custom Servers", show=False),
+        Binding("5", "option_5", "Custom servers", show=False),
         Binding("6", "option_6", "CloudTrail", show=False),
-        Binding("7", "option_7", "IP Ban Manager", show=False),
+        Binding("7", "option_7", "IP ban manager", show=False),
         Binding("8", "option_8", "CloudWatch", show=False),
         Binding("0", "quit", "Quit", show=False),
         Binding("q", "quit", "Quit", show=True),
@@ -40,7 +44,8 @@ class MainMenuScreen(Screen):
 
     def on_mount(self) -> None:
         """Initialize the dashboard and check for updates."""
-        self.run_worker(self._update_stats(), name="update_stats")
+        # Version checks must not cancel the local statistics update.
+        self.run_worker(self._update_stats(), name="update_stats", group="dashboard_stats")
         self.run_worker(self._check_update(), name="version_check", exclusive=True)
         # Focus the list instances button in the main area by default
         try:
@@ -64,43 +69,52 @@ class MainMenuScreen(Screen):
         
         # Update UI safely
         try:
-            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal Servers")
+            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal servers")
             self.query_one("#stat-running", Static).update(f"[bold $text-success]{running}[/bold $text-success]\nRunning")
             self.query_one("#stat-stopped", Static).update(f"[bold $text-warning]{stopped}[/bold $text-warning]\nStopped")
         except Exception:
             pass
 
     def compose(self) -> ComposeResult:
-        """Compose the dashboard UI."""
+        """Lead with server access, with inventory and inspection nearby."""
         yield SafeHeader()
-        
-        with Horizontal(id="main-layout"):
-            # Left Navigation Sidebar
-            yield Sidebar()
-            
-            # Right Content Area (Dashboard)
-            with Vertical(id="dashboard-content"):
+        yield WorkspaceControls("Dashboard")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Vertical(id="dashboard-content", classes="workspace-content"):
                 with Container(id="dashboard-header"):
-                    yield Static(f"Welcome to [bold $text-accent]Servonaut[/bold $text-accent]", id="dashboard-title")
-                    yield Static("Select a tool or view to get started.", id="dashboard-subtitle")
-                
-                # Stats Row
-                with Horizontal(id="stats-row"):
-                    yield Static("...\nTotal Servers", id="stat-total", classes="stat-card")
-                    yield Static("...\nRunning", id="stat-running", classes="stat-card")
-                    yield Static("...\nStopped", id="stat-stopped", classes="stat-card")
-                
-                # Main Actions Grid
-                with Grid(id="actions-grid"):
-                    yield Button("📋  Instances Explorer\n[dim]View, connect, and manage servers[/dim]", id="card_list", classes="action-card")
-                    yield Button("💻 Custom Servers\n[dim]Manage external bare-metal/VPS[/dim]", id="card_custom_servers", classes="action-card")
-                    yield Button("📊  CloudWatch Logs\n[dim]Analyze logs and top IPs[/dim]", id="card_cloudwatch", classes="action-card")
-                    yield Button("🔒 IP Ban Manager\n[dim]Block malicious traffic[/dim]", id="card_ip_ban", classes="action-card")
-                    yield Button("🔍  CloudTrail Events\n[dim]Audit AWS API activity[/dim]", id="card_cloudtrail", classes="action-card")
-                    yield Button("🎯  Security Scanner\n[dim]Scan fleet for vulnerabilities[/dim]", id="card_scan", classes="action-card")
-
+                    yield Static("Your server workspace", id="dashboard-title")
+                    yield Static("Connect, inspect, and manage your fleet.", id="dashboard-subtitle")
+                with Horizontal(id="dashboard-overview"):
+                    with Vertical(id="dashboard-servers"):
+                        yield Static("Server access", classes="dashboard-section-title")
+                        with Vertical(id="dashboard-primary-actions"):
+                            yield Button(
+                                "Instances explorer\nConnect to a server, browse files, or run commands",
+                                id="card_list", classes="action-card dashboard-primary",
+                            )
+                            with Horizontal(id="dashboard-secondary-actions"):
+                                yield Button("Custom servers", id="card_custom_servers", classes="action-card")
+                                yield Button("SSH keys", id="card_keys", classes="action-card")
+                                yield Button("Settings", id="card_settings", classes="action-card")
+                    with Vertical(id="dashboard-inventory"):
+                        yield Static("Loaded inventory", classes="dashboard-section-title")
+                        with Horizontal(id="stats-row"):
+                            yield Static("...\nTotal servers", id="stat-total", classes="stat-card")
+                            yield Static("...\nRunning", id="stat-running", classes="stat-card")
+                            yield Static("...\nStopped", id="stat-stopped", classes="stat-card")
+                        yield Static(
+                            "Refresh the live server list in Instances explorer.",
+                            id="dashboard-inventory-note",
+                        )
+                with Vertical(id="dashboard-tools"):
+                    yield Static("Inspect & protect", classes="dashboard-section-title")
+                    with Grid(id="actions-grid"):
+                        yield Button("CloudWatch logs\nSearch log streams", id="card_cloudwatch", classes="action-card")
+                        yield Button("IP ban manager\nReview traffic blocking", id="card_ip_ban", classes="action-card")
+                        yield Button("CloudTrail events\nInspect AWS API activity", id="card_cloudtrail", classes="action-card")
+                        yield Button("Scan servers\nFind configured keywords", id="card_scan", classes="action-card")
                 yield ProgressIndicator()
-                
         yield Footer()
 
     async def _check_update(self) -> None:

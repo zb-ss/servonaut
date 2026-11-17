@@ -1,0 +1,199 @@
+/* Report details and the exact payload preview share a quiet review workspace. */
+BugReportScreen #bug-report-content {
+    padding: 1 2 0 2;
+    height: 1fr;
+    overflow-y: auto;
+    background: $surface;
+}
+
+BugReportScreen #bug-title-header {
+    color: $text;
+    margin: 0;
+}
+
+BugReportScreen #bug-report-intro {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+BugReportScreen #bug-report-workflow {
+    height: 1fr;
+    padding: 0;
+}
+
+BugReportScreen #bug-report-panes {
+    height: 1fr;
+    min-height: 24;
+}
+
+BugReportScreen #bug-report-form,
+BugReportScreen #bug-report-preview-panel {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    border: round $primary;
+    background: transparent;
+}
+
+BugReportScreen #bug-report-form {
+    margin-right: 1;
+    overflow-y: auto;
+}
+
+BugReportScreen .field-label,
+BugReportScreen .bug-report-section-title {
+    height: auto;
+    margin: 0;
+    color: $text;
+    text-style: bold;
+}
+
+BugReportScreen .field-help {
+    margin: 0 0 1 0;
+}
+
+BugReportScreen #description {
+    height: 8;
+}
+
+BugReportScreen #consent-summary {
+    height: auto;
+    color: $text-muted;
+    margin: 0 0 1 0;
+}
+
+BugReportScreen #preview-scroll {
+    height: 1fr;
+    min-height: 6;
+    border: none;
+    background: $surface;
+}
+
+BugReportScreen #preview {
+    padding: 0;
+}
+
+BugReportScreen #diagnostics-status {
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+    border-left: solid $primary;
+    background: $surface;
+}
+
+BugReportScreen #btn-row {
+    align: right middle;
+    margin: 1 0 0 0;
+}
+
+BugReportScreen #btn-row Button {
+    min-width: 0;
+    margin: 0 0 0 1;
+}
+
+BugReportScreen #receipt-row {
+    margin: 1 0 0 0;
+}
+
+BugReportScreen.-content-narrow #bug-report-content {
+    padding: 0 1;
+}
+
+BugReportScreen.-content-narrow #bug-report-panes {
+    layout: vertical;
+    height: auto;
+    min-height: 0;
+}
+
+BugReportScreen.-content-narrow #bug-report-form {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+BugReportScreen.-content-narrow #bug-report-preview-panel {
+    width: 100%;
+    height: 18;
+}
+
+BugReportScreen.-content-narrow #btn-row {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+}
+
+BugReportScreen.-content-narrow #btn-row Button {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+}
+
+
+/* Writing, sharing and exact-payload review are separate parts of one flow. */
+BugReportScreen #bug-report-content { padding: 0 2 1 2; overflow-y: hidden; background: transparent; }
+BugReportScreen #bug-report-workflow { height: 1fr; min-height: 4; padding: 0; }
+BugReportScreen #bug-report-panes { height: auto; min-height: 0; }
+BugReportScreen #bug-report-form {
+    width: 2fr;
+    height: auto;
+    margin: 0 1 0 0;
+    padding: 1;
+    border: round $border-blurred;
+}
+BugReportScreen #bug-report-preview-panel {
+    width: 3fr;
+    height: auto;
+    padding: 0 1 1 1;
+    border: round $primary;
+}
+BugReportScreen #bug-report-form .bug-report-section-title { margin-bottom: 1; }
+BugReportScreen .field-label { margin: 0; }
+BugReportScreen #description { height: 10; min-height: 5; margin: 0; }
+BugReportScreen .bug-report-review-heading { height: auto; align: left middle; }
+BugReportScreen .bug-report-review-heading .bug-report-section-title {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    content-align: left middle;
+}
+BugReportScreen .bug-report-review-heading Button {
+    width: auto;
+    min-width: 0;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0 1;
+}
+BugReportScreen #consent-summary { height: auto; padding-bottom: 1; margin: 0; }
+BugReportScreen #preview-scroll { height: 16; min-height: 6; }
+BugReportScreen #bug-report-submit-bar {
+    dock: bottom;
+    width: 100%;
+    height: auto;
+    border-top: solid $border-blurred;
+    background: $surface;
+}
+BugReportScreen #diagnostics-status { padding: 0 1; margin: 0; border: none; }
+BugReportScreen #bug-report-feedback {
+    height: auto;
+    min-height: 0;
+    max-height: 5;
+    padding: 0 1;
+}
+BugReportScreen #submission-error,
+BugReportScreen #redact-warning,
+BugReportScreen #receipt-row { margin: 0; padding: 0; }
+BugReportScreen #btn-row { height: auto; margin: 0; align: left middle; }
+BugReportScreen #bug-report-submit-note { width: 1fr; height: auto; color: $text-muted; }
+BugReportScreen #btn-row #submit { width: auto; min-width: 14; margin: 0; }
+BugReportScreen.-content-narrow #bug-report-content { padding: 0 1 1 1; }
+BugReportScreen.-content-narrow #bug-report-panes { height: auto; min-height: 0; layout: vertical; }
+BugReportScreen.-content-narrow #bug-report-form,
+BugReportScreen.-content-narrow #bug-report-preview-panel { width: 100%; height: auto; margin: 0 0 1 0; }
+BugReportScreen.-content-narrow #preview-scroll { height: 8; }
+BugReportScreen.-content-narrow #btn-row { layout: horizontal; }
+BugReportScreen.-content-narrow #btn-row #submit { width: auto; }

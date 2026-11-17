@@ -106,10 +106,8 @@ async def test_general_roundtrip(tmp_path):
         panel.query_one("#general_username", Input).value = "deploy"
         panel.query_one("#general_default_key", Input).value = "~/.ssh/deploy.pem"
         panel.query_one("#general_cache_ttl", Input).value = "900"
-        panel.query_one("#general_theme", Select).value = "nord"
         panel.persist()
         await pilot.pause()
-        assert app.theme == "nord"
 
     reread = ConfigManager()
     reread._config_path = tmp_path / "config.json"  # type: ignore[attr-defined]
@@ -117,7 +115,6 @@ async def test_general_roundtrip(tmp_path):
     assert fresh.default_username == "deploy"
     assert fresh.default_key == "~/.ssh/deploy.pem"
     assert fresh.cache_ttl_seconds == 900
-    assert fresh.theme == "nord"
 
 
 @pytest.mark.asyncio

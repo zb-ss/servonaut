@@ -1,41 +1,111 @@
-/* ===================================================================
-   SCAN RESULTS SCREEN
-   =================================================================== */
+/* Cached and live matches with an adjacent complete-text reader. */
 
 #scan_container {
-    layout: vertical;
     height: 100%;
-    padding: 1;
+    width: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
 }
 
 #scan_banner {
-    text-align: center;
-    padding: 1;
+    height: auto;
+    padding: 0 1;
     margin-bottom: 1;
-    color: $accent;
-    text-style: bold;
+    border-left: heavy $accent;
+    background: $panel;
+    color: $text;
 }
 
 #results_container {
     height: 1fr;
-    layout: vertical;
+    min-height: 12;
+}
+
+#scan_controls {
+    height: auto;
+    margin-bottom: 1;
 }
 
 #scan_button {
-    margin: 1 0;
+    margin: 0 1 0 0;
     width: auto;
 }
 
 #scan_status {
-    margin: 1 0;
-    padding: 1;
-    border: round $accent;
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    padding: 0 1;
+    content-align: left middle;
     background: $panel;
-    min-height: 2;
+}
+
+#scan_match_workspace {
+    height: 1fr;
+    min-height: 8;
+}
+
+#scan_results_panel {
+    width: 3fr;
+    height: 100%;
+    min-height: 6;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+    margin-right: 1;
+}
+
+#scan_results_panel:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
 }
 
 #results_table {
     height: 1fr;
-    margin-top: 1;
+    border: none;
 }
 
+#scan_match_detail {
+    width: 2fr;
+    height: 100%;
+    min-height: 7;
+    margin: 0;
+    padding: 0 1;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+#scan_match_detail:focus {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+ScanResultsScreen.-content-narrow #scan_controls {
+    layout: vertical;
+}
+
+ScanResultsScreen.-content-narrow #scan_button {
+    width: 100%;
+    margin: 0;
+}
+
+ScanResultsScreen.-content-narrow #scan_status {
+    min-height: 1;
+}
+
+ScanResultsScreen.-content-narrow #scan_match_workspace {
+    layout: vertical;
+    min-height: 14;
+}
+
+ScanResultsScreen.-content-narrow #scan_results_panel {
+    width: 100%;
+    height: 1fr;
+    margin: 0 0 1 0;
+}
+
+ScanResultsScreen.-content-narrow #scan_match_detail {
+    width: 100%;
+    height: 7;
+}

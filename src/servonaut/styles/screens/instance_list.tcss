@@ -4,15 +4,31 @@
 
 
 
+/* The label above the search box needs a spare row: tall terminals only. */
+#fleet_search_label {
+    display: none;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+InstanceListScreen.-tall #fleet_search_label {
+    display: block;
+}
+
 #search_input {
     width: 1fr;
-    margin: 1 0;
+    margin: 0;
 }
 
 InstanceTable {
     height: 1fr;
     margin: 0 1;
-    border: round $primary;
+    border: round $panel-lighten-2;
+    background: transparent;
+    /* One cell, muted: a solid bar under the rows reads as a second table. */
+    scrollbar-size: 1 1;
+    scrollbar-color: $border-blurred;
 }
 
 StatusBar {
@@ -23,16 +39,200 @@ StatusBar {
     padding: 0 2;
 }
 
-ProgressIndicator {
+/* What the providers are doing while the list loads: a block of lines on the
+   first run, one line on a refresh. Hidden until there is something to say. */
+#fleet_load_status {
+    display: none;
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    color: $text;
+}
+
+/* Quick filters: state chips, then provider chips. */
+#fleet_filters {
+    layout: grid;
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-rows: auto;
+    grid-gutter: 0;
+    width: 100%;
+    height: auto;
+}
+
+/* The age and the Refresh link fit on the chip row: a second column. */
+#fleet_filters.-fresh-inline {
+    grid-size: 2;
+    grid-columns: auto 1fr;
+}
+
+#fleet_chip_row {
+    width: auto;
+    height: auto;
+}
+
+#fleet_state_chips,
+#fleet_provider_chips {
+    width: auto;
     height: 1;
-    padding: 0 2;
-    background: $panel;
-    color: $warning;
+}
+
+.fleet-chip-divider {
+    width: 1;
+    margin: 0 1 0 0;
+    color: $border-blurred;
+}
+
+InstanceListScreen.-narrow #fleet_chip_row,
+InstanceListScreen.-content-narrow #fleet_chip_row,
+InstanceListScreen.-chat-open #fleet_chip_row {
+    layout: vertical;
+}
+
+InstanceListScreen.-narrow .fleet-chip-divider,
+InstanceListScreen.-content-narrow .fleet-chip-divider,
+InstanceListScreen.-chat-open .fleet-chip-divider {
     display: none;
 }
 
-ProgressIndicator.--visible {
-    display: block;
+/* A chip is one row by default: a faint panel fill says "click me" while it
+   costs no height. Roomy terminals draw outlined pills instead (below). */
+.fleet-chip {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    margin: 0 1 0 0;
+    padding: 0 1;
+    border: none;
+    background: $panel;
+    color: $text;
+}
+
+.fleet-chip:hover {
+    border: none;
+    background: $panel-lighten-2;
+    color: $text-accent;
+}
+
+.fleet-chip:focus {
+    border: none;
+    background: $panel-lighten-2;
+    text-style: bold underline;
+}
+
+.fleet-chip.--chosen {
+    border: none;
+    background: $accent;
+    color: $background;
+    text-style: bold;
+}
+
+/* Roomy terminals (wide, tall, nothing beside the table): outlined pills. The
+   chosen one has an accent outline and accent text, the others a dim outline. */
+InstanceListScreen.-roomy .fleet-chip-divider {
+    height: 3;
+    content-align: center middle;
+}
+
+InstanceListScreen.-roomy #fleet_state_chips,
+InstanceListScreen.-roomy #fleet_provider_chips {
+    height: 3;
+}
+
+InstanceListScreen.-roomy .fleet-chip {
+    height: 3;
+    padding: 0;
+    border: round $border-blurred;
+    background: transparent;
+    color: $text;
+}
+
+/* Hover and focus are a brighter neutral outline: only the chosen pill is accent. */
+InstanceListScreen.-roomy .fleet-chip:hover,
+InstanceListScreen.-roomy .fleet-chip:focus {
+    border: round $border;
+    background: transparent;
+    color: $text;
+    text-style: bold;
+}
+
+InstanceListScreen.-roomy .fleet-chip.--chosen,
+InstanceListScreen.-roomy .fleet-chip.--chosen:hover,
+InstanceListScreen.-roomy .fleet-chip.--chosen:focus {
+    border: round $accent;
+    background: transparent;
+    color: $text-accent;
+    text-style: bold;
+}
+
+/* Terminal-colour themes: fills are not reliable there, so a chosen chip is
+   drawn reversed and an unchosen one underlined. */
+.fleet-chip:ansi {
+    background: $background;
+    text-style: underline;
+}
+
+.fleet-chip.--chosen:ansi {
+    background: $background;
+    color: $text;
+    text-style: bold reverse;
+}
+
+/* These out-rank the plain :focus rule above, so focus needs its own cue
+   here: the same bold underline the sidebar gives a focused active entry. */
+.fleet-chip:ansi:focus {
+    text-style: bold underline;
+}
+
+.fleet-chip.--chosen:ansi:focus {
+    text-style: bold underline reverse;
+}
+
+/* In a pill the outline carries the state, so the ansi cues are lighter. */
+InstanceListScreen.-roomy .fleet-chip:ansi {
+    text-style: none;
+}
+
+InstanceListScreen.-roomy .fleet-chip.--chosen:ansi {
+    text-style: bold;
+}
+
+InstanceListScreen.-roomy .fleet-chip:ansi:focus {
+    text-style: bold underline;
+}
+
+/* Freshness and Refresh: right-aligned on a row of their own, or on the chip
+   row when the screen measured enough room (see _sync_fresh_layout). */
+#fleet_fresh {
+    width: 100%;
+    height: 1;
+    align-horizontal: right;
+}
+
+#fleet_filters.-fresh-inline #fleet_fresh {
+    width: 100%;
+}
+
+InstanceListScreen.-roomy #fleet_filters.-fresh-inline #fleet_fresh {
+    height: 3;
+    align-vertical: middle;
+}
+
+#fleet_updated {
+    width: auto;
+    padding: 0;
+    color: $text-muted;
+    text-wrap: nowrap;
+}
+
+/* One row under the table at any width: a long summary is cut, not wrapped. */
+#fleet_summary {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #keyword_matches_label {
@@ -54,87 +254,11 @@ ProgressIndicator.--visible {
     text-overflow: ellipsis;
 }
 
-/* Fleet Memory screen — match Memory Sync visual language: centred
-   accent title + muted subtitle, rounded $primary card around the
-   table, consistent button spacing. The container itself overrides
-   memory_screen.tcss so this screen reads as a top-level fleet view
-   rather than a per-instance variant. */
-FleetMemoryScreen #memory-container {
-    width: 1fr;
-    height: 1fr;
-    padding: 1 2;
-}
-
-FleetMemoryScreen #memory-title {
-    text-align: center;
-    color: $accent;
-    text-style: bold;
-    margin-bottom: 0;
-    height: auto;
-}
-
-FleetMemoryScreen #memory-subtitle {
-    text-align: center;
-    color: $text-muted;
-    margin-bottom: 1;
-    height: auto;
-}
-
-#fleet-memory-help {
-    height: auto;
-    padding: 0 1 1 1;
-    color: $text-muted;
-}
-
-#fleet-memory-status {
-    height: 1;
-    padding: 0 1;
-}
-
-#fleet-memory-progress {
-    height: 1;
-    padding: 0 1;
-    color: $accent;
-}
-
-#fleet-auto-scan-status {
-    height: 1;
-    padding: 0 1;
-}
-
-/* Rounded card framing the DataTable so the table reads as an inset
-   surface (matches .msync_card on Memory Sync, the IP Ban content
-   panels, etc.). DataTable inside takes 1fr to fill the card. */
-#fleet-memory-table-card {
-    height: 1fr;
-    margin: 0 1;
-    border: round $primary;
-    background: $surface;
-    padding: 0;
-}
-
-#fleet-memory-table {
-    height: 1fr;
-    margin: 0;
-    background: $surface;
-}
-
-FleetMemoryScreen #memory-actions {
-    height: auto;
-    padding: 1 1 0 1;
-    align: left middle;
-}
-
-FleetMemoryScreen #memory-actions Button {
-    margin-right: 1;
-    min-width: 14;
-}
-
 #keyword_matches_container {
     height: auto;
     max-height: 30%;
     border: round $primary;
     margin: 0 1;
-    background: $boost;
+    background: transparent;
 }
 

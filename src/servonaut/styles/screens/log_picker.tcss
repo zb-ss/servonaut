@@ -1,199 +1,228 @@
-/* ===================================================================
-   LOG PICKER MODAL
-   =================================================================== */
+/* Log sources: bounded native lists, named path fields, and remote browsing. */
 
-LogPickerModal {
-    align: center middle;
-}
-
-#log_picker_container {
-    width: 70%;
-    max-width: 80;
-    height: 60%;
-    background: $surface;
-    border: round $accent;
-    layout: vertical;
-}
-
-#log_picker_header {
-    dock: top;
-    padding: 1 2;
-    background: $primary;
-    color: $text;
-    border-bottom: thick $accent;
-    text-style: bold;
-}
-
-#log_picker_search {
-    margin: 1 1 0 1;
-    width: 1fr;
-}
-
-#log_picker_count {
-    margin: 0 2;
+LogPickerModal #log_picker_hint {
+    height: auto;
     color: $text-muted;
+}
+
+LogPickerModal #log_picker_body {
+    height: 1fr;
+    min-height: 6;
+}
+
+LogPickerModal #log_picker_search {
+    width: 100%;
+    margin: 0;
+}
+
+LogPickerModal #log_picker_count {
     height: 1;
-}
-
-#log_picker_list {
-    height: 1fr;
+    padding: 0 1;
     background: $panel;
-    margin: 0 1 1 1;
-    border: round $primary-background;
-}
-
-/* Add Path Modal */
-
-AddPathModal {
-    align: center middle;
-}
-
-#add_path_container {
-    width: 60%;
-    max-width: 64;
-    height: auto;
-    background: $surface;
-    border: round $accent;
-    padding: 1 2;
-}
-
-#add_path_header {
-    padding: 1;
-    text-style: bold;
-}
-
-#add_path_hint {
-    padding: 0 1 1 1;
-}
-
-#add_path_input {
-    margin: 0 1 1 1;
-    width: 1fr;
-}
-
-/* Edit Path Modal */
-
-EditPathModal {
-    align: center middle;
-}
-
-#edit_path_container {
-    width: 70%;
-    max-width: 80;
-    height: auto;
-    background: $surface;
-    border: round $accent;
-    padding: 1 2;
-}
-
-#edit_path_header {
-    padding: 1;
-    text-style: bold;
-}
-
-#edit_path_hint {
-    padding: 0 1 1 1;
-}
-
-#edit_path_input {
-    margin: 0 1 1 1;
-    width: 1fr;
-}
-
-/* Add Directory Modal */
-
-AddDirectoryModal {
-    align: center middle;
-}
-
-#add_dir_container {
-    width: 60%;
-    max-width: 64;
-    height: auto;
-    background: $surface;
-    border: round $accent;
-    padding: 1 2;
-}
-
-#add_dir_header {
-    padding: 1;
-    text-style: bold;
-}
-
-#add_dir_hint {
-    padding: 0 1 1 1;
-}
-
-#add_dir_input {
-    margin: 0 1 1 1;
-    width: 1fr;
-}
-
-/* Manage Paths Modal */
-
-ManagePathsModal {
-    align: center middle;
-}
-
-#manage_paths_container {
-    width: 80%;
-    max-width: 100;
-    height: 60%;
-    background: $surface;
-    border: round $accent;
-    layout: vertical;
-}
-
-#manage_paths_header {
-    dock: top;
-    padding: 1 2;
-    background: $primary;
-    color: $text;
-    border-bottom: thick $accent;
-    text-style: bold;
-}
-
-#manage_paths_subtitle {
-    margin: 1 2 0 2;
     color: $text-muted;
 }
 
-#manage_paths_list {
+LogPickerModal #log_picker_list {
     height: 1fr;
-    background: $panel;
-    margin: 1 1 0 1;
-    border: round $primary-background;
+    min-height: 1;
+    margin: 0;
+    background: transparent;
+    border: round $border-blurred;
 }
 
-#manage_paths_buttons {
-    dock: bottom;
-    padding: 1 1;
+LogPickerModal #log_picker_list:focus {
+    border: round $accent;
+}
+
+AddPathModal .log_path_field_label,
+AddDirectoryModal .log_path_field_label,
+EditPathModal .log_path_field_label {
     height: auto;
-    align: center middle;
-    background: $surface;
-    border-top: wide $primary-background;
+    color: $text-muted;
+    margin-bottom: 1;
 }
 
-#manage_paths_buttons Button {
-    margin: 0 1 0 0;
+AddPathModal #add_path_input,
+AddDirectoryModal #add_dir_input,
+EditPathModal #edit_path_input {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+AddPathModal #add_path_hint,
+AddDirectoryModal #add_dir_hint,
+EditPathModal #edit_path_hint {
+    height: auto;
+    color: $text-muted;
+}
+
+ManagePathsModal #manage_paths_subtitle,
+ManagePathsModal #manage_paths_count {
+    height: auto;
+    color: $text-muted;
+}
+
+ManagePathsModal #manage_paths_count {
+    padding: 0 1;
+    background: $panel;
+}
+
+ManagePathsModal #manage_paths_list {
+    height: 1fr;
+    min-height: 1;
+    margin: 0;
+    background: transparent;
+    border: round $border-blurred;
+}
+
+ManagePathsModal #manage_paths_list:focus {
+    border: round $accent;
+}
+
+ManagePathsModal #manage_paths_buttons {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: 6;
+}
+
+ManagePathsModal #manage_paths_buttons Button {
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
+    margin: 0;
 }
 
-/* Browse Remote Screen */
-
-#browse_container {
+BrowseRemoteScreen #browse_container {
+    width: 1fr;
     height: 1fr;
     padding: 0 1;
+    overflow-y: auto;
 }
 
-#browse_header {
-    dock: top;
+BrowseRemoteScreen #browse_header_scroll {
     height: auto;
-    padding: 1;
+    max-height: 4;
+    margin-bottom: 1;
+    border-left: heavy $accent;
+    background: $panel;
+    overflow-y: auto;
 }
 
-#browse_tree {
+BrowseRemoteScreen #browse_header {
+    height: auto;
+    padding: 0 1;
+    color: $text;
+}
+
+BrowseRemoteScreen #browse_browser {
     height: 1fr;
-    border: round $primary;
+    min-height: 17;
 }
 
+BrowseRemoteScreen #browse_workspace {
+    width: 1fr;
+    height: 100%;
+    min-height: 8;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+    margin-right: 1;
+}
+
+BrowseRemoteScreen #browse_workspace:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+BrowseRemoteScreen #browse_tree {
+    height: 1fr;
+    min-height: 4;
+    padding: 0 1;
+    border: none;
+    background: $surface;
+}
+
+BrowseRemoteScreen #browse_selection {
+    width: 34;
+    height: 100%;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+    overflow-y: auto;
+}
+
+BrowseRemoteScreen #browse_selection_title {
+    height: 1;
+    color: $text-accent;
+}
+
+BrowseRemoteScreen #browse_path_scroll {
+    height: 1fr;
+    min-height: 3;
+    overflow-y: auto;
+}
+
+BrowseRemoteScreen #browse_path {
+    height: auto;
+    color: $text;
+}
+
+BrowseRemoteScreen #browse_selection_hint {
+    height: auto;
+    color: $text-muted;
+    margin: 1 0;
+}
+
+BrowseRemoteScreen #browse_actions {
+    layout: vertical;
+    height: auto;
+}
+
+BrowseRemoteScreen #browse_actions Button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_browser {
+    layout: vertical;
+    min-height: 18;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_workspace {
+    width: 100%;
+    height: 1fr;
+    margin: 0 0 1 0;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_selection {
+    width: 100%;
+    height: auto;
+    border: none;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_path_scroll {
+    height: auto;
+    min-height: 1;
+    max-height: 4;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_selection_hint {
+    display: none;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: 6;
+}
+
+BrowseRemoteScreen.-content-narrow #browse_back {
+    column-span: 2;
+}

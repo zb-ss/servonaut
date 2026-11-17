@@ -15,10 +15,10 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.content import Content
 from textual.events import Key
-from textual.screen import Screen
-from textual.widgets import Footer, Static, RichLog
+from textual.widgets import Button, Footer, Static, RichLog
 
 from servonaut.utils.markup import literal
+from servonaut.utils.theme_text import themed_text
 from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import (
     SshLog,
@@ -27,7 +27,7 @@ from servonaut.utils.ssh_utils import (
     with_diagnostics,
 )
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 from servonaut.screens.log_picker import (
     LogPickerModal,
@@ -71,7 +71,7 @@ def _format_cache_age(probed_at_iso: Optional[str]) -> str:
     return f" {int(age_seconds // 86400)}d ago"
 
 
-class LogViewerScreen(Screen):
+class LogViewerScreen(WorkspaceScreen):
     """Real-time remote log viewer via SSH tail -f.
 
     Architecture: a dedicated OS thread reads lines from the SSH subprocess
@@ -81,6 +81,14 @@ class LogViewerScreen(Screen):
     starved.
     """
 
+    AUTO_FOCUS = "#log_output"
+    CHAT_REFLOW = True
+    # The log pane's margin, border and padding (6) plus about 58 columns
+    # of log text beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 64
+    # The action dock wraps before labels would be truncated.
+    CONTENT_NARROW_WIDTH = 104
+
     BINDINGS = [
         # Tooltips double as the key descriptions on the help screen.
         Binding("escape", "back", "Back", show=True,
@@ -88,16 +96,16 @@ class LogViewerScreen(Screen):
         Binding("p", "toggle_pause", "Pause/Resume", show=True,
                 tooltip="Pause or resume streaming"),
         Binding("c", "clear_output", "Clear", show=True, tooltip="Clear the output"),
-        Binding("m", "manage_paths", "Manage Paths", show=True,
+        Binding("m", "manage_paths", "Manage paths", show=True,
                 tooltip="Manage custom log paths"),
-        Binding("l", "pick_log", "Pick Log", show=True,
+        Binding("l", "pick_log", "Pick log", show=True,
                 tooltip="Switch to a different log file"),
         Binding("a", "send_to_ai", "Send to AI", show=True,
                 tooltip="Send the log buffer to AI analysis"),
-        Binding("y", "copy_output", "Copy All", show=True,
+        Binding("y", "copy_output", "Copy all", show=True,
                 tooltip="Copy the whole log buffer to the clipboard"),
         Binding("v", "copy_mode", "Select", show=True,
-                tooltip="Copy Mode: the log in a text area you can select from"),
+                tooltip="Copy mode: the log in a text area you can select from"),
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
@@ -134,34 +142,59 @@ class LogViewerScreen(Screen):
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            yield Container(
-                Static(
+        yield WorkspaceControls("Log viewer")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="log_viewer_container", classes="workspace-content"):
+                yield Static("[bold]Remote log stream[/bold]", id="log_title")
+                yield Static(
                     Content.assemble(
-                        ("Log Viewer:", "bold $text-accent"), " ", literal(str(name)),
+                        ("Log viewer:", "bold $text-accent"), " ", literal(str(name)),
                         "  ", ("Probing available logs...", "dim"),
                     ),
                     id="log_header",
-                ),
-                RichLog(id="log_output", highlight=True, markup=True),
-                Static(
-                    "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
+                )
+                yield RichLog(id="log_output", highlight=True, markup=True)
+                with Container(id="log_actions"):
+                    yield Button("Pick log", id="log_pick", variant="primary")
+                    yield Button("Pause / resume", id="log_pause")
+                    yield Button("Select text", id="log_select")
+                    yield Button("Copy all", id="log_copy")
+                    yield Button("Send to AI", id="log_analyze")
+                    yield Button("Clear", id="log_clear")
+                yield Static(
+                    "[dim]P: Pause | C: Clear | L: Pick log | M: Manage paths | +: Add path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
                     id="log_hints",
-                ),
-                id="log_viewer_container",
-            )
+                )
         yield Footer()
 
     def on_key(self, event: Key) -> None:
         """Handle keys that can't be expressed as Textual bindings."""
+        # Like the screen's own bindings, typing on the focused navigation
+        # rail must not act on the log.
+        if self.navigation_focused:
+            return
         if event.character == "+":
             self.action_add_path()
             event.prevent_default()
 
     def on_mount(self) -> None:
         """Probe for available logs and start streaming."""
+        self.query_one("#log_output", RichLog).border_title = "Log output"
         self.run_worker(self._probe_and_start(), name="probe_logs", exclusive=True)
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "log_pick": "pick_log",
+            "log_pause": "toggle_pause",
+            "log_select": "copy_mode",
+            "log_copy": "copy_output",
+            "log_analyze": "send_to_ai",
+            "log_clear": "clear_output",
+        }
+        action = actions.get(event.button.id)
+        if action:
+            await self.run_action(action)
 
     async def _probe_and_start(self) -> None:
         """Probe available log paths, then start streaming the first one.
@@ -184,12 +217,12 @@ class LogViewerScreen(Screen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            output.write(Text(message, style="red"))
+            output.write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
-            output.write(Text(f"Error probing logs: {e}", style="red"))
+            output.write(themed_text(self.app, f"Error probing logs: {e}", "$text-error"))
             return
 
         self._available_logs = available
@@ -199,10 +232,8 @@ class LogViewerScreen(Screen):
             self._update_header()
             await self._start_stream(self._current_log)
         else:
-            output.write(
-                "[yellow]No readable log files found on this server.[/yellow]\n"
-                "[dim]Press L to pick a log or + to add a custom path.[/dim]"
-            )
+            output.write(themed_text(self.app, "No readable log files found on this server.", "$text-warning"))
+            output.write("[dim]Press L to pick a log or + to add a custom path.[/dim]")
             self.app.notify("No readable log files found", severity="warning")
 
         # Kick off background directory scan
@@ -245,10 +276,12 @@ class LogViewerScreen(Screen):
         status: list = []
         for part in status_parts:
             status += [" ", part] if status else ["  ", part]
-        self.query_one("#log_header", Static).update(Content.assemble(
-            ("Log Viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
-            ("Viewing:", "dim"), " ", literal(log_label), *status,
-        ))
+        self.query_one("#log_header", Static).update(
+            Content.assemble(
+                ("Log viewer:", "bold $text-accent"), " ", literal(str(name)), "  ",
+                ("Viewing:", "dim"), " ", literal(log_label), *status,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Stream lifecycle
@@ -280,7 +313,7 @@ class LogViewerScreen(Screen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
         try:
@@ -298,7 +331,7 @@ class LogViewerScreen(Screen):
             message = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 message = self.app.redaction_service.scrub_stream(message)
-            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
 
@@ -334,7 +367,7 @@ class LogViewerScreen(Screen):
         except Exception as e:
             logger.error("Failed to start stream process: %s", e)
             output = self.query_one("#log_output", RichLog)
-            output.write(Text(f"Error starting stream: {e}", style="red"))
+            output.write(themed_text(self.app, f"Error starting stream: {e}", "$text-error"))
 
     def _reader_thread_fn(self) -> None:
         """Read lines from the subprocess stdout in a dedicated OS thread.
@@ -433,7 +466,7 @@ class LogViewerScreen(Screen):
             if self._content_buffer:
                 output.write("\n[dim]--- End of file ---[/dim]")
             else:
-                output.write("[yellow]File is empty (0 lines)[/yellow]")
+                output.write(themed_text(self.app, "File is empty (0 lines)", "$text-warning"))
 
     def _check_empty_output(self) -> None:
         """Show hint if no log output has arrived after the initial delay."""
@@ -441,10 +474,8 @@ class LogViewerScreen(Screen):
             return
         if self._reader_thread and self._reader_thread.is_alive():
             output = self.query_one("#log_output", RichLog)
-            output.write(
-                "[yellow]No output received — file may be empty or inactive.[/yellow]\n"
-                "[dim]New lines will appear here as they are written to the log.[/dim]"
-            )
+            output.write(themed_text(self.app, "No output received — file may be empty or inactive.", "$text-warning"))
+            output.write("[dim]New lines will appear here as they are written to the log.[/dim]")
 
     async def _stop_stream(self) -> None:
         """Terminate the reader thread and subprocess."""
@@ -561,7 +592,7 @@ class LogViewerScreen(Screen):
         self._pause_stream_for_modal()
         text = "\n".join(self._content_buffer)
         self.app.push_screen(
-            CopyModeScreen(text, title="Log Viewer — Copy Mode"),
+            CopyModeScreen(text, title="Log viewer — copy mode"),
             callback=lambda _: self._resume_stream_after_modal(),
         )
 

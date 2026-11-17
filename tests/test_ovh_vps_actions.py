@@ -67,7 +67,7 @@ async def test_vps_actions_show_the_reverse_dns() -> None:
         await app.push_screen(screen)
 
         def info() -> str:
-            return str(screen.query_one("#server_info", Static).content)
+            return screen.query_one("#server_info", Static).content.plain
 
         await _wait_for(pilot, lambda: "Reverse DNS" in info(), "the reverse DNS line")
         # The name comes from the provider: shown literally, never as markup.
@@ -222,11 +222,12 @@ def test_server_info_shows_names_literally(instance, heading) -> None:
         info = screen._build_server_info()
 
     plain = info.plain
-    assert plain.startswith(heading)
-    assert (0, len(heading), "bold $text-accent") == (
-        info.spans[0].start, info.spans[0].end, str(info.spans[0].style),
+    name = "web-[b]1[/b]"
+    assert any(
+        plain[span.start:span.end] == name and str(span.style) == "bold"
+        for span in info.spans
     )
-    assert "web-[b]1[/b]" in plain
+    assert name in plain
     if "os" in instance:
         assert "OS: Debian [red]12" in plain
     if "group" in instance:

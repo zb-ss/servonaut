@@ -55,7 +55,7 @@ _STOP = object()
 
 _INSTALL_HINT = "Streaming voice input needs: pip install 'servonaut[voice-streaming]'"
 _NO_DEVICE_HINT = "No microphone detected"
-_NO_MODEL_HINT = "The streaming model is not downloaded yet — see Settings > Voice Input"
+_NO_MODEL_HINT = "The streaming model is not downloaded yet — see Settings > Voice input"
 
 
 def _load_modules() -> Tuple[Optional[Any], Optional[Any]]:

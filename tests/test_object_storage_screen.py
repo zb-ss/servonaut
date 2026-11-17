@@ -618,7 +618,7 @@ async def test_buckets_of_several_regions_show_their_region() -> None:
         await _wait_for(pilot, lambda: table.row_count == 3)
 
         labels = [str(column.label) for column in table.columns.values()]
-        assert labels[:4] == ["Type", "Bucket Name", "Region", "Created"]
+        assert labels[:4] == ["Type", "Bucket name", "Region", "Created"]
         # The same name in two regions is two rows, not a DuplicateKey crash.
         assert [table.get_row_at(i)[1:3] for i in range(3)] == [
             ["shared", "gra"], ["shared", "uk"], ["media-assets", "uk"],

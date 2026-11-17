@@ -1,19 +1,160 @@
-/* MemoryScreen styles — disjoint from app.css (shard 3 appends there) */
-
-/* Main container that holds title, banner, table, and action buttons */
-#memory-container {
-    width: 1fr;
-    padding: 0 1;
+/* Hidden utility class */
+.hidden {
+    display: none;
 }
 
-/* Screen title */
-#memory-title {
+/* Memory is a record desk: scan context, native records, full-value reader. */
+MemoryScreen #memory-container,
+FleetMemoryScreen #memory-container {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+MemoryScreen #memory-context,
+FleetMemoryScreen #fleet-memory-context {
+    height: auto;
+    padding: 0 1;
     margin-bottom: 1;
+}
+
+MemoryScreen #memory-title,
+FleetMemoryScreen #memory-title {
+    height: auto;
+    margin: 0;
+    text-align: left;
+    color: $text;
     text-style: bold;
 }
 
-/* Opt-out banner shown when memory is disabled for this server */
-#memory-opt-out-banner {
+MemoryScreen #memory-local-status,
+MemoryScreen #memory-shared-source,
+FleetMemoryScreen #memory-subtitle,
+FleetMemoryScreen #fleet-memory-status,
+FleetMemoryScreen #fleet-auto-scan-status {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    border: none;
+    text-align: left;
+}
+
+FleetMemoryScreen #memory-subtitle {
+    color: $text-muted;
+}
+
+MemoryScreen .memory-panel-heading,
+FleetMemoryScreen .memory-panel-heading {
+    height: 1;
+    padding: 0 1;
+    color: $text;
+    text-style: bold;
+}
+
+MemoryScreen #memory-manage-panel {
+    height: auto;
+    margin-bottom: 1;
+}
+
+MemoryScreen #memory-actions {
+    width: 100%;
+    height: auto;
+}
+
+MemoryScreen #memory-workbench {
+    width: 1fr;
+    height: 1fr;
+    min-height: 15;
+}
+
+MemoryScreen #memory-records,
+MemoryScreen #memory-record-reader {
+    height: 1fr;
+    min-height: 12;
+    border: round $panel;
+    background: $surface;
+}
+
+MemoryScreen #memory-records {
+    width: 3fr;
+}
+
+MemoryScreen #memory-record-reader {
+    width: 2fr;
+    margin-left: 1;
+}
+
+MemoryScreen #memory-record-reader:focus-within {
+    border: round $primary;
+}
+
+MemoryScreen #memory-table {
+    height: 1fr;
+    min-height: 8;
+    margin: 0;
+    background: $surface;
+}
+
+MemoryScreen #memory-record-detail {
+    height: 1fr;
+    min-height: 6;
+    border: none;
+    padding: 0 1;
+    background: $surface;
+    color: $text;
+}
+
+MemoryScreen #memory-tools {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-gutter: 0 1;
+    width: 1fr;
+    height: auto;
+    margin-top: 1;
+}
+
+MemoryScreen #memory-summary-row,
+MemoryScreen #memory-sync-row,
+MemoryScreen #memory-ai-row {
+    layout: vertical;
+    height: auto;
+    padding: 0 1;
+    border: round $panel;
+    background: $surface;
+}
+
+MemoryScreen #memory-cloud-banner {
+    height: auto;
+    margin-top: 1;
+}
+
+MemoryScreen #memory-summary-status,
+MemoryScreen #memory-sync-status,
+MemoryScreen #memory-ai-status,
+MemoryScreen #memory-cloud-banner-text {
+    width: 1fr;
+    height: auto;
+    min-height: 1;
+    padding: 0;
+}
+
+MemoryScreen .memory-row-buttons {
+    width: 100%;
+    height: auto;
+}
+
+MemoryScreen #memory-empty-state {
+    height: auto;
+    border: round $primary;
+    background: $surface;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+MemoryScreen #memory-opt-out-banner {
     background: $warning 20%;
     color: $text;
     padding: 0 1;
@@ -21,53 +162,60 @@
     border: round $warning;
 }
 
-/* DataTable that shows module rows */
-#memory-table {
-    height: 1fr;
-    margin-bottom: 1;
-}
-
-/* Action button row */
-#memory-actions {
+MemoryScreen #memory-empty-state-label {
     height: auto;
-    padding: 0 0 1 0;
 }
 
-#memory-actions Button {
-    margin-right: 1;
-}
-
-/* The per-server screen stacks a title, status, banner, table and four
-   action rows; together they are taller than a small terminal. The page
-   scrolls instead of clipping, the title keeps a row between itself and the
-   header, and the table is as tall as its rows (8 to 16): a 1fr share of an
-   over-full page is zero, and the notes and findings panels below it make
-   the page over-full even on a large terminal. */
-MemoryScreen #memory-container {
-    padding: 1 1 0 1;
-    overflow-y: auto;
-}
-
-MemoryScreen #memory-table {
-    height: auto;
-    min-height: 8;
-    max-height: 16;
-}
-
-/* Narrow terminals (see MemoryScreen.HORIZONTAL_BREAKPOINTS): the five
-   action buttons do not fit on one row, so they wrap onto a grid. */
-MemoryScreen.-narrow #memory-actions {
-    layout: grid;
-    grid-size: 3;
-    grid-gutter: 0 1;
-}
-
-MemoryScreen.-narrow #memory-actions Button {
+MemoryScreen #memory-hosted-status {
     width: 1fr;
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
     margin: 0;
+    border: none;
+    text-align: left;
+    content-align: left middle;
 }
 
-/* Hidden utility class */
-.hidden {
-    display: none;
+MemoryScreen.-content-narrow #memory-workbench {
+    layout: vertical;
+    height: auto;
+}
+
+MemoryScreen.-content-narrow #memory-records {
+    width: 100%;
+    height: 12;
+}
+
+MemoryScreen.-content-narrow #memory-record-reader {
+    width: 100%;
+    height: 12;
+    margin: 1 0 0 0;
+}
+
+MemoryScreen.-content-narrow #memory-tools {
+    grid-size: 1;
+    grid-columns: 1fr;
+    grid-gutter: 1 0;
+}
+
+/* Fleet records get the remaining viewport, with compact controls above. */
+FleetMemoryScreen #fleet-memory-table-card {
+    height: 1fr;
+    min-height: 10;
+    margin: 0;
+    border: round $panel;
+    background: $surface;
+}
+
+FleetMemoryScreen #fleet-memory-table {
+    height: 1fr;
+    margin: 0;
+    background: $surface;
+}
+
+FleetMemoryScreen #fleet-memory-progress {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
 }

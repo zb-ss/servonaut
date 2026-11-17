@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalGroup
 from textual.widgets import Button, Static
 
 from servonaut.screens.settings.base import SettingsPanel
@@ -32,7 +32,7 @@ class CustomServersPanel(SettingsPanel):
     """
 
     PANEL_ID = "custom_servers"
-    TITLE = "Custom Servers"
+    TITLE = "Custom servers"
 
     DEFAULT_CSS = """
     CustomServersPanel .custom-servers-note {
@@ -55,19 +55,21 @@ class CustomServersPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the launcher row and count note."""
-        yield Static(
-            "Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal, etc.).",
-            classes="custom-servers-note",
-        )
-        yield Static("", id="custom_servers_count", classes="custom-servers-count")
-        yield Horizontal(
-            Button(
-                "Open Custom Servers",
-                id="open_custom_servers",
-                variant="primary",
-            ),
-            classes="setting_row",
-        )
+        with VerticalGroup(classes="settings-access-context"):
+            yield Static(
+                "Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal, etc.).",
+                classes="custom-servers-note",
+            )
+        with VerticalGroup(classes="settings-access-status settings-access-launcher"):
+            yield Static("", id="custom_servers_count", classes="custom-servers-count")
+            yield Horizontal(
+                Button(
+                    "Open custom servers",
+                    id="open_custom_servers",
+                    variant="primary",
+                ),
+                classes="setting_row",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -106,7 +108,7 @@ class CustomServersPanel(SettingsPanel):
 
     def persist(self) -> None:
         """Nothing to persist — all changes happen in CustomServersScreen."""
-        self._finish_save("Custom server changes are saved from the Custom Servers screen.")
+        self._finish_save("Custom server changes are saved from the Custom servers screen.")
 
     def is_dirty(self) -> bool:
         """Always clean — this panel owns no editable fields."""

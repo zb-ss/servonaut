@@ -1,0 +1,63 @@
+/* ===================================================================
+   LINK BUTTON
+   Underlined words with no frame or fill. The widget draws the underline
+   on the label's own text (see LinkButton), so the padding around the words
+   is never underlined. Hover and focus change colour and weight, never the
+   border or the fill, so the control keeps its one-row footprint.
+   =================================================================== */
+
+Button.link-button {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    /* Button already pads its label by a cell a side (line-pad). */
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: $text-accent;
+    text-style: none;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+Button.link-button:hover {
+    border: none;
+    background: transparent;
+    color: $accent;
+    text-style: bold;
+}
+
+Button.link-button:focus {
+    border: none;
+    background: transparent;
+    color: $accent;
+    text-style: bold;
+}
+
+Button.link-button:disabled {
+    color: $text-muted;
+    text-style: none;
+}
+
+Button.link-button:ansi {
+    color: $foreground;
+}
+
+Button.link-button:ansi:hover {
+    border: none;
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+}
+
+Button.link-button:ansi:focus {
+    border: none;
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: bold;
+}
+
+Button.link-button:ansi:disabled:hover {
+    text-style: none;
+}

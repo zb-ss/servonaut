@@ -30,11 +30,19 @@ async def test_a_click_waits_for_the_layout_to_catch_up(desktop, seed):
         section = next(n for n in cloudwatch.ancestors if isinstance(n, SidebarSection))
         await click_widget(page, app, section.query_one("Button.section-header", Button))
         await tui.wait_until(lambda: not section.collapsed, desc="the AWS section open")
+        await tui.settle()
         sidebar = tui.on_screen("#sidebar-scroll")
-        await tui.wait_until(lambda: sidebar.max_scroll_y >= 2, desc="a sidebar that can scroll")
 
-        # Scroll by less than an entry: the entry below now covers the middle
-        # of the region the screen still reports for CloudWatch.
+        # Give this regression its own bounded viewport: compact navigation
+        # can otherwise fit every available section in the desktop window.
+        # Leave the target visible, with the following entries overflowing.
+        sidebar.styles.height = cloudwatch.region.bottom - sidebar.scrollable_content_region.y + 1
+        await tui.settle()
+        await tui.wait_until(lambda: sidebar.max_scroll_y >= 2, desc="a sidebar that can scroll")
+        assert sidebar.scrollable_content_region.contains_region(cloudwatch.region)
+
+        # Another entry takes CloudWatch's old cells before Textual updates
+        # its reported region. The helper must measure after that update.
         before = cloudwatch.region
         sidebar.scroll_relative(y=2, animate=False, immediate=True)
         assert sidebar.scroll_y > 0

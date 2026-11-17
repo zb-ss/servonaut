@@ -24,6 +24,8 @@ from tests._bulk_share_fakes import (
     team_memory_service,
 )
 
+from servonaut.widgets.workspace.state import WorkspaceState
+
 pytestmark = pytest.mark.asyncio
 
 TARGETS = [
@@ -51,6 +53,10 @@ class _Host(App):
             self.redaction_service.scrub_stream = lambda t: t
         self.notes: List[str] = []
         self.result: Optional[bool] = None
+        # The user pressed "Show navigation" in the narrow width class.
+        self.workspace_state = WorkspaceState(
+            navigation_visible=True, navigation_choice_class="narrow",
+        )
 
     def on_mount(self) -> None:
         self.push_screen(BulkShareScreen(self._targets), self._bulk_form_closed)
@@ -104,6 +110,44 @@ async def test_the_form_starts_with_the_single_forms_defaults():
         confirm = screen.query_one("#bulk-btn-confirm", Button)
         assert str(confirm.label) == "Share 3 servers" and not confirm.disabled
         assert "web-1, web-2, vps-1" in _text(screen, "#bulk-servers")
+
+
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_update_existing_caption_is_fully_painted_and_clickable(size):
+    backend = _backend()
+    app = _Host(backend)
+    async with app.run_test(size=size) as pilot:
+        screen = await _open(app, pilot)
+        checkbox = screen.query_one("#bulk-update-existing", Checkbox)
+        caption = "Update existing shares to these settings"
+        assert checkbox.label.plain == caption
+        assert screen.has_class("-content-narrow") is (size == (100, 30))
+        for _ in range(len(screen.focus_chain) + 1):
+            if app.focused is checkbox:
+                break
+            await pilot.press("tab")
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause()
+        assert app.focused is checkbox
+        assert screen.region.contains_region(checkbox.region)
+        assert app.get_widget_at(*checkbox.content_region.center)[0] is checkbox
+        region = checkbox.region
+        strips = screen._compositor.render_strips()
+        painted = "\n".join(
+            strips[y].crop(region.x, region.right).text
+            for y in range(region.y, region.bottom)
+        )
+        assert caption in painted, painted
+        assert checkbox.value is False
+        offset = (checkbox.size.width // 2, checkbox.size.height // 2)
+        assert await pilot.click(checkbox, offset=offset)
+        await pilot.pause()
+        assert checkbox.value is True
+        assert await pilot.click(checkbox, offset=offset)
+        await pilot.pause()
+        assert checkbox.value is False
+        assert backend.writes() == []
+        assert app._exception is None
 
 
 async def test_the_readers_are_listed_once_for_the_chosen_role():

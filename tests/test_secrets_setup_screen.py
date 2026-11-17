@@ -15,11 +15,16 @@ import pytest
 from textual.app import App
 from textual.widgets import OptionList, Static
 
+from servonaut.styles import CSS_FILES
 from servonaut.screens.secrets_setup import SecretsSetupScreen
 from servonaut.services.bws_onboarding import BwsProject
 
+from tests._native_actions import click_action
+
 
 class _WrapperApp(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, *, auth, guard, api, **kwargs):
         super().__init__(**kwargs)
         self.demo_mode = False
@@ -78,7 +83,7 @@ async def test_list_projects_populates_option_list():
          ):
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            await pilot.click("#list_projects")
+            await click_action(pilot, "#list_projects")
             await pilot.pause(0.05)
             option_list = app.screen.query_one("#project_list", OptionList)
             assert option_list.option_count == 2
@@ -113,12 +118,12 @@ async def test_save_puts_config_and_primes_cache():
          ):
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            await pilot.click("#list_projects")
+            await click_action(pilot, "#list_projects")
             await pilot.pause(0.05)
             # Select the sole project directly on the screen state.
             screen = app.screen
             screen._selected_project_id = "p1"
-            await pilot.click("#save")
+            await click_action(pilot, "#save")
             await pilot.pause(0.05)
 
     api.put_user_secrets_config.assert_awaited_once()

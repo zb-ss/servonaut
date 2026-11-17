@@ -136,6 +136,8 @@ def test_start_rejects_symlinked_socket_directory_without_touching_target(
     target.mkdir(mode=0o700)
     socket_dir = target / "agent"
     socket_dir.mkdir(mode=0o755)
+    os.chmod(socket_dir, 0o755)
+    assert stat.S_IMODE(socket_dir.stat().st_mode) == 0o755
     if via_parent_link:
         link = tmp_path / "agent-parent"
         link.symlink_to(target, target_is_directory=True)
@@ -280,11 +282,13 @@ def test_two_private_agents_can_hold_independent_leases(short_socket_dir):
     reason="OpenSSH client, agent, or server is unavailable",
 )
 @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
-def test_private_agent_authenticates_with_public_identity_file_only(tmp_path, monkeypatch):
+def test_private_agent_authenticates_with_public_identity_file_only(
+    tmp_path, monkeypatch, short_socket_dir,
+):
     """OpenSSH selects an agent key under IdentitiesOnly via its public file."""
     # OpenSSH Unix sockets have a short path limit, so the default HOME used
     # for this real agent journey must be shorter than pytest's test path.
-    servonaut_home = Path(tempfile.mkdtemp(prefix="servonaut-"))
+    servonaut_home = short_socket_dir.resolve()
     auth_file = servonaut_home / ".servonaut" / "auth.json"
     monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
     auth = AuthService()
@@ -349,6 +353,8 @@ def test_private_agent_authenticates_with_public_identity_file_only(tmp_path, mo
         agent = PrivateSshAgent.start()
         try:
             assert agent.socket_path.parent == servonaut_home / ".servonaut" / "vault" / "tmp"
+            assert stat.S_IMODE(agent.socket_path.parent.stat().st_mode) == 0o700
+            assert agent.socket_path.parent.stat().st_uid == os.getuid()
             agent.add_private_key(private, ttl_seconds=60)
             manager = MagicMock()
             manager.get.return_value = AppConfig(ssh=SSHConfig())
@@ -375,7 +381,15 @@ def test_private_agent_authenticates_with_public_identity_file_only(tmp_path, mo
         shutil.rmtree(servonaut_home, ignore_errors=True)
 
 
-def test_default_start_with_a_long_home_uses_a_private_temporary_socket_directory(tmp_path, monkeypatch):
+def test_default_start_with_a_long_home_uses_a_private_temporary_socket_directory(
+    tmp_path, monkeypatch, short_socket_dir,
+):
+    # Exercise the long-HOME branch independently of the runner's TMPDIR.
+    tempbase = short_socket_dir.resolve()
+    monkeypatch.setattr(
+        "servonaut.services.vault.ssh_agent.tempfile.gettempdir",
+        lambda: str(tempbase),
+    )
     home = tmp_path / ("home-" + "h" * 90)
     home.mkdir(mode=0o700)
     started = []
@@ -421,3 +435,35 @@ def test_a_failed_start_removes_its_temporary_socket_directory(tmp_path, monkeyp
         PrivateSshAgent.start()
 
     assert seen and not seen[0].exists()
+
+
+def test_overlong_system_tempbase_uses_private_canonical_tmp_fallback(
+    tmp_path, monkeypatch,
+):
+    from servonaut.services.vault.ssh_agent import _UNIX_SOCKET_PATH_MAX
+
+    long_tmp = tmp_path / ("tmp-" + "t" * 110)
+    long_tmp.mkdir(mode=0o700)
+    assert len(os.fsencode(long_tmp)) > _UNIX_SOCKET_PATH_MAX
+    monkeypatch.setattr(
+        "servonaut.services.vault.ssh_agent.tempfile.gettempdir",
+        lambda: str(long_tmp),
+    )
+
+    def refuse_process(*args, **kwargs):
+        raise AssertionError("Temporary directory selection must not start a process")
+
+    monkeypatch.setattr(
+        "servonaut.services.vault.ssh_agent.subprocess.run", refuse_process,
+    )
+    socket_name = "agent-fixture-0123456789abcdef.sock"
+    directory = PrivateSshAgent._private_temporary_directory(socket_name)
+    try:
+        assert directory.parent == Path("/tmp").resolve()
+        assert directory.name.startswith("svn-agent-")
+        assert len(os.fsencode(directory / socket_name)) <= _UNIX_SOCKET_PATH_MAX
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert directory.stat().st_uid == os.getuid()
+    finally:
+        PrivateSshAgent._remove_private_directory(directory)
+    assert not directory.exists()

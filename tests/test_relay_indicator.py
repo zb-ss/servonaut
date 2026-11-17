@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from textual.screen import Screen
+
 from servonaut.services.relay_manager import RelayState
 from servonaut.widgets.relay_indicator import RelayIndicator
 
@@ -146,7 +148,10 @@ def test_the_command_palette_offers_the_relay_status():
     app.hetzner_service = None
     app.push_screen = MagicMock()
     with patch("textual.app.App.get_system_commands", return_value=iter(())):
-        command = next(c for c in ServonautApp.get_system_commands(app, None) if c.title == "Relay status")
+        command = next(
+            c for c in ServonautApp.get_system_commands(app, Screen())
+            if c.title == "Relay status"
+        )
 
     app.relay_state = RelayState.CONNECTED
     command.callback()

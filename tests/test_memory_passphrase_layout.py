@@ -14,6 +14,8 @@ from textual.widgets import Button, Input, Static, Switch
 from tests.test_memory_screens import _EnrolApp, _StyledEnrolApp
 from servonaut.styles import CSS_FILES
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 SIZES = [(60, 20), (80, 24), (100, 30), (100, 40), (120, 30), (160, 50)]
 # At 44x10, the full app styles leave 35 columns and three scroll rows.
 SMALL_SIZES = [(44, 10), (44, 12), (50, 16)]
@@ -36,10 +38,12 @@ def _assert_layout(app, mode, state, request):
     body = app.screen.query_one("#enrol-body")
     footer = app.screen.query_one("#enrol-btn-row")
     children = [child for child in body.children if child.display]
+    heading = app.screen.query_one("#enrol-title")
+    # The shared frame pins the heading above the body, so it counts as content.
     natural_height = sum(
         child.region.height + child.styles.margin.top + child.styles.margin.bottom
-        for child in children
-    ) + footer.region.height + footer.styles.margin.top + container.styles.gutter.height
+        for child in [heading, *children]
+    ) + body.styles.margin.bottom + footer.region.height + footer.styles.margin.top + container.styles.gutter.height
     gap = footer.region.y - children[-1].region.bottom
     measurements = {
         "mode": mode, "state": state, "viewport": list(app.size),
@@ -350,7 +354,9 @@ async def test_small_prompt_keeps_actions_outside_bounded_scroll(app_class, mode
         assert body.region.bottom < footer.region.y
         for action in footer.children:
             assert action.region in footer.region
-        assert body.max_scroll_y > 0
+        # Either the body scrolls, or (a short unlock) every visible field is in it.
+        shown = [child for child in body.children if child.display]
+        assert body.max_scroll_y > 0 or all(child.region in body.region for child in shown)
         await pilot.press("escape")
         assert app.dismissed_value is None
 
@@ -374,11 +380,13 @@ async def test_unlock_height_follows_visible_content(app_class, size, keychain_a
         footer = app.screen.query_one("#enrol-btn-row")
         visible_content = [child for child in body.children if child.display]
         gap = footer.region.y - visible_content[-1].region.bottom
+        heading = app.screen.query_one("#enrol-title")
         assert gap <= 2, f"{size}: unlock leaves {gap} rows before its actions"
+        # The shared frame pins the heading above the body, so it counts as content.
         content_height = sum(
             child.region.height + child.styles.margin.top + child.styles.margin.bottom
-            for child in visible_content
-        )
+            for child in [heading, *visible_content]
+        ) + body.styles.margin.bottom
         footer_height = footer.region.height + footer.styles.margin.top + footer.styles.margin.bottom
         natural_height = content_height + footer_height + container.styles.gutter.height
         assert container.region.height <= natural_height + 1, (
@@ -386,3 +394,44 @@ async def test_unlock_height_follows_visible_content(app_class, size, keychain_a
         )
         await pilot.press("escape")
         assert app.dismissed_value is None
+
+
+@pytest.mark.parametrize("size", [(60, 20), (80, 24), (100, 30)], ids=lambda size: f"{size[0]}x{size[1]}")
+@pytest.mark.asyncio
+async def test_enrol_opens_with_the_unrecoverable_warning_in_view(size, modal_policy, monkeypatch):
+    """Focusing the first field must not scroll the warning out of sight."""
+    from servonaut.services.memory import passphrase_store
+
+    monkeypatch.setattr(passphrase_store, "keyring_available", lambda: True)
+    app = _StyledEnrolApp(mode="enrol")
+    async with app.run_test(size=size) as pilot:
+        for _ in range(3):
+            await pilot.pause(0.1)
+        body = app.screen.query_one("#enrol-body")
+        warning = app.screen.query_one("#enrol-blurb")
+        assert body.scroll_y == 0
+        assert warning.region in body.region, (size, warning.region, body.region)
+        assert app.focused.id == "enrol-pass1"
+
+
+@pytest.mark.parametrize("size", [(60, 20), (80, 24)], ids=lambda size: f"{size[0]}x{size[1]}")
+@pytest.mark.asyncio
+async def test_enrol_shows_why_it_is_disabled_without_scrolling(size, modal_policy, monkeypatch):
+    """The reason Enrol is disabled stays in view while the user types."""
+    from servonaut.services.memory import passphrase_store
+
+    monkeypatch.setattr(passphrase_store, "keyring_available", lambda: True)
+    app = _StyledEnrolApp(mode="enrol")
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _paste(pilot, PASSPHRASE)
+        await _tab(pilot, app, "enrol-pass2")
+        await _paste(pilot, "Different8!Pine")
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause()
+        body = app.screen.query_one("#enrol-body")
+        reason = app.screen.query_one("#enrol-mismatch", Static)
+        assert "do not match" in str(reason.content)
+        assert app.screen.query_one("#enrol-btn-confirm", Button).disabled
+        assert reason.region in body.region, (size, reason.region, body.region)
+        assert app.focused.region in body.region

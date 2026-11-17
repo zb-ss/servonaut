@@ -233,3 +233,21 @@ def test_empty_usage_list_reads_as_zero_not_na() -> None:
     assert "0.00" in text
     assert "n/a" not in text
 
+
+def test_service_states_use_theme_tokens_not_named_colours() -> None:
+    service = SimpleNamespace(get_service_list=AsyncMock(return_value=[
+        {"name": "web-1", "type": "VPS", "status": "ok", "expiration": "2026-01-01", "auto_renew": True},
+        {"name": "web-2", "type": "VPS", "status": "[x]odd", "expiration": "", "auto_renew": False},
+    ]))
+    table = MagicMock()
+    screen = OVHBillingScreen()
+    app = SimpleNamespace(demo_mode=False, ovh_billing_service=service)
+    with (
+        patch.object(OVHBillingScreen, "app", new_callable=PropertyMock, return_value=app),
+        patch.object(screen, "query_one", return_value=table),
+    ):
+        asyncio.run(screen._load_services())
+    cells = [c for call in table.add_row.call_args_list for c in call.args]
+    assert all(not isinstance(c, str) or "[" not in c for c in cells[1:] if c)
+    # Text cells (never parsed as markup), coloured from the theme and not by a colour name.
+    assert any(getattr(c, "plain", None) == "ok" and str(c.style) not in ("green", "red") for c in cells)

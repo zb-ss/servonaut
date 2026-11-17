@@ -74,9 +74,10 @@ class TestUnlock:
 @pytest.mark.asyncio
 async def test_pilot_renders_masked_input_with_filename_centered():
     from textual.app import App
-    from textual.widgets import Input, Static
+    from textual.widgets import Button, Input, Static
 
     from servonaut.styles import CSS_FILES
+    from servonaut.widgets.dialogs import DialogFrame
 
     class _Host(App):
         CSS_PATH = CSS_FILES
@@ -94,6 +95,19 @@ async def test_pilot_renders_masked_input_with_filename_centered():
         prompt = app.screen.query_one("#bw_passphrase_prompt", Static)
         assert "id_ed25519" in str(prompt.render())
 
-        region = app.screen.query_one("#bw_passphrase_container").region
+        frame = app.screen.query_one("#bw_passphrase_container", DialogFrame)
+        region = frame.region
         assert abs(region.x - (120 - region.width) // 2) <= 1
-        assert abs(region.y - (40 - region.height) // 2) <= 1
+        # The shared frame reserves space below for native notifications.
+        assert app.screen.region.contains_region(region)
+        painted = "\n".join(
+            strip.text for strip in app.screen._compositor.render_strips()
+        )
+        for control in [pw_input, *frame.query(Button)]:
+            assert control.region.width > 0 and control.region.height > 0
+            assert frame.content_region.contains_region(control.region)
+            assert app.screen.region.contains_region(control.region)
+            hit = app.get_widget_at(*control.region.center)[0]
+            assert hit is control or control in hit.ancestors
+            if isinstance(control, Button):
+                assert control.label.plain in painted

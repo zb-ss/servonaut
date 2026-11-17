@@ -1,80 +1,185 @@
-/* ===================================================================
-   SCP TRANSFER SCREEN
-   =================================================================== */
-
-#transfer_container {
+/* Keep direction, two endpoints and the explicit manual action easy to compare. */
+SCPTransferScreen #transfer_container {
     width: 1fr;
     height: 100%;
-    background: $surface;
-    padding: 2;
+    padding: 0 2 1 2;
     overflow-y: auto;
+    overflow-x: hidden;
+    background: $surface;
 }
 
-#transfer_banner {
-    text-align: center;
-    padding: 1 0;
-    margin-bottom: 2;
-    color: $accent;
-    text-style: bold;
-}
-
-#transfer_form {
-    width: 100%;
+SCPTransferScreen #transfer_banner {
     height: auto;
-}
-
-#direction_label,
-#local_path_label,
-#remote_path_label {
-    margin-top: 1;
-    margin-bottom: 1;
+    padding: 0 1 1 1;
     color: $text;
-    text-style: bold;
-}
-
-#direction_selector {
-    margin-bottom: 1;
-    padding: 1;
-    background: $boost;
-    border: round $primary;
-}
-
-RadioSet {
     background: transparent;
 }
 
-RadioButton {
-    padding: 1 1;
-}
-
-RadioButton:focus {
-    background: $accent;
-    color: $text;
-}
-
-#local_path_input,
-#remote_path_input {
+SCPTransferScreen #transfer_workbench {
     width: 100%;
+    height: auto;
+    align-vertical: top;
+}
+
+SCPTransferScreen #transfer_form {
+    width: 3fr;
+    height: auto;
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SCPTransferScreen #direction_label,
+SCPTransferScreen #local_path_label,
+SCPTransferScreen #remote_path_label,
+SCPTransferScreen #transfer_status_title {
+    height: auto;
+    color: $text;
+    text-style: bold;
+}
+
+SCPTransferScreen #direction_selector {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    border: none;
+    background: transparent;
+}
+
+SCPTransferScreen RadioButton {
+    padding: 0 1;
+}
+
+/* Preserve RadioSet's native keyboard selection and theme focus colours. */
+SCPTransferScreen RadioSet:ansi:enabled:focus > RadioButton.-selected > .toggle--label {
+    text-style: not bold;
+}
+
+SCPTransferScreen #transfer_paths {
+    height: auto;
+    width: 100%;
+}
+
+SCPTransferScreen .transfer-path-group {
+    width: 1fr;
+    height: auto;
     margin-bottom: 1;
 }
 
-#button_container {
+SCPTransferScreen #local_path_group {
+    margin-right: 1;
+}
+
+SCPTransferScreen .transfer-path-heading {
     width: 100%;
     height: auto;
-    margin-top: 1;
+    layout: vertical;
+}
+
+SCPTransferScreen #local_path_role,
+SCPTransferScreen #remote_path_role {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+}
+
+SCPTransferScreen #local_path_input,
+SCPTransferScreen #remote_path_input {
+    width: 100%;
+    margin-top: 0;
+}
+
+SCPTransferScreen #transfer_manual_hint {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+SCPTransferScreen #button_container {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    width: 100%;
+    height: 3;
+}
+
+SCPTransferScreen #button_container Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0;
+}
+
+/* Long errors and output scroll here rather than displacing the manual controls. */
+SCPTransferScreen #transfer_result {
+    width: 2fr;
+    height: auto;
+    min-height: 8;
+    max-height: 16;
+    margin-left: 1;
+    padding: 0 1 1 1;
+    border: round $border-blurred;
+    background: transparent;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+SCPTransferScreen #transfer_status_title {
+    margin-bottom: 1;
+}
+
+SCPTransferScreen #status_output {
+    height: auto;
+    min-height: 4;
+    color: $text;
+}
+
+SCPTransferScreen #transfer_loading {
+    display: none;
+    height: 1;
+    margin-bottom: 1;
+}
+
+SCPTransferScreen.-content-narrow #transfer_container {
+    padding: 0 1 1 1;
+}
+
+/* Keep the instruction block stable across narrow pane widths. */
+SCPTransferScreen.-content-narrow #transfer_manual_hint {
+    min-height: 2;
+}
+
+SCPTransferScreen.-content-narrow #transfer_workbench,
+SCPTransferScreen.-content-narrow #transfer_paths {
+    layout: vertical;
+}
+
+SCPTransferScreen.-content-narrow #transfer_form,
+SCPTransferScreen.-content-narrow #transfer_result,
+SCPTransferScreen.-content-narrow .transfer-path-group {
+    width: 100%;
+    margin-right: 0;
+}
+
+SCPTransferScreen.-content-narrow .transfer-path-heading {
     layout: horizontal;
 }
 
-#button_container Button {
+SCPTransferScreen.-content-narrow #local_path_label,
+SCPTransferScreen.-content-narrow #remote_path_label {
+    width: 12;
+}
+
+SCPTransferScreen.-content-narrow #local_path_role,
+SCPTransferScreen.-content-narrow #remote_path_role {
     width: 1fr;
-    margin: 0 1;
 }
 
-#status_output {
-    margin-top: 2;
-    padding: 1;
-    min-height: 4;
-    border: round $accent;
-    background: $panel;
+SCPTransferScreen.-content-narrow #transfer_result {
+    min-height: 7;
+    max-height: 12;
+    margin: 1 0 0 0;
 }
-

@@ -45,7 +45,7 @@ def _build_panel():
     return panel
 
 
-def _attach_app(panel, resolver):
+def _attach_app(panel, resolver, monkeypatch: pytest.MonkeyPatch):
     app = MagicMock()
     app.provider_preference_resolver = resolver
     app.push_screen = MagicMock()
@@ -64,11 +64,13 @@ def _attach_app(panel, resolver):
     config_manager.get.return_value = cfg
     app.config_manager = config_manager
 
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
     return app
 
 
-def test_first_run_modal_pushed_when_resolver_emits_event():
+def test_first_run_modal_pushed_when_resolver_emits_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B2 — SHOW_FIRST_RUN_MODAL drives ``app.push_screen(AIProviderFirstRunModal)``."""
     panel = _build_panel()
 
@@ -79,7 +81,7 @@ def test_first_run_modal_pushed_when_resolver_emits_event():
     )
     resolver.is_provider_configured.side_effect = lambda name: name == "ollama"
 
-    app = _attach_app(panel, resolver)
+    app = _attach_app(panel, resolver, monkeypatch)
     panel._set_banner = MagicMock()  # type: ignore[assignment]
 
     panel._check_provider_decision_events()
@@ -92,7 +94,9 @@ def test_first_run_modal_pushed_when_resolver_emits_event():
     assert panel._first_run_modal_shown is True
 
 
-def test_first_run_modal_pushed_only_once_per_session():
+def test_first_run_modal_pushed_only_once_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B2 — re-rendering doesn't re-push the modal.
 
     The flag ``_first_run_modal_shown`` is per-instance and never
@@ -108,7 +112,7 @@ def test_first_run_modal_pushed_only_once_per_session():
     )
     resolver.is_provider_configured.side_effect = lambda name: name == "ollama"
 
-    app = _attach_app(panel, resolver)
+    app = _attach_app(panel, resolver, monkeypatch)
     panel._set_banner = MagicMock()  # type: ignore[assignment]
 
     panel._check_provider_decision_events()
@@ -120,7 +124,9 @@ def test_first_run_modal_pushed_only_once_per_session():
     )
 
 
-def test_empty_state_modal_pushed_when_resolver_emits_event():
+def test_empty_state_modal_pushed_when_resolver_emits_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B2 — SHOW_EMPTY_STATE drives ``app.push_screen(AIEmptyStateModal)``."""
     panel = _build_panel()
 
@@ -130,7 +136,7 @@ def test_empty_state_modal_pushed_when_resolver_emits_event():
         events=[ProviderPreferenceEvent.SHOW_EMPTY_STATE],
     )
 
-    app = _attach_app(panel, resolver)
+    app = _attach_app(panel, resolver, monkeypatch)
     panel._set_banner = MagicMock()  # type: ignore[assignment]
 
     panel._check_provider_decision_events()
@@ -141,7 +147,9 @@ def test_empty_state_modal_pushed_when_resolver_emits_event():
     assert panel._empty_state_modal_shown is True
 
 
-def test_empty_state_modal_pushed_only_once_per_session():
+def test_empty_state_modal_pushed_only_once_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B2 — empty-state modal is also one-shot per session."""
     panel = _build_panel()
 
@@ -151,7 +159,7 @@ def test_empty_state_modal_pushed_only_once_per_session():
         events=[ProviderPreferenceEvent.SHOW_EMPTY_STATE],
     )
 
-    app = _attach_app(panel, resolver)
+    app = _attach_app(panel, resolver, monkeypatch)
     panel._set_banner = MagicMock()  # type: ignore[assignment]
 
     panel._check_provider_decision_events()

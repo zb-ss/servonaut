@@ -31,6 +31,7 @@ from servonaut.screens.settings.accounts import (
     shown_text,
     suggest_label,
 )
+from servonaut.screens.settings.forms import setting_row
 
 logger = logging.getLogger(__name__)
 
@@ -164,23 +165,20 @@ class AwsAccountsSection(AccountsSection):
                 id="aws_account_detected_row",
                 classes="setting_row",
             ),
-            Horizontal(
-                Static("Label", classes="label"),
+            setting_row(
+                "Label",
                 Input(placeholder="e.g. prod", id="aws_account_label"),
-                classes="setting_row",
             ),
-            Horizontal(
-                Static("Profile", classes="label"),
+            setting_row(
+                "Profile",
                 Input(placeholder="named profile in ~/.aws/config", id="aws_account_profile"),
-                classes="setting_row",
             ),
-            Horizontal(
-                Static("Regions", classes="label"),
+            setting_row(
+                "Regions",
                 Input(
                     placeholder="all enabled regions, or e.g. eu-west-1, us-east-1",
                     id="aws_account_regions",
                 ),
-                classes="setting_row",
             ),
             Static("", id="aws_account_form_hint"),
             Static("", id="aws_account_form_error"),

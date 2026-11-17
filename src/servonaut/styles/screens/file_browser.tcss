@@ -1,45 +1,111 @@
-/* ===================================================================
-   FILE BROWSER SCREEN
-   =================================================================== */
-
-#file_browser_container {
+/* The filesystem is the working surface; identity and selection stay bounded. */
+FileBrowserScreen #file_browser_container {
     width: 1fr;
     height: 100%;
+    padding: 0 2 1 2;
+    background: $surface;
 }
 
-#browser_header {
-    dock: top;
-    padding: 1 2;
-    background: $primary;
+FileBrowserScreen #browser_header_scroll {
+    height: auto;
+    max-height: 4;
+    overflow-y: auto;
+    background: $surface;
+    margin-bottom: 1;
+}
+
+FileBrowserScreen #browser_header {
+    height: auto;
+    padding: 0 1;
     color: $text;
-    border-bottom: wide $accent;
-    text-style: bold;
+    background: transparent;
 }
 
-#remote_tree {
+FileBrowserScreen #browser_workspace {
     height: 1fr;
+    width: 100%;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+/* The inspector keeps the exact cursor path available without moving the tree. */
+FileBrowserScreen #browser_selection {
+    dock: right;
+    width: 32;
+    max-width: 42%;
+    height: 100%;
     padding: 1;
-    background: $surface;
-    border: round $primary;
-    margin: 1;
+    background: $panel;
+    border-left: solid $border-blurred;
 }
 
-Tree {
-    background: $surface;
-    color: $text;
-}
-
-Tree:focus .tree--cursor {
-    background: $accent;
+FileBrowserScreen #browser_selection_heading {
+    height: auto;
+    margin-bottom: 1;
     color: $text;
     text-style: bold;
 }
 
-TreeNode {
+FileBrowserScreen #browser_path_scroll {
+    height: auto;
+    max-height: 4;
+    overflow-y: auto;
+    background: $panel;
+}
+
+FileBrowserScreen #browser_path {
+    height: auto;
+    color: $text;
+    background: $panel;
+}
+
+FileBrowserScreen #remote_tree {
+    height: 1fr;
+    min-height: 4;
+    padding: 0 1;
+    margin: 0;
+    border: none;
     background: $surface;
+    color: $text;
 }
 
-TreeNode:hover {
-    background: $boost;
+FileBrowserScreen #browser_workspace:focus-within {
+    border: round $border;
 }
 
+FileBrowserScreen #browser_help {
+    height: auto;
+    color: $text-muted;
+}
+
+/* Stack the inspector above the native tree without sacrificing its viewport. */
+FileBrowserScreen.-content-narrow #file_browser_container {
+    padding: 0 1;
+}
+
+FileBrowserScreen.-content-narrow #browser_header_scroll {
+    max-height: 3;
+    margin-bottom: 0;
+}
+
+FileBrowserScreen.-content-narrow #browser_selection {
+    dock: top;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    padding: 0 1;
+    border-left: none;
+    border-bottom: solid $border-blurred;
+}
+
+FileBrowserScreen.-content-narrow #browser_selection_heading {
+    margin-bottom: 0;
+}
+
+FileBrowserScreen.-content-narrow #browser_path_scroll {
+    max-height: 3;
+}
+
+FileBrowserScreen.-content-narrow #browser_help {
+    display: none;
+}

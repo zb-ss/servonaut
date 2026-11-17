@@ -12,7 +12,10 @@ from textual.app import App, ComposeResult
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
+from servonaut.styles import CSS_FILES
 from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+from tests._native_actions import click_action
 
 
 class _AuthStub:
@@ -97,6 +100,8 @@ class _ElsewhereScreen(Screen):
 
 
 class _SetupApp(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, sync_service: _SetupSyncStub) -> None:
         super().__init__()
         self.auth_service = _AuthStub()
@@ -133,7 +138,7 @@ async def test_sync_card_repaints_and_job_survives_navigation() -> None:
             button = app.screen.query_one("#msync_btn_sync_now", Button)
             assert str(button.label) == "Sync all local memory"
 
-            await pilot.click("#msync_btn_sync_now")
+            await click_action(pilot, "#msync_btn_sync_now")
             await asyncio.wait_for(sync.second_batch_started.wait(), timeout=2)
             await pilot.pause()
 

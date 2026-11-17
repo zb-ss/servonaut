@@ -59,6 +59,71 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/aws_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/hetzner_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/ovh_manager.py", "_update_resource_context", "update",
+                   "Reads drawn _instances copied and redacted by DemoRowsMixin before "
+                   "rendering; summary/empty text is counts or fixed copy, and raw API targets "
+                   "stay separate."),
+    AllowlistEntry("screens/cloudtrail_browser.py", "_apply_filters", "update",
+                   "Only resets the detail pane to a fixed selection hint when the selected "
+                   "event no longer matches; no event/filter value is interpolated."),
+    AllowlistEntry("screens/memory.py", "_update_record_detail", "load_text",
+                   "Reads the display cache rebuilt by _render_modules on every redraw/toggle; "
+                   "observed and declared values are scrubbed before caching, while taxonomy and "
+                   "probe metadata stay literal."),
+    AllowlistEntry("screens/ovh_snapshots.py", "_update_selected_context", "update",
+                   "Both selected name and ID pass _display_snapshot_name before display; the "
+                   "empty-selection hint is fixed text."),
+    AllowlistEntry("screens/ovh_storage.py", "_update_selected_resource", "update",
+                   "Selected names and IDs pass _display_name and every attachment ID passes "
+                   "_display_instance_id; the empty-selection hint is fixed text."),
+    AllowlistEntry("screens/bug_report.py", "_render_consent_summary", "update",
+                   "Only fixed consent labels, included/excluded choices and one of two fixed "
+                   "destination labels."),
+    AllowlistEntry("screens/log_picker.py", "_render_path_context", "update",
+                   "Selected path passes display_text (known identifiers and stream scrubbing), "
+                   "then terminal_safe before the literal update."),
+    AllowlistEntry("screens/log_picker.py", "refresh_after_demo_toggle", "update",
+                   "_header_text applies display_text and terminal_safe; the path redraw uses "
+                   "the same protected display pipeline."),
+    AllowlistEntry("screens/login.py", "_show_logged_out_state", "update",
+                   "Writes only fixed signed-out guidance, without account or authorization "
+                   "data."),
+    AllowlistEntry("screens/login.py", "_show_device_flow_state", "update",
+                   "Writes only fixed authorization-progress guidance, never a device code or "
+                   "browser URL."),
+    AllowlistEntry("screens/login.py", "_show_no_httpx_state", "update",
+                   "Writes only the fixed authentication-unavailable label."),
+    AllowlistEntry("screens/scp_transfer.py", "on_radio_set_changed", "update",
+                   "Both role labels select fixed Source/Destination and This computer/Remote "
+                   "server phrases; no paths or identifiers."),
+    AllowlistEntry("screens/team_management.py", "_show_no_auth_state", "update",
+                   "Writes only fixed sign-in guidance, without team names or account data."),
+    AllowlistEntry("screens/team_management.py", "_load_teams", "update",
+                   "Both summary updates are fixed unavailable/failure guidance; no provider "
+                   "exception is interpolated."),
+    AllowlistEntry("screens/vault.py", "_records_heading", "update",
+                   "Heading labels are fixed call-site strings; context contains counts and "
+                   "scoped names protected by _display_record_name and scrub_for_display."),
+    AllowlistEntry("screens/vault.py", "_sync_facts", "update",
+                   "The facts are built by the per-view fact builders, which pass every record "
+                   "value through scrub_text (demo redaction and terminal-safe text)."),
+    AllowlistEntry("screens/vault.py", "_show_device_step", "update",
+                   "Writes the fixed product copy 'Next: Approve device', without record data."),
+    AllowlistEntry("screens/vault.py", "_identity_summary", "update",
+                   "All caller state labels and selected action button labels are fixed product "
+                   "copy, without identity metadata."),
+    AllowlistEntry("widgets/relay_indicator.py", "update", "update",
+                   "Backend publisher receives fixed copy or literal Content built from "
+                   "display_text-protected errors/heartbeat and existing demo-redacted client "
+                   "IDs."),
     AllowlistEntry("screens/tool_confirm_modal.py", "_show_overflow_cue", "update",
                    "Only a fixed sentence and a line count; the arguments themselves "
                    "are shown in the scroll box and are not part of this text."),
@@ -72,6 +137,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Only fixed required-name and length-validation messages; "
                    "no key name, secret or server data is interpolated."),
     # Demo-toggle redraw helpers (refresh_after_demo_toggle hooks).
+    AllowlistEntry("screens/scp_transfer.py", "refresh_after_demo_toggle", "update",
+                   "_banner_text passes displayed identity through _display_identity "
+                   "(display_text and demo scrub_stream), then escapes its markup."),
     AllowlistEntry("screens/key_management.py", "refresh_after_demo_toggle", "update",
                    "Clears the ssh-add listing with an empty string constant."),
     AllowlistEntry("screens/ovh_firewall.py", "_render_title", "update",
@@ -104,6 +172,18 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("widgets/status_bar.py", "_update_display", "update",
                    "Only displays instance counts, cache age, filter state, "
                    "and the DEMO badge constant — no user-origin streaming data."),
+
+    # fleet_values.py — the selected server's values come from the fleet
+    # table's own rows, which are already redacted in demo mode; the same
+    # strings are what gets copied.
+    AllowlistEntry("screens/instance_list.py", "_draw", "update",
+                   "Draws the filter summary: counts and fixed words, never server text."),
+    AllowlistEntry("widgets/fleet_values.py", "_show_copied", "update",
+                   "Draws a fixed confirmation word in place of the value."),
+    AllowlistEntry("widgets/fleet_values.py", "_paint", "update",
+                   "Draws values taken from the fleet table's selected row, which "
+                   "holds the redacted stand-ins in demo mode; fixed labels and "
+                   "the copy confirmation are constants."),
 
     # safe_header.py — _refresh_title renders the app and screen titles,
     # which come from code-controlled TITLE / SUB_TITLE constants; it only
@@ -292,6 +372,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/fleet_memory.py", "_populate_table", "update",
                    "Updates status footer with hard-coded count labels (fresh/stale "
                    "integers) — code-controlled strings, not streaming data."),
+
+    # fleet_memory.py — the onboarding card and banner show fixed product text
+    # or the scan's plain progress note ("Scanning N of M…"), never server text.
+    AllowlistEntry("screens/fleet_memory.py", "_sync_onboarding_text", "update",
+                   "Writes the fixed empty-state / banner sentences or the scan "
+                   "progress note, which carries only completed/total counts — "
+                   "no server-origin data."),
 
     # fleet_memory.py — _set_progress writes scan progress markup. The
     # just_finished name embedded in the template is scrubbed at source in
@@ -633,6 +720,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/ovh_billing.py", "_show_card_error", "update",
                    "Writes a fixed message built from a literal label; the "
                    "provider's error text is only logged."),
+    AllowlistEntry("screens/ovh_billing.py", "_show_unreadable_bill", "update",
+                   "Writes a fixed message built from a literal label; the "
+                   "unreadable bill data is only logged."),
     AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
                    "Only writes the literal Loading placeholder while clearing "
                    "old billing values before guarded reloads."),
@@ -724,11 +814,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes 'Scan completed: N results found' (count integer) or "
                    "hard-coded failure/empty strings — no raw content."),
 
-    # secrets.py — _render_state writes hard-coded card-placeholder markup;
+    # secrets.py — _render_cards writes hard-coded card-placeholder markup;
     # _render_unauthenticated / _render_free_tier / _render_bitwarden /
     # _render_local write hard-coded configuration-state labels (no secret values,
     # only provider/plan indicators).
-    AllowlistEntry("screens/secrets.py", "_render_state", "update",
+    AllowlistEntry("screens/secrets.py", "_render_cards", "update",
                    "Writes hard-coded card-placeholder markup for the secrets "
                    "provider state — no secret values, only status labels."),
     AllowlistEntry("screens/secrets.py", "_render_unauthenticated", "update",
@@ -816,12 +906,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("widgets/progress_indicator.py", "stop", "update",
                    "Writes empty string to hide the indicator — no user data."),
 
-    # relay_indicator.py — _refresh_local writes relay state label and lock owner
-    # PID (integer + mode). _refresh_backend also writes client_ids, which embed
-    # the OS user and machine model, so it carries its own demo-mode guard.
+    # Local state/PID are product metadata; error reasons use the same
+    # known-identifier and stream display redaction as backend diagnostics.
     AllowlistEntry("widgets/relay_indicator.py", "_refresh_local", "update",
-                   "Writes relay lock state label and owner PID/mode (integers) "
-                   "— internal relay metadata, not user PII."),
+                   "Writes state and owner PID/mode plus a reason protected by "
+                   "display_text before literal Content assembly."),
 
     # server_actions.py — _run_ssh_probe writes a private key to a tmpfile
     # (tempfile.NamedTemporaryFile). `tf.write(private_key_body)` is a filesystem
@@ -895,6 +984,40 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "fresh provider data before calling _update_table(); safe "
                    "by the time load_text is called."),
 
+    # instance_list.py — _update_inspector_panel writes either a fixed
+    # "No server selected" line or the header for the selected row of
+    # self._instances. Every path that fills self._instances goes through
+    # replace_instances(), which redacts in demo mode, and a demo toggle
+    # redraws through refresh_after_demo_toggle(), so the header only ever
+    # shows redacted values.
+    AllowlistEntry("screens/instance_list.py", "_update_inspector_panel", "update",
+                   "Writes a fixed placeholder or the selected row of "
+                   "self._instances. Rows enter the list through "
+                   "replace_instances(), which redacts in demo mode; proven "
+                   "per row by test_fleet_inspector's demo-mode test."),
+
+    # instance_list.py — the filter summary and the "updated ago" label are
+    # built from fixed words and numbers only (counts, filter names, an age);
+    # no server text is placed in them.
+    AllowlistEntry("screens/instance_list.py", "_sync_summary", "update",
+                   "Fixed words and counts; never server text."),
+    AllowlistEntry("screens/instance_list.py", "_sync_updated", "update",
+                   "A fixed 'Updated/Cached <age>' phrase; never server text."),
+
+    # instance_list.py — _mark_changes merges into a plain dict of server id ->
+    # marker word; it is dict.update, not a widget write.
+    AllowlistEntry("screens/instance_list.py", "_mark_changes", "update",
+                   "dict.update on the marker map; not a widget write."),
+
+    # instance_list.py — _render_load shows each provider's failure reason, the
+    # one piece of server-origin text in the load report. It reaches the
+    # widget only after display_text() (the demo-mode redaction of free text)
+    # and is placed as literal content; the demo-mode test in
+    # test_fleet_filters_behaviour proves it.
+    AllowlistEntry("screens/instance_list.py", "_render_load", "update",
+                   "Failure reasons pass through display_text() before they "
+                   "are placed; the rest is fixed words and counts."),
+
     # chat_panel.py — _send clears the chat input TextArea with '' after reading
     # the user's message — no server-origin data involved.
     AllowlistEntry("widgets/chat_panel.py", "_send", "load_text",
@@ -963,6 +1086,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes hard-coded count strings ('N buckets.') or loading "
                    "status text. Error payloads are pre-scrubbed via scrub() "
                    "in callers before being passed here — no raw user data."),
+    AllowlistEntry("screens/theme_name_prompt.py", "_show_error", "update",
+                   "Local validation messages for a new theme file name: fixed "
+                   "text plus the name the user is typing, which is limited to "
+                   "[a-z0-9-] — no server, account or service data."),
     # Note: _render_buckets_table, _render_objects_table, _update_breadcrumb,
     # and _generate_presigned_url no longer need allowlist entries because
     # scrub() and scrub_name() are public method names (no leading underscore)
@@ -1175,7 +1302,6 @@ _TOGGLE_HOOK_ALLOWLIST = {
     ("screens/findings.py", "FindingDetailScreen"): _REOPEN,
     ("screens/fleet_memory.py", "FleetScanSummaryModal"): _REOPEN,
     ("screens/hetzner_create.py", "HetznerCreateScreen"): _REOPEN,
-    ("screens/log_picker.py", "BrowseRemoteScreen"): _REOPEN,
     ("screens/login.py", "LoginScreen"): _REOPEN,
     ("screens/main_menu.py", "MainMenuScreen"): _REOPEN,
     ("screens/memory_drift.py", "DriftDiffScreen"): _REOPEN,
@@ -1188,7 +1314,6 @@ _TOGGLE_HOOK_ALLOWLIST = {
     ("screens/ovh_snapshots.py", "OVHSnapshotsScreen"): _REOPEN,
     ("screens/ovh_storage.py", "OVHStorageScreen"): _REOPEN,
     ("screens/scan_results.py", "ScanResultsScreen"): _REOPEN,
-    ("screens/scp_transfer.py", "SCPTransferScreen"): _REOPEN,
     ("screens/secrets_setup.py", "SecretsSetupScreen"): _REOPEN,
     ("screens/snapshot_manager.py", "SnapshotManagerScreen"): _REOPEN,
     ("screens/ssh_ref_editor.py", "SshRefEditorModal"): _REOPEN,

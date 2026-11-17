@@ -19,6 +19,8 @@ from servonaut.screens.settings.base import SettingsPanel
 from servonaut.screens.settings.shell import DiscardChangesModal
 from tests.test_open_settings_screen import _Host
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _hold_rebaseline(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     """Keep every deferred re-baseline from running, as a busy machine would."""

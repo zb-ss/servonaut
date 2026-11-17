@@ -342,7 +342,7 @@ class IdentityStore:
         if self._allow_file_key_store:
             return self._load_or_create_file_kek(key, create=True), "file"
         raise IdentityStoreError(
-            "no trusted OS keyring is available; turn on Settings > Team Vault > "
+            "no trusted OS keyring is available; turn on Settings > Team vault > "
             "Allow encrypted file key storage (`vault.allow_file_key_store` in config.json), "
             "or provide SERVONAUT_VAULT_DEVICE_KEY"
         )

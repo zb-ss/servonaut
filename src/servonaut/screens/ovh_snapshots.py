@@ -8,25 +8,31 @@ from typing import List
 from textual.app import ComposeResult
 from textual.content import Content
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.utils.markup import cell, literal, with_bold_values
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
 
-class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
+class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, WorkspaceScreen):
     """Screen for managing snapshots of a specific OVH instance.
 
     Supports VPS snapshots, VPS automated backups, and Public Cloud snapshots
     depending on the instance's provider_type.
     """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -39,6 +45,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             instance: Instance dictionary from the instance list.
         """
         super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
         self._instance = instance
         self._provider_type: str = instance.get("provider_type", "vps")
         self._snapshots: List[dict] = []
@@ -53,45 +60,75 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         is_vps = self._provider_type == "vps"
 
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with ScrollableContainer(id="snapshots_container"):
-                yield Static(
-                    literal(f"Snapshots: {instance_name}", "bold $text-accent"),
-                    id="snapshots_title",
-                )
-                yield DataTable(id="snapshots_table")
-                with Horizontal(id="snapshots_actions"):
-                    yield Button(
-                        "Create Snapshot",
-                        variant="primary",
-                        id="btn_create",
-                    )
-                    yield Button(
-                        "Restore Selected",
-                        variant="error",
-                        id="btn_restore",
-                    )
-                    yield Button(
-                        "Delete Selected",
-                        variant="error",
-                        id="btn_delete",
-                    )
-                    yield Button("Back", variant="default", id="btn_back")
-                if is_vps:
+        yield WorkspaceControls("Snapshots")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with ScrollableContainer(
+                id="snapshots_container",
+                classes="workspace-content resource-workspace-content provider-lifecycle-workspace",
+            ):
+                yield BusyIndicator(id="read_loading", classes="read-loading")
+                with Vertical(classes="provider-lifecycle-heading"):
                     yield Static(
-                        "[bold]Automated Backups[/bold]",
-                        id="backup_section_title",
+                        literal(f"Snapshots: {instance_name}"),
+                        id="snapshots_title",
+                        classes="screen-title",
                     )
                     yield Static(
-                        "[dim]Loading backup status...[/dim]",
-                        id="backup_status",
+                        "OVH recovery points: select a snapshot to restore or delete it.",
+                        classes="resource-context",
                     )
-                    yield Button(
-                        "Configure Backup",
-                        variant="default",
-                        id="btn_configure_backup",
-                    )
+                with Horizontal(classes="provider-lifecycle-body"):
+                    with Vertical(classes="resource-panel provider-lifecycle-inventory"):
+                        yield Static("Snapshots", classes="resource-section-title")
+                        yield DataTable(id="snapshots_table")
+                        yield Static(
+                            "No snapshots found. Use Create snapshot to add a recovery point.",
+                            id="snapshot_empty_state",
+                        )
+                    with Vertical(classes="provider-lifecycle-operations"):
+                        yield Static(
+                            "Selected recovery point", classes="provider-lifecycle-section-title",
+                        )
+                        yield Static(
+                            "Select a snapshot to review its identity.",
+                            id="snapshot_selected_context",
+                            classes="provider-lifecycle-selection", markup=False,
+                        )
+                        yield Horizontal(
+                            Button(
+                                "Create snapshot",
+                                variant="primary",
+                                id="btn_create",
+                            ),
+                            Button(
+                                "Restore selected",
+                                variant="error",
+                                id="btn_restore",
+                            ),
+                            Button(
+                                "Delete selected",
+                                variant="error",
+                                id="btn_delete",
+                            ),
+                            Button("Back", variant="default", id="btn_back"),
+                            id="snapshots_actions",
+                        )
+                        if is_vps:
+                            with Vertical(classes="resource-panel provider-lifecycle-backup"):
+                                yield Static(
+                                    "[bold]Automated backups[/bold]",
+                                    id="backup_section_title",
+                                )
+                                yield Static(
+                                    "[dim]Loading backup status...[/dim]",
+                                    id="backup_status",
+                                )
+                                yield Button(
+                                    "Configure backup",
+                                    variant="default",
+                                    id="btn_configure_backup",
+                                )
         yield Footer()
 
     # ------------------------------------------------------------------
@@ -101,7 +138,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     def on_mount(self) -> None:
         """Set up table columns and load snapshots."""
         table = self.query_one("#snapshots_table", DataTable)
-        table.add_columns("Name / ID", "Date", "Description / Status")
+        table.add_columns("Name / ID", "Date", "Description / status")
         table.cursor_type = "row"
 
         if self._provider_type == "vps":
@@ -165,7 +202,9 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             return
 
         try:
-            self._snapshots = await svc.list_vps_snapshots(vps_name)
+            self._set_empty_inventory(False)
+            with self._read_loading.running("Loading snapshots…"):
+                self._snapshots = await svc.list_vps_snapshots(vps_name)
         except Exception as e:
             logger.error("Error loading VPS snapshots: %s", e)
             self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error", markup=False)
@@ -191,7 +230,9 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
 
         project_id, _ = raw_id.split("/", 1)
         try:
-            self._snapshots = await svc.list_cloud_snapshots(project_id)
+            self._set_empty_inventory(False)
+            with self._read_loading.running("Loading snapshots…"):
+                self._snapshots = await svc.list_cloud_snapshots(project_id)
         except Exception as e:
             logger.error("Error loading cloud snapshots: %s", e)
             self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error", markup=False)
@@ -241,6 +282,8 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         """Populate the DataTable with the current snapshot list."""
         table = self.query_one("#snapshots_table", DataTable)
         table.clear()
+        self._set_empty_inventory(not self._snapshots)
+        self._update_selected_context()
 
         if not self._snapshots:
             self.notify("No snapshots found.", severity="information")
@@ -265,6 +308,37 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
                 else:
                     description = self.app.redaction_service.scrub_stream(str(description))
             table.add_row(cell(self._display_snapshot_name(snap)), cell(created_at), cell(description))
+        self._update_selected_context()
+
+    def _set_empty_inventory(self, is_empty: bool) -> None:
+        """Switch between loaded empty guidance and the mounted catalog."""
+        try:
+            container = self.query_one("#snapshots_container")
+        except NoMatches:
+            return
+        container.set_class(is_empty, "-snapshots-empty")
+
+    def _update_selected_context(self) -> None:
+        """Show the selected recovery identity without shortening its value."""
+        try:
+            context = self.query_one("#snapshot_selected_context", Static)
+        except NoMatches:
+            return
+        table = self.query_one("#snapshots_table", DataTable)
+        row = table.cursor_row
+        if table.row_count == 0 or not 0 <= row < len(self._snapshots):
+            context.update("Select a snapshot to review its identity.")
+            return
+        snapshot = self._snapshots[row]
+        name = self._display_snapshot_name(snapshot)
+        identifier = self._display_snapshot_name({"id": snapshot.get("id")})
+        context.update(literal(
+            name if identifier == name or identifier == "—" else f"{name}\n{identifier}"
+        ))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "snapshots_table":
+            self._update_selected_context()
 
     def _display_snapshot_name(self, snapshot: dict) -> str:
         """Share one display alias across the table and confirmation prompts."""
@@ -383,7 +457,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Restore Snapshot",
+                title="Restore snapshot",
                 description=with_bold_values(
                     "Restore {} from snapshot {}.", instance_name, snap_name,
                 ),
@@ -392,7 +466,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
                     "All changes made after the snapshot was taken will be lost",
                 ],
                 confirm_text=instance_name,
-                action_label="Restore Now",
+                action_label="Restore now",
                 severity="danger",
             )
         )
@@ -456,14 +530,14 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
-                title="Delete Snapshot",
+                title="Delete snapshot",
                 description=with_bold_values("Delete snapshot {}.", snap_name),
                 consequences=[
                     "The snapshot will be permanently deleted",
                     "This cannot be undone",
                 ],
                 confirm_text=str(snap_name),
-                action_label="Delete Snapshot",
+                action_label="Delete snapshot",
                 severity="warning",
             )
         )

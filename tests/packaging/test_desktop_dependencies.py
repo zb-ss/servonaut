@@ -54,6 +54,7 @@ _DIRECT_REQUIREMENTS = {
     "httpx-sse>=0.4",
     "keyring>=24",
     "regex>=2025.9.18",
+    'tomli>=2 ; python_version < "3.11"',
     "mcp>=1.30.0,<2",
     "ovh",
     "hcloud>=2.0",

@@ -7,14 +7,65 @@
    =================================================================== */
 
 * {
-    scrollbar-background: $boost;
-    scrollbar-color: $primary;
-    scrollbar-color-hover: $accent;
+    scrollbar-background: transparent;
+    /* The square where two scrollbars meet takes the screen surface, not black. */
+    scrollbar-corner-color: $surface;
+    scrollbar-color: $panel-lighten-2;
+    scrollbar-color-hover: $primary;
     scrollbar-color-active: $accent;
 }
 
 Screen {
     background: $surface;
+}
+
+/* Keep native slider fills distinct from both the track and themed surfaces. */
+Switch .switch--slider {
+    color: $text-muted;
+}
+
+Switch:hover .switch--slider {
+    color: $text;
+}
+
+Switch.-on .switch--slider {
+    color: $success;
+}
+
+Switch.-on:hover .switch--slider {
+    color: $success-lighten-1;
+}
+
+/* The native right position identifies ON when light themes need neutral fills. */
+Switch:light.-on .switch--slider {
+    color: $text;
+}
+
+Switch:light.-on:hover .switch--slider {
+    color: $text-muted;
+}
+
+/* Explicit terminal roles retain hover feedback without relying on ANSI alpha.
+   Keep these after the light-theme rules so ANSI state colors win ties. */
+Switch:ansi .switch--slider {
+    color: ansi_bright_black;
+}
+
+Switch:ansi:hover .switch--slider {
+    color: ansi_default;
+}
+
+Switch:ansi.-on .switch--slider {
+    color: $success;
+}
+
+Switch:ansi.-on:hover .switch--slider {
+    color: ansi_bright_green;
+}
+
+/* A visible native frame keeps the slider's left/right position readable. */
+Switch:ansi:enabled:blur {
+    border: round $foreground;
 }
 
 /* Global default: every ModalScreen centres its dialog. Individual modals
@@ -41,8 +92,7 @@ ModalScreen {
    rule wins over any DEFAULT_CSS, so without this the dimmed backdrop would
    show through the dialog itself. */
 #copy-mode-container,
-#text-editor-container,
-#discard-box {
+#text-editor-container {
     background: $surface;
 }
 
@@ -51,10 +101,23 @@ ModalScreen {
    =================================================================== */
 
 Header {
-    background: $primary;
+    background: $surface;
     color: $text;
     text-style: bold;
     dock: top;
+}
+
+Header:ansi {
+    background: $panel;
+    color: $foreground;
+}
+
+Header HeaderTitle {
+    color: auto 100%;
+}
+
+Header:ansi HeaderTitle {
+    color: $foreground;
 }
 
 Footer {
@@ -65,6 +128,15 @@ Footer {
     border-top: wide $primary;
 }
 
+/* Light themes may pair their native footer text with an accent fill. Our
+   quiet panel needs its own text role, including native binding components. */
+Footer:light,
+Footer:light FooterLabel,
+Footer:light FooterKey .footer-key--key,
+Footer:light FooterKey .footer-key--description {
+    color: $text;
+}
+
 /* ===================================================================
    BUTTONS - Global Styling
    =================================================================== */
@@ -72,36 +144,161 @@ Footer {
 Button {
     min-width: 16;
     height: 3;
-    background: $boost;
+    background: transparent;
     color: $text;
-    border: round $primary-background;
+    border: round $border-blurred;
     text-align: center;
     content-align: center middle;
 }
 
+Button.-primary {
+    color: $text-accent;
+    border: round $primary;
+}
+
+Button.-success {
+    color: $text-success;
+    border: round $success;
+}
+
+Button.-warning {
+    color: $text-warning;
+    border: round $warning;
+}
+
+Button.-error {
+    color: $text-error;
+    border: round $error;
+}
+
 Button:hover {
-    background: $primary;
-    color: $text;
+    background: transparent;
+    color: $text-accent;
     border: round $accent;
     text-style: bold;
 }
 
 Button:focus {
-    background: $accent;
-    color: $text;
+    background: transparent;
+    color: $text-accent;
+    border: round $accent;
+    text-style: bold underline;
+}
+
+/* Hover brightens the frame and never underlines the words; keyboard focus
+   keeps its underline. A role keeps its own colour and gets a lighter frame. */
+Button.-warning:focus {
+    background: transparent;
+    color: $text-warning;
     border: round $warning;
+    text-style: bold underline;
+}
+
+Button.-error:focus {
+    background: transparent;
+    color: $text-error;
+    border: round $error;
+    text-style: bold underline;
+}
+
+Button.-warning:hover {
+    border: round $warning-lighten-2;
     text-style: bold;
+}
+
+Button.-error:hover {
+    border: round $error-lighten-2;
+    text-style: bold;
+}
+
+Button.-success:hover,
+Button.-primary:hover {
+    text-style: bold;
+}
+
+/* A compact button (a chip, a toolbar action) has no frame at all. The hover
+   and focus rules above out-rank any class selector that sets `border: none`
+   (a pseudo-class counts as a class), so without this the frame appears the
+   moment the pointer or focus arrives and the button grows by two rows. */
+Button.-textual-compact {
+    height: 1;
+    border: none !important;
+}
+
+/* A frameless button shows hover by its fill (reversed in terminal themes). */
+Button.-textual-compact:hover {
+    background: $foreground 8%;
+}
+
+Button.-textual-compact:ansi:hover,
+Button.-textual-compact.-primary:ansi:hover,
+Button.-textual-compact.-success:ansi:hover,
+Button.-textual-compact.-warning:ansi:hover,
+Button.-textual-compact.-error:ansi:hover {
+    background: transparent;
+    border: none;
+    text-style: reverse;
 }
 
 #btn_back {
-    color: $error;
+    background: transparent;
+    color: $text-muted;
+    border: round $border-blurred;
+}
+
+#btn_back:hover {
+    background: transparent;
+    color: $text;
+    border: round $accent;
+    text-style: bold;
 }
 
 #btn_back:focus {
-    background: $error;
-    color: $text;
-    border: round $error-darken-1;
-    text-style: bold;
+    background: transparent;
+    color: $text-accent;
+    border: round $accent;
+    text-style: bold underline;
+}
+
+Button.-primary:ansi,
+Button.-success:ansi,
+Button.-warning:ansi,
+Button.-error:ansi,
+#btn_back:ansi {
+    color: $foreground;
+}
+
+Button:ansi:hover,
+Button.-primary:ansi:hover,
+Button.-success:ansi:hover,
+Button.-warning:ansi:hover,
+Button.-error:ansi:hover,
+#btn_back:ansi:hover {
+    background: $surface;
+    color: $foreground;
+    border: heavy $accent;
+    text-style: none;
+}
+
+Button:ansi:focus,
+Button.-primary:ansi:focus,
+Button.-success:ansi:focus,
+Button.-warning:ansi:focus,
+Button.-error:ansi:focus,
+#btn_back:ansi:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    border: round $warning;
+    text-style: not bold;
+}
+
+Button:ansi:disabled:hover,
+Button.-primary:ansi:disabled:hover,
+Button.-success:ansi:disabled:hover,
+Button.-warning:ansi:disabled:hover,
+Button.-error:ansi:disabled:hover,
+#btn_back:ansi:disabled:hover {
+    text-style: not underline not bold;
 }
 
 /* ===================================================================
@@ -109,18 +306,131 @@ Button:focus {
    =================================================================== */
 
 Input {
-    background: $boost;
+    background: transparent;
     border: round $primary-background;
     padding: 0 1;
 }
 
 Input:focus {
     border: round $accent;
-    background: $panel;
+    background: transparent;
 }
 
 Input.-invalid {
     border: round $error;
+}
+
+/* A Select draws the same rounded frame as every other control: its closed
+   box, its focused box and the open option list. Textual's own rules use a
+   half-block border, whose corners stand out next to the rounded ones. The
+   fill stays transparent so nothing square shows outside the curve. */
+SelectCurrent {
+    border: round $primary-background;
+    background: transparent;
+}
+
+Select:focus > SelectCurrent {
+    border: round $accent;
+    background: transparent;
+    background-tint: transparent;
+}
+
+Select > SelectOverlay {
+    border: round $primary-background;
+    background: $surface;
+}
+
+Select > SelectOverlay:focus {
+    border: round $accent;
+    background-tint: transparent;
+}
+
+Select.-textual-compact > SelectCurrent {
+    border: none;
+}
+
+SelectCurrent:ansi {
+    border: round $primary-background;
+    background: transparent;
+}
+
+Select:ansi:focus > SelectCurrent {
+    border: round $border;
+}
+
+/* The other framed controls follow the same rounded frame, in the Input's
+   idle colour: Textual draws them with half-block borders, which would sit
+   oddly beside the Input. */
+TextArea,
+Checkbox,
+RadioSet,
+Switch,
+OptionList {
+    border: round $primary-background;
+}
+
+TextArea:focus,
+Checkbox:focus,
+RadioSet:focus,
+Switch:focus,
+OptionList:focus {
+    border: round $accent;
+}
+
+/* The command palette's result list keeps Textual's own look: a rule under
+   the list, no frame. */
+CommandPalette CommandList {
+    border-top: blank;
+    border-bottom: hkey $border-blurred;
+    border-left: none;
+    border-right: none;
+}
+
+CommandPalette CommandList:focus {
+    border: blank;
+}
+
+CommandPalette CommandList.--populating {
+    border-bottom: none;
+}
+
+Checkbox,
+RadioSet,
+Switch {
+    background: transparent;
+}
+
+/* A compact control has no frame at all, focused or not: the frames above must
+   not give it two more rows. */
+TextArea.-textual-compact,
+Checkbox.-textual-compact,
+RadioSet.-textual-compact,
+Switch.-textual-compact,
+OptionList.-textual-compact {
+    border: none !important;
+}
+
+/* Keep the selected label readable on the theme's native cursor fill. */
+SelectOverlay:focus > .option-list--option-highlighted {
+    color: auto 100%;
+}
+
+/* Terminal palettes retain their explicit native foreground/background pair. */
+SelectOverlay:ansi:focus > .option-list--option-highlighted {
+    color: $block-cursor-foreground;
+}
+
+/* Native ANSI selections reverse the terminal's readable foreground pair. */
+TextArea:ansi .text-area--selection {
+    color: $foreground;
+}
+
+/* Keep native editor edges visible when focus moves away. */
+CopyModeScreen #copy-mode-text:ansi:enabled:blur,
+TextEditorModal #text-editor-area:ansi:enabled:blur,
+CustomServersScreen #input_extra_ssh_options:ansi:enabled:blur,
+BugReportScreen #description:ansi:enabled:blur {
+    border: round $foreground;
 }
 
 /* ===================================================================
@@ -128,7 +438,7 @@ Input.-invalid {
    =================================================================== */
 
 DataTable {
-    background: $surface;
+    background: transparent;
     color: $text;
     border: none;
     height: auto;
@@ -136,19 +446,36 @@ DataTable {
 
 DataTable > .datatable--header {
     background: $primary;
-    color: $text;
+    color: $background;
     text-style: bold;
 }
 
+/* The cursor row is a muted primary fill with the normal text colour, not a
+   reversed white bar. Terminal-colour themes keep the reversed form below,
+   as they have no reliable muted fill. */
+/* A tint of the primary colour over the table's own background, light enough
+   that the normal text colour stays readable in every theme. */
 DataTable > .datatable--cursor {
-    background: $accent;
+    background: $primary 25%;
     color: $text;
     text-style: bold;
 }
 
 DataTable:focus > .datatable--cursor {
-    background: $accent;
+    background: $primary 35%;
     color: $text;
+}
+
+DataTable:ansi > .datatable--header {
+    background: $panel;
+    color: $foreground;
+}
+
+DataTable:ansi > .datatable--cursor,
+DataTable:ansi:focus > .datatable--cursor {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: not bold;
 }
 
 DataTable > .datatable--odd-row {

@@ -227,8 +227,13 @@ async def test_relay_status_screen_stops_and_restarts(tui, seed, fake_cloud):
         await t.wait_for_screen("RelayStatusScreen")
         await t.wait_for_text(
             "Backend: connected",
-            f"Local: connected — lock owner: tui (PID {os.getpid()})",
+            "Local: connected — lock owner: tui",
+            f"(PID {os.getpid()})",
             client_id,
+        )
+        # Keep the exact owner/PID association while allowing its native line break.
+        assert Content.from_markup(str(t.on_screen("#local_status").render())).plain == (
+            f"Local: connected — lock owner: tui (PID {os.getpid()})"
         )
 
         stopped = _live(fake_cloud)[0]["number"]
@@ -297,11 +302,13 @@ async def test_ssh_verify_results_show_in_the_fleet(tui, seed, fake_cloud):
         def ssh_column():
             return _fleet_column(t, "ssh")
 
+        # A verified server reads "✓" and how long ago it was verified (the
+        # cell is short: "✓ 5s ago"); a failed one says why.
         await t.wait_until(
-            lambda: "verified" in ssh_column().get(fleet.APP_1.name, ""), desc="verify badges"
+            lambda: "✓" in ssh_column().get(fleet.APP_1.name, ""), desc="verify badges"
         )
         badges = ssh_column()
-        assert "✓ verified" in badges[fleet.APP_1.name]
+        assert re.search(r"✓ .*ago", badges[fleet.APP_1.name]), badges
         assert "✗ auth failed" in badges[fleet.DB_1.name]
-        assert "verified" not in badges[fleet.EDGE_1.name]
+        assert "✓" not in badges[fleet.EDGE_1.name]
         assert "failed" not in badges[fleet.EDGE_1.name]

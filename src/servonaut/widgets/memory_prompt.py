@@ -23,6 +23,8 @@ from textual.events import Key
 from textual.widget import Widget
 from textual.widgets import Button, Static
 
+from servonaut.widgets.action_button import ActionButton
+
 from servonaut.utils.markup import literal
 
 logger = logging.getLogger(__name__)
@@ -99,8 +101,8 @@ class MemoryPrompt(Widget):
     def compose(self) -> ComposeResult:
         yield Horizontal(
             Static(self._label_content(), id="memory_prompt_label"),
-            Button("y. Build", variant="primary", id="memory_prompt_accept"),
-            Button("n. Dismiss", variant="default", id="memory_prompt_dismiss"),
+            ActionButton("Build", "y", role="primary", id="memory_prompt_accept"),
+            ActionButton("Dismiss", "n", id="memory_prompt_dismiss"),
             id="memory_prompt_row",
         )
 

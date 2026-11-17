@@ -7,15 +7,24 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 from textual.content import Content
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, Footer, Input, Label, OptionList, Static
+from textual.widgets import Button, Footer, Input, Label, OptionList, Static, Tree
 from textual.widgets.option_list import Option
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogContent,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.utils.markup import literal
 from servonaut.widgets.safe_header import SafeHeader
+from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 if TYPE_CHECKING:
     from servonaut.services.log_viewer_service import LogViewerService
@@ -45,8 +54,10 @@ class LogPickerModal(ModalScreen[str]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
-        Binding("f2", "manage_paths", "Manage Paths", show=True),
+        Binding("f2", "manage_paths", "Manage paths", show=True),
     ]
+
+    DEFAULT_CLASSES = "dialog-screen"
 
     def __init__(
         self,
@@ -94,24 +105,33 @@ class LogPickerModal(ModalScreen[str]):
             ]
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Log Picker[/bold $text-accent]  "
-                "[dim]Type to filter, Enter to select, Escape to cancel[/dim]",
-                id="log_picker_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static("[bold $text-accent]Log picker[/bold $text-accent]", id="log_picker_header"),
+                Static("Type to filter, Enter to select, Escape to cancel", id="log_picker_hint"),
             ),
-            Input(
-                placeholder="Search log files...",
-                id="log_picker_search",
+            body=DialogContent(
+                Input(placeholder="Search log files...", id="log_picker_search"),
+                Static("", id="log_picker_count"),
+                OptionList(id="log_picker_list"),
+                id="log_picker_body",
             ),
-            Static("", id="log_picker_count"),
-            OptionList(id="log_picker_list"),
+            actions=DialogActions(
+                Button("Add path", id="log_picker_add", variant="primary"),
+                Button("Manage paths (F2)", id="log_picker_manage"),
+                Button("Cancel", id="log_picker_cancel"),
+            ),
             id="log_picker_container",
+            size="large",
         )
 
     def on_mount(self) -> None:
         """Populate the option list and focus search."""
         self._rebuild_options("")
+        self.query_one("#log_picker_manage", Button).display = bool(
+            self._instance is not None and self._log_viewer_service is not None
+        )
         self.query_one("#log_picker_search", Input).focus()
 
     def on_key(self, event: Key) -> None:
@@ -171,9 +191,9 @@ class LogPickerModal(ModalScreen[str]):
 
         total_matches = len(filtered_available) + len(filtered_custom) + len(filtered_discovered)
 
-        # --- Available Logs section ---
+        # --- Available logs section ---
         if filtered_available:
-            all_options.append(Option("── Available Logs ──", disabled=True))
+            all_options.append(Option("── Available logs ──", disabled=True))
             idx += 1
             for path in filtered_available:
                 option_id = f"avail:{path}"
@@ -184,12 +204,12 @@ class LogPickerModal(ModalScreen[str]):
                     self._first_selectable = idx
                 idx += 1
 
-        # --- Custom Paths section (saved but not confirmed readable) ---
+        # --- Custom paths section (saved but not confirmed readable) ---
         if filtered_custom:
             if filtered_available:
                 all_options.append(Option("", disabled=True))
                 idx += 1
-            all_options.append(Option("── Custom Paths ──", disabled=True))
+            all_options.append(Option("── Custom paths ──", disabled=True))
             idx += 1
             for path in filtered_custom:
                 option_id = f"custom:{path}"
@@ -208,12 +228,12 @@ class LogPickerModal(ModalScreen[str]):
             all_options.append(Option("", disabled=True))
             idx += 1
 
-        # --- Discovered Logs section (capped) ---
+        # --- Discovered logs section (capped) ---
         truncated_discovered = filtered_discovered[:_MAX_VISIBLE]
         hidden_count = len(filtered_discovered) - len(truncated_discovered)
 
         if truncated_discovered:
-            all_options.append(Option("── Discovered Logs ──", disabled=True))
+            all_options.append(Option("── Discovered logs ──", disabled=True))
             idx += 1
             for path in truncated_discovered:
                 option_id = f"disc:{path}"
@@ -341,9 +361,21 @@ class LogPickerModal(ModalScreen[str]):
         # Pass sentinel results back up to LogViewerScreen unchanged
         self.dismiss(result)
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Expose the existing list actions without changing picker results."""
+        if event.button.id == "log_picker_cancel":
+            event.stop()
+            self.action_cancel()
+        elif event.button.id == "log_picker_add":
+            event.stop()
+            self.dismiss(ADD_PATH_SENTINEL)
+        elif event.button.id == "log_picker_manage":
+            event.stop()
+            self.action_manage_paths()
+
     def action_cancel(self) -> None:
         """Close without selecting."""
-        self.app.pop_screen()
+        self.dismiss(None)
 
 
 class AddPathModal(ModalScreen[str]):
@@ -356,21 +388,23 @@ class AddPathModal(ModalScreen[str]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Add Custom Log Path[/bold $text-accent]",
-                id="add_path_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static('[bold $text-accent]Add custom log path[/bold $text-accent]', id='add_path_header'),
+            body=DialogBody(
+                Label("Remote file path", classes="log_path_field_label"),
+                Input(placeholder='/var/log/myapp/app.log', id='add_path_input'),
+                Static('[dim]Enter an absolute path to a log file on the remote server.[/dim]', id='add_path_hint'),
             ),
-            Static(
-                "[dim]Enter an absolute path to a log file on the remote server.[/dim]",
-                id="add_path_hint",
-            ),
-            Input(
-                placeholder="/var/log/myapp/app.log",
-                id="add_path_input",
+            actions=DialogActions(
+                Button("Cancel", id="add_path_cancel"),
+                Button("Add", variant="primary", id="add_path_submit"),
             ),
             id="add_path_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -381,7 +415,19 @@ class AddPathModal(ModalScreen[str]):
         """Validate and submit on Enter."""
         if event.input.id != "add_path_input":
             return
-        path = event.value.strip()
+        self._submit(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """The buttons act exactly as Enter and Escape do."""
+        if event.button.id == "add_path_submit":
+            event.stop()
+            self._submit(self.query_one("#add_path_input", Input).value)
+        elif event.button.id == "add_path_cancel":
+            event.stop()
+            self.action_cancel()
+
+    def _submit(self, value: str) -> None:
+        path = value.strip()
         if not path:
             self.notify("Path cannot be empty", severity="warning")
         elif not path.startswith("/"):
@@ -404,22 +450,23 @@ class AddDirectoryModal(ModalScreen[str]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Add Log Directory[/bold $text-accent]",
-                id="add_dir_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static('[bold $text-accent]Add log directory[/bold $text-accent]', id='add_dir_header'),
+            body=DialogBody(
+                Label("Remote directory", classes="log_path_field_label"),
+                Input(placeholder='/var/log/myapp', id='add_dir_input'),
+                Static('[dim]Enter an absolute directory path on the remote server.\nServonaut will scan it for log files (maxdepth 2).[/dim]', id='add_dir_hint'),
             ),
-            Static(
-                "[dim]Enter an absolute directory path on the remote server.\n"
-                "Servonaut will scan it for log files (maxdepth 2).[/dim]",
-                id="add_dir_hint",
-            ),
-            Input(
-                placeholder="/var/log/myapp",
-                id="add_dir_input",
+            actions=DialogActions(
+                Button("Cancel", id="add_dir_cancel"),
+                Button("Add", variant="primary", id="add_dir_submit"),
             ),
             id="add_dir_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -430,7 +477,19 @@ class AddDirectoryModal(ModalScreen[str]):
         """Validate and submit on Enter."""
         if event.input.id != "add_dir_input":
             return
-        path = event.value.strip()
+        self._submit(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """The buttons act exactly as Enter and Escape do."""
+        if event.button.id == "add_dir_submit":
+            event.stop()
+            self._submit(self.query_one("#add_dir_input", Input).value)
+        elif event.button.id == "add_dir_cancel":
+            event.stop()
+            self.action_cancel()
+
+    def _submit(self, value: str) -> None:
+        path = value.strip()
         if not path:
             self.notify("Path cannot be empty", severity="warning")
         elif not path.startswith("/"):
@@ -464,6 +523,8 @@ class ManagePathsModal(ModalScreen[str]):
         Binding("escape", "close_modal", "Close", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(
         self,
         custom_paths: List[str],
@@ -474,17 +535,22 @@ class ManagePathsModal(ModalScreen[str]):
         self._instance = instance
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Manage Custom Paths[/bold $text-accent]",
-                id="manage_paths_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(
+                    "[bold $text-accent]Manage custom paths[/bold $text-accent]",
+                    id="manage_paths_header",
+                ),
+                Static(
+                    "[dim]Custom log files and directories for this server.[/dim]",
+                    id="manage_paths_subtitle",
+                ),
+                Static(f"{len(self._custom_paths)} saved paths", id="manage_paths_count"),
             ),
-            Static(
-                "[dim]Custom log files and directories for this server.[/dim]",
-                id="manage_paths_subtitle",
-            ),
-            OptionList(id="manage_paths_list"),
-            Horizontal(
+            # The option list is its own scroll owner.
+            body=OptionList(id="manage_paths_list"),
+            actions=DialogActions(
                 Button("Browse", id="manage_browse", variant="primary"),
                 Button("+ File", id="manage_add_file"),
                 Button("+ Dir", id="manage_add_dir"),
@@ -494,6 +560,7 @@ class ManagePathsModal(ModalScreen[str]):
                 id="manage_paths_buttons",
             ),
             id="manage_paths_container",
+            size="large",
         )
 
     def on_mount(self) -> None:
@@ -519,7 +586,7 @@ class ManagePathsModal(ModalScreen[str]):
         """Handle button presses."""
         button_id = event.button.id
         if button_id == "manage_close":
-            self.app.pop_screen()
+            self.action_close_modal()
         elif button_id == "manage_browse":
             if self._instance is None:
                 self.notify("Browse not available", severity="warning")
@@ -586,7 +653,7 @@ class ManagePathsModal(ModalScreen[str]):
 
     def action_close_modal(self) -> None:
         """Close without changes."""
-        self.app.pop_screen()
+        self.dismiss(None)
 
 
 class EditPathModal(ModalScreen[str]):
@@ -599,25 +666,27 @@ class EditPathModal(ModalScreen[str]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     def __init__(self, current_path: str) -> None:
         super().__init__()
         self._current_path = current_path
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Edit Custom Log Path[/bold $text-accent]",
-                id="edit_path_header",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static('[bold $text-accent]Edit custom log path[/bold $text-accent]', id='edit_path_header'),
+            body=DialogBody(
+                Label("Saved path", classes="log_path_field_label"),
+                Input(value=self._current_path, id='edit_path_input'),
+                Static('[dim]Modify the path and press Enter to save.[/dim]', id='edit_path_hint'),
             ),
-            Static(
-                "[dim]Modify the path and press Enter to save.[/dim]",
-                id="edit_path_hint",
-            ),
-            Input(
-                value=self._current_path,
-                id="edit_path_input",
+            actions=DialogActions(
+                Button("Cancel", id="edit_path_cancel"),
+                Button("Save", variant="primary", id="edit_path_submit"),
             ),
             id="edit_path_container",
+            size="compact",
         )
 
     def on_mount(self) -> None:
@@ -629,7 +698,19 @@ class EditPathModal(ModalScreen[str]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "edit_path_input":
             return
-        new_path = event.value.strip()
+        self._submit(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """The buttons act exactly as Enter and Escape do."""
+        if event.button.id == "edit_path_submit":
+            event.stop()
+            self._submit(self.query_one("#edit_path_input", Input).value)
+        elif event.button.id == "edit_path_cancel":
+            event.stop()
+            self.action_cancel()
+
+    def _submit(self, value: str) -> None:
+        new_path = value.strip()
         if not new_path:
             self.notify("Path cannot be empty", severity="warning")
         elif not new_path.startswith("/") and not new_path.startswith("dir:"):
@@ -643,7 +724,7 @@ class EditPathModal(ModalScreen[str]):
         self.app.pop_screen()
 
 
-class BrowseRemoteScreen(Screen[str]):
+class BrowseRemoteScreen(WorkspaceScreen):
     """Full-screen remote file browser for picking log file/directory paths.
 
     Uses the existing RemoteTree widget. Enter adds the highlighted file as a
@@ -654,14 +735,22 @@ class BrowseRemoteScreen(Screen[str]):
     or None.
     """
 
+    CHAT_REFLOW = True
+    # The container's padding and the tree's border (4) plus a readable path
+    # column and the header hint beside the chat column.
+    CHAT_MIN_CONTENT_WIDTH = 48
+    # Keep the complete path action labels readable beside the navigation rail.
+    CONTENT_NARROW_WIDTH = 80
+    AUTO_FOCUS = "#browse_tree"
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         # priority: the focused Tree binds Enter itself (select + expand), so
         # a plain screen binding never fires. Directories are handed back to
         # the tree, so Enter still expands them.
-        Binding("enter", "select_node", "Add file / Open dir", show=True, priority=True),
-        Binding("f", "select_as_file", "Add as File", show=True),
-        Binding("d", "select_as_dir", "Add as Dir", show=True),
+        Binding("enter", "select_node", "Add file / open dir", show=True, priority=True),
+        Binding("f", "select_as_file", "Add as file", show=True),
+        Binding("d", "select_as_dir", "Add as dir", show=True),
     ]
 
     def __init__(self, instance: dict) -> None:
@@ -670,17 +759,35 @@ class BrowseRemoteScreen(Screen[str]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Container(
-            Static(
-                "[bold $text-accent]Browse Remote Server[/bold $text-accent]  "
-                "[dim]Enter: add file or open directory · D: add directory[/dim]",
-                id="browse_header",
-            ),
-            id="browse_container",
-        )
+        yield WorkspaceControls("Browse remote")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Container(id="browse_container", classes="workspace-content"):
+                yield VerticalScroll(
+                    Static(self._header_text(), id="browse_header", markup=False),
+                    id="browse_header_scroll",
+                )
+                with Horizontal(id="browse_browser"):
+                    yield Container(id="browse_workspace")
+                    with Vertical(id="browse_selection"):
+                        yield Static("[bold]Selected source[/bold]", id="browse_selection_title")
+                        yield VerticalScroll(
+                            Static("Select a file or directory", id="browse_path", markup=False),
+                            id="browse_path_scroll",
+                        )
+                        yield Static(
+                            "Add a file directly, or include a directory in log discovery.",
+                            id="browse_selection_hint",
+                        )
+                        yield Horizontal(
+                            Button("Add as file", id="browse_add_file", variant="primary"),
+                            Button("Add directory", id="browse_add_directory"),
+                            Button("Back", id="browse_back"),
+                            id="browse_actions",
+                        )
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         """Mount the RemoteTree into the container."""
         from servonaut.widgets.remote_tree import RemoteTree
         from servonaut.services.log_viewer_service import LogViewerService
@@ -716,7 +823,53 @@ class BrowseRemoteScreen(Screen[str]):
             scan_paths=scan_paths,
             id="browse_tree",
         )
-        self.query_one("#browse_container").mount(tree)
+        self.query_one("#browse_workspace").border_title = "Remote files"
+        await self.query_one("#browse_workspace").mount(tree)
+        if (
+            self.is_attached
+            and tree.is_attached
+            and self.app.screen_stack
+            and self.app.screen is self
+            and self.focused is None
+        ):
+            self.set_focus(tree)
+
+    def _header_text(self) -> str:
+        from servonaut.screens._demo_resolve import display_text
+        from servonaut.services.vault.display import terminal_safe
+
+        name = self._instance.get("name") or self._instance.get("id") or "Unknown server"
+        shown = terminal_safe(display_text(self.app, str(name)))
+        return f"Browse Remote Server: {shown}\nEnter opens directories or adds a file."
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        if event.control.id == "browse_tree":
+            self._render_path_context()
+
+    def _render_path_context(self) -> None:
+        from servonaut.screens._demo_resolve import display_text
+        from servonaut.services.vault.display import terminal_safe
+
+        data = self._get_selected_path() or {}
+        path = data.get("path")
+        shown = terminal_safe(display_text(self.app, str(path or "")))
+        self.query_one("#browse_path", Static).update(
+            f"Selected path: {shown}" if path else "Select a file or directory"
+        )
+
+    def refresh_after_demo_toggle(self) -> None:
+        self.query_one("#browse_header", Static).update(self._header_text())
+        self._render_path_context()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "browse_add_file": "select_as_file",
+            "browse_add_directory": "select_as_dir",
+            "browse_back": "back",
+        }
+        action = actions.get(event.button.id)
+        if action:
+            await self.run_action(action)
 
     def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
         """Enter acts on the tree only while the tree has focus.
@@ -726,9 +879,26 @@ class BrowseRemoteScreen(Screen[str]):
         """
         from servonaut.widgets.remote_tree import RemoteTree
 
+        # The tree scoping comes first: the priority Enter binding must stay
+        # off whatever else has focus, including the navigation rail.
         if action == "select_node" and not isinstance(self.focused, RemoteTree):
             return None
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
         return True
+
+    def on_sidebar_navigation_requested(self, message: Sidebar.NavigationRequested) -> None:
+        stack = self.app.screen_stack
+        owner_index = len(stack) - 2
+        if owner_index < 0 or not isinstance(stack[owner_index], ManagePathsModal):
+            return
+        message.stop()
+        if self.app._refuse_navigation():
+            return
+        while isinstance(stack[owner_index], (ManagePathsModal, LogPickerModal)):
+            owner_index -= 1
+        stack[owner_index].pop_until_active()
+        self.app.call_later(self.app.on_sidebar_navigation_requested, message)
 
     def _get_selected_path(self) -> Optional[dict]:
         """Get the currently highlighted node's path and type."""

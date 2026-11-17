@@ -1,0 +1,156 @@
+/* Operational settings share the shell's single reading surface and Save dock. */
+MemoryPanel .settings-operations-section,
+MemorySyncPanel .settings-operations-section,
+BackupsPanel .settings-operations-section,
+HistoryPathsPanel .settings-operations-section,
+IpBanPanel .settings-operations-section,
+IpLookupPanel .settings-operations-section,
+McpPanel .settings-operations-section,
+RelayPanel .settings-operations-section {
+    width: 100%;
+    height: auto;
+    padding-top: 1;
+    margin-bottom: 1;
+    border-top: solid $border-blurred;
+}
+
+MemoryPanel .settings-operations-section:first-child,
+MemorySyncPanel .settings-operations-section:first-child,
+BackupsPanel .settings-operations-section:first-child,
+HistoryPathsPanel .settings-operations-section:first-child,
+IpBanPanel .settings-operations-section:first-child,
+IpLookupPanel .settings-operations-section:first-child,
+McpPanel .settings-operations-section:first-child,
+RelayPanel .settings-operations-section:first-child {
+    border-top: none;
+    padding-top: 0;
+}
+
+MemoryPanel .settings-operations-section .settings-group-title,
+MemorySyncPanel .settings-operations-section .settings-group-title,
+BackupsPanel .settings-operations-section .settings-group-title,
+HistoryPathsPanel .settings-operations-section .settings-group-title,
+IpBanPanel .settings-operations-section .settings-group-title,
+IpLookupPanel .settings-operations-section .settings-group-title,
+McpPanel .settings-operations-section .settings-group-title,
+RelayPanel .settings-operations-section .settings-group-title {
+    height: auto;
+    color: $text;
+    text-style: bold;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+MemoryPanel .memory-per-server-note,
+MemoryPanel .memory-confidence-hint,
+MemoryPanel #memory_device_auto_unlock_status,
+MemorySyncPanel #msync_info_note,
+MemorySyncPanel #settings_msync_gate_note,
+MemorySyncPanel #settings_msync_status,
+BackupsPanel .backups-note,
+IpLookupPanel .ip-lookup-help,
+IpLookupPanel .ip-lookup-subhelp,
+McpPanel .list-editor-label,
+RelayPanel .relay-help {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+McpPanel .mcp-warn,
+RelayPanel .relay-warn,
+MemorySyncPanel #settings_msync_status {
+    height: auto;
+    color: $text-warning;
+}
+
+/* The account section continues to own every remote field and Save/Reload. */
+MemorySyncPanel #settings_msync_section {
+    height: auto;
+}
+
+MemorySyncPanel .settings-operations-context {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SettingsScreen MemorySyncPanel #settings_msync_section .settings-operations-remote-actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 0;
+}
+
+MemorySyncPanel #btn_msync_save,
+MemorySyncPanel #btn_msync_reload,
+BackupsPanel #backups_open_snapshots,
+BackupsPanel #backups_open_restore {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+/* Existing target records and the per-entry editor stay on the same surface. */
+IpBanPanel #ipban_table {
+    width: 100%;
+    height: auto;
+    min-height: 6;
+    max-height: 12;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+IpBanPanel .ipban-action-row,
+IpBanPanel .ipban-form-actions {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 1 0 0 0;
+}
+
+IpBanPanel .ipban-form-actions {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+IpBanPanel .ipban-action-row Button,
+IpBanPanel .ipban-form-actions Button {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+IpBanPanel #ipban-form-container {
+    height: auto;
+    border: none;
+    border-top: solid $border-blurred;
+    padding: 1 0 0 0;
+    margin: 0;
+    background: transparent;
+}
+
+IpBanPanel #ipban_waf_fields,
+IpBanPanel #ipban_sg_fields,
+IpBanPanel #ipban_nacl_fields {
+    height: auto;
+    padding-top: 1;
+    margin-top: 1;
+}
+
+IpBanPanel #ipban_discover_hint {
+    height: auto;
+}

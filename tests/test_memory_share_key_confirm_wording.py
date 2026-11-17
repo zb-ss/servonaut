@@ -21,7 +21,7 @@ from tests.test_memory_share_key_confirm import (
 from tests.test_memory_share_screen import SLUG, _live_panel, _member, _open, _settle, _text
 from servonaut.utils.file_lock import FileLock
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("navigation_open")]
 
 
 async def _review_and_confirm(app, pilot, screen):
@@ -127,7 +127,7 @@ async def test_the_title_shows_the_server_name_literally(name):
     async with app.run_test(size=(120, 50)) as pilot:
         screen = await _open(app, pilot)
         title = _text(screen, "#share-title")
-    assert title == f"Share Memory: {name}"
+    assert title == f"Share memory: {name}"
 
 
 @pytest.mark.parametrize("name", NAMES)

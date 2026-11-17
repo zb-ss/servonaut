@@ -1,8 +1,7 @@
-"""T4.5 first-run + empty-state provider picker modals.
+"""First-run and empty-state provider picker modals.
 
-Both are :class:`ModalScreen` (per the "ModalScreen vs Screen" convention
-of thumb"): brief blocking choices with two or three buttons. The
-caller awaits the dismiss return value to decide what to do next.
+Both are brief blocking choices with two or three buttons. The caller
+awaits the dismiss return value to decide what to do next.
 
 * :class:`AIProviderFirstRunModal` — shown when ``premium_ai`` is true AND
   any non-Servonaut provider is configured AND no preference is set yet.
@@ -15,15 +14,20 @@ caller awaits the dismiss return value to decide what to do next.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from typing import Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Static
 
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 
 
@@ -38,7 +42,7 @@ def _format_existing_provider_label(
 ) -> str:
     """Return the "Currently configured: [...]" string for the modal title.
 
-    Per the agent brief:
+    Display labels follow these conventions:
       - Ollama with default base_url ``http://localhost:11434`` →
         ``"Ollama @ localhost:11434"``
       - Ollama with non-default base_url → ``"Ollama @ <stripped url>"``
@@ -99,42 +103,9 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss_none", "Cancel", show=True),
     ]
 
-    DEFAULT_CSS = """
-    AIProviderFirstRunModal {
-        align: center middle;
-    }
+    CSS_PATH = Path(__file__).parent.parent / "styles/screens/ai_choice_dialogs.tcss"
 
-    AIProviderFirstRunModal #ai_picker_container {
-        width: 78;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    AIProviderFirstRunModal #ai_picker_title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    AIProviderFirstRunModal #ai_picker_body {
-        margin-bottom: 1;
-    }
-
-    AIProviderFirstRunModal #ai_picker_existing {
-        margin-bottom: 1;
-        text-style: italic;
-    }
-
-    AIProviderFirstRunModal #ai_picker_buttons {
-        height: auto;
-        align: center middle;
-    }
-
-    AIProviderFirstRunModal #ai_picker_buttons Button {
-        margin: 0 1;
-    }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
 
     def __init__(
         self,
@@ -151,12 +122,19 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Container(
-            Static(
-                "[bold $text-accent]You're now subscribed to Servonaut AI.[/bold $text-accent]",
-                id="ai_picker_title",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(
+                    "[bold $text-accent]You're now subscribed to Servonaut AI.[/bold $text-accent]",
+                    id="ai_picker_title",
+                ),
+                Static(
+                    f"Currently configured: [$text-accent]{self._existing_label}[/$text-accent]",
+                    id="ai_picker_existing",
+                ),
             ),
-            Static(
+            body=DialogBody(Static(
                 "With Servonaut AI, the model can deploy, provision, scan, "
                 "and read account-level data (billing, ban status) — "
                 "operations the local chat won't touch. The CLI executes "
@@ -164,12 +142,9 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
                 "against.\n\n"
                 "Switch to Servonaut AI for this CLI?",
                 id="ai_picker_body",
-            ),
-            Static(
-                f"Currently configured: [$text-accent]{self._existing_label}[/$text-accent]",
-                id="ai_picker_existing",
-            ),
-            Horizontal(
+                classes="dialog-description",
+            )),
+            actions=DialogActions(
                 Button(
                     "Switch to Servonaut AI",
                     id="btn_pick_servonaut",
@@ -183,6 +158,7 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
                 id="ai_picker_buttons",
             ),
             id="ai_picker_container",
+            size="standard",
         )
         yield Footer()
 
@@ -218,53 +194,26 @@ class AIEmptyStateModal(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss_none", "Cancel", show=True),
     ]
 
-    DEFAULT_CSS = """
-    AIEmptyStateModal {
-        align: center middle;
-    }
+    CSS_PATH = Path(__file__).parent.parent / "styles/screens/ai_choice_dialogs.tcss"
 
-    AIEmptyStateModal #ai_empty_container {
-        width: 76;
-        height: auto;
-        border: round $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    AIEmptyStateModal #ai_empty_title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    AIEmptyStateModal #ai_empty_body {
-        margin-bottom: 1;
-    }
-
-    AIEmptyStateModal #ai_empty_buttons {
-        height: auto;
-        align: center middle;
-    }
-
-    AIEmptyStateModal #ai_empty_buttons Button {
-        margin: 0 1;
-    }
-    """
+    DEFAULT_CLASSES = "dialog-screen"
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        yield Container(
-            Static(
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static(
                 "[bold $text-accent]Servonaut needs an AI provider.[/bold $text-accent]",
                 id="ai_empty_title",
             ),
-            Static(
+            body=DialogBody(Static(
                 "  1. Subscribe to Servonaut AI (zero config, "
                 "includes tool execution)\n"
                 "  2. Add an OpenAI / Anthropic key\n"
                 "  3. Run a local model with Ollama (free, no key)",
                 id="ai_empty_body",
-            ),
-            Horizontal(
+            )),
+            actions=DialogActions(
                 Button(
                     "Subscribe",
                     id="btn_empty_subscribe",
@@ -283,6 +232,7 @@ class AIEmptyStateModal(ModalScreen[Optional[str]]):
                 id="ai_empty_buttons",
             ),
             id="ai_empty_container",
+            size="standard",
         )
         yield Footer()
 

@@ -16,17 +16,19 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 
 class HistoryPathsPanel(SettingsPanel):
     """Edit keyword store, command history, and chat history paths."""
 
     PANEL_ID = "history_paths"
-    TITLE = "History & Paths"
+    TITLE = "History & paths"
+    DESCRIPTION = "Local files for scan keywords, commands and chat history."
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -37,38 +39,40 @@ class HistoryPathsPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the form rows for history and path settings."""
-        yield Horizontal(
-            Static("Keyword store path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/keywords.json",
-                id="hp_keyword_store_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Command history path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/command_history.json",
-                id="hp_command_history_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max command history", classes="label"),
-            Input(
-                placeholder="50",
-                id="hp_max_command_history",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Chat history path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/chats",
-                id="hp_chat_history_path",
-            ),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Scan keywords', classes="settings-group-title", markup=False)
+            yield setting_row(
+                "Keyword store path",
+                Input(
+                    placeholder="~/.servonaut/keywords.json",
+                    id="hp_keyword_store_path",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Command history', classes="settings-group-title", markup=False)
+            yield setting_row(
+                "Command history path",
+                Input(
+                    placeholder="~/.servonaut/command_history.json",
+                    id="hp_command_history_path",
+                ),
+            )
+            yield setting_row(
+                "Max command history",
+                Input(
+                    placeholder="50",
+                    id="hp_max_command_history",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Chat history', classes="settings-group-title", markup=False)
+            yield setting_row(
+                "Chat history path",
+                Input(
+                    placeholder="~/.servonaut/chats",
+                    id="hp_chat_history_path",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

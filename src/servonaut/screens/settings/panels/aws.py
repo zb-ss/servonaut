@@ -24,13 +24,14 @@ import logging
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Select, Static, Switch
 
 from servonaut.screens.settings.accounts import rebuild_accounts, refresh_provider_fleet
 from servonaut.screens.settings.aws_accounts import AwsAccountsSection
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import EnvVarInput, KeyValueEditor
+from servonaut.screens.settings.forms import setting_row
 from servonaut.services.object_storage_regions import (
     AWS_S3_DEFAULT_REGION,
     AWS_S3_REGIONS,
@@ -86,137 +87,125 @@ class AwsPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the AWS form rows."""
-        yield Static(
-            "AWS EC2 and S3 credentials. Leave blank to use the boto3 default "
-            "credential chain (env vars, ~/.aws/credentials, IAM role).",
-            classes="aws-help",
-        )
-        yield Static("", id="aws_status_label", classes="aws-status")
+        with Vertical(classes="settings-form-section"):
+            yield Static(
+                "AWS EC2 and S3 credentials. Leave blank to use the boto3 default "
+                "credential chain (env vars, ~/.aws/credentials, IAM role).",
+                classes="aws-help",
+            )
+            yield Static("", id="aws_status_label", classes="aws-status")
 
-        # --- Enabled switch -------------------------------------------------
-        yield Horizontal(
-            Static("AWS enabled", classes="label"),
-            Switch(id="aws_enabled"),
-            classes="setting_row",
-        )
-
-        # --- EC2 / instance list --------------------------------------------
-        yield Static("EC2", classes="aws-subheader")
-        yield Horizontal(
-            Static("Default region", classes="label"),
-            Input(placeholder=_DEFAULT_REGION_HINT, id="aws_default_region"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cache TTL (seconds)", classes="label"),
-            Input(placeholder="300", id="aws_cache_ttl"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Cache path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/aws_cache.json",
-                id="aws_cache_path",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Audit path", classes="label"),
-            Input(
-                placeholder="~/.servonaut/aws_audit.jsonl",
-                id="aws_audit_path",
-            ),
-            classes="setting_row",
-        )
-
-        # --- S3 object storage ----------------------------------------------
-        yield Static("S3 Object Storage", classes="aws-subheader")
-        yield Horizontal(
-            Static("Access key", classes="label"),
-            EnvVarInput(
-                placeholder="AKIA... or $AWS_ACCESS_KEY_ID or file:/path",
-                password=True,
-                id="aws_s3_access_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Secret key", classes="label"),
-            EnvVarInput(
-                placeholder="your-secret or $AWS_SECRET_ACCESS_KEY or file:/path",
-                password=True,
-                id="aws_s3_secret_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("S3 region", classes="label"),
-            Select(
-                [(label, code) for label, code in AWS_S3_REGIONS],
-                value=AWS_S3_DEFAULT_REGION,
-                allow_blank=False,
-                id="aws_s3_region",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("S3 endpoint URL", classes="label"),
-            Input(
-                placeholder="https://... (leave blank for AWS S3)",
-                id="aws_s3_endpoint_url",
-            ),
-            classes="setting_row",
-        )
-
-        # --- Control-plane IAM roles (read) ---------------------------------
-        yield Static("Control-plane IAM (read)", classes="aws-subheader")
-        yield Horizontal(
-            Static("Role ARN", classes="label"),
-            Input(
-                placeholder="arn:aws:iam::123456789:role/ReadRole (leave blank to use ambient creds)",
-                id="aws_ctrl_role_arn",
-            ),
-            classes="setting_row",
-        )
-        yield Static("Per-account role ARNs (account_id → role_arn):", classes="label")
-        yield KeyValueEditor(
-            key_placeholder="account_id",
-            value_placeholder="arn:aws:iam::...:role/...",
-            id="aws_ctrl_plane_arns",
-        )
-        yield Horizontal(
-            Static("External ID", classes="label"),
-            EnvVarInput(
-                placeholder="ExternalId or $CTRL_PLANE_EXTERNAL_ID",
-                id="aws_ctrl_external_id",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Session name", classes="label"),
-            Input(
-                placeholder="servonaut-control-plane",
-                id="aws_ctrl_session_name",
-            ),
-            classes="setting_row",
-        )
-
-        # --- Control-plane IAM roles (mutate) -------------------------------
-        yield Static("Control-plane IAM (mutate write path)", classes="aws-subheader")
-        yield Horizontal(
-            Static("Mutate role ARN", classes="label"),
-            Input(
-                placeholder="arn:aws:iam::123456789:role/WriteRole (leave blank → ambient creds for writes)",
-                id="aws_mutate_role_arn",
-            ),
-            classes="setting_row",
-        )
-        yield Static("Per-account mutate ARNs (account_id → role_arn):", classes="label")
-        yield KeyValueEditor(
-            key_placeholder="account_id",
-            value_placeholder="arn:aws:iam::...:role/...",
-            id="aws_mutate_arns",
-        )
+            # --- Enabled switch -------------------------------------------------
+            yield setting_row(
+                "AWS enabled",
+                Switch(id="aws_enabled"),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # --- EC2 / instance list --------------------------------------------
+            yield Static("EC2", classes="aws-subheader settings-group-title")
+            yield setting_row(
+                "Default region",
+                Input(placeholder=_DEFAULT_REGION_HINT, id="aws_default_region"),
+            )
+            yield setting_row(
+                "Cache TTL (seconds)",
+                Input(placeholder="300", id="aws_cache_ttl"),
+            )
+            yield setting_row(
+                "Cache path",
+                Input(
+                    placeholder="~/.servonaut/aws_cache.json",
+                    id="aws_cache_path",
+                ),
+            )
+            yield setting_row(
+                "Audit path",
+                Input(
+                    placeholder="~/.servonaut/aws_audit.jsonl",
+                    id="aws_audit_path",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # --- S3 object storage ----------------------------------------------
+            yield Static("S3 object storage", classes="aws-subheader settings-group-title")
+            yield setting_row(
+                "Access key",
+                EnvVarInput(
+                    placeholder="AKIA... or $AWS_ACCESS_KEY_ID or file:/path",
+                    password=True,
+                    id="aws_s3_access_key",
+                ),
+            )
+            yield setting_row(
+                "Secret key",
+                EnvVarInput(
+                    placeholder="your-secret or $AWS_SECRET_ACCESS_KEY or file:/path",
+                    password=True,
+                    id="aws_s3_secret_key",
+                ),
+            )
+            yield setting_row(
+                "S3 region",
+                Select(
+                    [(label, code) for label, code in AWS_S3_REGIONS],
+                    value=AWS_S3_DEFAULT_REGION,
+                    allow_blank=False,
+                    id="aws_s3_region",
+                ),
+            )
+            yield setting_row(
+                "S3 endpoint URL",
+                Input(
+                    placeholder="https://... (leave blank for AWS S3)",
+                    id="aws_s3_endpoint_url",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # --- Control-plane IAM roles (read) ---------------------------------
+            yield Static("Control-plane IAM (read)", classes="aws-subheader settings-group-title")
+            yield setting_row(
+                "Role ARN",
+                Input(
+                    placeholder="arn:aws:iam::123456789:role/ReadRole (leave blank to use ambient creds)",
+                    id="aws_ctrl_role_arn",
+                ),
+            )
+            yield Static("Per-account role ARNs (account_id → role_arn):", classes="label")
+            yield KeyValueEditor(
+                key_placeholder="account_id",
+                value_placeholder="arn:aws:iam::...:role/...",
+                id="aws_ctrl_plane_arns",
+            )
+            yield setting_row(
+                "External ID",
+                EnvVarInput(
+                    placeholder="ExternalId or $CTRL_PLANE_EXTERNAL_ID",
+                    id="aws_ctrl_external_id",
+                ),
+            )
+            yield setting_row(
+                "Session name",
+                Input(
+                    placeholder="servonaut-control-plane",
+                    id="aws_ctrl_session_name",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-provider-section"):
+            # --- Control-plane IAM roles (mutate) -------------------------------
+            yield Static("Control-plane IAM (mutate write path)", classes="aws-subheader settings-group-title")
+            yield setting_row(
+                "Mutate role ARN",
+                Input(
+                    placeholder="arn:aws:iam::123456789:role/WriteRole (leave blank → ambient creds for writes)",
+                    id="aws_mutate_role_arn",
+                ),
+            )
+            yield Static("Per-account mutate ARNs (account_id → role_arn):", classes="label")
+            yield KeyValueEditor(
+                key_placeholder="account_id",
+                value_placeholder="arn:aws:iam::...:role/...",
+                id="aws_mutate_arns",
+            )
 
         # --- Accounts (saved per account, not by the Save dock) -------------
         yield AwsAccountsSection(heading_classes="aws-subheader")

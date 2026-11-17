@@ -25,8 +25,8 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 # Palette queries that only a configured provider can match (the letter z
 # appears in no other command title).
 PROVIDER_QUERIES = {
-    "Hetzner Manage": "HetznerManagerScreen",
-    "OVH DNS Zones": "OVHDNSScreen",
+    "Hetzner manage": "HetznerManagerScreen",
+    "OVH DNS zones": "OVHDNSScreen",
 }
 
 # The read that tells the client whether the service offers Vault.
@@ -34,7 +34,7 @@ VAULT_DISCOVERY_PATH = "/api/v1/vault/identity/me"
 
 VAULT_PALETTE_DESTINATIONS = {
     "Go to Vault": "VaultScreen",
-    "Go to SSH Certificates": "CaScreen",
+    "Go to SSH certificates": "CaScreen",
 }
 
 
@@ -129,7 +129,7 @@ async def test_vault_palette_entries_are_hidden_when_vault_is_unavailable(tui, s
     async with tui() as t:
         assert not t.app.vault_available
         await _palette_omits_native_vault(t)
-        await _palette_has_no_match(t, "Go to SSH Certificates")
+        await _palette_has_no_match(t, "Go to SSH certificates")
 
 
 async def test_provider_palette_entries_lead_to_their_screens(tui, seed, providers):
@@ -138,14 +138,14 @@ async def test_provider_palette_entries_lead_to_their_screens(tui, seed, provide
     fleet.seed_provider_fleet(providers)
 
     async with tui() as t:
-        await t.palette("Go to Hetzner Manage")
+        await t.palette("Go to Hetzner manage")
         await t.wait_for_screen("HetznerManagerScreen")
         await t.wait_until(
             lambda: {host.name for host in fleet.HETZNER_FLEET}
             <= {row[1] for row in t.table_rows("#hetzner_mgr_table")},
             desc="Hetzner servers listed",
         )
-        await t.palette("Go to OVH DNS Zones")
+        await t.palette("Go to OVH DNS zones")
         await t.wait_for_screen("OVHDNSScreen")
     # Opening the screens only read from the providers.
     assert providers.mutations() == []
@@ -161,7 +161,7 @@ async def test_help_opens_from_a_provider_screen_and_returns_there(tui, seed, pr
         await t.wait_for_screen("HetznerManagerScreen")
         await t.press("question_mark")
         await t.wait_for_screen("HelpScreen")
-        await t.wait_for_text("Servonaut — Help", "Instance List")
+        await t.wait_for_text("Servonaut — Help", "Instance list")
         await t.press("escape")
         await t.wait_for_screen("HetznerManagerScreen")
 

@@ -24,8 +24,12 @@ from typing import List, Optional, Tuple
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Vertical
 from textual.screen import ModalScreen
+
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogFrame, DialogNotificationSpace,
+)
 from textual.widgets import Button, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
@@ -61,6 +65,8 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
     after an import, or ``None`` on cancel.
     """
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
     ]
@@ -93,19 +99,23 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Container(
-            Static(
-                "[bold $text-accent]Import SSH keys into Bitwarden[/bold $text-accent]",
-                id="bw_import_title",
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Vertical(
+                Static(
+                    "[bold $text-accent]Import SSH keys into Bitwarden[/bold $text-accent]",
+                    id="bw_import_title",
+                ),
+                Static(escape(_SEMANTICS_TEXT), id="bw_import_semantics"),
             ),
-            Static(escape(_SEMANTICS_TEXT), id="bw_import_semantics"),
-            SelectionList(id="bw_import_list"),
-            Static("[dim]Scanning…[/dim]", id="bw_import_status"),
-            Horizontal(
+            body=SelectionList(id="bw_import_list"),
+            status=Static("[dim]Scanning…[/dim]", id="bw_import_status"),
+            actions=DialogActions(
                 Button("Cancel", variant="default", id="bw_import_cancel_btn"),
                 Button("Import", variant="primary", id="bw_import_btn"),
                 classes="bw_import_actions",
             ),
+            size="large",
             id="bw_import_container",
         )
 

@@ -35,10 +35,21 @@ class ChatMessage:
             self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
+# The title of a session that has no name yet. Sessions saved before the
+# sentence-case wording carry the older spelling and still count as unnamed.
+DEFAULT_SESSION_TITLE = "New chat"
+_UNNAMED_TITLES = frozenset({DEFAULT_SESSION_TITLE, "New Chat"})
+
+
+def is_unnamed_title(title: str) -> bool:
+    """Whether *title* is the placeholder a session has until its first message names it."""
+    return title in _UNNAMED_TITLES
+
+
 @dataclass
 class ChatSession:
     id: str = ""
-    title: str = "New Chat"
+    title: str = DEFAULT_SESSION_TITLE
     messages: List[ChatMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -398,7 +409,7 @@ class ChatService:
         )
 
         # Auto-title from first user message
-        if session.title == "New Chat" and len(session.messages) >= 2:
+        if is_unnamed_title(session.title) and len(session.messages) >= 2:
             first_msg = session.messages[0].content
             session.title = first_msg[:50] + ("..." if len(first_msg) > 50 else "")
 

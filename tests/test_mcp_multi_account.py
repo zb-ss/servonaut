@@ -649,6 +649,7 @@ def test_build_headless_tools_serves_the_registry(monkeypatch, tmp_path):
 
 def test_build_headless_tools_reuses_the_relay_vault_runtime(monkeypatch, tmp_path):
     from servonaut.mcp.server import build_headless_tools
+    from servonaut.services.vault import command_service as vault_command_module
     from servonaut.services.vault.command_service import VaultCommandService
     from servonaut.services.vault.identity_store import IdentityStoreError
 
@@ -659,14 +660,23 @@ def test_build_headless_tools_reuses_the_relay_vault_runtime(monkeypatch, tmp_pa
     runtime = MagicMock()
     runtime.unlock_existing_identity.side_effect = IdentityStoreError("locked")
     factory = MagicMock(side_effect=AssertionError("duplicate custody runtime"))
-    monkeypatch.setattr(VaultCommandService, "__new__", factory)
-
-    tools = build_headless_tools(manager, vault_runtime=runtime)
+    original_new = VaultCommandService.__dict__.get("__new__")
+    # Replace the import seam, never a real class's inherited allocation slot.
+    with monkeypatch.context() as seam:
+        seam.setattr(vault_command_module, "VaultCommandService", factory)
+        tools = build_headless_tools(manager, vault_runtime=runtime)
 
     assert tools._vault_runtime is runtime
     runtime.unlock_existing_identity.assert_called_once()
     factory.assert_not_called()
     assert tools.account_registry.accounts("hetzner")
+
+    assert vault_command_module.VaultCommandService is VaultCommandService
+    assert VaultCommandService.__dict__.get("__new__") is original_new
+    # Enter the real constructor with three arguments, stopping at its first
+    # config lookup before identity/custody IO. Slot pollution raises TypeError.
+    with pytest.raises(AttributeError, match="vault"):
+        VaultCommandService(None, None, object())
 
 
 def test_build_headless_tools_fetches_team_rules_with_the_vault_runtime_s_teams(

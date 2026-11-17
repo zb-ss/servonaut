@@ -22,7 +22,6 @@
 
 #ai_token_estimate {
     padding: 0 1;
-    color: $text-muted;
 }
 
 #ai_text_input {
@@ -33,7 +32,9 @@
 
 #ai_output {
     height: 1fr;
-    background: $panel;
+    /* Border and padding use four rows; leave two native output rows. */
+    min-height: 6;
+    background: transparent;
     padding: 1;
     margin: 1 0;
     border: round $primary;
@@ -69,7 +70,6 @@
 
 #ai_cost_info {
     padding: 0 1;
-    color: $warning;
 }
 
 /* ===================================================================
@@ -86,9 +86,139 @@
     layer: overlay;
 }
 
+/* Explicitly opted-in rows give chat its own column; other screens overlay. */
+#main-layout.workspace-chat-layout > #chat-panel {
+    dock: none;
+    layer: default;
+    width: 40%;
+    min-width: 45;
+    max-width: 64;
+    height: 100%;
+    margin: 0;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > .workspace-content {
+    display: none;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > #chat-panel {
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
+}
+
+/* Keep all four actions available even in the smallest chat column. */
+#main-layout.workspace-chat-layout > #chat-panel #chat-controls {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 1;
+    grid-gutter: 0 1;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-controls Button {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-controls Button:focus {
+    text-style: bold underline;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-input-row {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    /* Auto tracks measure the draft, even while the editor stays four rows. */
+    grid-rows: 4 3;
+    padding: 0 2;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-messages {
+    padding: 0 2;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-input {
+    column-span: 3;
+    width: 100%;
+    margin-right: 0;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-input-row Button {
+    width: 6;
+    min-width: 6;
+    max-width: 6;
+    padding: 0;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > #chat-panel #chat-input-row {
+    layout: horizontal;
+    padding: 1 2;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > #chat-panel #chat-messages {
+    padding: 1 2;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > #chat-panel #chat-input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+/* Short panels keep the logo and every action without decorative blank rows. */
+WorkspaceScreen.-chat-compact #main-layout.workspace-chat-layout > #chat-panel #chat-header {
+    padding: 0 2;
+}
+
+WorkspaceScreen.-chat-compact #main-layout.workspace-chat-layout > #chat-panel #chat-logo,
+WorkspaceScreen.-chat-compact #main-layout.workspace-chat-layout > #chat-panel #chat-controls {
+    padding: 0;
+}
+
+/* ANSI surfaces may share the terminal background; outline the native editor. */
+#main-layout.workspace-chat-layout > #chat-panel #chat-input:ansi {
+    border: round $foreground;
+}
+
+#main-layout.workspace-chat-layout > #chat-panel #chat-input:ansi:focus {
+    border: round $accent;
+}
+
 #chat-inner {
     height: 1fr;
     layout: vertical;
+}
+
+/* Unmigrated screens retain mouse Restore / End beside a collapsed chat. */
+#chat-restore-controls {
+    display: none;
+    height: 1;
+    align: right middle;
+}
+
+#chat-panel.--compact-collapsed {
+    layer: default;
+    dock: top;
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    margin: 1 0 0 0;
+    border: none;
+}
+
+#chat-panel.--compact-collapsed #chat-inner {
+    display: none;
+}
+
+#chat-panel.--compact-collapsed #chat-restore-controls {
+    display: block;
+}
+
+#chat-restore-controls #btn-chat-end {
+    color: $text-error;
 }
 
 /* Header with logo and controls */
@@ -121,6 +251,14 @@
 
 #chat-controls Button:hover {
     background: $panel;
+}
+
+/* Preserve the native focus pair above the chat hover/layout overrides. */
+#chat-controls Button:ansi:enabled:focus,
+#main-layout.workspace-chat-layout > #chat-panel #chat-controls Button:ansi:enabled:focus {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: underline not bold;
 }
 
 /* Session history list */
@@ -171,6 +309,11 @@
 
 }
 
+/* ANSI accents cannot be alpha blended; keep the terminal's readable pair. */
+.chat-message-user:ansi {
+    background: $background;
+}
+
 .chat-message-assistant {
     color: $text;
     background: $panel;
@@ -194,7 +337,7 @@
 
 .chat-welcome {
     margin: 2 2;
-    background: $surface;
+    background: transparent;
     border: round $primary 50%;
     padding: 2;
     text-align: center;
@@ -213,6 +356,11 @@
     color: $text-muted;
     text-align: center;
     border-top: wide $primary 30%;
+}
+
+/* Reverse selection must swap the terminal's own foreground/background pair. */
+ChatPanel #chat-input:ansi .text-area--selection {
+    color: $foreground;
 }
 
 /* Input row */
@@ -263,8 +411,240 @@
     color: $text;
 }
 
-
 AITopUpModal #btn_topup_billing {
     width: 100%;
     margin-top: 1;
+}
+
+AIFallbackPromptModal #ai_fallback_buttons Button.-textual-compact {
+    height: 1;
+    margin: 0;
+    border: none;
+}
+
+AITopUpModal #ai_topup_container {
+    height: 24;
+    max-height: 100%;
+}
+
+/* Result metadata is ordinary text; values retain non-color emphasis. */
+AIAnalysisScreen #ai_status,
+AIAnalysisScreen #ai_cost_info,
+AIAnalysisScreen #ai_token_estimate {
+    color: auto 100%;
+}
+
+AIAnalysisScreen #ai_status:ansi,
+AIAnalysisScreen #ai_cost_info:ansi,
+AIAnalysisScreen #ai_token_estimate:ansi {
+    color: $foreground;
+}
+
+/* Fixed editors and actions must remain reachable on short terminals. */
+AIAnalysisScreen #ai_container {
+    overflow-y: auto;
+}
+
+/* Keep header, data and the native horizontal scrollbar inside the card. */
+AIConversationsScreen.-content-narrow #local_table,
+AIConversationsScreen.-content-narrow #convs_table {
+    min-height: 3;
+}
+
+/* Give the table card this spacer row without moving the action buttons. */
+AIConversationsScreen.-content-narrow #local_actions,
+AIConversationsScreen.-content-narrow #convs_actions {
+    margin-top: 0;
+}
+
+/* Retain a header, data row and horizontal scrollbar inside the card border. */
+AIConversationsScreen.-content-narrow #convs_scroll {
+    min-height: 5;
+}
+
+/* The extra action row remains reachable when the tab has little height. */
+AIConversationsScreen.-content-narrow #tab_cloud {
+    overflow-y: auto;
+}
+
+/* Short replacement chat keeps its four-row editor without decorative gaps. */
+WorkspaceScreen.-chat-compact.-chat-replace #main-layout.workspace-chat-layout > #chat-panel #chat-input-row {
+    height: 4;
+    padding: 0 2;
+}
+
+WorkspaceScreen.-chat-compact.-chat-replace #main-layout.workspace-chat-layout > #chat-panel #chat-messages {
+    padding: 0 2;
+}
+
+/* Chat surface: a compact session header, reading lane, and framed composer. */
+ChatPanel #chat-inner {
+    overflow-y: auto;
+}
+
+ChatPanel #chat-header {
+    padding: 0 1;
+    background: $panel;
+    border-bottom: solid $border-blurred;
+}
+
+ChatPanel #chat-logo {
+    padding: 0;
+}
+
+ChatPanel #chat-controls {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 1;
+    grid-gutter: 0 1;
+    padding: 0;
+    margin-top: 1;
+}
+
+ChatPanel #chat-controls Button {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+    background: $panel;
+    color: $text;
+}
+
+ChatPanel #chat-controls Button:hover {
+    background: $boost;
+}
+
+ChatPanel #chat-controls Button:focus {
+    background: $accent;
+    color: auto 100%;
+    text-style: bold underline;
+}
+
+#main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-controls {
+    margin-top: 1;
+}
+
+WorkspaceScreen.-chat-compact #main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-controls {
+    margin-top: 0;
+}
+
+ChatPanel #chat-messages {
+    min-height: 4;
+    padding: 1;
+    background: $surface;
+}
+
+#main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-messages {
+    padding: 0 1;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-messages {
+    padding: 1;
+}
+
+ChatPanel .chat-message-user {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $panel;
+    border-left: solid $accent;
+}
+
+ChatPanel .chat-message-user:ansi {
+    background: $background;
+}
+
+ChatPanel .chat-message-assistant {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $surface;
+    border-left: solid $primary;
+}
+
+ChatPanel .chat-message-tool {
+    height: auto;
+    margin: 0 0 1 1;
+    padding: 0 1;
+    color: $text;
+    background: $panel;
+    border-left: solid $border-blurred;
+}
+
+ChatPanel .chat-welcome {
+    margin: 0 0 1 0;
+    padding: 1;
+    border: round $border-blurred;
+    text-align: left;
+}
+
+ChatPanel #chat-composer {
+    height: auto;
+    background: $panel;
+    border-top: solid $border-blurred;
+}
+
+/* The framed editor already separates the short composer from its transcript. */
+WorkspaceScreen.-chat-compact #main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-composer {
+    border-top: none;
+}
+
+ChatPanel #chat-stats,
+ChatPanel #chat-quota-footer {
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    background: $panel;
+    border: none;
+    text-align: left;
+}
+
+ChatPanel #chat-input-row {
+    padding: 0 1;
+}
+
+#main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-input-row {
+    padding: 0 1;
+}
+
+WorkspaceScreen.-chat-replace #main-layout.workspace-chat-layout > ChatPanel#chat-panel #chat-input-row {
+    padding: 0 1;
+}
+
+ChatPanel #chat-input {
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+}
+
+ChatPanel #chat-input:focus {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+ChatPanel #chat-pinned-error-banner {
+    layout: vertical;
+    padding: 0 1;
+}
+
+ChatPanel #chat-pinned-error-text {
+    width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+ChatPanel #chat-pinned-error-actions {
+    height: 3;
+}
+
+ChatPanel #chat-pinned-error-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1 0 0;
+}
+
+ChatPanel #chat-pinned-error-actions Button:last-child {
+    margin-right: 0;
 }

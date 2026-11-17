@@ -19,6 +19,8 @@ from servonaut.styles import CSS_FILES
 from servonaut.widgets.busy_indicator import BusyIndicator
 from tests._async_bounds import wait_until
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 _VAULT = {"vault_id": "vault-1", "name": "Personal", "kind": "personal", "my_grant": {"version": 1}, "counts": {}}
 
 
@@ -340,10 +342,17 @@ def _in_view(screen: VaultScreen, button_id: str) -> bool:
 async def test_the_action_the_status_names_is_focused_and_in_view(size) -> None:
     service = _Service(local=None, custody_missing=True)
     app = _StyledHost(service)
-    async with app.run_test(size=size):
+    from tests.test_workspace_reflow import _painted
+
+    async with app.run_test(size=size) as pilot:
         screen = await _settled(app, "key file is missing")
         recover = screen.query_one("#vault_recover", Button)
+        assert tuple(screen.query_one("#vault_content").styles.padding) == (0, 1, 0, 1)
         await wait_until(lambda: screen.focused is recover and _in_view(screen, "vault_recover"))
+        await pilot.wait_for_scheduled_animations()
+        assert screen.can_view_entire(recover)
+        assert app.get_widget_at(*recover.content_region.center)[0] is recover
+        assert str(recover.label) in _painted(app, recover)
 
 
 @pytest.mark.asyncio
@@ -358,6 +367,7 @@ async def test_a_pending_device_is_selected_with_approve_device_in_view() -> Non
 
     service.list_devices = list_devices  # type: ignore[attr-defined]
     app = _StyledHost(service)
+    from tests.test_workspace_reflow import _painted
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await _settled(app, "Identity fingerprint")
         await pilot.press("d")
@@ -365,6 +375,17 @@ async def test_a_pending_device_is_selected_with_approve_device_in_view() -> Non
         await wait_until(lambda: screen.focused is approve and _busy(screen) is None)
         assert screen.query_one("#vault_table").cursor_row == 1
         await wait_until(lambda: _in_view(screen, "vault_approve"))
+        await pilot.wait_for_scheduled_animations()
+        assert screen.query_one("#vault_identity_group").display
+        assert approve.region.width > 0 and approve.region.height > 0
+        assert screen.region.contains_region(approve.region)
+        assert screen.can_view_entire(approve)
+        assert str(approve.label) in _painted(app, approve)
+        for y in range(approve.region.y, approve.region.bottom):
+            for x in range(approve.region.x, approve.region.right):
+                hit = app.get_widget_at(x, y)[0]
+                assert hit is approve or approve in hit.ancestors
+
 
 
 @pytest.mark.asyncio

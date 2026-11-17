@@ -22,6 +22,8 @@ from servonaut.services.vault import crypto
 from servonaut.styles import CSS_FILES
 from tests.test_vault_bind_picker import KEY_ITEM, PERSONAL_VAULT, TEAM_VAULT, _Service, _host_key, _settle
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 
 def _own() -> dict:
     return {"id": "i-1", "name": "web-1", "public_ip": "9.9.9.9", "username": "deploy"}
@@ -359,6 +361,7 @@ async def test_replaced_shared_record_cannot_receive_a_stale_binding() -> None:
         await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.instances[1]["id"] = "replacement-server"
+        await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
         app.vault_command_service.bind.assert_not_awaited()
@@ -500,6 +503,7 @@ async def _bind_team_key(pilot: Any) -> None:
     await _choose_scope(pilot, 0)
     await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
     await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+    await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
     app.screen.query_one("#vault_bind_confirm", Button).press()
 
 

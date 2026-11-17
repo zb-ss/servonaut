@@ -308,7 +308,7 @@ class AutoBindRow:
         if self.status == ALREADY_BOUND and self.team:
             return "Already has a team key: team keys are never replaced automatically."
         if self.status == NO_LOGIN and self.team:
-            return "No login user: set the login on the shared server (Teams → Shared Servers)."
+            return "No login user: set the login on the shared server (Teams → Shared servers)."
         if self.status == NO_HOST_KEYS:
             if surface == "tui":
                 return "No trusted host key yet: press f (Fetch host keys) to fetch and review it"

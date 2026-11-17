@@ -52,6 +52,8 @@ def _screen(app) -> tuple[InstanceListScreen, list[str]]:
 
     screen.run_worker = run_worker
     screen.query_one = MagicMock()
+    screen.set_timer = MagicMock()
+    screen.set_interval = MagicMock()
     screen._update_table = MagicMock()
     screen._update_status_bar = MagicMock()
     return screen, started

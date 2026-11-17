@@ -22,23 +22,33 @@ def _ref(item_id="ssh-1", instance_id="i-1", name="web-1", status="verified"):
             "name": name, "verify_status": status}
 
 
+_THEME = {"text-success": "#8AD4A1", "text-error": "#D17E92", "text-warning": "#FFC473"}
+
+
+def _verify_cell(refs):
+    """The verify cell the screen draws, under a fixed theme."""
+    screen = MagicMock()
+    screen.app.get_css_variables.return_value = _THEME
+    return BwVaultManagerScreen._verify_cell(screen, refs)
+
+
 class TestCells:
     def test_verify_cell_all_verified_green(self):
-        cell = BwVaultManagerScreen._verify_cell([_ref(status="verified")])
-        assert "green" in cell and "verified" in cell
+        cell = _verify_cell([_ref(status="verified")])
+        assert cell.plain == "verified" and cell.style == "#8AD4A1"
 
     def test_verify_cell_failed_red(self):
-        cell = BwVaultManagerScreen._verify_cell(
+        cell = _verify_cell(
             [_ref(status="verified"), _ref(status="auth_failed")]
         )
-        assert "red" in cell and "auth_failed" in cell
+        assert cell.plain == "auth_failed" and cell.style == "#D17E92"
 
     def test_verify_cell_none_is_dash(self):
-        assert "—" in BwVaultManagerScreen._verify_cell([])
+        assert _verify_cell([]).plain == "—"
 
     def test_verify_cell_unknown_is_unverified(self):
-        cell = BwVaultManagerScreen._verify_cell([_ref(status=None)])
-        assert "unverified" in cell
+        cell = _verify_cell([_ref(status=None)])
+        assert cell.plain == "unverified" and cell.style == "#FFC473"
 
     def test_servers_cell_counts_and_truncates(self):
         refs = [_ref(instance_id=f"i-{n}", name=f"web-{n}") for n in range(5)]
@@ -372,3 +382,129 @@ async def test_pilot_renders_joined_table():
         table = app.screen.query_one("#bw_vault_mgr_table", DataTable)
         assert table.row_count == 2
     bw_cfg.get_personal_instance_ref.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_selected_metadata_redacts_generic_identities_and_copies_literal_text():
+    """Full metadata stays literal normally and field-redacted in demo copies."""
+    from textual.app import App
+    from textual.widgets import TextArea
+
+    from servonaut.services.redaction_service import RedactionService
+    from servonaut.styles import CSS_FILES
+    from tests._async_bounds import wait_until
+
+    # Generic UUIDs, a numeric provider ID and plain names evade stream patterns.
+    item_id = "a31b0f5c-1111-4222-8333-222222222222"  # leak-guard:allow - synthetic fixture exercises demo redaction.
+    item_name = "credential inventory [literal] Ω"
+    numeric_id = "57281940"
+    instance_uuid = "b42c1a6d-2222-4333-8444-333333333333"  # leak-guard:allow - synthetic fixture exercises demo redaction.
+    names = ("databaseprimary", "workernode")
+    identities = (item_id, item_name, numeric_id, instance_uuid, *names)
+    svc = MagicMock()
+    svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+    svc.ensure_servonaut_folder = AsyncMock(return_value="folder-example")
+    svc.list_items = AsyncMock(return_value=[
+        BwItemSummary(id=item_id, name=item_name, type=5, has_ssh_key=True),
+    ])
+    bw_cfg = MagicMock()
+    bw_cfg.get_personal_config = AsyncMock(return_value=None)
+    bw_cfg.list_personal_instances = AsyncMock(return_value=[
+        {"provider": "hetzner", "instance_id": numeric_id, "ssh_verify_status": "verified"},
+        {"provider": "ovh", "instance_id": instance_uuid, "ssh_verify_status": "unverified"},
+    ])
+    bw_cfg.get_personal_instance_ref = AsyncMock(
+        return_value={"ssh_credential_ref": {"item_id": item_id}}
+    )
+
+    class _Host(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.demo_mode = False
+            self.redaction_service = RedactionService()
+            self.entitlement_guard = SimpleNamespace(check=lambda feature: (True, "OK"))
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
+            self.bw_session_service = svc
+            self.bw_ssh_config_service = bw_cfg
+            self.instances = [
+                {"id": numeric_id, "name": names[0]},
+                {"id": instance_uuid, "name": names[1]},
+            ]
+            self.push_screen(BwVaultManagerScreen(session_service=svc))
+
+    app = _Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, BwVaultManagerScreen))
+        screen = app.screen
+        await wait_until(lambda: len(screen._rows) == 1 and not screen._loading)
+        detail = screen.query_one("#bw_vault_mgr_detail", TextArea)
+        literal = (
+            f"Name: {item_name}\nItem ID: {item_id}\nServer references: 2\n\n"
+            f"Server: {names[0]}\nProvider: hetzner\nInstance ID: {numeric_id}\nVerify: verified\n\n"
+            f"Server: {names[1]}\nProvider: ovh\nInstance ID: {instance_uuid}\nVerify: unverified"
+        )
+        assert detail.text == literal and detail.read_only
+        detail.focus()
+        # TextArea's native Select All binding is F7; Ctrl+A is line start.
+        await pilot.press("f7", "ctrl+c")
+        assert app.clipboard == literal
+
+        app.demo_mode = True
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert all(identity not in detail.text for identity in identities)
+        redactor = app.redaction_service
+        for value in (item_id, numeric_id, instance_uuid):
+            assert redactor.redact_identifier(value) in detail.text
+        for value in (item_name, *names):
+            assert redactor.redact_name(value) in detail.text
+        await pilot.press("f7", "ctrl+c")
+        assert app.clipboard == detail.text
+        assert all(identity not in app.clipboard for identity in identities)
+        assert screen._rows[0]["item_id"] == item_id
+        assert screen._rows[0]["refs"][0]["instance_id"] == numeric_id
+
+        app.demo_mode = False
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert detail.text == literal
+        await pilot.press("f7", "ctrl+c")
+        assert app.clipboard == literal
+
+        svc.list_items.return_value = []
+        screen.action_refresh()
+        await wait_until(lambda: not screen._loading and not screen._rows)
+        assert detail.text == "Select an SSH-key item to inspect its complete reference details."
+
+
+@pytest.mark.asyncio
+async def test_the_description_paints_its_key_letters():
+    from textual.app import App
+
+    svc = MagicMock()
+    svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+    svc.ensure_servonaut_folder = AsyncMock(return_value="fld-1")
+    svc.list_items = AsyncMock(return_value=[])
+    bw_cfg = MagicMock()
+    bw_cfg.get_personal_config = AsyncMock(return_value=None)
+    bw_cfg.list_personal_instances = AsyncMock(return_value=[])
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.entitlement_guard = SimpleNamespace(check=lambda f: (True, "OK"))
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
+            self.bw_session_service = svc
+            self.bw_ssh_config_service = bw_cfg
+            self.instances = []
+            self.push_screen(BwVaultManagerScreen(session_service=svc))
+
+    async with _Host().run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        text = pilot.app.screen.query_one("#bw_vault_mgr_hint").render().plain
+        assert "o Open in Bitwarden" in text and "e Manage ref" in text, text

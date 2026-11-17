@@ -16,10 +16,11 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 
 
 class CloudtrailPanel(SettingsPanel):
@@ -27,32 +28,33 @@ class CloudtrailPanel(SettingsPanel):
 
     PANEL_ID = "cloudtrail"
     TITLE = "CloudTrail"
+    DESCRIPTION = "Defaults used when browsing AWS audit events."
 
     def form_rows(self) -> ComposeResult:
         """Yield the CloudTrail form rows."""
-        yield Horizontal(
-            Static("Default region", classes="label"),
-            Input(
-                placeholder="us-east-1  (leave blank to use AWS default)",
-                id="cloudtrail_default_region",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Max events", classes="label"),
-            Input(placeholder="500", id="cloudtrail_max_events"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default lookback hours", classes="label"),
-            Input(placeholder="24", id="cloudtrail_default_lookback_hours"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default lookback minutes", classes="label"),
-            Input(placeholder="0", id="cloudtrail_default_lookback_minutes"),
-            classes="setting_row",
-        )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Event browsing", classes="settings-group-title")
+            yield setting_row(
+                "Default region",
+                Input(
+                    placeholder="us-east-1  (leave blank to use AWS default)",
+                    id="cloudtrail_default_region",
+                ),
+            )
+            yield setting_row(
+                "Max events",
+                Input(placeholder="500", id="cloudtrail_max_events"),
+            )
+        with Vertical(classes="settings-form-section settings-analysis-section"):
+            yield Static("Default time window", classes="settings-group-title")
+            yield setting_row(
+                "Default lookback hours",
+                Input(placeholder="24", id="cloudtrail_default_lookback_hours"),
+            )
+            yield setting_row(
+                "Default lookback minutes",
+                Input(placeholder="0", id="cloudtrail_default_lookback_minutes"),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

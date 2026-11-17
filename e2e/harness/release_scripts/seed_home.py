@@ -19,6 +19,7 @@ of its own because Python puts the script's directory first on ``sys.path``.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import fields
 from typing import Any
@@ -73,7 +74,13 @@ def main(spec_path: str) -> int:
 
     skipped: list[str] = []
     config = _build_config(spec, skipped)
-    ConfigManager().save(config)
+    # Reproduce conventional user permissions for legacy writers even when
+    # the suite uses a restrictive umask; secure releases still write 0600.
+    previous_umask = os.umask(0o022)
+    try:
+        ConfigManager().save(config)
+    finally:
+        os.umask(previous_umask)
 
     CacheService(ttl_seconds=config.cache_ttl_seconds).save(spec.get("fleet", []))
     keywords = KeywordStore(config.keyword_store_path)

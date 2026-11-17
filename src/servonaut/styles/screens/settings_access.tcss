@@ -1,0 +1,141 @@
+/* Access panels retain the single Settings reading surface and native controls. */
+SettingsScreen ConnectionsPanel .settings-access-section,
+SettingsScreen VaultPanel .settings-access-section {
+    height: auto;
+    margin: 0 0 2 0;
+}
+
+SettingsScreen ConnectionsPanel .settings-access-context,
+SettingsScreen CustomServersPanel .settings-access-context,
+SettingsScreen SshKeysPanel .settings-access-context,
+SettingsScreen BwSshPanel .settings-access-context,
+SettingsScreen VaultPanel .settings-access-context {
+    height: auto;
+    margin-bottom: 1;
+}
+
+SettingsScreen ConnectionsPanel .conn-section-header,
+SettingsScreen VaultPanel .settings-access-heading {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    color: $text;
+    text-style: bold;
+}
+
+SettingsScreen ConnectionsPanel .settings-access-catalog {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: solid $border-blurred;
+}
+
+SettingsScreen ConnectionsPanel .settings-access-catalog DataTable {
+    height: auto;
+    min-height: 5;
+    max-height: 8;
+}
+
+SettingsScreen CustomServersPanel .settings-access-status,
+SettingsScreen SshKeysPanel .settings-access-status,
+SettingsScreen BwSshPanel .settings-access-status {
+    height: auto;
+    padding: 1;
+    margin: 0 0 1 0;
+    border-left: solid $border-blurred;
+    background: $surface;
+}
+
+SettingsScreen CustomServersPanel .custom-servers-note,
+SettingsScreen CustomServersPanel .custom-servers-count,
+SettingsScreen SshKeysPanel .ssh-keys-info,
+SettingsScreen SshKeysPanel .ssh-keys-count,
+SettingsScreen BwSshPanel .bw-status-row {
+    height: auto;
+}
+
+SettingsScreen ConnectionsPanel .conn-form,
+SettingsScreen BwSshPanel .bw-form {
+    height: auto;
+    padding: 1;
+    margin: 1 0;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+SettingsScreen BwSshPanel .bw-form .section_header {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 0;
+    border: none;
+    color: $text;
+}
+
+SettingsScreen ConnectionsPanel .conn-form-buttons,
+SettingsScreen BwSshPanel .bw-form-actions {
+    height: auto;
+    padding-top: 1;
+    margin: 1 0 0 0;
+    border-top: solid $border-blurred;
+}
+
+/* Native descendant scrolling includes borders but omits ancestor top padding. */
+SettingsScreen BwSshPanel #bw_ssh_vault_form,
+SettingsScreen BwSshPanel .bw-form-actions {
+    padding-top: 0;
+}
+
+SettingsScreen ConnectionsPanel .conn-action-row {
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 1 0 0 0;
+}
+
+SettingsScreen ConnectionsPanel .conn-form-buttons,
+SettingsScreen BwSshPanel .bw-actions-row,
+SettingsScreen BwSshPanel .bw-form-actions {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+}
+
+/* Stack only the inline form when its own width cannot fit both captions. */
+SettingsScreen BwSshPanel .bw-form-actions.-stacked {
+    grid-size: 1;
+    grid-columns: 1fr;
+}
+
+SettingsScreen ConnectionsPanel .conn-action-row > Button,
+SettingsScreen ConnectionsPanel .conn-form-buttons > Button,
+SettingsScreen BwSshPanel .bw-actions-row > Button,
+SettingsScreen BwSshPanel .bw-form-actions > Button {
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+}
+
+SettingsScreen CustomServersPanel .settings-access-launcher Button,
+SettingsScreen SshKeysPanel .settings-access-launcher Button {
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    min-height: 3;
+}
+
+SettingsScreen.-content-narrow ConnectionsPanel .settings-access-catalog,
+SettingsScreen.-content-narrow CustomServersPanel .settings-access-status,
+SettingsScreen.-content-narrow SshKeysPanel .settings-access-status,
+SettingsScreen.-content-narrow BwSshPanel .settings-access-status {
+    padding: 0 1;
+}

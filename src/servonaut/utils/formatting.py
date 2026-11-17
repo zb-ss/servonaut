@@ -296,8 +296,12 @@ def format_ssh_verify_state(
     verified_at: Optional[str],
     *,
     now_utc: Optional[datetime] = None,
+    compact: bool = False,
 ) -> str:
     """Render the SSH verify state as a Rich-markup string for the TUI.
+
+    With *compact* a verified state reads "✓ 1h ago" instead of
+    "✓ verified (1h ago)", for a table cell.
 
     Locked contract with servonaut.dev (2026-05-24): the server NULLs
     ``ssh_verified_at`` whenever ``ssh_verify_status`` is anything other
@@ -335,6 +339,8 @@ def format_ssh_verify_state(
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         age_seconds = max(0.0, (now - parsed).total_seconds())
+        if compact:
+            return f"[green]✓ {_format_age(age_seconds)} ago[/green]"
         return f"[green]✓ verified[/green] ({_format_age(age_seconds)} ago)"
     if s == "not_found":
         return "[red]✗ not found[/red]"

@@ -1,0 +1,131 @@
+/* Read-only Memory finding: provenance beside complete authored text. */
+
+MemoryFindingScreen #memory-finding-container {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+MemoryFindingScreen #memory-finding-workspace {
+    width: 100%;
+    height: 1fr;
+    min-height: 10;
+}
+
+MemoryFindingScreen #memory-finding-context {
+    width: 30;
+    height: 1fr;
+    margin-right: 1;
+    border: round $border-blurred;
+    background: transparent;
+}
+
+MemoryFindingScreen #memory-finding-context:focus-within {
+    border: round $accent;
+}
+
+MemoryFindingScreen #memory-finding-context-scroll {
+    height: 1fr;
+    min-height: 1;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+MemoryFindingScreen #memory-finding-server,
+MemoryFindingScreen #memory-finding-notice,
+MemoryFindingScreen #memory-finding-meta,
+MemoryFindingScreen #memory-finding-title,
+MemoryFindingScreen #memory-finding-body,
+MemoryFindingScreen #memory-finding-chain {
+    width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+MemoryFindingScreen #memory-finding-server {
+    padding: 0;
+    margin-bottom: 1;
+    color: $text-accent;
+}
+
+MemoryFindingScreen #memory-finding-notice {
+    border-left: thick $warning;
+    padding: 0 1;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+MemoryFindingScreen .memory-finding-heading {
+    height: auto;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+MemoryFindingScreen #memory-finding-scroll {
+    width: 1fr;
+    height: 1fr;
+    min-height: 4;
+    padding: 1 2;
+    border: round $border-blurred;
+    background: transparent;
+    scrollbar-gutter: stable;
+}
+
+MemoryFindingScreen #memory-finding-scroll:focus {
+    border: round $accent;
+}
+
+MemoryFindingScreen #memory-finding-title {
+    border-bottom: solid $border-blurred;
+    margin-bottom: 1;
+    color: $text-accent;
+}
+
+MemoryFindingScreen #memory-finding-body {
+    color: $text;
+}
+
+MemoryFindingScreen #memory-finding-chain {
+    margin-top: 1;
+    color: $text;
+}
+
+MemoryFindingScreen #memory-finding-actions {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    padding: 0;
+    align: left middle;
+}
+
+MemoryFindingScreen .memory-finding-action-note {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+MemoryFindingScreen #btn_memory_finding_back {
+    width: 14;
+    min-width: 8;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+}
+
+MemoryFindingScreen.-content-narrow #memory-finding-workspace {
+    layout: vertical;
+}
+
+MemoryFindingScreen.-content-narrow #memory-finding-context {
+    width: 100%;
+    height: 5;
+    margin: 0 0 1 0;
+}
+
+MemoryFindingScreen.-content-narrow #memory-finding-scroll {
+    width: 100%;
+    padding: 0 1;
+}

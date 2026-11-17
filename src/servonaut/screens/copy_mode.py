@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from servonaut.utils.platform_utils import copy_to_clipboard
+from servonaut.widgets.dialogs import (
+    DialogActions, DialogContent, DialogFrame, DialogNotificationSpace,
+)
 
 
 class CopyModeScreen(ModalScreen[None]):
@@ -23,44 +25,45 @@ class CopyModeScreen(ModalScreen[None]):
         Binding("y", "copy", "Copy", show=True),
     ]
 
+    DEFAULT_CLASSES = "dialog-screen"
+
     DEFAULT_CSS = """
-    CopyModeScreen {
-        align: center middle;
-    }
-
-    #copy-mode-container {
-        width: 90%;
-        height: 85%;
-        background: $surface;
-        border: round $accent;
-        border-title-color: $accent;
-    }
-
-    #copy-mode-hint {
-        height: 1;
+    CopyModeScreen #copy-mode-hint {
+        height: auto;
         padding: 0 2;
-        color: $text-muted;
         background: $panel;
     }
 
-    #copy-mode-text {
+    CopyModeScreen #copy-mode-text {
         height: 1fr;
     }
     """
 
-    def __init__(self, text: str, title: str = "Copy Mode") -> None:
+    def __init__(self, text: str, title: str = "Copy mode") -> None:
         super().__init__()
         self._text = text
         self._title = title
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="copy-mode-container") as container:
-            container.border_title = self._title
-            yield Static(
+        yield DialogNotificationSpace()
+        frame = DialogFrame(
+            heading=Static(
                 "Select text with mouse | [bold]y[/bold] Copy selection | [bold]Esc[/bold] Close",
                 id="copy-mode-hint",
-            )
-            yield TextArea(self._text, id="copy-mode-text", read_only=True, soft_wrap=True)
+                classes="dialog-muted",
+            ),
+            body=DialogContent(
+                TextArea(self._text, id="copy-mode-text", read_only=True, soft_wrap=True),
+            ),
+            actions=DialogActions(
+                Button("Close", id="copy-mode-close"),
+                Button("Copy", variant="primary", id="copy-mode-copy"),
+            ),
+            size="fill",
+            id="copy-mode-container",
+        )
+        frame.border_title = self._title
+        yield frame
 
     def on_mount(self) -> None:
         self.query_one("#copy-mode-text", TextArea).focus()
@@ -79,5 +82,12 @@ class CopyModeScreen(ModalScreen[None]):
             self.app.copy_to_clipboard(text)
             self.app.notify("Copied (via terminal)")
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "copy-mode-copy":
+            self.action_copy()
+        elif event.button.id == "copy-mode-close":
+            self.action_close()
+
     def action_close(self) -> None:
-        self.app.pop_screen()
+        self.dismiss(None)

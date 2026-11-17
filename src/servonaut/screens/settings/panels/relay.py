@@ -20,10 +20,11 @@ from typing import Any, Dict, List
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.screens.settings.forms import setting_row
 from servonaut.utils.endpoints import (
     RELAY_BASE_URL_KEY,
     RELAY_MERCURE_URL_KEY,
@@ -59,6 +60,7 @@ class RelayPanel(SettingsPanel):
 
     PANEL_ID = "relay"
     TITLE = "Relay"
+    DESCRIPTION = 'Cloud relay connection and tool execution limits.'
 
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
@@ -85,60 +87,62 @@ class RelayPanel(SettingsPanel):
 
     def form_rows(self) -> ComposeResult:
         """Yield the Relay form rows."""
-        yield Static(
-            "Configure the relay listener that executes AI tool calls dispatched "
-            "from the cloud. Leave URLs empty to use the defaults from environment.",
-            classes="relay-help",
-        )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Relay endpoints', classes="settings-group-title", markup=False)
+            yield Static(
+                "Configure the relay listener that executes AI tool calls dispatched "
+                "from the cloud. Leave URLs empty to use the defaults from environment.",
+                classes="relay-help",
+            )
 
-        # base_url
-        yield Horizontal(
-            Static("API base URL", classes="label"),
-            Input(
-                placeholder="https://api.servonaut.dev",
-                id="relay_base_url",
-            ),
-            classes="setting_row",
-        )
+            # base_url
+            yield setting_row(
+                "API base URL",
+                Input(
+                    placeholder="https://api.servonaut.dev",
+                    id="relay_base_url",
+                ),
+            )
 
-        # mercure_url
-        yield Horizontal(
-            Static("Mercure hub URL", classes="label"),
-            Input(
-                placeholder="https://servonaut.dev/.well-known/mercure",
-                id="relay_mercure_url",
-            ),
-            classes="setting_row",
-        )
+            # mercure_url
+            yield setting_row(
+                "Mercure hub URL",
+                Input(
+                    placeholder="https://servonaut.dev/.well-known/mercure",
+                    id="relay_mercure_url",
+                ),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Listener timing', classes="settings-group-title", markup=False)
 
-        # heartbeat_interval
-        yield Horizontal(
-            Static("Heartbeat interval (seconds)", classes="label"),
-            Input(placeholder="30", id="relay_heartbeat_interval"),
-            classes="setting_row",
-        )
+            # heartbeat_interval
+            yield setting_row(
+                "Heartbeat interval (seconds)",
+                Input(placeholder="30", id="relay_heartbeat_interval"),
+            )
+        with Vertical(classes="settings-form-section settings-operations-section"):
+            yield Static('Execution approvals', classes="settings-group-title", markup=False)
 
-        # ai_tool_auto_approve
-        yield Horizontal(
-            Static("AI tool auto-approve tier", classes="label"),
-            Select(
-                _AUTO_APPROVE_OPTIONS,
-                value="standard",
-                allow_blank=False,
-                id="relay_ai_tool_auto_approve",
-            ),
-            classes="setting_row",
-        )
-        yield Static(
-            "",
-            id="relay_auto_approve_warn",
-            classes="relay-warn",
-        )
-        yield Static(
-            "Maximum guard tier the relay listener will auto-approve when executing "
-            "AI tool calls without human confirmation. Tools above this tier are refused.",
-            classes="relay-help",
-        )
+            # ai_tool_auto_approve
+            yield setting_row(
+                "AI tool auto-approve tier",
+                Select(
+                    _AUTO_APPROVE_OPTIONS,
+                    value="standard",
+                    allow_blank=False,
+                    id="relay_ai_tool_auto_approve",
+                ),
+            )
+            yield Static(
+                "",
+                id="relay_auto_approve_warn",
+                classes="relay-warn",
+            )
+            yield Static(
+                "Maximum guard tier the relay listener will auto-approve when executing "
+                "AI tool calls without human confirmation. Tools above this tier are refused.",
+                classes="relay-help",
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -262,6 +266,9 @@ class RelayPanel(SettingsPanel):
         except Exception:
             return
         if tier == "dangerous":
-            warn.update(escape(_WARN_DANGEROUS_AUTO_APPROVE))
+            warn.update(
+                f"[$text-warning]{escape(_WARN_DANGEROUS_AUTO_APPROVE)}"
+                "[/$text-warning]"
+            )
         else:
             warn.update("")

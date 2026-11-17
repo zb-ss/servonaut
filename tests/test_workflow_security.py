@@ -224,6 +224,13 @@ def _mcp_publisher_script() -> str:
     return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
 
+def test_publish_test_gate_runs_pytest_in_parallel() -> None:
+    source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
+    steps = _steps(_jobs(source)["test"])
+    run_step = next(step for step in steps if step.startswith("name: Run tests"))
+    assert re.search(r"^\s*run: python -m pytest\b.*\s-n auto\b", run_step, re.MULTILINE)
+
+
 def test_mcp_publisher_is_pinned_to_a_release_and_checksum() -> None:
     source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
     assert re.search(r"MCP_PUBLISHER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+\n", source)
@@ -313,10 +320,43 @@ def test_ci_runs_the_screenshot_tests_strictly_in_their_own_job() -> None:
     job = jobs["screenshots"]
     assert '.[test]"' in job
     assert 'SERVONAUT_SNAPSHOTS_STRICT: "1"' in job
-    assert "pytest --tb=short -q tests/snapshots" in job
+    assert "pytest --tb=short -q -n auto tests/snapshots" in job
     assert "tests/snapshots/__failures__/" in job
-    # Elsewhere a Textual version mismatch skips them instead of failing.
+    # The unit shards leave them out, so they run once, strictly, here.
+    assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["unit"]
     assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["test"]
+    pytest_commands = [
+        line for line in jobs["unit"].splitlines() if "python -m pytest" in line
+    ]
+    assert len(pytest_commands) == 2
+    for command in pytest_commands:
+        assert "--ignore=tests/snapshots" in command
+        assert "-p tests._ci_shard" in command
+
+
+def test_ci_test_matrix_lets_every_python_version_finish() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    assert "fail-fast: false" in jobs["unit"]
+    assert "fail-fast: false" in jobs["test"]
+
+
+def test_ci_test_job_aggregates_every_unit_shard() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    aggregate = jobs["test"]
+    assert "    needs: unit\n" in aggregate
+    assert "    if: always()\n" in aggregate
+    assert "for shard in 1 2 3 4" in aggregate
+    assert "reported no result" in aggregate
+    unit_steps = _steps(jobs["unit"])
+    for name in ("Record the shard result", "Upload the shard result"):
+        (step,) = [step for step in unit_steps if f"name: {name}" in step]
+        assert "if: always()" in step
+    # A rerun of one shard must replace its earlier artifact.
+    for job in (jobs["unit"], jobs["test"]):
+        uploads = [s for s in _steps(job) if "actions/upload-artifact@" in s]
+        assert uploads
+        for step in uploads:
+            assert "overwrite: true" in step
 
 
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
@@ -379,3 +419,10 @@ def test_desktop_tests_fail_on_a_missing_host_dependency_when_required(
     result = _collect_desktop_tests(tmp_path, required=True)
     assert result.returncode != 0
     assert "servonaut[desktop-test]" in result.stdout + result.stderr
+
+
+def test_ci_coverage_shards_get_a_longer_per_test_timeout() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    (step,) = [s for s in _steps(jobs["unit"]) if "name: Run tests with coverage" in s]
+    assert "--timeout=180" in step
+    assert "--cov=servonaut" in step

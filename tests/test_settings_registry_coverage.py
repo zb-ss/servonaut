@@ -57,7 +57,7 @@ _FIELD_TO_PANEL = {
     "keyword_store_path": "history_paths",
     "command_history_path": "history_paths",
     "max_command_history": "history_paths",
-    "theme": "general",
+    "theme": "appearance",
     "log_viewer_default_paths": "log_viewer",
     "log_viewer_custom_paths": "log_viewer",
     "log_viewer_scan_directories": "log_viewer",

@@ -23,6 +23,8 @@ from servonaut.mcp.tool_schemas import TOOL_SCHEMAS, mcp_tool_list
 from servonaut.services.accounts import AccountRegistry
 from servonaut.widgets.sidebar import Sidebar
 
+pytestmark = pytest.mark.usefixtures("navigation_open")
+
 AWS_TOOLS = sorted(name for name, spec in TOOL_SCHEMAS.items() if spec.get("required_service") == "aws")
 
 

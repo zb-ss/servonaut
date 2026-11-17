@@ -9,6 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+from servonaut.screens.fleet_memory import _SHARED_WIDTH
+from servonaut.utils.text_fit import cut
 from rich.text import Text
 from textual.app import App
 
@@ -63,8 +66,11 @@ async def test_fleet_memory_shared_with_draws_the_team_name_as_typed(
         cell = _table(app).get_row_at(0)[shared.SHARED_WITH]
         assert isinstance(cell, Text), "a team name is never a markup string"
         # With two teams the first by name is shown, then the count.
-        expected = {name, "Team B"} if teams == 2 else {name}
-        assert cell.plain.removesuffix(" +1") in expected
+        # The cell is cut with an ellipsis to its column width, never silently.
+        shown = {name, "Team B"} if teams == 2 else {name}
+        suffix = " +1" if teams == 2 else ""
+        expected = {cut(f"{label}{suffix}", _SHARED_WIDTH) for label in shown}
+        assert cell.plain in expected
         assert clickable_cells(app) == []
 
 

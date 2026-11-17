@@ -32,7 +32,7 @@ _SERVERS = {
     "web": [{"server_id": "srv-web-1", "label": "web-1 (10.0.1.1)"}, {"server_id": "srv-web-2", "label": "web-2 (10.0.1.2)"}],
 }
 
-_NO_SERVERS = "No shared servers in this team: share one from Team Management."
+_NO_SERVERS = "No shared servers in this team: share one from Team management."
 
 
 class _PickerService:
@@ -261,7 +261,7 @@ async def test_import_binding_preselects_a_single_team_and_server() -> None:
 @pytest.mark.parametrize(
     ("service", "pick_team", "expected"),
     [
-        (_PickerService(teams=[]), None, "No teams yet: create or join one from Team Management."),
+        (_PickerService(teams=[]), None, "No teams yet: create or join one from Team management."),
         (
             _PickerService(team_error=APIError(code="server_error", message="server text", status=503)),
             None,
@@ -426,7 +426,7 @@ async def test_rotation_checks_the_only_server_of_the_only_team() -> None:
 @pytest.mark.parametrize(
     ("service", "pick_team", "expected"),
     [
-        (_PickerService(teams=[]), None, "No teams yet: create or join one from Team Management."),
+        (_PickerService(teams=[]), None, "No teams yet: create or join one from Team management."),
         (_PickerService(servers={"ops": []}), "ops", _NO_SERVERS),
         (
             _PickerService(server_errors={"web": RuntimeError("boom")}),

@@ -26,15 +26,22 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Static
 
+from servonaut.screens._footer_fit import fit_footer
 from servonaut.screens.settings.base import SettingsPanel
 from servonaut.screens.settings.registry import PANELS, PanelSpec
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
-from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
+from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
 
@@ -46,48 +53,31 @@ class DiscardChangesModal(ModalScreen[bool]):
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
-
-    DEFAULT_CSS = """
-    DiscardChangesModal { align: center middle; }
-    DiscardChangesModal #discard-box {
-        width: 60;
-        height: auto;
-        border: round $warning;
-        background: $surface;
-        padding: 1 2;
-    }
-    DiscardChangesModal #discard-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    DiscardChangesModal #discard-buttons {
-        height: auto;
-        align: right middle;
-        margin-top: 1;
-    }
-    DiscardChangesModal #discard-buttons Button { margin-left: 1; }
-    """
+    AUTO_FOCUS = "#discard-cancel"
 
     def __init__(self, panel_title: str) -> None:
-        super().__init__()
+        super().__init__(classes="dialog-screen")
         self._panel_title = panel_title
 
     def compose(self) -> ComposeResult:
         """Compose the discard-changes prompt."""
-        yield Vertical(
-            Static("Unsaved changes", id="discard-title"),
-            Static(
-                escape(
-                    f"Discard unsaved changes in {self._panel_title}?"
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("Unsaved changes", id="discard-title"),
+            body=DialogBody(
+                Static(
+                    escape(f"Discard unsaved changes in {self._panel_title}?"),
+                    id="discard-message",
                 ),
-                id="discard-message",
             ),
-            Horizontal(
+            actions=DialogActions(
                 Button("Keep editing", variant="default", id="discard-cancel"),
                 Button("Discard", variant="warning", id="discard-confirm"),
                 id="discard-buttons",
             ),
             id="discard-box",
+            size="compact",
+            severity="warning",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -99,13 +89,28 @@ class DiscardChangesModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class SettingsScreen(Screen):
+class _SettingsSection(SidebarSection):
+    """Settings categories participate in ordinary content Tab traversal."""
+
+    def on_mount(self) -> None:
+        header = self.query_one("Button.section-header", Button)
+        header.can_focus = True
+        header.tooltip = self._title
+
+
+class SettingsScreen(WorkspaceScreen):
     """Master/detail settings editor with per-panel save + unsaved guard."""
 
-    # The sidebar and the nav rail take a fixed ~58 columns, so below 120
-    # columns a label column would leave the fields next to no room: the
-    # stylesheet stacks each label above its field on ``-narrow``. Below 40
-    # rows it trims the vertical padding on ``-short``.
+    AUTO_FOCUS = "#settings-search"
+
+    CHAT_REFLOW = True
+    # Leave room for the contextual category rail beside the settings panel.
+    CHAT_MIN_CONTENT_WIDTH = 70
+    # Stack form labels and actions according to the remaining content space.
+    CONTENT_NARROW_WIDTH = 95
+
+    # Keep terminal breakpoints consistent with the other workspace screens.
+    # Form/action stacking follows ``-content-narrow``; below 40 rows trim padding.
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
@@ -113,6 +118,23 @@ class SettingsScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("ctrl+f", "focus_search", "Search", show=True),
     ]
+
+    # Footer shortcuts, most useful first; the rest go when the row is full.
+    FOOTER_PRIORITY = ("back", "choose", "new_theme", "focus_search")
+
+    @property
+    def active_bindings(self):
+        """Active bindings, with the footer kept to the shortcuts that fit."""
+        return fit_footer(
+            super().active_bindings, self, self.FOOTER_PRIORITY, include_widgets=True,
+        )
+
+    def on_resize(self) -> None:
+        self.refresh_bindings()
+
+    def on_descendant_focus(self) -> None:
+        # The footer is fitted to the focused widget's shortcuts as well.
+        self.call_after_refresh(self.refresh_bindings)
 
     def __init__(self, initial_panel: Optional[str] = None) -> None:
         """Create the screen.
@@ -145,12 +167,26 @@ class SettingsScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the nav rail + search + content switcher."""
         yield SafeHeader()
-        with Horizontal(id="main-layout"):
-            yield Sidebar()
-            with Horizontal(id="settings-body"):
-                with Vertical(id="settings-nav"):
+        yield WorkspaceControls("Settings")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            with Horizontal(id="settings-body", classes="workspace-content"):
+                with Vertical(id="settings-nav") as navigation:
+                    navigation.border_title = "Categories"
+                    yield Button("‹ Back", id="settings-back")
                     yield Input(placeholder="Search settings…", id="settings-search")
-                    yield VerticalScroll(id="settings-nav-list")
+                    yield Static(
+                        "No matching settings. Try another search.",
+                        id="settings-search-empty",
+                        markup=False,
+                    )
+                    yield Button("Clear search", id="settings-search-clear")
+                    yield VerticalScroll(id="settings-nav-list", can_focus=False)
+                    yield Static(
+                        "Save each category separately.",
+                        id="settings-nav-note",
+                        markup=False,
+                    )
                 yield Vertical(id="settings-content")
         yield Footer()
 
@@ -165,6 +201,8 @@ class SettingsScreen(Screen):
         # active button exists. Re-assert the highlight once everything settled.
         if self._active_id is not None:
             self.call_after_refresh(self._set_nav_active, self._active_id)
+        self.query_one("#settings-search-empty").display = False
+        self.query_one("#settings-search-clear").display = False
 
     def on_screen_resume(self, _event: events.ScreenResume) -> None:
         """Refresh the active panel after a pushed management screen closes."""
@@ -207,11 +245,12 @@ class SettingsScreen(Screen):
                     label,
                     id=f"navbtn_{spec.id}",
                     classes="settings-nav-btn",
+                    tooltip=f"{spec.title} (preview)" if spec.preview else spec.title,
                 )
             )
         open_group = self._group_of.get(self._active_id or "", ordered_groups[0])
         for index, group in enumerate(ordered_groups):
-            section = SidebarSection(
+            section = _SettingsSection(
                 group,
                 *buttons_by_group[group],
                 section_id=f"settings_sec_{index}",
@@ -294,6 +333,15 @@ class SettingsScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle nav button clicks (panel Save buttons are handled in-panel)."""
         button_id = event.button.id or ""
+        if button_id == "settings-back":
+            event.stop()
+            self.action_back()
+            return
+        if button_id == "settings-search-clear":
+            event.stop()
+            self.query_one("#settings-search", Input).value = ""
+            self.action_focus_search()
+            return
         if not button_id.startswith("navbtn_"):
             return
         event.stop()
@@ -367,6 +415,10 @@ class SettingsScreen(Screen):
             self.query_one(f"#navbtn_{target_id}", Button).add_class("--active")
         except Exception:
             pass
+        spec = self._spec_of.get(target_id)
+        if spec is not None:
+            for controls in self.query(WorkspaceControls):
+                controls.set_context(f"Settings › {spec.title}")
 
     def _search_query(self) -> str:
         """Current lowercased search text, or ``""`` if the box is empty/absent."""
@@ -406,6 +458,9 @@ class SettingsScreen(Screen):
         and groups with no match are hidden entirely. Clearing the query
         restores every button and the default collapse state.
         """
+        has_matches = not query or any(self._spec_matches(spec, query) for spec in PANELS)
+        self.query_one("#settings-search-empty").display = not has_matches
+        self.query_one("#settings-search-clear").display = not has_matches
         if not query:
             for spec in PANELS:
                 try:

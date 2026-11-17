@@ -14,12 +14,19 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test (${{ matrix.python-version }})
+  # The unit tests run as four shards per Python version so a run finishes
+  # sooner. The `test (...)` jobs below collect the shard results under the
+  # names the branch protection requires.
+  unit:
+    name: unit (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.12", "3.13"]
+        shard: [1, 2, 3, 4]
+    env:
+      SERVONAUT_TEST_SHARD: ${{ matrix.shard }}/4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,13 +43,99 @@ jobs:
         # of failing with ModuleNotFoundError.
         run: python -m pip install -e ".[test,hetzner,ovh,mcp]"
 
+      # The screenshot tests run once, in the `screenshots` job.
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: python -m pytest --tb=short -q
+        run: python -m pytest --tb=short -q -n auto --ignore=tests/snapshots -p tests._ci_shard
 
+      # Coverage makes these shards about 3x slower, so the per-test hang guard
+      # gets matching headroom; a real hang still fails.
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
-        run: python -m pytest --cov=servonaut --cov-report=term-missing --cov-report=xml
+        run: python -m pytest --tb=short -q -n auto --ignore=tests/snapshots -p tests._ci_shard --timeout=180 --cov=servonaut --cov-report=
+
+      # overwrite lets a rerun of one shard replace its earlier artifact.
+      - name: Upload coverage data
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-data-3.12-${{ matrix.shard }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Record the shard result
+        if: always()
+        run: echo "${{ job.status }}" > shard-result.txt
+
+      - name: Upload the shard result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unit-result-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: shard-result.txt
+          overwrite: true
+
+  # The required check. It always runs and fails unless all four shards of its
+  # Python version reported success: a skipped job would otherwise count as
+  # passing, and a missing result means a shard was cancelled or died.
+  test:
+    name: test (${{ matrix.python-version }})
+    needs: unit
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - name: Download the shard results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unit-result-${{ matrix.python-version }}-*
+          path: results
+
+      - name: Require every shard to have succeeded
+        run: |
+          status=0
+          for shard in 1 2 3 4; do
+            file="results/unit-result-${{ matrix.python-version }}-${shard}/shard-result.txt"
+            if [ ! -f "$file" ]; then
+              echo "::error::shard ${shard}/4 reported no result"
+              status=1
+            elif [ "$(tr -d '[:space:]' < "$file")" != "success" ]; then
+              echo "::error::shard ${shard}/4 finished as $(tr -d '[:space:]' < "$file")"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        if: matrix.python-version == '3.12'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download the coverage data
+        if: matrix.python-version == '3.12'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-data-3.12-*
+          path: coverage-data
+
+      - name: Combine the coverage
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip install coverage
+          python -m coverage combine coverage-data/*/.coverage
+          python -m coverage report --skip-covered
+          python -m coverage xml
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
@@ -50,6 +143,7 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+          overwrite: true
 
   # Resolves `servonaut[all]` on the newest CPython without installing it,
   # so an extra that cannot install there (a dependency with no build for
@@ -102,8 +196,11 @@ jobs:
     # changes the rendering shows up here without failing unrelated changes.
     name: screenshots / Python 3.12
     runs-on: ubuntu-latest
-    # The tests take about a minute; the limit only stops a hung run.
-    timeout-minutes: 10
+    # About 650 renderings, many of them sweeps over several terminal widths.
+    # Four workers took about 24 minutes on a developer laptop, and a hosted
+    # runner is slower per worker, so the limit leaves roughly twice that;
+    # it only stops a hung run.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,7 +219,7 @@ jobs:
           # Fail, rather than skip, when the installed Textual is not the
           # version the snapshots were recorded with.
           SERVONAUT_SNAPSHOTS_STRICT: "1"
-        run: python -m pytest --tb=short -q tests/snapshots
+        run: python -m pytest --tb=short -q -n auto tests/snapshots
 
       - name: Upload the new renderings
         # Public: the renderings show only the neutral test fixtures.
@@ -137,10 +234,11 @@ jobs:
   e2e:
     name: end-to-end journeys / Python 3.12
     runs-on: ubuntu-latest
-    # The suite takes seven to ten minutes including the install, and more on
-    # a busy runner; the limit only stops a hung run, so it leaves that
-    # headroom rather than cancelling a healthy run near the end.
-    timeout-minutes: 20
+    # The suite takes roughly twenty minutes on four workers including the
+    # install, and more on a busy runner; the limit only stops a hung run, so
+    # it leaves about twice that rather than cancelling a healthy run near
+    # the end.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

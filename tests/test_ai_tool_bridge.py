@@ -879,7 +879,9 @@ def test_conversation_event_persists_id_to_session_via_chat_service():
     chat_service.save_session.assert_called_once_with(session)
 
 
-def test_request_body_echoes_captured_conversation_id():
+def test_request_body_echoes_captured_conversation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Turn 2 must include the conversation_id captured on turn 1 so
     the server appends to the same /account/ai/conversations row instead
     of creating a fresh one per turn (which produced 20+ untitled rows
@@ -898,7 +900,7 @@ def test_request_body_echoes_captured_conversation_id():
     config_manager.get.return_value = cfg
     app = MagicMock()
     app.config_manager = config_manager
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     chat_service = MagicMock()
     chat_service._max_history = 20
@@ -912,7 +914,9 @@ def test_request_body_echoes_captured_conversation_id():
     assert body["conversation_id"] == "conv-uuid-from-turn-1"
 
 
-def test_request_body_prepends_memory_context_when_instance_in_scope():
+def test_request_body_prepends_memory_context_when_instance_in_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When chat_inject_server_memory is on and the active turn has a
     resolved instance with stored memory, the very first message in the
     request must be a synthetic ``user`` carrying a
@@ -959,7 +963,7 @@ def test_request_body_prepends_memory_context_when_instance_in_scope():
     app.config_manager = config_manager
     app.memory_service = memory_service
     app.instances = []
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     chat_service = MagicMock()
     chat_service._max_history = 20
@@ -982,7 +986,9 @@ def test_request_body_prepends_memory_context_when_instance_in_scope():
     assert body["context"] == {"instance_ids": ["srv-a"]}
 
 
-def test_request_body_skips_memory_when_toggle_off():
+def test_request_body_skips_memory_when_toggle_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Honour ``config.chat_inject_server_memory = False`` — no <CONTEXT>
     block, no extra synthetic message, regardless of stored memory."""
     from types import SimpleNamespace
@@ -1015,7 +1021,7 @@ def test_request_body_skips_memory_when_toggle_off():
     app.config_manager = config_manager
     app.memory_service = memory_service
     app.instances = []
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     chat_service = MagicMock()
     chat_service._max_history = 20
@@ -1255,7 +1261,9 @@ def test_follow_tail_tolerates_small_drift_from_previous_bottom():
     container.scroll_end.assert_called_once_with(animate=False)
 
 
-def test_tool_message_persisted_when_keep_toggle_on():
+def test_tool_message_persisted_when_keep_toggle_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """With ``config.chat_keep_tool_results = True`` the tool render
     helper must append a role=tool ChatMessage and save the session,
     so reloading the chat shows tool output (debug-friendly default)."""
@@ -1277,7 +1285,7 @@ def test_tool_message_persisted_when_keep_toggle_on():
     config_manager.get.return_value = cfg
     app = MagicMock()
     app.config_manager = config_manager
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     ChatPanel._maybe_persist_tool_message(panel, {"kind": "skipped", "tool": "x", "reason": "[bold]tool ran[/bold]"})
 
@@ -1288,7 +1296,9 @@ def test_tool_message_persisted_when_keep_toggle_on():
     chat_service.save_session.assert_called_once_with(session)
 
 
-def test_tool_message_dropped_when_keep_toggle_off():
+def test_tool_message_dropped_when_keep_toggle_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """With the toggle off, no message is appended and no save fires —
     the row only renders for the live turn and disappears on reload."""
     from unittest.mock import MagicMock
@@ -1308,7 +1318,7 @@ def test_tool_message_dropped_when_keep_toggle_off():
     config_manager.get.return_value = cfg
     app = MagicMock()
     app.config_manager = config_manager
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     ChatPanel._maybe_persist_tool_message(panel, {"kind": "skipped"})
 
@@ -1338,10 +1348,10 @@ def test_scroll_to_bottom_rearms_follow_tail():
 
 
 def test_new_chat_clears_remote_conversation_id():
-    """Hitting "New Chat" must drop the previous server-side
+    """Hitting "New chat" must drop the previous server-side
     conversation pointer so the next turn opens a fresh
     /account/ai/conversations row instead of appending to the prior
-    thread (which makes "New Chat" look local-only)."""
+    thread (which makes "New chat" look local-only)."""
     from unittest.mock import MagicMock
     from servonaut.widgets.chat_panel import ChatPanel
 
@@ -1394,7 +1404,9 @@ def test_is_stale_conversation_404_detects_not_found_error():
 # ---------------------------------------------------------------------------
 
 
-def test_chat_panel_synthesises_error_tool_result_on_bridge_exception():
+def test_chat_panel_synthesises_error_tool_result_on_bridge_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """C4 — when ``handle_tool_call`` raises, the chat panel posts a
     synthetic ``status="error"`` result back so the server's turn closes.
 
@@ -1433,7 +1445,7 @@ def test_chat_panel_synthesises_error_tool_result_on_bridge_exception():
 
     app = MagicMock()
     app.ai_tool_bridge = bridge
-    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    monkeypatch.setattr(type(panel), "app", property(lambda self, _a=app: _a))
 
     asyncio.run(
         panel._handle_streamed_tool_call(

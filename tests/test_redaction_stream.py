@@ -410,24 +410,30 @@ class TestScrubStreamEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# TestScrubStreamPerformance — 10 000 typical log lines under 1 s
+# TestScrubStreamPerformance — 10 000 typical log lines within a CPU budget
 # ---------------------------------------------------------------------------
 
 
 class TestScrubStreamPerformance:
-    def test_10k_lines_under_1s(self) -> None:
-        """10 000 typical 80-char log lines processed under 1 second."""
+    # CPU time, not wall clock: a busy runner deschedules the process for long
+    # stretches, which says nothing about the scrubber. The work takes about
+    # 0.3 s of CPU (0.4 s under coverage); the budget leaves room for a slow
+    # runner and still fails on a regression of several times.
+    CPU_BUDGET_SECONDS = 2.5
+
+    def test_10k_lines_stay_within_the_cpu_budget(self) -> None:
+        """10 000 typical 80-char log lines are scrubbed within the CPU budget."""
         svc = _svc()
         line = "INFO 2024-01-15 10:23:45 request from 10.0.0.1 to /api/v1 status=200 in 45ms"
         lines = [line] * 10_000
 
-        start = time.perf_counter()
+        start = time.process_time()
         for ln in lines:
             svc.scrub_stream(ln)
-        elapsed = time.perf_counter() - start
+        elapsed = time.process_time() - start
 
-        assert elapsed < 1.0, (
-            f"scrub_stream too slow: {elapsed:.3f}s for 10 000 lines "
+        assert elapsed < self.CPU_BUDGET_SECONDS, (
+            f"scrub_stream too slow: {elapsed:.3f}s CPU for 10 000 lines "
             f"({elapsed * 100:.1f} ms/1000 lines)"
         )
 

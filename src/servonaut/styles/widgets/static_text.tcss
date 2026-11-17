@@ -7,3 +7,8 @@ Static {
     color: $text;
 }
 
+
+/* Preserve the editor's warning role above the generic Static text color. */
+TextEditorModal #text-editor-warning {
+    color: $warning;
+}

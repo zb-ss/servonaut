@@ -67,5 +67,7 @@ def test_rejects_a_symlinked_or_insecure_known_hosts_directory(tmp_path):
 
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir(mode=0o755)
+    unsafe.chmod(0o755)
+    assert stat.S_IMODE(unsafe.stat().st_mode) == 0o755
     with pytest.raises(KnownHostsError, match="unsafe ownership or permissions"):
         TeamKnownHosts(unsafe).write("team", HOST_CA, ["web-1.example.test"])

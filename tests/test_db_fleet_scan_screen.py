@@ -12,8 +12,11 @@ import pytest
 from textual.app import App
 from textual.widgets import DataTable, Static
 
+from servonaut.styles import CSS_FILES
 from servonaut.config.schema import AppConfig, DBProfile
 from servonaut.screens.db_fleet_scan import DbFleetScanScreen
+
+from tests._native_actions import click_action
 
 
 def _candidate(token="dbstg_x"):
@@ -25,6 +28,8 @@ def _candidate(token="dbstg_x"):
 
 
 class _WrapperApp(App):
+    CSS_PATH = CSS_FILES
+
     def __init__(self, *, tools, config_manager, instances, **kwargs):
         super().__init__(**kwargs)
         self.demo_mode = False
@@ -89,7 +94,7 @@ async def test_commit_all_runs_bulk_save():
     async with app.run_test(headless=True) as pilot:
         await pilot.pause()
         await pilot.pause(0.05)
-        await pilot.click("#fleet_commit_all")
+        await click_action(pilot, "#fleet_commit_all")
         await pilot.pause(0.05)
         text = _rendered(app)
     assert tools.db_setup_save.await_count == 2

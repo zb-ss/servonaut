@@ -288,29 +288,42 @@ def _mgr_app(*, aws_service=None, demo_mode=False, redaction_service=None):
     return app
 
 
+_THEME = {"text-success": "#8AD4A1", "text-warning": "#FFC473", "text-accent": "#FFC473"}
+
+
+def _colorize(state: str):
+    """The cell the manager draws for *state*, under a fixed theme."""
+    screen = MagicMock()
+    screen.app.get_css_variables.return_value = _THEME
+    return AWSManagerScreen._colorize_state(screen, state)
+
+
 class TestAWSManagerColorize:
 
-    def test_running_green(self) -> None:
-        assert "[green]" in AWSManagerScreen._colorize_state("running")
+    def test_running_success(self) -> None:
+        assert _colorize("running").style == "#8AD4A1"
 
-    def test_stopped_yellow(self) -> None:
-        assert "[yellow]" in AWSManagerScreen._colorize_state("stopped")
+    def test_stopped_warning(self) -> None:
+        assert _colorize("stopped").style == "#FFC473"
 
-    def test_pending_blue(self) -> None:
-        assert "[blue]" in AWSManagerScreen._colorize_state("pending")
+    def test_pending_accent(self) -> None:
+        assert _colorize("pending").style == "#FFC473"
 
     def test_terminated_dim(self) -> None:
-        assert "[dim]" in AWSManagerScreen._colorize_state("terminated")
+        assert _colorize("terminated").style == "dim"
 
     def test_shutting_down_dim(self) -> None:
-        assert "[dim]" in AWSManagerScreen._colorize_state("shutting-down")
+        assert _colorize("shutting-down").style == "dim"
 
     def test_unknown_passthrough(self) -> None:
-        result = AWSManagerScreen._colorize_state("weird-state")
-        assert "weird-state" in result
+        result = _colorize("weird-state")
+        assert result.plain == "weird-state" and not result.style
 
-    def test_rebooting_blue(self) -> None:
-        assert "[blue]" in AWSManagerScreen._colorize_state("rebooting")
+    def test_rebooting_accent(self) -> None:
+        assert _colorize("rebooting").style == "#FFC473"
+
+    def test_state_text_is_never_read_as_markup(self) -> None:
+        assert _colorize("running[red]").plain == "running[red]"
 
 
 class TestAWSManagerRenderTable:
@@ -323,9 +336,10 @@ class TestAWSManagerRenderTable:
              "state": "running", "public_ip": "1.2.3.4", "region": "us-east-1"},
         ]
         # An empty table: the redraw keeps the selected row (none here).
-        mock_table = MagicMock(row_count=0)
+        mock_table = MagicMock(row_count=0, cursor_row=0)
         with patch.object(screen, "query_one", return_value=mock_table), \
-             patch.object(screen, "_sync_action_buttons"):
+             patch.object(screen, "_sync_action_buttons"), \
+             patch.object(AWSManagerScreen, "app", new=MagicMock(get_css_variables=lambda: _THEME)):
             screen._render_table()
         mock_table.clear.assert_called_once()
         mock_table.add_row.assert_called_once()
@@ -338,12 +352,13 @@ class TestAWSManagerRenderTable:
         ]
         rows_added = []
         # An empty table: the redraw keeps the selected row (none here).
-        mock_table = MagicMock(row_count=0)
+        mock_table = MagicMock(row_count=0, cursor_row=0)
         mock_table.add_row = MagicMock(side_effect=lambda *a, **kw: rows_added.append(a))
         with patch.object(screen, "query_one", return_value=mock_table), \
-             patch.object(screen, "_sync_action_buttons"):
+             patch.object(screen, "_sync_action_buttons"), \
+             patch.object(AWSManagerScreen, "app", new=MagicMock(get_css_variables=lambda: _THEME)):
             screen._render_table()
-        assert "—" in rows_added[0]
+        assert "—" in [str(cell) for cell in rows_added[0]]
 
 
 class TestAWSManagerOnButtonPressed:
@@ -2715,12 +2730,17 @@ class TestObjectStorageFormMethods:
                 return mock_form
             return MagicMock()
 
+        # A mocked worker must close work it does not schedule.
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", side_effect=query_side), \
-             patch.object(screen, "_hide_all_forms"):
+             patch.object(screen, "_hide_all_forms"), \
+             patch.object(
+                 screen, "run_worker", side_effect=lambda coro, **kw: coro.close(),
+             ) as worker:
             screen._show_new_bucket_form()
 
         assert mock_form.display is True
+        worker.assert_called_once()
 
     def test_show_upload_form_not_in_objects_view_notifies(self) -> None:
         svc = _s3_mock_storage_service()
@@ -4424,10 +4444,13 @@ class TestObjectStorageRegionPicker:
         screen = ObjectStorageScreen("aws")
         app = _s3_app(provider="aws")
 
+        # A mocked worker must close work it does not schedule.
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", return_value=MagicMock()), \
              patch.object(screen, "_hide_all_forms"), \
-             patch.object(screen, "run_worker") as worker, \
+             patch.object(
+                 screen, "run_worker", side_effect=lambda coro, **kw: coro.close(),
+             ) as worker, \
              patch.object(screen, "_load_regions") as loader:
             screen._show_new_bucket_form()
             screen._show_new_bucket_form()

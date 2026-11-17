@@ -36,6 +36,7 @@ def test_deferred_rebaseline_after_leaving_settings_does_not_crash(tmp_path):
     assert report["network_attempts"] == []
 
 
+@pytest.mark.timeout(180)  # Four app boots in a child; a slow runner needs more than the default.
 def test_sidebar_round_trip_through_settings_smoke(tmp_path):
     """Smoke test: sidebar Settings, then Instances, at several dwells.
 
@@ -43,7 +44,7 @@ def test_sidebar_round_trip_through_settings_smoke(tmp_path):
     (the test above does); it catches other crashes while a screen is still
     mounting or tearing down.
     """
-    report = run_hermetic_app(tmp_path, "settings-round-trips", *DWELLS)
+    report = run_hermetic_app(tmp_path, "settings-round-trips", *DWELLS, child_timeout=150.0)
 
     assert report["error"] is None, f"{report['error']}\n{report['stderr']}"
     outcomes = {entry["dwell"]: entry for entry in report["result"]}

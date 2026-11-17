@@ -181,6 +181,7 @@ async def test_fetch_host_key_connects_once_then_asks_to_check_the_fingerprint(m
         await _settle(pilot, lambda: box().display)
         assert service.visits == [("i-1", "ec2-user")]  # with the login in the form
         assert "SHA256:" in str(app.screen.query_one("#vault_bind_trusted", Static).render())
+        await _settle(pilot, lambda: app.screen.focused is box())  # focus lands after the checkbox shows
         assert fetch().display is False and app.screen.focused is box()
         assert box().value is False  # recorded is not checked: the user still says so
         box().value = True
@@ -264,6 +265,7 @@ async def test_the_dialog_fits_a_narrow_terminal_with_the_choices_in_view(monkey
         for selector in ("#vault_bind_vault", "#vault_bind_item"):
             region = app.screen.query_one(selector).region
             assert region.width > 0 and modal.contains_region(region), (selector, region, modal)
+        await _settle(pilot, lambda: app.focused is app.screen.query_one("#vault_bind_item", Select))
         assert app.focused is app.screen.query_one("#vault_bind_item", Select)  # never Bind
 
 
@@ -546,6 +548,7 @@ async def test_typing_in_the_search_box_narrows_the_keys_and_picks_a_single_matc
 
         await pilot.press("ctrl+u", "enter")
         await _settle(pilot, lambda: len(offered()) == 4)
+        await _settle(pilot, lambda: app.focused is item())
         assert app.focused is item()  # Enter in the search box moves on to the list
 
 
