@@ -11,6 +11,7 @@ from textual.widgets import Button, Input, Static
 from servonaut.screens.remediation_confirm import RemediationConfirmModal
 from servonaut.screens.tool_confirm_modal import DangerousToolConfirmModal, ToolConfirmModal
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
+from tests._async_bounds import wait_until
 from tests.test_basic_dialogs import BasicDialogHost, assert_exposed
 
 
@@ -88,6 +89,8 @@ async def test_invalid_dangerous_tool_reprompts_with_pinned_error_and_input(
             assert await pilot.click(screen.query_one(f"#{confirm_id}", Button))
         await pilot.pause()
         error = screen.query_one("#dangerous_confirm_error", Static)
+        await wait_until(lambda: "visible" in error.classes and error.display)
+        await pilot.pause()
         assert "visible" in error.classes and error.display
         assert "RUN" in error.render().plain
         assert screen.focused is field and results == []
@@ -197,6 +200,34 @@ async def test_safety_dialog_cancellation_preserves_false_versus_none(
         assert results == [None if kind == "remediation" else False]
 
 
+async def _wait_long_dialog_ready(
+    app: BasicDialogHost, screen: ModalScreen, safe_id: str, kind: str,
+) -> VerticalScroll:
+    """Wait until a scrollable safety modal has focused, laid out, and shown its overflow cue."""
+    if kind == "remediation":
+        await wait_until(
+            lambda: app.screen is screen
+            and bool(screen.query(f"#{safe_id}"))
+            and screen.focused is screen.query_one(f"#{safe_id}")
+            and bool(screen.query(DialogBody))
+            and bool(screen.query(DialogFrame))
+            and bool(screen.query_one(DialogFrame).border_subtitle)
+            and screen.query_one(DialogBody).max_scroll_y > 0
+        )
+        return screen.query_one(DialogBody)
+    prefix = "dangerous" if kind == "dangerous" else "tool"
+    await wait_until(
+        lambda: app.screen is screen
+        and bool(screen.query(f"#{safe_id}"))
+        and screen.focused is screen.query_one(f"#{safe_id}")
+        and bool(screen.query(f"#{prefix}_confirm_scroll"))
+        and bool(screen.query(f"#{prefix}_confirm_more"))
+        and screen.query_one(f"#{prefix}_confirm_more", Static).display
+        and screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll).max_scroll_y > 0
+    )
+    return screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 @pytest.mark.parametrize("kind", ["standard", "dangerous", "remediation"])
@@ -207,22 +238,22 @@ async def test_long_safety_details_scroll_without_moving_pinned_controls(
     screen, safe_id, _ = make_dialog(kind, long=True)
     async with app.run_test(size=size) as pilot:
         app.push_screen(screen)
+        body = await _wait_long_dialog_ready(app, screen, safe_id, kind)
         await pilot.pause()
         assert screen.focused is screen.query_one(f"#{safe_id}")
         if kind == "remediation":
-            body = screen.query_one(DialogBody)
             assert screen.query_one(DialogFrame).border_subtitle
         else:
             # Tool approvals scroll their arguments in a box of their own,
             # with a cue below it instead of the frame's border hint.
             prefix = "dangerous" if kind == "dangerous" else "tool"
-            body = screen.query_one(f"#{prefix}_confirm_scroll", VerticalScroll)
             assert screen.query_one(f"#{prefix}_confirm_more", Static).display
         assert body.max_scroll_y > 0
         buttons = list(screen.query_one(DialogActions).query(Button))
         positions = [button.region for button in buttons]
         body.focus()
         await pilot.press("pagedown")
+        await wait_until(lambda: body.scroll_y > 0)
         await pilot.pause()
         assert body.scroll_y > 0
         assert [button.region for button in buttons] == positions
@@ -267,9 +298,11 @@ async def test_long_undo_stays_accessible_without_hiding_remediation_controls(
         assert body not in undo.ancestors
         assert undo.render().plain == preview["revert_plan"]["human"]
         undo_scroll = undo.parent
+        await wait_until(lambda: undo_scroll.max_scroll_y > 0 and undo_scroll.allow_focus())
         assert undo_scroll.max_scroll_y > 0 and undo_scroll.allow_focus()
         undo_scroll.focus()
         await pilot.press("pagedown")
+        await wait_until(lambda: undo_scroll.scroll_y > 0)
         await pilot.pause()
         assert undo_scroll.scroll_y > 0
         assert_exposed(app, screen, field)
@@ -368,6 +401,7 @@ async def test_undo_heading_remains_painted_while_reading_long_plan(
         positions = [button.region for button in buttons]
         undo_scroll.focus()
         await pilot.press("pagedown")
+        await wait_until(lambda: undo_scroll.scroll_y > 0)
         await pilot.pause()
         assert undo_scroll.scroll_y > 0
         after = "\n".join(strip.text for strip in screen._compositor.render_strips())
