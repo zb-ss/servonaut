@@ -439,6 +439,7 @@ async def test_resource_reflow_retains_four_visibility_states(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(240)  # Measured 14 s normal, 72 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 async def test_resource_state_focus_native_tab_and_chat_draft_survive_reflow(
     case: ReflowCase,
@@ -451,6 +452,7 @@ async def test_resource_state_focus_native_tab_and_chat_draft_survive_reflow(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 10 s normal, 51 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 @pytest.mark.parametrize("navigation", [False, True])
 async def test_resource_qualified_native_boundary_and_all_action_fit(

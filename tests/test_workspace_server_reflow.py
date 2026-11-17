@@ -407,6 +407,7 @@ async def test_server_representative_named_palettes_keep_native_targets(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(210)  # Measured 13 s normal, 67 s on two cores with coverage; a slow runner needs more.
 async def test_nested_fleet_actions_transfer_retains_separate_chat_owners() -> None:
     app = _app(False)
     async with app.run_test(size=(160, 50)) as pilot:

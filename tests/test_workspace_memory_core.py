@@ -377,6 +377,7 @@ async def test_memory_actions_wrap_after_scroll_and_navigation_toggle() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 11 s normal, 54 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("kind", KINDS)
 async def test_memory_workspace_keeps_native_state_and_chat_identity(kind: str) -> None:
     case = memory_case(kind)

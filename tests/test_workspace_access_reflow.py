@@ -362,6 +362,7 @@ async def test_access_four_visibility_states(case: ReflowCase, size: tuple[int, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)  # Measured 10 s normal, 53 s on two cores with coverage; a slow runner needs more.
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_access_state_native_tab_and_chat_restore(case: ReflowCase) -> None:
     app = case.app_factory(False)
