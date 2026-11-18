@@ -42,29 +42,7 @@ from servonaut.desktop.voice.protocol import (
 )
 from servonaut.desktop.voice.worker import VoiceWorker
 from tests._async_bounds import STEP_TIMEOUT_SECONDS
-
-
-class PipeTransport:
-    """Creates a pair of bidirectional OS pipes for testing."""
-
-    def __init__(self) -> None:
-        # Parent writes to worker_r, worker reads from worker_r
-        # Worker writes to parent_r, parent reads from parent_r
-        p2w_r, p2w_w = os.pipe()
-        w2p_r, w2p_w = os.pipe()
-
-        self.parent_in = os.fdopen(w2p_r, "rb", buffering=0)
-        self.parent_out = os.fdopen(p2w_w, "wb", buffering=0)
-
-        self.worker_in = os.fdopen(p2w_r, "rb", buffering=0)
-        self.worker_out = os.fdopen(w2p_w, "wb", buffering=0)
-
-    def close(self) -> None:
-        for f in (self.parent_in, self.parent_out, self.worker_in, self.worker_out):
-            try:
-                f.close()
-            except Exception:
-                pass
+from tests.desktop._voice_pipes import PipeTransport
 
 
 @pytest.fixture
