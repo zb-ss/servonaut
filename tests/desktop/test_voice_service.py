@@ -66,6 +66,7 @@ from servonaut.services.voice_conversation_service import (
 )
 from servonaut.services.voice_input_service import VoiceInputError
 from servonaut.services.voice_output_service import VoiceOutputError
+from tests._async_bounds import STEP_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -827,7 +828,9 @@ def _real_worker(pipes: PipeTransport, factory: _Factory, **policy: float) -> Vo
     )
 
 
-def _wait_for(predicate: Callable[[], bool], timeout: float = 3.0) -> bool:
+def _wait_for(
+    predicate: Callable[[], bool], timeout: float = STEP_TIMEOUT_SECONDS,
+) -> bool:
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() > deadline:
@@ -860,7 +863,7 @@ def test_transcript_handler_can_stop_playback_without_stalling(pipes):
     threading.Thread(target=lambda: [ui_queue.get()() for _ in range(1)], daemon=True).start()
     conversation.set_transcript_callback(on_transcript)
     conversation.start()
-    assert _wait_for(lambda: bool(stalls), 5.0)
+    assert _wait_for(lambda: bool(stalls))
     assert stalls[0] < 0.5
     conn.close()
 
@@ -1078,9 +1081,9 @@ def test_sender_survives_a_request_that_cannot_be_sent(pipes):
     service._post(OutputEnqueueRequest(id=_new_id(), text="x" * 70_000, epoch=0), on_failure=failed.set)
     service._post(OutputEnqueueRequest(id=_new_id(), text="after", epoch=0))
 
-    assert failed.wait(2.0)
+    assert failed.wait(STEP_TIMEOUT_SECONDS)
     assert _wait_for(lambda: texts == ["after"])
-    assert conn._pending == {}
+    assert _wait_for(lambda: conn._pending == {}), conn._pending
     conn.close()
 
 
