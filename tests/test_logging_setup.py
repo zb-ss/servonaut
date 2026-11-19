@@ -53,3 +53,21 @@ def test_hosted_mcp_session_ids_stay_out_of_the_log(tmp_path, restore_logging):
     text = log_file.read_text(encoding="utf-8")
     assert "fake-session-id" not in text
     assert "Session termination failed: 503" in text
+
+
+@pytest.mark.parametrize("warn_on_failure", [True, False])
+@pytest.mark.parametrize("blocked", ["directory", "file"])
+def test_log_setup_fails_open_without_using_stdout(
+    tmp_path, restore_logging, capsys, warn_on_failure, blocked,
+):
+    blocked_path = tmp_path / "logs"
+    if blocked == "directory":
+        blocked_path.touch()
+    else:
+        blocked_path.mkdir()
+        (blocked_path / "servonaut.log").mkdir()
+    assert configure_rotating_log(blocked_path, warn_on_failure=warn_on_failure) is None
+    logging.getLogger("servonaut.test").warning("ordinary log message")
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ("servonaut: Could not enable file logging.\n" if warn_on_failure else "")

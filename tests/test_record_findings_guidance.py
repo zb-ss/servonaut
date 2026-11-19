@@ -100,7 +100,7 @@ def test_the_server_is_created_with_the_guidance(monkeypatch):
     stub_tools = SimpleNamespace(
         has_memory=True, has_ovh=False, has_hetzner=False, has_ip_ban=False,
     )
-    monkeypatch.setattr(mcp_server, "build_headless_tools", lambda cm: stub_tools)
+    monkeypatch.setattr(mcp_server, "build_headless_tools", lambda cm, **_kwargs: stub_tools)
     monkeypatch.setattr("mcp.server.Server", FakeServer)
 
     mcp_server.create_mcp_server()

@@ -28,7 +28,8 @@ def _exit_missing_sdk() -> NoReturn:
     sys.exit(1)
 
 
-def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=None):
+def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=None,
+                         audit_to_stderr: bool = False):
     """Construct a fully wired :class:`ServonautTools` with no TUI.
 
     Single source of truth for headless service construction — shared by
@@ -125,7 +126,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         logger.warning("MemoryService unavailable in MCP: %s", e)
 
     guard = CommandGuard(config.mcp, config_manager)
-    audit = AuditTrail(config.mcp.audit_path)
+    audit = AuditTrail(config.mcp.audit_path, warn_to_stderr=audit_to_stderr)
     auth_service = AuthService()
     if vault_runtime is None and auth_service.is_authenticated:
         from servonaut.services.api_client import APIClient
@@ -441,9 +442,9 @@ def create_mcp_server():
 
     from servonaut.config.manager import ConfigManager
 
-    config_manager = ConfigManager()
+    config_manager = ConfigManager(allow_read_only=True)
     config = config_manager.get()
-    tools = build_headless_tools(config_manager)
+    tools = build_headless_tools(config_manager, audit_to_stderr=True)
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = tools.has_ovh

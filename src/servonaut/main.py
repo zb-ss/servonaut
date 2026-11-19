@@ -28,19 +28,23 @@ def _prune_empty_env() -> None:
     _PRUNED_ENV_NAMES = prune_empty_forwarded_env()
 
 
-def _setup_logging(debug: bool = False) -> Path:
+def _setup_logging(debug: bool = False, *, mcp: bool = False) -> Path | None:
     """Configure logging to a size-rotated file (and optionally stderr).
 
     Args:
         debug: If True, also log to stderr and use DEBUG level.
+        mcp: Suppress the optional file-log startup warning for MCP.
 
     Returns:
-        Path to the active log file.
+        Path to the active log file, if available.
     """
     from servonaut.utils.logging_setup import configure_rotating_log
 
-    log_file = configure_rotating_log(Path.home() / '.servonaut' / 'logs', debug=debug)
-    logging.getLogger(__name__).info("Servonaut started — log: %s", log_file)
+    log_file = configure_rotating_log(
+        Path.home() / '.servonaut' / 'logs', debug=debug, warn_on_failure=not mcp,
+    )
+    if log_file is not None:
+        logging.getLogger(__name__).info("Servonaut started — log: %s", log_file)
     if _PRUNED_ENV_NAMES:
         logging.getLogger(__name__).info(
             "Ignoring empty environment variables: %s", ", ".join(_PRUNED_ENV_NAMES)
@@ -1849,7 +1853,7 @@ def _main() -> None:
 
     if args.mcp:
         import asyncio
-        _setup_logging(debug=args.debug)
+        _setup_logging(debug=args.debug, mcp=True)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
         return
