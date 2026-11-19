@@ -28,7 +28,15 @@ To run the check yourself, for example from a headless install:
 servonaut --mcp-repair
 ```
 
-Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten. When one names a path that no longer exists, the startup notification says which agent it is, and `--mcp-repair` names the missing path so you can fix it, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
+It also lists agents whose configuration has no Servonaut entry, or is empty, with the `--mcp-install` command that adds one.
+
+Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten. A script may try several places in turn (a path, then `command -v servonaut`); it counts as broken only when none of them can still start Servonaut. Then the startup notification says which agent it is, and `--mcp-repair` names the missing paths so you can fix them, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
+
+### The `servonaut` command with only the desktop app
+
+The Linux desktop package installs `/usr/bin/servonaut`. The macOS app keeps its command line inside the app, so when it starts it links `~/.local/bin/servonaut` to it, the place pipx uses, if nothing is there yet. Agent entries and scripts that run `servonaut` or `~/.local/bin/servonaut` then keep working after you remove the pipx installation. A link the app made is moved along when you move the app, and a link that points nowhere is replaced; anything else at that path, such as the pipx installation's link or a script of your own, is left alone.
+
+If `~/.local/bin` is not on your `PATH`, run the commands from this page with the full path, for example `~/.local/bin/servonaut --mcp-repair`; the startup notification names the command that works on your Mac. The install script hands the name back to pipx when you install the TUI later; with pipx itself, use `pipx install --force servonaut`. The link is made at startup only while `repair_stale_install_paths` is on.
 
 ## Guard levels
 

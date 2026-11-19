@@ -431,7 +431,8 @@ class ServonautApp(App):
         )
         # Agent MCP configs and the terminal shortcut can still name an
         # executable a change of install method removed (pipx -> desktop
-        # package, or back). Own group for the same reason as version_check.
+        # package, or back); the macOS app also links ~/.local/bin/servonaut
+        # here. Own group for the same reason as version_check.
         if self.config_manager.get().repair_stale_install_paths:
             self.run_worker(
                 self._repair_stale_install_paths(),
