@@ -9,6 +9,7 @@ moves them breaks here, loudly, and nowhere else.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable, Union
 
@@ -110,6 +111,10 @@ async def click_row(t: Any, table: DataTable, index: int) -> None:
     """
     if not 0 <= index < table.row_count:
         raise AssertionError(f"{table!r} has no row {index} ({table.row_count} rows)")
+    # Row count can update before the table's scroll limits.
+    refreshed = asyncio.Event()
+    table.call_after_refresh(refreshed.set)
+    await t.wait_until(refreshed.is_set, desc=f"{table!r} row dimensions ready")
     top = sum(row.height for row in table.ordered_rows[:index])
     table.scroll_to(y=top, animate=False, immediate=True)
     await t.pilot.pause()

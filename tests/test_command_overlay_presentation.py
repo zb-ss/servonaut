@@ -27,7 +27,7 @@ from servonaut.services.ssh_service import SSHService
 from servonaut.styles import CSS_FILES
 from servonaut.styles.themes import SERVONAUT_THEMES
 from servonaut.widgets.command_output import CommandOutput
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import assert_button_label_painted
 from tests.test_navigation_dialog_contrast import _assert_readable, _painted_text_styles
 from tests.test_selection_copy import _Clipboard
@@ -397,7 +397,7 @@ async def test_console_picker_fills_without_running_and_save_uses_trimmed_name(r
         else:
             field.value = "  " + COMMAND + "  "
             await pilot.press("ctrl+s")
-            await wait_until(lambda: isinstance(app.screen, SaveCommandModal))
+            await wait_for_screen_ready(app, SaveCommandModal, required=("#save_name_input",))
             app.screen.query_one("#save_name_input", Input).value = "  Example  "
             await pilot.press("enter")
             await wait_until(lambda: app.screen is overlay)

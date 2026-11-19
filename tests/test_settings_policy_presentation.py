@@ -18,7 +18,7 @@ from servonaut.screens.settings.panels.ai_chat import _DANGEROUS_WARNING
 from servonaut.screens.settings.panels.relay import _WARN_DANGEROUS_AUTO_APPROVE
 from servonaut.screens.settings.shell import DiscardChangesModal
 from servonaut.styles.themes import SERVONAUT_THEMES
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests.test_navigation_dialog_contrast import _painted_text_styles
 from tests.test_settings_presentation import _Host, _ready, _tab_to
 
@@ -261,7 +261,8 @@ async def test_invalid_vault_draft_keeps_native_switch_guard_and_discard_reload(
         destination = screen.query_one("#navbtn_history_paths", Button)
         await _tab_to(pilot, destination)
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-cancel",))
+        await wait_for_click_target(app, "#discard-cancel")
         assert await pilot.click("#discard-cancel")
         await wait_until(lambda: app.screen is screen)
         assert field.value == "0" and panel.has_unsaved_changes()
@@ -273,7 +274,8 @@ async def test_invalid_vault_draft_keeps_native_switch_guard_and_discard_reload(
 
         await _tab_to(pilot, destination)
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-confirm",))
+        await wait_for_click_target(app, "#discard-confirm")
         assert await pilot.click("#discard-confirm")
         await wait_until(lambda: app.screen is screen)
         await _ready(app, pilot)

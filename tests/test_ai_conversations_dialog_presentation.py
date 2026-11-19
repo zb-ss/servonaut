@@ -12,7 +12,7 @@ from servonaut.screens.ai_conversations_screen import (
     AIConversationsScreen, _ConfirmModal, _ExportPathModal,
 )
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import tab_to
 from tests.test_selection_copy import _Clipboard, _drag
 from tests.test_selection_copy import clipboard as clipboard
@@ -168,7 +168,8 @@ async def test_real_history_confirmation_cancel_then_exact_selected_mutation(kin
         app.ai_conversations_client.delete.assert_not_awaited()
         app.chat_service.delete_session.assert_not_called()
         await _click(pilot, button)
-        await wait_until(lambda: isinstance(app.screen, _ConfirmModal))
+        await wait_for_screen_ready(app, _ConfirmModal, required=("#btn_yes",))
+        await wait_for_click_target(app, "#btn_yes")
         await _click(pilot, "#btn_yes")
         if kind == "archive":
             await wait_until(lambda: app.ai_conversations_client.patch.await_count == 1)

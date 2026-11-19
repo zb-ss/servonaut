@@ -20,7 +20,7 @@ from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.upsell_modal import UpsellModal
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase, assert_button_label_painted, assert_layout,
     assert_qualified_boundaries, assert_visibility_combinations, content, open_case,
@@ -434,8 +434,9 @@ async def test_clear_confirmation_keeps_table_context_and_chat_draft(confirm: bo
         table.focus()
         await wait_until(lambda: app.focused is table)
         await pilot.press("c")
-        await wait_until(lambda: isinstance(app.screen, SimpleConfirmModal))
+        await wait_for_screen_ready(app, SimpleConfirmModal, required=("#confirm_no_btn",))
         assert app.focused is app.screen.query_one("#confirm_no_btn", Button)
+        await wait_for_click_target(app, "#confirm_yes_btn" if confirm else "#confirm_no_btn")
         await _click(pilot, "#confirm_yes_btn" if confirm else "#confirm_no_btn")
         await wait_until(lambda: app.screen is screen)
         assert screen.query_one(ChatPanel) is panel
@@ -515,10 +516,11 @@ async def test_clear_prompt_escapes_selected_module_without_changing_raw_target(
         monkeypatch.setattr(screen, "_get_cursor_module_key", lambda: (module_name, "version"))
         screen.query_one("#memory-table", DataTable).focus()
         await pilot.press("c")
-        await wait_until(lambda: isinstance(app.screen, SimpleConfirmModal))
+        await wait_for_screen_ready(app, SimpleConfirmModal, required=("#confirm_message",))
         message = app.screen.query_one("#confirm_message", Static)
         assert message.render().plain == f"Clear module {module_name}?"
         await wait_until(lambda: module_name in _painted(app, message))
+        await wait_for_click_target(app, "#confirm_yes_btn")
         await _click(pilot, "#confirm_yes_btn")
         await wait_until(lambda: app.screen is screen)
         await wait_until(lambda: app.memory_service.clear.called)

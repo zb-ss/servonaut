@@ -6,6 +6,7 @@ import pytest
 from textual.widgets import Button, Input
 
 from tests._async_bounds import wait_until
+from tests.snapshots import _harness
 from tests.test_vault_key_names_tui import _Host, _Service, _confirm_open, _loaded, _rename_open
 
 
@@ -25,9 +26,11 @@ def test_vault_key_management(screen_snapshot, size, state) -> None:
             await wait_until(lambda: "Name is required." in str(app.screen.query_one("#vault_rename_key_feedback").render()))
             # A pressed button keeps its "-active" look for a moment; capture after it ends.
             await wait_until(lambda: not app.screen.query_one("#vault_rename_key_save", Button).has_class("-active"))
+            _harness.freeze_cursors(app)
         elif state == "delete":
             screen.action_delete_key()
             await wait_until(lambda: _confirm_open(app))
+            _harness.freeze_cursors(app)
         elif state in {"bulk-select", "bulk-delete"}:
             from servonaut.screens.bulk_action import BulkActionModal
             from textual.widgets import SelectionList

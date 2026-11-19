@@ -233,6 +233,17 @@ async def collapse_chat(
         await settled_layout(app, screen)
 
 
+def _assert_target_exposed(
+    app: ServonautApp, body: Widget, screen: WorkspaceScreen, target: Widget,
+) -> None:
+    assert target.region.width > 0 and target.region.height > 0
+    assert body.region.x <= target.region.x
+    assert target.region.x < target.region.right <= body.region.right
+    assert screen.region.contains(*target.region.center)
+    hit = app.get_widget_at(*target.region.center)[0]
+    assert hit is target or target in hit.ancestors
+
+
 async def assert_essential_targets(
     case: ReflowCase, app: ServonautApp, pilot: Pilot, screen: WorkspaceScreen,
 ) -> None:
@@ -241,20 +252,36 @@ async def assert_essential_targets(
     for selector in case.essential_targets:
         target = screen.query_one(selector)
         target.scroll_visible(animate=False, immediate=True)
-        await pilot.pause()
-        assert target.region.width > 0 and target.region.height > 0
-        assert body.region.x <= target.region.x
-        assert target.region.x < target.region.right <= body.region.right
-        assert screen.region.contains(*target.region.center)
-        hit = app.get_widget_at(*target.region.center)[0]
-        assert hit is target or target in hit.ancestors
+        failure: AssertionError | None = None
+
+        def exposed() -> bool:
+            nonlocal failure
+            try:
+                _assert_target_exposed(app, body, screen, target)
+            except AssertionError as error:
+                failure = error
+                return False
+            return True
+
+        try:
+            await wait_until(exposed)
+        except asyncio.TimeoutError:
+            raise failure or AssertionError(
+                f"{selector} did not become exposed in the workspace viewport"
+            ) from None
         if isinstance(target, Button):
             await wait_button_label_painted(app, target)
     for selector, text in case.painted_targets:
         target = screen.query_one(selector)
         target.scroll_visible(animate=False, immediate=True)
-        await pilot.pause()
-        await wait_until(lambda t=target, expected=text: expected in _painted(app, t))
+        await wait_until(
+            lambda t=target, expected=text: (
+                t.region.area > 0
+                and 0 <= t.region.y
+                and t.region.bottom <= app.size.height
+                and expected in _painted(app, t)
+            )
+        )
         assert text in _painted(app, target)
 
 
