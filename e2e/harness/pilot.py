@@ -403,6 +403,10 @@ class TuiDriver:
             await self.wait_until(
                 lambda: not widget.has_class("-active"), desc=f"{widget!r} ready for a click"
             )
+        # Pending layout can move the widget before scrolling takes effect.
+        refreshed = asyncio.Event()
+        widget.call_after_refresh(refreshed.set)
+        await self.wait_until(refreshed.is_set, desc=f"{widget!r} layout ready for scrolling")
         widget.scroll_visible(animate=False, immediate=True)
         await self.pilot.pause()
         region = await self.wait_until(
