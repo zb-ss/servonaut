@@ -491,6 +491,21 @@ async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_vault_capabilities_option_announces_only_known_features(qa_sandbox):
+    """--vault-capabilities: walk the vault screens against a service with its optional features."""
+    before = _files(qa_sandbox.person.base)
+    refused = await qa_sandbox.command("up", "--vault-capabilities", "item_usage,nope")
+    assert refused.returncode == 2 and "unknown vault capability nope" in refused.stderr, refused.stderr
+
+    current = await qa_sandbox.up("--signed-in", "--vault-capabilities", "item_usage,delete_refuses_bound")
+    assert current["vault_capabilities"] == ["item_usage", "delete_refuses_bound"]
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
 async def test_bitwarden_option_seeds_fleet_keys_and_forwards_session(qa_sandbox):
     before = _files(qa_sandbox.person.base)
     current = await qa_sandbox.up("--signed-in", "--bitwarden")
