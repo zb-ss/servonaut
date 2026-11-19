@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import threading
 import time
@@ -67,6 +66,7 @@ from servonaut.services.voice_conversation_service import (
 from servonaut.services.voice_input_service import VoiceInputError
 from servonaut.services.voice_output_service import VoiceOutputError
 from tests._async_bounds import STEP_TIMEOUT_SECONDS
+from tests.desktop._voice_pipes import PipeTransport
 
 logger = logging.getLogger(__name__)
 
@@ -75,32 +75,13 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-class PipeTransport:
-    """Creates a pair of bidirectional OS pipes for testing."""
-
-    def __init__(self) -> None:
-        p2w_r, p2w_w = os.pipe()
-        w2p_r, w2p_w = os.pipe()
-
-        self.parent_in = os.fdopen(w2p_r, "rb", buffering=0)
-        self.parent_out = os.fdopen(p2w_w, "wb", buffering=0)
-
-        self.worker_in = os.fdopen(p2w_r, "rb", buffering=0)
-        self.worker_out = os.fdopen(w2p_w, "wb", buffering=0)
-
-    def close(self) -> None:
-        for f in (self.parent_in, self.parent_out, self.worker_in, self.worker_out):
-            try:
-                f.close()
-            except Exception:
-                pass
-
-
 @pytest.fixture
 def pipes():
     transport = PipeTransport()
-    yield transport
-    transport.close()
+    try:
+        yield transport
+    finally:
+        transport.close()
 
 
 def _default_handshake_payload() -> HandshakeResponsePayload:
@@ -232,7 +213,7 @@ def test_input_service_recording_lifecycle(pipes):
                 time.sleep(0.05)
                 write_voice_frame(p.worker_out, InputEndpointEvent(id=_new_id()))
 
-            threading.Thread(target=emit_events, daemon=True).start()
+            p.start_event_emitter(emit_events)
             return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
 
         if isinstance(req, InputStopRequest):
@@ -412,7 +393,7 @@ def test_output_service_utterance_session_lifecycle(pipes):
                     ),
                 )
 
-            threading.Thread(target=emit_completed, daemon=True).start()
+            p.start_event_emitter(emit_completed)
             return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
         return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
 
@@ -536,7 +517,7 @@ def test_conversation_service_state_and_signals(pipes):
                     ),
                 )
 
-            threading.Thread(target=emit_state, daemon=True).start()
+            p.start_event_emitter(emit_state)
             return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
 
         if isinstance(req, ConversationSignalRequest):
@@ -554,7 +535,7 @@ def test_conversation_service_state_and_signals(pipes):
                     ),
                 )
 
-            threading.Thread(target=emit_stop, daemon=True).start()
+            p.start_event_emitter(emit_stop)
             return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
 
         return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})

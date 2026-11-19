@@ -96,6 +96,12 @@ async def _assert_reachable(
     widget.focus()
     widget.scroll_visible(animate=False)
     await pilot.pause()
+    await wait_until(
+        lambda: app.focused is widget
+        and widget.region.width > 0 and widget.region.height > 0
+        and app.screen.region.contains(*widget.region.center)
+        and app.get_widget_at(*widget.region.center)[0] is widget
+    )
     assert app.focused is widget
     assert widget.region.width > 0 and widget.region.height > 0
     assert app.screen.region.contains(*widget.region.center)

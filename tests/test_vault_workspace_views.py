@@ -1,6 +1,7 @@
 """The Vault screen's view switch and inspector keep every action, gate and name as before."""
 from __future__ import annotations
 
+from asyncio import Event
 from unittest.mock import MagicMock
 
 import pytest
@@ -243,8 +244,21 @@ async def _clickable(app, pilot, screen: VaultScreen, button_id: str) -> None:
     button = screen.query_one(f"#{button_id}")
     await wait_until(lambda: not screen._busy_work and button.region.width > 0
                      and app.get_widget_at(*button.region.center)[0] is button)
-    # Queued focus reveals scroll once more; let them run before a click lands.
     await pilot.pause()
+    refreshed = Event()
+    screen.call_after_refresh(refreshed.set)
+    next_step = screen.query_one("#vault_next_step", Static)
+    # Selection can reveal a header row after the worker has finished.
+    await wait_until(
+        lambda: refreshed.is_set() and not screen._busy_work
+        and screen._primary == screen._primary_action()
+        and next_step.has_class("-shown") == (next_step.region.height > 0)
+        and button.region.width > 0 and button.region.height > 0
+        and screen.region.contains(*button.region.center)
+        and screen.region.contains(*button.region.offset)
+        and app.get_widget_at(*button.region.center)[0] is button
+        and app.get_widget_at(*button.region.offset)[0] is button
+    )
 
 
 async def _view(screen: VaultScreen, action, mode: str) -> None:
