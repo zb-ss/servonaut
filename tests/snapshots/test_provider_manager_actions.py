@@ -365,6 +365,10 @@ async def test_wide_layout_keeps_the_table_before_the_rail(manager: Manager) -> 
             await pilot.pause()
         rail = screen.query_one(".provider-manager-rail")
         table_panel = screen.query_one(".provider-manager-inventory")
+        await wait_until(
+            lambda: table_panel.region.x < rail.region.x
+            and screen.query_one(f"#{manager.prefix}_hint").display
+        )
         assert table_panel.region.x < rail.region.x
         assert screen.query_one(f"#{manager.prefix}_hint").display
 

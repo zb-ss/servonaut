@@ -239,6 +239,14 @@ async def test_replacement_returns_to_native_columns_and_keeps_the_draft(
         for size in ((100, 30), (160, 50), (200, 50), (100, 30), (160, 50)):
             await pilot.resize_terminal(*size)
             await pilot.pause()
+            await wait_until(
+                lambda: screen.has_class("-chat-replace") is (size[0] == 100)
+                and (size[0] < 160 or (
+                    panel.region.width == column_width
+                    and _content(screen).region.right <= panel.region.x
+                    and screen.has_class("-content-narrow") is (size[0] == 160)
+                ))
+            )
             assert screen.has_class("-chat-replace") is (size[0] == 100)
             if size[0] >= 160:
                 assert panel.region.width == column_width
@@ -264,6 +272,10 @@ async def test_a_reopened_panel_returns_to_the_native_column(family: str) -> Non
         assert replacement is not panel and screen.has_class("-chat-replace")
         await pilot.resize_terminal(160, 50)
         await pilot.pause()
+        await wait_until(
+            lambda: not screen.has_class("-chat-replace")
+            and replacement.region.width == column_width
+        )
         assert not screen.has_class("-chat-replace")
         assert replacement.region.width == column_width
         assert app._exception is None
@@ -553,6 +565,16 @@ async def test_minimum_chat_column_keeps_draft_and_native_glyph_controls_usable(
             assert app.get_widget_at(*widget.region.center)[0] is widget
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
+        await wait_until(
+            lambda: screen.has_class("-chat-replace")
+            and editor.region.right <= controls[0].region.x
+            and all(button.region.height == 3 and button.region.width == 6 for button in controls)
+            and all(
+                panel.region.contains_region(widget.region)
+                and app.get_widget_at(*widget.region.center)[0] is widget
+                for widget in (editor, *controls)
+            )
+        )
         assert screen.has_class("-chat-replace")
         assert editor.region.right <= controls[0].region.x
         assert panel.region.contains_region(editor.region)
