@@ -337,6 +337,22 @@ async def test_pending_device_native_sidebar_entry_reveals_approve_above_footer(
         approve = screen.query_one("#vault_approve", Button)
         content = screen.query_one("#vault_content")
         actions = screen.query_one("#vault_action_scroll")
+        refreshed = asyncio.Event()
+        screen.call_after_refresh(refreshed.set)
+        next_step = screen.query_one("#vault_next_step", Static)
+        # Selection can reveal a header row after loading has finished.
+        await wait_until(
+            lambda: refreshed.is_set() and not screen._busy_work
+            and screen._primary == screen._primary_action()
+            and next_step.has_class("-shown") == (next_step.region.height > 0)
+            and table.row_count == 2 and table.cursor_row == 1
+            and app.focused is approve
+            and approve.region.width > 0 and approve.region.height > 0
+            and screen.region.contains_region(approve.region)
+            and content.can_view_entire(approve)
+            and actions.region.contains_region(approve.region)
+            and app.get_widget_at(*approve.region.offset)[0] is approve
+        )
         assert table.row_count == 2 and table.cursor_row == 1
         assert table.region.height >= 7
         assert app.focused is approve
