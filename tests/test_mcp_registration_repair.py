@@ -818,6 +818,23 @@ def test_nonexecutable_wrapper_candidate_does_not_hide_a_missing_fallback(
     report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
 
     assert report.state is RegistrationState.STALE_WRAPPER
+    assert report.detail.endswith(
+        "$HOME/old/servonaut, $HOME/removed/servonaut, none of which is an executable file"
+    ), report.detail
+
+
+def test_a_single_unusable_path_is_named_in_the_singular(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _claude_wrapper(home, 'exec "$HOME/removed/servonaut" --mcp')
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda _name: None)
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.state is RegistrationState.STALE_WRAPPER
+    assert report.detail.endswith(
+        "$HOME/removed/servonaut, which is not an executable file"
+    ), report.detail
 
 
 def test_literal_quoted_codex_header_matches_an_existing_entry(

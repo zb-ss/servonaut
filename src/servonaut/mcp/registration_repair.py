@@ -284,9 +284,14 @@ def _judge(argv: Sequence[str]) -> _Verdict | None:
     # of them is there.
     if len(missing) < len(paths) or _wrapper_finds_servonaut_on_path(argv):
         return _Verdict(RegistrationState.OK)
+    reason = (
+        f"{missing[0]}, which is not an executable file"
+        if len(missing) == 1
+        else f"{', '.join(missing)}, none of which is an executable file"
+    )
     return _Verdict(
         RegistrationState.STALE_WRAPPER,
-        f"its launch script names {', '.join(missing)}, which is missing or not executable",
+        f"its launch script names {reason}",
     )
 
 
