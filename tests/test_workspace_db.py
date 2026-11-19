@@ -24,7 +24,7 @@ from servonaut.services.secret_provider import LocalProvider
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase, assert_essential_targets, assert_layout,
     assert_qualified_boundaries, assert_visibility_combinations,
@@ -416,7 +416,8 @@ async def test_coverage_check_action_and_remove_confirmation_from_content() -> N
         assert (captured.instance_id, captured.label) == ("id-web-1", "shop.example.com")
         table.move_cursor(row=row)
         await pilot.press("d")
-        await wait_until(lambda: isinstance(app.screen, ConfirmDbRemoveModal))
+        await wait_for_screen_ready(app, ConfirmDbRemoveModal, required=("#btn_db_remove_cancel",))
+        await wait_for_click_target(app, "#btn_db_remove_cancel")
         await _click(pilot, "#btn_db_remove_cancel")
         await wait_until(lambda: app.screen is screen)
         assert app.servonaut_tools.db_setup_remove.await_count == 0
@@ -429,12 +430,14 @@ async def test_coverage_check_action_and_remove_confirmation_from_content() -> N
             await wait_until(lambda: app.focused is table)
             table.move_cursor(row=row)
             await pilot.press("d")
-            await wait_until(lambda: isinstance(app.screen, ConfirmDbRemoveModal))
+            await wait_for_screen_ready(app, ConfirmDbRemoveModal, required=("#db_remove_delete_secret",))
             checkbox = app.screen.query_one("#db_remove_delete_secret", Checkbox)
             assert checkbox.value is True and not checkbox.disabled
             if toggle:
+                await wait_for_click_target(app, "#db_remove_delete_secret")
                 assert await pilot.click("#db_remove_delete_secret")
                 await wait_until(lambda: checkbox.value is False)
+            await wait_for_click_target(app, "#btn_db_remove_confirm")
             await _click(pilot, "#btn_db_remove_confirm")
             await wait_until(lambda: app.screen is screen)
             await wait_until(
@@ -520,7 +523,7 @@ async def test_nested_scan_roots_characterises_caller_result(route: str) -> None
 
         with patch.object(app, "push_screen", _recording_push):
             await pilot.press("p")
-            await wait_until(lambda: isinstance(app.screen, DbScanRootsScreen))
+            await wait_for_screen_ready(app, DbScanRootsScreen, required=("#db_roots_input",))
         roots = app.screen
         # Every route starts from an unsaved draft edit, typed natively.
         field = roots.query_one("#db_roots_input", Input)

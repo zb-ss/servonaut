@@ -25,7 +25,7 @@ from servonaut.styles import CSS_FILES
 from servonaut.styles.themes import SERVONAUT_THEMES
 from servonaut.utils import platform_utils
 from servonaut.widgets.dialogs import DialogContent, DialogFrame, DialogNotificationSpace
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
 
@@ -471,7 +471,7 @@ async def test_log_stream_resumes_and_flushes_new_lines_after_copy_escape(
             process.send("before overlay")
             await wait_until(lambda: "before overlay" in viewer._content_buffer)
             await pilot.press("v")
-            await wait_until(lambda: isinstance(app.screen, CopyModeScreen))
+            await wait_for_screen_ready(app, CopyModeScreen, required=("TextArea",))
             assert _area(app.screen).text == "before overlay"
             process.send("while overlay is open")
             await pilot.pause()

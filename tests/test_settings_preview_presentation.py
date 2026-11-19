@@ -20,7 +20,7 @@ from servonaut.screens.settings.shell import DiscardChangesModal
 from servonaut.screens.settings.widgets import PreviewBanner, StringListEditor
 from servonaut.services.azure_service import AzureService
 from servonaut.services.gcp_service import GCPService
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests.test_settings_credentials_presentation import _CredentialsApp, _ready
 from tests.test_settings_presentation import _painted_label, _tab_to
 
@@ -253,7 +253,8 @@ async def test_cancel_back_guard_keeps_native_list_edits_without_persisting(
         await _add(app, pilot, editor, extra)
         settings = app.screen
         await _click(app, pilot, settings.query_one("#settings-back", Button))
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-cancel",))
+        await wait_for_click_target(app, "#discard-cancel")
         await _click(app, pilot, app.screen.query_one("#discard-cancel", Button))
         await wait_until(lambda: app.screen is settings)
         assert editor.get_values() == original + [extra]

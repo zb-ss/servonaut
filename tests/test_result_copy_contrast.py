@@ -23,7 +23,7 @@ from servonaut.services.redaction_service import RedactionService
 from servonaut.services.ssh_service import SSHService
 from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT, is_servonaut_theme
 from servonaut.widgets.dialogs import DialogActions, DialogFrame
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._theme_sets import theme_chunks
 from tests.test_ansi_chat_dialog_contrast import _glyph_evidence, _painted_glyphs
 from tests.test_editor_selection_contrast import (
@@ -437,7 +437,7 @@ async def _choose_log(pilot: Pilot, app: _Host, *, custom: bool = False) -> None
         await pilot.press(*'custom')
         await wait_until(lambda: set(picker._option_map) == {'action:add_path'})
         await pilot.press('enter')
-        await wait_until(lambda: isinstance(app.screen, AddPathModal))
+        await wait_for_screen_ready(app, AddPathModal, required=("#add_path_input",))
         field = app.screen.query_one('#add_path_input', Input)
         await wait_until(lambda: app.focused is field)
         await pilot.press(*LITERAL_LOG_PATH, 'enter')

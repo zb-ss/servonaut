@@ -18,7 +18,7 @@ from servonaut.screens.remediation_confirm import RemediationConfirmModal
 from servonaut.services.redaction_service import RedactionService
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
-from tests._async_bounds import wait_for_screen_ready, wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import ReflowCase, assert_essential_targets, assert_layout, collapse_chat, open_case, open_chat
 from tests.test_findings_screen import _revertible_finding, _revert_preview
 from tests.test_workspace_security_reflow import (
@@ -134,9 +134,13 @@ async def test_finding_detail_result_and_origin_refresh_after_real_child_return(
         table = inbox.query_one("#findings_table", DataTable)
         table.focus()
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, FindingDetailScreen))
+        if changed:
+            await wait_for_screen_ready(app, FindingDetailScreen, required=("#btn_finding_ack",))
+        else:
+            await wait_until(lambda: isinstance(app.screen, FindingDetailScreen))
         detail = app.screen
         if changed:
+            await wait_for_click_target(app, "#btn_finding_ack")
             await _click(pilot, "#btn_finding_ack")
             await wait_until(lambda: detail._changed)
             app.findings_service.acknowledge.assert_awaited_once_with("fnd_01abc")
