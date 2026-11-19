@@ -76,9 +76,9 @@ Avoid `pip install --pre` and `pipx install --pip-args=--pre`: they also
 install pre-release versions of Servonaut's dependencies, and some of those
 do not work with it.
 
-While you run a candidate, the update check offers newer candidates and then
-the stable release. A stable installation is only ever offered stable
-releases. Please report problems in
+While you run a candidate, the default update check offers newer candidates
+and then the stable release. With pipx, you can also opt into candidates in
+**Settings → Updates**. Please report problems in
 [GitHub issues](https://github.com/zb-ss/servonaut/issues). Details:
 [Release candidates](docs/release-candidates.md).
 
@@ -211,7 +211,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 - **Your own colour themes** — drop a small TOML file into `~/.servonaut/themes/` and pick it in Settings → Appearance, with a live readability check; `servonaut theme` lists, exports and validates themes. → [docs](docs/themes.md)
 - **Instance caching** — stale-while-revalidate for fast startup.
-- **Auto-update** — startup check + one-click update (`servonaut --update`). Stable installations are offered stable releases only; see [Release candidates](docs/release-candidates.md).
+- **Auto-update** — pipx installs prepare updates in the background and switch on a later launch. Manage the channel and postponements in Settings → Updates. [Updating Servonaut](docs/updates.md)
 - **Terminal shortcut** — `servonaut --install-desktop` adds a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS.
 - **Fully configurable** — everything in `~/.servonaut/config.json`.
 
@@ -248,7 +248,7 @@ the sidebar, with full mouse and keyboard support.
 A few flags you may want on day one:
 
 ```bash
-servonaut --update                # Check for updates and upgrade
+servonaut --update                # Check for an update and install it
 servonaut --install-desktop       # Add a launcher that opens the TUI in a terminal (Linux/macOS)
 servonaut --setup-ovh             # Guided OVHcloud credential setup
 servonaut --debug                 # Verbose logging to stderr
