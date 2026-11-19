@@ -6,6 +6,7 @@ OS/runtime/service/web-stack questions without an SSH round-trip.
 """
 from __future__ import annotations
 
+import io
 import logging
 import sys
 from typing import NoReturn
@@ -491,12 +492,30 @@ async def run_server() -> None:
     except ImportError:
         _exit_missing_sdk()
 
+    from anyio import wrap_file
+
+    # Keep the SDK's replacement decoder for malformed client bytes. If the
+    # stream cannot be configured, let the SDK construct its usual input.
+    input_stream = None
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        except (io.UnsupportedOperation, ValueError, OSError):
+            input_stream = None
+        else:
+            input_stream = wrap_file(sys.stdin)
+
     server = create_mcp_server()
 
     from servonaut.services.team_policy_refresh import kept_fresh
 
     try:
-        async with kept_fresh(server.servonaut_tools.team_policy), stdio_server() as (
+        # The entry point already configures UTF-8. Share those text streams:
+        # the SDK's temporary wrappers otherwise close their shared buffers,
+        # leaving the executable host unable to flush them after main returns.
+        async with kept_fresh(server.servonaut_tools.team_policy), stdio_server(
+            stdin=input_stream, stdout=wrap_file(sys.stdout),
+        ) as (
             read_stream, write_stream,
         ):
             await server.run(read_stream, write_stream, server.create_initialization_options())
