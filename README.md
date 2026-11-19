@@ -438,7 +438,9 @@ If you change how Servonaut is installed (for example from pipx to the desktop
 app) and remove the old copy, the TUI and desktop app point agent entries that
 still name the removed command at the running installation when they start,
 and tell you which agents to restart. `servonaut --mcp-repair` runs the same
-check from the command line. See
+check from the command line. On macOS the desktop app also links
+`~/.local/bin/servonaut` to itself when no other installation provides that
+command. See
 [Switching how Servonaut is installed](docs/mcp-tools.md#switching-how-servonaut-is-installed).
 
 SSH-backed MCP tools first use the configured local or vault key. If that key

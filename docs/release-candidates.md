@@ -281,14 +281,19 @@ It prints `accepted` and `source=Notarized Developer ID`.
 To install it, open the disk image, drag **Servonaut** onto the
 **Applications** folder next to it, and eject the image. Start Servonaut from
 Launchpad or the Applications folder. It uses your configuration in
-`~/.servonaut/`, like any other installation.
+`~/.servonaut/`, like any other installation. When it starts, it links
+`~/.local/bin/servonaut` to its command line if nothing is there yet, so
+coding agents and scripts that run `servonaut` reach the app; see
+[the `servonaut` command with only the desktop app](mcp-tools.md#the-servonaut-command-with-only-the-desktop-app).
 
 The download mirror described above serves the disk images too, and each
 release's notes link them. To move to a newer candidate or release, install
 its disk image the same way, and let Finder replace the copy you have.
 
 To remove it, drag **Servonaut** from the Applications folder to the Trash.
-Your configuration and data in `~/.servonaut/` are kept.
+Your configuration and data in `~/.servonaut/` are kept. If
+`~/.local/bin/servonaut` points into the app, delete that link too
+(`rm ~/.local/bin/servonaut`).
 
 ## Updates in the desktop preview
 

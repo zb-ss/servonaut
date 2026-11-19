@@ -268,8 +268,24 @@ install_release_candidate() {
     exit 1
 }
 
+# The macOS desktop app links ~/.local/bin/servonaut to its own command line
+# while nothing else provides the command. pipx would leave that link in
+# place, so the app hands the name over to this installation.
+release_desktop_app_link() {
+    link="$HOME/.local/bin/servonaut"
+    [ -L "$link" ] || return 0
+    case "$(readlink "$link")" in
+        *.app/Contents/MacOS/servonaut)
+            rm -f "$link"
+            print_info "The servonaut command now runs this installation instead of the desktop app"
+            ;;
+    esac
+}
+
 # Install servonaut
 install_servonaut() {
+    release_desktop_app_link
+
     if [ "$INSTALL_PRE" -eq 1 ]; then
         install_release_candidate
         return 0
