@@ -262,3 +262,36 @@ def test_install_ps1_installs_a_release_candidate_on_request(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "pipx install --force servonaut>=0rc0" in _calls(tmp_path)
+
+
+@needs_posix_shell
+def test_install_sh_takes_the_command_over_from_the_desktop_app(tmp_path: Path) -> None:
+    # The macOS app links ~/.local/bin/servonaut while nothing else provides
+    # it; pipx leaves an existing link alone, so the installer removes it.
+    app = tmp_path / "Applications" / "Servonaut.app" / "Contents" / "MacOS" / "servonaut"
+    app.parent.mkdir(parents=True)
+    app.write_text("#!/bin/sh\n", encoding="utf-8")
+    link = tmp_path / "home" / ".local" / "bin" / "servonaut"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(app)
+
+    result = _run_install_sh(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not link.is_symlink()
+    assert "pipx install servonaut" in _calls(tmp_path)
+
+
+@needs_posix_shell
+def test_install_sh_keeps_a_servonaut_command_it_did_not_link(tmp_path: Path) -> None:
+    other = tmp_path / "venvs" / "servonaut" / "bin" / "servonaut"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    link = tmp_path / "home" / ".local" / "bin" / "servonaut"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(other)
+
+    result = _run_install_sh(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert os.readlink(link) == str(other)

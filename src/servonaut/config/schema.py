@@ -1634,7 +1634,9 @@ class AppConfig:
             servonaut). Legacy ``dark``/``light`` read as the Servonaut pair.
         repair_stale_install_paths: On launch, repoint coding-agent MCP
             entries and the terminal shortcut that still name a removed
-            Servonaut install at the running one (default: True)
+            Servonaut install at the running one, and in the macOS desktop
+            app link ~/.local/bin/servonaut to it when nothing is there
+            (default: True)
     """
     version: int = CONFIG_VERSION
     default_key: str = ""

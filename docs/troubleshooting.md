@@ -218,6 +218,13 @@ rather than a version Servonaut supports.
 Then restart the agent, or reconnect its MCP servers, so it starts the
 server again. Other start-up errors are written to the log described below.
 
+With only the macOS desktop app installed there is no `servonaut` on your
+`PATH` until the app has started once: it then links
+`~/.local/bin/servonaut` to its command line. Start the app, then run
+`~/.local/bin/servonaut --mcp-repair` to see which agents still need a fix.
+If pipx later reports `File exists at ~/.local/bin/servonaut` and leaves the
+app's link in place, install with `pipx install --force servonaut`.
+
 ## Logging
 
 Logs are always written to `~/.servonaut/logs/servonaut.log` and include:

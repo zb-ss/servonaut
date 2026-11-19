@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from servonaut import cli_link
 from servonaut.mcp import installer, registration_repair
 from servonaut.mcp.registration_repair import (
     InstallRepairOutcome,
@@ -456,10 +457,13 @@ def _runtime(kind: DistributionKind, command: str) -> SimpleNamespace:
 
 @pytest.fixture
 def no_shortcuts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent configs only: no terminal shortcut and no command line link."""
     monkeypatch.setattr("servonaut.main.repair_terminal_shortcuts", lambda _argv: [])
+    monkeypatch.setattr(registration_repair, "ensure_cli_link", lambda _runtime: None)
     monkeypatch.setattr(
         registration_repair, "validate_launch_argv", lambda argv, runtime: list(argv)
     )
+    monkeypatch.setattr(cli_link, "validate_launch_argv", lambda argv, runtime: list(argv))
     monkeypatch.setattr(
         installer, "_resolve_mcp_command", lambda runtime: (runtime.mcp_argv()[0], ["--mcp"])
     )
@@ -640,6 +644,58 @@ def test_file_mode_is_kept(home: Path, servonaut_command: str) -> None:
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+# --- agents without an entry -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "{}\n", '{"mcpServers": {"other": {"command": "x"}}}\n'],
+    ids=["empty-file", "empty-object", "other-servers-only"],
+)
+def test_an_agent_config_without_a_servonaut_entry_is_reported_missing(
+    home: Path, servonaut_command: str, content: str
+) -> None:
+    path = home / ".gemini" / "config" / "mcp_config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.client == "agy"
+    assert report.state is RegistrationState.MISSING
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_a_codex_config_without_a_servonaut_block_is_reported_missing(
+    home: Path, servonaut_command: str
+) -> None:
+    _codex_config(home, "")
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.client == "codex"
+    assert report.state is RegistrationState.MISSING
+
+
+def test_a_missing_entry_is_named_by_the_repair_command_only(
+    home: Path,
+    servonaut_command: str,
+    no_shortcuts: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_json(home / ".gemini" / "config" / "mcp_config.json", {"mcpServers": {}})
+    runtime = _runtime(DistributionKind.PIPX, servonaut_command)
+
+    assert repair_on_launch(runtime) is None
+    status = run_repair_command(runtime)
+
+    assert status == 0
+    assert (
+        "Antigravity (~/.gemini/config/mcp_config.json): no Servonaut entry. "
+        "Run `servonaut --mcp-install agy` to add one."
+    ) in capsys.readouterr().out
+
+
 # --- wrappers that try several places ----------------------------------------
 
 _LOOKUP_WRAPPER = (
@@ -684,3 +740,128 @@ def test_a_wrapper_that_looks_servonaut_up_on_path_runs_while_it_is_there(
     report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
     assert report.state is RegistrationState.STALE_WRAPPER
     assert "$HOME/.local/bin/servonaut" in report.detail
+
+
+# --- the macOS desktop app ----------------------------------------------------
+
+
+def _bundle_command(root: Path) -> Path:
+    command = root / "Servonaut.app" / "Contents" / "MacOS" / "servonaut"
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n", encoding="utf-8")
+    command.chmod(0o755)
+    return command
+
+
+def test_the_desktop_app_links_its_command_so_a_wrapper_works_again(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("servonaut.main.repair_terminal_shortcuts", lambda _argv: [])
+    monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "darwin")
+    for module in (registration_repair, cli_link):
+        monkeypatch.setattr(module, "validate_launch_argv", lambda argv, runtime: list(argv))
+    monkeypatch.setattr(
+        installer, "_resolve_mcp_command", lambda runtime: (runtime.mcp_argv()[0], ["--mcp"])
+    )
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda name: None)
+    app = _bundle_command(tmp_path / "Applications")
+    path = _claude_wrapper(home, _LOOKUP_WRAPPER)
+    before = path.read_bytes()
+
+    message = repair_on_launch(_runtime(DistributionKind.PACKAGED_DESKTOP, str(app)))
+
+    assert message == (
+        "Servonaut added the servonaut command at ~/.local/bin/servonaut, so coding "
+        "agents and scripts that run servonaut now use this app."
+    )
+    assert os.readlink(home / ".local" / "bin" / "servonaut") == str(app)
+    # A wrapper someone wrote by hand works again without being rewritten.
+    assert path.read_bytes() == before
+
+
+def _stale_codex_wrapper(home: Path) -> None:
+    _codex_config(
+        home,
+        "[mcp_servers.servonaut]\n"
+        'command = "sh"\n'
+        "args = [\"-c\", 'exec \"$HOME/old/servonaut\" --mcp']\n",
+    )
+
+
+@pytest.mark.parametrize("setup", ["nothing", "link", "path"])
+def test_the_desktop_app_names_a_command_that_exists(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_shortcuts: None,
+    setup: str,
+) -> None:
+    import shlex
+
+    app = _bundle_command(tmp_path / "Applications")
+    _stale_codex_wrapper(home)
+    found = str(app) if setup == "path" else None
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda name: found)
+    if setup == "link":
+        link = home / ".local" / "bin" / "servonaut"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(app)
+    expected = {
+        "nothing": shlex.quote(str(app)),
+        "link": "~/.local/bin/servonaut",
+        "path": "servonaut",
+    }[setup]
+
+    message = repair_on_launch(_runtime(DistributionKind.PACKAGED_DESKTOP, str(app)))
+
+    assert message is not None
+    assert f"run {expected} --mcp-repair to see which path to fix." in message
+
+
+def test_the_repair_command_reports_the_command_link(
+    home: Path,
+    servonaut_command: str,
+    no_shortcuts: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    link = home / ".local" / "bin" / "servonaut"
+    runtime = _runtime(DistributionKind.PACKAGED_DESKTOP, servonaut_command)
+    created = cli_link.CliLinkResult(link, cli_link.CliLinkState.CREATED, Path(servonaut_command))
+    monkeypatch.setattr(registration_repair, "ensure_cli_link", lambda _runtime: created)
+
+    assert run_repair_command(runtime) == 0
+    assert "servonaut command (~/.local/bin/servonaut): created, it runs " in (
+        capsys.readouterr().out
+    )
+
+    failed = cli_link.CliLinkResult(
+        link, cli_link.CliLinkState.FAILED, Path(servonaut_command), "Permission denied"
+    )
+    monkeypatch.setattr(registration_repair, "ensure_cli_link", lambda _runtime: failed)
+
+    assert run_repair_command(runtime) == 1
+    assert "could not be created: Permission denied" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("state", "sentence"),
+    [
+        ("UPDATED", "Servonaut pointed the servonaut command at ~/.local/bin/servonaut to this app."),
+        ("UNCHANGED", None),
+        ("OCCUPIED", None),
+        ("SKIPPED", None),
+    ],
+)
+def test_the_launch_message_mentions_a_link_only_when_it_changed(
+    home: Path, state: str, sentence: str | None
+) -> None:
+    result = cli_link.CliLinkResult(
+        home / ".local" / "bin" / "servonaut",
+        cli_link.CliLinkState[state],
+        Path("/Applications/Servonaut.app/Contents/MacOS/servonaut"),
+    )
+
+    message = launch_message(InstallRepairOutcome(["/x", "--mcp"], cli_link=result))
+
+    assert message == sentence

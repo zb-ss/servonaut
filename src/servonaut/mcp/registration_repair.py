@@ -24,6 +24,13 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from servonaut.cli_link import (
+    CliLinkResult,
+    CliLinkState,
+    app_command,
+    cli_link_path,
+    ensure_cli_link,
+)
 from servonaut.mcp import installer
 from servonaut.mcp.installer import MCPInstallerError
 from servonaut.runtime import (
@@ -75,6 +82,8 @@ class RegistrationState(str, Enum):
     # A hand-written wrapper can no longer find any Servonaut to run.
     STALE_WRAPPER = "stale_wrapper"
     FAILED = "failed"
+    # The agent's config exists but has no servonaut entry (or is empty).
+    MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -149,9 +158,10 @@ def repair_stale_registrations(
         args: Its arguments (``["--mcp"]``).
 
     Returns:
-        One report per agent config that has a servonaut entry Servonaut can
-        check. Agents without one, and entries that run something else (a
-        container, a package runner), are not reported.
+        One report per agent config that exists. A config without a servonaut
+        entry is reported as MISSING; agents without a config, and entries
+        that run something else (a container, a package runner), are not
+        reported.
     """
     if is_command_missing(command):
         logger.warning("MCP registration repair skipped: its own command is missing")
@@ -261,6 +271,14 @@ def _failed(
     )
 
 
+def _missing(name: str, label: str, path: Path) -> RegistrationReport:
+    return RegistrationReport(name, label, path, RegistrationState.MISSING)
+
+
+def _names_servonaut(client: _JsonClient, config: dict[str, Any]) -> bool:
+    return any(SERVER_NAME in servers for servers in client.server_maps(config))
+
+
 def _repair_json_client(
     client: _JsonClient, target: list[str]
 ) -> RegistrationReport | None:
@@ -273,7 +291,7 @@ def _repair_json_client(
         except (OSError, UnicodeDecodeError) as exc:
             return _failed(client.name, client.label, path, f"cannot be read: {exc}")
         if not text.strip():
-            return None
+            return _missing(client.name, client.label, path)
         try:
             config = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -285,6 +303,8 @@ def _repair_json_client(
             )
         if not isinstance(config, dict):
             return None
+        if not _names_servonaut(client, config):
+            return _missing(client.name, client.label, path)
         found = _find_json_entry(client, config)
         if found is None:
             return None
@@ -344,7 +364,7 @@ def _repair_codex(target: list[str]) -> RegistrationReport | None:
             return _failed("codex", _CODEX_LABEL, path, f"cannot be read: {exc}")
         before, block, after = installer._split_codex_block(text)
         if not block:
-            return None
+            return _missing("codex", _CODEX_LABEL, path)
         try:
             argv = _codex_argv(block)
         except MCPInstallerError as exc:
@@ -446,6 +466,10 @@ class InstallRepairOutcome:
     command: list[str]
     registrations: list[RegistrationReport] = field(default_factory=list)
     shortcuts: list[ShortcutRepair] = field(default_factory=list)
+    # The macOS desktop app's ``~/.local/bin/servonaut``; None elsewhere.
+    cli_link: CliLinkResult | None = None
+    # How a person runs this install's command line in a terminal.
+    cli: str = "servonaut"
 
     @property
     def repaired_labels(self) -> list[str]:
@@ -466,10 +490,18 @@ class InstallRepairOutcome:
     @property
     def has_problems(self) -> bool:
         """Whether something still points at a removed install or could not be checked."""
-        return any(
-            report.state in {RegistrationState.STALE_WRAPPER, RegistrationState.FAILED}
-            for report in self.registrations
-        ) or any(shortcut.error is not None for shortcut in self.shortcuts)
+        link_failed = (
+            self.cli_link is not None and self.cli_link.state is CliLinkState.FAILED
+        )
+        return (
+            link_failed
+            or any(
+                report.state
+                in {RegistrationState.STALE_WRAPPER, RegistrationState.FAILED}
+                for report in self.registrations
+            )
+            or any(shortcut.error is not None for shortcut in self.shortcuts)
+        )
 
 
 def repair_install_paths(runtime: RuntimeLayout | None = None) -> InstallRepairOutcome:
@@ -483,6 +515,9 @@ def repair_install_paths(runtime: RuntimeLayout | None = None) -> InstallRepairO
 
     selected = runtime or detect_runtime()
     command, args = installer._resolve_mcp_command(selected)
+    # Linked first: a wrapper that runs ~/.local/bin/servonaut works again
+    # once the link is there, and is judged on that.
+    cli_link = ensure_cli_link(selected)
     registrations = repair_stale_registrations(command, args)
     try:
         app_argv = validate_launch_argv(selected.current_app_argv(), runtime=selected)
@@ -491,7 +526,43 @@ def repair_install_paths(runtime: RuntimeLayout | None = None) -> InstallRepairO
         shortcuts: list[ShortcutRepair] = []
     else:
         shortcuts = repair_terminal_shortcuts(app_argv)
-    return InstallRepairOutcome([command, *args], registrations, shortcuts)
+    return InstallRepairOutcome(
+        [command, *args], registrations, shortcuts, cli_link, _command_hint(selected)
+    )
+
+
+def _command_hint(runtime: RuntimeLayout) -> str:
+    """How a person runs this install's command line in a terminal.
+
+    pip, pipx and the standalone command line put ``servonaut`` on PATH. The
+    desktop app may not (or not on PATH): then its link, or its full path.
+    """
+    target = app_command(runtime)
+    if target is None:
+        return SERVER_NAME
+    found = shutil.which(SERVER_NAME)
+    if found is not None and _same_file(Path(found), target):
+        return SERVER_NAME
+    link = cli_link_path()
+    if _same_file(link, target):
+        return "~/" + link.relative_to(Path.home()).as_posix()
+    return _shell_path(target)
+
+
+def _same_file(path: Path, other: Path) -> bool:
+    try:
+        return path.samefile(other)
+    except OSError:
+        return False
+
+
+def _shell_path(path: Path) -> str:
+    """*path* as a shell word, under home as ``~/...`` so it stays shareable."""
+    text = home_relative(str(path))
+    if text.startswith("~/"):
+        # The tilde must stay outside the quotes to expand.
+        return "~/" + shlex.quote(text[2:])
+    return shlex.quote(text)
 
 
 def repair_on_launch(runtime: RuntimeLayout | None = None) -> str | None:
@@ -519,11 +590,26 @@ def launch_message(outcome: InstallRepairOutcome) -> str | None:
     A hand-written wrapper is never rewritten, so without a line here an agent
     still pointing at a removed install would fail with no hint at startup.
     """
-    sentences = _repair_sentences(outcome)
+    sentences = _cli_link_sentences(outcome.cli_link)
+    sentences.extend(_repair_sentences(outcome))
     stale = outcome.stale_wrapper_labels
     if stale:
-        sentences.append(_stale_wrapper_sentence(stale))
+        sentences.append(_stale_wrapper_sentence(stale, outcome.cli))
     return " ".join(sentences) or None
+
+
+def _cli_link_sentences(link: CliLinkResult | None) -> list[str]:
+    if link is None:
+        return []
+    place = home_relative(str(link.path))
+    if link.state is CliLinkState.CREATED:
+        return [
+            f"Servonaut added the servonaut command at {place}, so coding agents "
+            "and scripts that run servonaut now use this app."
+        ]
+    if link.state is CliLinkState.UPDATED:
+        return [f"Servonaut pointed the servonaut command at {place} to this app."]
+    return []
 
 
 def _repair_sentences(outcome: InstallRepairOutcome) -> list[str]:
@@ -547,16 +633,16 @@ def _repair_sentences(outcome: InstallRepairOutcome) -> list[str]:
     return []
 
 
-def _stale_wrapper_sentence(labels: Sequence[str]) -> str:
+def _stale_wrapper_sentence(labels: Sequence[str], cli: str = SERVER_NAME) -> str:
     if len(labels) == 1:
         return (
             f"{labels[0]} runs Servonaut through a hand-written script that still "
-            "names a removed install; run servonaut --mcp-repair to see which path "
+            f"names a removed install; run {cli} --mcp-repair to see which path "
             "to fix."
         )
     return (
         f"{_join_names(labels)} run Servonaut through hand-written scripts that "
-        "still name a removed install; run servonaut --mcp-repair to see which "
+        f"still name a removed install; run {cli} --mcp-repair to see which "
         "paths to fix."
     )
 
@@ -571,12 +657,14 @@ def run_repair_command(runtime: RuntimeLayout | None = None) -> int:
     _log_outcome(outcome)
     command = shlex.join([home_relative(outcome.command[0]), *outcome.command[1:]])
     print(f"Servonaut MCP command: {command}")
+    if outcome.cli_link is not None:
+        print(_cli_link_line(outcome.cli_link))
     if not outcome.registrations and not outcome.shortcuts:
         print("No coding agent has a Servonaut MCP entry to check, and no terminal "
               "shortcut needs repair.")
-        return 0
+        return 1 if outcome.has_problems else 0
     for report in outcome.registrations:
-        print(_report_line(report))
+        print(_report_line(report, outcome.cli))
     for shortcut in outcome.shortcuts:
         place = home_relative(str(shortcut.path))
         if shortcut.error is None:
@@ -588,7 +676,24 @@ def run_repair_command(runtime: RuntimeLayout | None = None) -> int:
     return 1 if outcome.has_problems else 0
 
 
-def _report_line(report: RegistrationReport) -> str:
+def _cli_link_line(link: CliLinkResult) -> str:
+    where = f"servonaut command ({home_relative(str(link.path))})"
+    target = home_relative(str(link.target))
+    if link.state is CliLinkState.CREATED:
+        return f"{where}: created, it runs {target}"
+    if link.state is CliLinkState.UPDATED:
+        return f"{where}: updated, it runs {target}"
+    if link.state is CliLinkState.UNCHANGED:
+        return f"{where}: ok"
+    if link.state is CliLinkState.OCCUPIED:
+        holder = f" ({home_relative(link.holder)})" if link.holder else ""
+        return f"{where}: left as it is, {link.detail}{holder}"
+    if link.state is CliLinkState.SKIPPED:
+        return f"{where}: not created. {link.detail}."
+    return f"{where}: could not be created: {link.detail}"
+
+
+def _report_line(report: RegistrationReport, cli: str = SERVER_NAME) -> str:
     where = f"{report.label} ({home_relative(str(report.config_path))})"
     if report.state is RegistrationState.OK:
         return f"{where}: ok"
@@ -597,14 +702,28 @@ def _report_line(report: RegistrationReport) -> str:
     if report.state is RegistrationState.STALE_WRAPPER:
         return (
             f"{where}: not changed, {report.detail}. Fix that path by hand, or run "
-            f"`servonaut --mcp-install {report.client}` to replace the entry."
+            f"`{cli} --mcp-install {report.client}` to replace the entry."
+        )
+    if report.state is RegistrationState.MISSING:
+        return (
+            f"{where}: no Servonaut entry. Run `{cli} --mcp-install {report.client}` "
+            "to add one."
         )
     return f"{where}: could not be checked, the file {report.detail}"
 
 
 def _log_outcome(outcome: InstallRepairOutcome) -> None:
+    link = outcome.cli_link
+    if link is not None and link.state is not CliLinkState.UNCHANGED:
+        logger.info(
+            "Command line link %s: %s %s",
+            home_relative(str(link.path)),
+            link.state.value,
+            link.detail,
+        )
     for report in outcome.registrations:
-        if report.state is RegistrationState.OK:
+        # A missing entry is the agent's choice, not a finding to log each launch.
+        if report.state in {RegistrationState.OK, RegistrationState.MISSING}:
             continue
         logger.info(
             "MCP registration %s in %s: %s %s",
