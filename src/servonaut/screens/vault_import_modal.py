@@ -21,7 +21,7 @@ from textual.content import Content
 from textual.screen import ModalScreen
 
 from servonaut.widgets.dialogs import (
-    DialogActions, DialogFrame, DialogNotificationSpace,
+    DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogFrame, DialogNotificationSpace,
 )
 from textual.widgets import Button, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -71,6 +71,8 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     """
 
     DEFAULT_CLASSES = "dialog-screen"
+    # On a short terminal the dialog gives up spacing so the key list keeps rows.
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 

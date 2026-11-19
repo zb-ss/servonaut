@@ -691,3 +691,35 @@ async def test_a_stored_name_ending_in_a_backslash_keeps_the_row_closed(tmp_path
         assert plain.rstrip().endswith("already in this vault as deploy\\")
         assert "[/dim]" not in plain
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_key_list_keeps_rows_on_a_short_terminal(tmp_path: Path) -> None:
+    """At 100x30 the dialog gives up spacing so the list still shows keys and Import stays on screen."""
+    from textual.app import App
+    from textual.widgets import SelectionList
+
+    from servonaut.styles import CSS_FILES
+
+    class Host(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._local_keys = [
+            ScannedKey(path=tmp_path / f"id_{n}", filename=f"id_{n}", encrypted=False, fingerprint=f"SHA256:k{n}")
+            for n in range(3)
+        ]
+        modal._show_local_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 3)
+        await wait_until(lambda: listing.content_region.height >= 3)
+        confirm = modal.query_one("#vault_import_confirm")
+        assert confirm.region.height > 0 and confirm.region.bottom <= 30
+        await pilot.pause()
+
