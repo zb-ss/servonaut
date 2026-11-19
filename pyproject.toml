@@ -155,7 +155,7 @@ Repository = "https://github.com/zb-ss/servonaut"
 Issues = "https://github.com/zb-ss/servonaut/issues"
 
 [project.scripts]
-servonaut = "servonaut.main:main"
+servonaut = "servonaut.entry:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/servonaut"]

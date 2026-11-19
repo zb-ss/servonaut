@@ -6,6 +6,7 @@ import contextlib
 import importlib
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 import weakref
@@ -17,6 +18,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
+from servonaut.updates.status import UpdateCheckOutcome
 from servonaut.styles import CSS_FILES, widen_parse_cache
 from servonaut.styles.parse_cache import install_shared_parse_cache
 from servonaut.widgets.workspace import WorkspaceScreen, WorkspaceState
@@ -3571,7 +3573,29 @@ class ServonautApp(App):
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""
-        import asyncio
+        from servonaut.updates.layout import UpdateLayout
+        from servonaut.updates.launch import refresh_ready
+
+        try:
+            layout = await asyncio.to_thread(UpdateLayout.detect)
+            prefs = await asyncio.to_thread(layout.store.preferences) if layout else None
+        except (OSError, ValueError, RuntimeError):
+            layout, prefs = None, None
+        if layout is not None:
+            await self._show_generation_update()
+            if os.environ.get("SERVONAUT_SKIP_AUTO_APPLY") != "1":
+                self.set_interval(prefs.status_poll_seconds, self._queue_generation_status)
+                self.set_interval(
+                    prefs.tui_refresh_interval_seconds,
+                    lambda: self.run_worker(
+                        asyncio.to_thread(refresh_ready, layout.store), group="update_validation",
+                        exclusive=True, exit_on_error=False,
+                    ),
+                )
+            return
+        await self._check_legacy_update()
+
+    async def _check_legacy_update(self) -> None:
         latest = await asyncio.to_thread(self.update_service.check_for_update)
         if latest:
             self._latest_version = latest
@@ -3581,6 +3605,69 @@ class ServonautApp(App):
                 severity="information",
                 timeout=8,
             )
+
+    def _queue_generation_status(self) -> None:
+        self.run_worker(self._show_generation_update(), group="update_status",
+                        exclusive=True, exit_on_error=False)
+
+    async def request_update_check(self) -> UpdateCheckOutcome:
+        """Report whether a requested check started, without waiting for discovery."""
+        from servonaut.updates.builder import queue_update_check
+        from servonaut.updates.layout import UpdateLayout
+        from servonaut.updates.status import read_update_status
+
+        if os.environ.get("SERVONAUT_SKIP_AUTO_APPLY") == "1":
+            return "skipped"
+        try:
+            layout = await asyncio.to_thread(UpdateLayout.detect)
+            snapshot = await asyncio.to_thread(read_update_status, self.runtime_layout)
+        except (OSError, ValueError, RuntimeError):
+            return "failed"
+        if layout is not None and snapshot.state != "managed_elsewhere":
+            return await asyncio.to_thread(queue_update_check, layout.store, snapshot.installed_version)
+        job = self._check_legacy_update()
+        try:
+            self.run_worker(job, group="update_check_requested", exclusive=True, exit_on_error=False)
+        except RuntimeError:
+            job.close()
+            return "failed"
+        return "queued"
+
+    async def _show_generation_update(self) -> None:
+        """Reflect the background updater's local state in a running session."""
+        from servonaut.updates.status import mark_update_presented, public_version, read_update_status
+
+        snapshot = await asyncio.to_thread(read_update_status, self.runtime_layout)
+        if snapshot.state == "managed_elsewhere":
+            if not getattr(self, "_legacy_generation_update", False):
+                self._legacy_generation_update = True
+                await self._check_legacy_update()
+            return
+        self._legacy_generation_update = False
+        target = public_version(snapshot.target_version)
+        current = public_version(snapshot.installed_version)
+        if target is None or current is None or target <= current:
+            if getattr(self, "_last_generation_offer", None) is not None:
+                self.screen.query("#nav_update").add_class("hidden")
+                self._last_generation_offer = None
+                self._last_generation_presentation = None
+                self._latest_version = None
+            return
+        ready = snapshot.state == "ready"
+        preparing = snapshot.state in ("offered", "building")
+        offer = (snapshot.target_version, ready)
+        if (ready or preparing) and getattr(self, "_last_generation_offer", None) != offer:
+            self._last_generation_offer = offer
+            self._latest_version = snapshot.target_version
+            self._show_update_button(snapshot.target_version)
+            message = (
+                f"{snapshot.target_version} is ready · starts the next time you open Servonaut"
+                if ready else f"Servonaut {snapshot.target_version} is being prepared"
+            )
+            self.notify(message, markup=False)
+            if getattr(self, "_last_generation_presentation", None) != snapshot.target_version:
+                if await asyncio.to_thread(mark_update_presented, snapshot.target_version):
+                    self._last_generation_presentation = snapshot.target_version
 
     def _show_update_button(self, version: str) -> None:
         """Reveal the update button on the current screen's sidebar."""
@@ -3594,6 +3681,12 @@ class ServonautApp(App):
 
     def _run_update(self) -> None:
         """Run the upgrade via pipx/pip."""
+        from servonaut.updates.layout import UpdateLayout
+
+        if (not getattr(self, "_legacy_generation_update", False)
+                and UpdateLayout.detect() is not None):
+            self.open_settings_screen("updates")
+            return
         if not self._latest_version:
             self.notify("Already up to date!", severity="information")
             return
@@ -3615,13 +3708,31 @@ class ServonautApp(App):
     async def _do_update(self) -> None:
         """Worker: run the upgrade."""
         try:
-            success, message = await self.update_service.run_upgrade()
+            success, message = await self.run_requested_upgrade()
         finally:
             self._update_in_progress = False
             self._set_update_button_disabled(False)
         severity = "information" if success else "error"
         # The message can quote package-manager output, which is not markup.
         self.notify(message, severity=severity, timeout=10, markup=False)
+
+    async def run_requested_upgrade(self) -> tuple[bool, str]:
+        """Run a manual update through the owning install."""
+        from servonaut.updates.layout import UpdateLayout
+
+        layout = await asyncio.to_thread(UpdateLayout.detect)
+        if layout is None or layout.generation is None:
+            return await self.update_service.run_upgrade()
+        try:
+            prefs = await asyncio.to_thread(layout.store.preferences)
+            result = await asyncio.to_thread(
+                subprocess.run, [str(layout.launcher), "--update"], cwd=layout.store.root,
+                capture_output=True, text=True, timeout=prefs.upgrade_timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, "Could not run the pipx update command."
+        lines = result.stdout.strip().splitlines()
+        return result.returncode == 0, lines[-1] if lines else "The pipx update command finished."
 
     def _set_update_button_disabled(self, disabled: bool) -> None:
         """Toggle the sidebar update button on every screen in the stack."""

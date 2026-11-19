@@ -16,7 +16,7 @@ USER_CODE = "E2E-0001"
 # Device-flow poll outcomes a scenario can script for /api/oauth/token.
 TOKEN_OUTCOMES = frozenset({"pending", "slow_down", "expired", "denied", "success"})
 # Scenario keys holding lists: stored as copies so a caller's list stays its own.
-_LIST_KEYS = frozenset({"token_outcomes", "pypi_files"})
+_LIST_KEYS = frozenset({"token_outcomes", "pypi_files", "pypi_yanked_files"})
 
 
 @dataclass
@@ -58,6 +58,8 @@ class Scenario:
     pypi_version: str = "0.0.0"
     # Wheel files the fake package index offers (absolute paths).
     pypi_files: list[str] = field(default_factory=list)
+    pypi_yanked_files: list[str] = field(default_factory=list)
+    pypi_download_delay: float = 0.0
     # When set, personal binding reads answer 429 with this Retry-After
     # (seconds), like the service's per-user request limiter.
     binding_reads_retry_after: Optional[int] = None

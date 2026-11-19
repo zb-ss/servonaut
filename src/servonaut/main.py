@@ -1510,6 +1510,7 @@ def _main() -> None:
             raise SystemExit(run_artifact_selftest(runtime))
     _prune_empty_env()
     parser = argparse.ArgumentParser(
+        prog='servonaut',
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )
     from servonaut import get_version

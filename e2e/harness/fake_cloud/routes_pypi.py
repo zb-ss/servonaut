@@ -9,6 +9,7 @@ instead of looking anywhere else.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import re
@@ -39,9 +40,21 @@ def add_routes(app: web.Application, store: ScenarioStore) -> None:
         return [Path(entry) for entry in store.snapshot().pypi_files]
 
     async def project_json(request: web.Request) -> web.Response:
-        version = store.snapshot().pypi_version
+        scenario = store.snapshot()
+        releases: dict[str, list[dict]] = {}
+        for path in offered():
+            parts = path.name.split("-")
+            if parts[0] != "servonaut" or len(parts) < 5:
+                continue
+            releases.setdefault(parts[1], []).append({
+                "filename": path.name,
+                "url": f"{request.scheme}://{request.host}{FILES_PATH}{path.name}",
+                "size": path.stat().st_size,
+                "digests": {"sha256": _sha256(path)},
+                "yanked": path.name in scenario.pypi_yanked_files,
+            })
         return web.json_response(
-            {"info": {"name": "servonaut", "version": version}, "releases": {}}
+            {"info": {"name": "servonaut", "version": scenario.pypi_version}, "releases": releases}
         )
 
     async def simple_project(request: web.Request) -> web.Response:
@@ -61,6 +74,9 @@ def add_routes(app: web.Application, store: ScenarioStore) -> None:
         name = request.match_info["filename"]
         for path in offered():
             if path.name == name:
+                delay = store.snapshot().pypi_download_delay
+                if delay:
+                    await asyncio.sleep(delay)
                 return web.FileResponse(path)
         raise web.HTTPNotFound()
 
