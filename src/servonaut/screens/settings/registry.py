@@ -72,6 +72,16 @@ PANELS: List[PanelSpec] = [
         keywords=["keywords", "command", "history", "chat", "paths", "store"],
         factory=_panel("history_paths", "HistoryPathsPanel"),
     ),
+    PanelSpec(
+        id="updates",
+        title="Updates",
+        group="General",
+        keywords=[
+            "update", "updates", "version", "channel", "release",
+            "candidate", "rc", "stable", "postpone", "pipx",
+        ],
+        factory=_panel("updates", "UpdatesPanel"),
+    ),
     # ------------------------------------------------------------ Connections
     PanelSpec(
         id="scan",
