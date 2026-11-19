@@ -51,8 +51,8 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "servonaut"
 
 # An agent may rewrite its own config while the repair runs (Claude Code
-# saves ~/.claude.json often). A write only lands if the file still holds what
-# was read; otherwise the repair starts again from the new content.
+# saves ~/.claude.json often). Recheck before replacing the file and retry
+# from new content if a save is observed; this is not an atomic comparison.
 _MAX_WRITE_ATTEMPTS = 3
 
 # Interpreters that run a script given inline (``sh -c '...'``). Their entries
@@ -68,10 +68,10 @@ _WRAPPER_PATH_RE = re.compile(
     r"(?:\$\{HOME\}|\$HOME|~|/|[A-Za-z]:[\\/])"
     r"[^\s'\"`;|&()<>]*servonaut[^\s'\"`;|&()<>]*"
 )
-# ``servonaut`` as a bare command word (``command -v servonaut``,
-# ``exec servonaut``): the script resolves it on PATH. Not part of a path,
-# a variable, a host name or a URL.
-_PATH_LOOKUP_RE = re.compile(r"(?<![\w/\\.$~:-])servonaut(?![\w/\\.:-])")
+# A simple assignment whose value comes from resolving the command on PATH.
+_PATH_ASSIGNMENT_RE = re.compile(
+    r"([A-Za-z_][A-Za-z_0-9]*)=\$\(\s*command\s+-v\s+servonaut\s*\)"
+)
 
 
 class RegistrationState(str, Enum):
@@ -207,8 +207,59 @@ def _wrapper_paths(argv: Sequence[str]) -> list[str]:
 
 def _wrapper_finds_servonaut_on_path(argv: Sequence[str]) -> bool:
     """Whether the wrapper looks ``servonaut`` up on PATH and would find it there."""
-    return bool(_PATH_LOOKUP_RE.search(" ".join(argv[1:]))) and (
-        shutil.which(SERVER_NAME) is not None
+    script = _inline_posix_script(argv)
+    return (
+        script is not None
+        and _has_path_launch(script)
+        and shutil.which(SERVER_NAME) is not None
+    )
+
+
+def _inline_posix_script(argv: Sequence[str]) -> str | None:
+    if _executable_name(argv[0]) not in {"sh", "bash", "dash", "zsh", "ksh"}:
+        return None
+    return argv[2] if len(argv) >= 3 and argv[1] == "-c" else None
+
+
+def _has_path_launch(script: str) -> bool:
+    # Decline quoting/escaping that could turn a substitution into literal
+    # data. This recognises simple launch forms, not general shell control flow.
+    if "'" in script or "\\$" in script or re.search(r'(?:^|[;&|])\s*"', script):
+        return False
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return False
+    if words == ["exec", SERVER_NAME, "--mcp"]:
+        return True
+    return _has_lookup_fallback(words)
+
+
+def _has_lookup_fallback(words: list[str]) -> bool:
+    # Accept the simple command lookup, optionally preceded by the common
+    # executable-path fallback. Unknown control flow remains unverified.
+    if len(words) not in {5, 12}:
+        return False
+    assignment = _PATH_ASSIGNMENT_RE.fullmatch(words[-5])
+    if assignment is None:
+        return False
+    name = assignment[1]
+    if words[-4:] != [";", "exec", f"${name}", "--mcp"]:
+        return False
+    return len(words) == 5 or (
+        words[0].startswith(f"{name}=")
+        and words[1:7] == [";", "[", "-x", f"${name}", "]", "||"]
+    )
+
+
+def _wrapper_path_is_runnable(path: str) -> bool:
+    expanded = _expand_home(path)
+    # Windows does not use POSIX execute bits; leave suffix/loader handling
+    # to its shell, while still refusing directories as launch commands.
+    return os.path.isfile(expanded) and (
+        os.name == "nt" or os.access(expanded, os.X_OK)
     )
 
 
@@ -228,14 +279,19 @@ def _judge(argv: Sequence[str]) -> _Verdict | None:
     paths = _wrapper_paths(argv)
     if not paths:
         return None
-    missing = [path for path in paths if not os.path.exists(_expand_home(path))]
+    missing = [path for path in paths if not _wrapper_path_is_runnable(path)]
     # A wrapper often tries several places in turn; it still starts while any
     # of them is there.
     if len(missing) < len(paths) or _wrapper_finds_servonaut_on_path(argv):
         return _Verdict(RegistrationState.OK)
+    reason = (
+        f"{missing[0]}, which is not an executable file"
+        if len(missing) == 1
+        else f"{', '.join(missing)}, none of which is an executable file"
+    )
     return _Verdict(
         RegistrationState.STALE_WRAPPER,
-        f"its launch script names {', '.join(missing)}, which no longer exists",
+        f"its launch script names {reason}",
     )
 
 
@@ -346,11 +402,10 @@ def _find_json_entry(
 
 
 def _replace_if_unchanged(path: Path, expected: str, text: str) -> bool:
-    """Write *text* only while *path* still holds *expected*."""
+    """Stage *text* and recheck *expected* immediately before replacement."""
     if path.read_text(encoding="utf-8") != expected:
         return False
-    installer._atomic_write_text(path, text)
-    return True
+    return installer._atomic_write_text(path, text, expected=expected)
 
 
 def _repair_codex(target: list[str]) -> RegistrationReport | None:

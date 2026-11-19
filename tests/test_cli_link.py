@@ -128,6 +128,39 @@ def test_a_file_in_the_way_is_left_alone(home: Path, tmp_path: Path, on_macos: N
     assert "somewhere-else" in script.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("updating", [False, True], ids=["create", "update"])
+def test_another_command_published_during_link_preparation_is_preserved(
+    home: Path, tmp_path: Path, on_macos: None,
+    monkeypatch: pytest.MonkeyPatch, updating: bool,
+) -> None:
+    link = _link(home)
+    if updating:
+        ensure_cli_link(_desktop(_app(tmp_path / "old")))
+    command = _app(tmp_path / "Applications")
+    original_symlink_to = Path.symlink_to
+    published = False
+    content = "#!/bin/sh\n# another installation's command\nexit 0\n"
+
+    def publish_before_link(self: Path, target, *args, **kwargs):
+        nonlocal published
+        if not published:
+            published = True
+            link.unlink(missing_ok=True)
+            link.write_text(content, encoding="utf-8")
+            link.chmod(0o755)
+        return original_symlink_to(self, target, *args, **kwargs)
+
+    # Patch the method itself: before Python 3.11, Path.symlink_to called a
+    # copy of os.symlink taken at import, so patching os.symlink missed it.
+    monkeypatch.setattr(Path, "symlink_to", publish_before_link)
+
+    result = ensure_cli_link(_desktop(command))
+
+    assert published
+    assert result is not None and result.state is CliLinkState.OCCUPIED
+    assert not link.is_symlink() and link.read_text(encoding="utf-8") == content
+
+
 @pytest.mark.parametrize(
     "location",
     [
