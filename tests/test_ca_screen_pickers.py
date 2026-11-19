@@ -631,6 +631,7 @@ async def test_pickers_fit_and_actions_stay_reachable_at_100x30() -> None:
         scan = screen.query_one("#ca_break_glass_scan")
         content.scroll_to_widget(scan, animate=False)
         await pilot.pause()
+        await wait_until(lambda: scan.region.bottom <= content.region.bottom)
         assert scan.region.bottom <= content.region.bottom
 
 

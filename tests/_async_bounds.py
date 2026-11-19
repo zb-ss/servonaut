@@ -40,6 +40,30 @@ async def wait_until(
         await asyncio.sleep(0.005)
 
 
+async def wait_for_screen_ready(
+    app: Any, expected: type[T] | T, *, required: tuple[str, ...] = (),
+) -> T:
+    """Wait for the current screen and its required children to be mounted."""
+    found: list[T] = []
+
+    def ready() -> bool:
+        if (error := getattr(app, "_exception", None)) is not None:
+            raise error
+        screen = app.screen
+        is_expected = isinstance(screen, expected) if isinstance(expected, type) else screen is expected
+        if not (is_expected and screen.is_attached and screen.is_mounted):
+            return False
+        for selector in required:
+            children = list(screen.query(selector))
+            if len(children) != 1 or not all(child.is_attached and child.is_mounted for child in children):
+                return False
+        found[:] = [screen]
+        return True
+
+    await wait_until(ready)
+    return found[0]
+
+
 def run_within(coroutine: Coroutine[Any, Any, T], seconds: float) -> T:
     """Run ``coroutine`` with ``asyncio.run`` and fail if it has not finished,
     including the event loop's own teardown, within ``seconds``.

@@ -535,6 +535,7 @@ async def test_native_key_add_form_dock_and_unsaved_fields_survive_reflow() -> N
         await open_chat(app, pilot, screen)
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
+        await wait_until(lambda: not content(screen).display)
         assert not content(screen).display
         await collapse_chat(app, pilot, screen)
         await wait_until(lambda: app.focused is public_key)

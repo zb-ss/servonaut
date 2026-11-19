@@ -119,6 +119,9 @@ async def test_diagnostics_is_reachable_by_scrolling_at_100x30() -> None:
         assert overview.region.height >= 12
         overview.scroll_to_widget(screen.query_one("#btn_ban_ip"), animate=False)
         await pilot.pause()
+        await wait_until(
+            lambda: overview.region.contains_region(screen.query_one("#btn_ban_ip").region)
+        )
         assert overview.region.contains_region(screen.query_one("#btn_ban_ip").region)
 
 
