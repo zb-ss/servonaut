@@ -223,6 +223,12 @@ async def test_import_dialog_marks_a_key_the_vault_holds_and_imports_only_the_ne
             in str(screen.query_one("#vault_status", Static).render()),
             desc="the import status",
         )
+        # The status is shown before the vault list is re-read; leaving earlier
+        # would tear the screen down under that refresh.
+        await wait_for_async(
+            lambda: not screen._busy_work and all(w.is_finished for w in screen.workers),
+            desc="the vault refresh after the import",
+        )
 
     live = [item for item in fake_cloud.vault._items[vault_id].values() if not item.get("deleted_at")]
     assert len(live) == 2
