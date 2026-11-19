@@ -137,20 +137,22 @@ def test_another_command_published_during_link_preparation_is_preserved(
     if updating:
         ensure_cli_link(_desktop(_app(tmp_path / "old")))
     command = _app(tmp_path / "Applications")
-    original_symlink = os.symlink
+    original_symlink_to = Path.symlink_to
     published = False
     content = "#!/bin/sh\n# another installation's command\nexit 0\n"
 
-    def publish_before_link(source, destination, *args, **kwargs):
+    def publish_before_link(self: Path, target, *args, **kwargs):
         nonlocal published
         if not published:
             published = True
             link.unlink(missing_ok=True)
             link.write_text(content, encoding="utf-8")
             link.chmod(0o755)
-        return original_symlink(source, destination, *args, **kwargs)
+        return original_symlink_to(self, target, *args, **kwargs)
 
-    monkeypatch.setattr(os, "symlink", publish_before_link)
+    # Patch the method itself: before Python 3.11, Path.symlink_to called a
+    # copy of os.symlink taken at import, so patching os.symlink missed it.
+    monkeypatch.setattr(Path, "symlink_to", publish_before_link)
 
     result = ensure_cli_link(_desktop(command))
 
