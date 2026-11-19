@@ -22,6 +22,8 @@ The installer writes the full path of the `servonaut` command it ran from, for e
 
 Servonaut fixes this itself: each time the TUI or desktop app starts, it checks the Servonaut entry of every agent `--mcp-install` supports and points any entry whose command no longer exists at the installation you are running. Only the command and its arguments change, entries that still work are left alone, and a notification names the agents it changed. Restart those agents to reconnect. The terminal shortcut from `servonaut --install-desktop` is checked the same way.
 
+For Codex, the table headers `[mcp_servers.servonaut]`, `[mcp_servers."servonaut"]` and `[mcp_servers.'servonaut']` are all recognised. Installation and repair update an existing entry with any of these headers in place.
+
 To run the check yourself, for example from a headless install:
 
 ```bash
@@ -30,13 +32,27 @@ servonaut --mcp-repair
 
 It also lists agents whose configuration has no Servonaut entry, or is empty, with the `--mcp-install` command that adds one.
 
-Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten. A script may try several places in turn (a path, then `command -v servonaut`); it counts as broken only when none of them can still start Servonaut. Then the startup notification says which agent it is, and `--mcp-repair` names the missing paths so you can fix them, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
+Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten. When a wrapper names one or more Servonaut paths, an executable file at any of them counts as a working fallback. Directories do not count, and on Linux and macOS a file must have execute permission.
+
+When all of those paths are unusable, Servonaut also checks for a simple, recognised POSIX `-c` launcher that finds `servonaut` on `PATH`. For example, it recognises this script body:
+
+```sh
+p="$HOME/.local/bin/servonaut"; [ -x "$p" ] || p="$(command -v servonaut)"; exec "$p" --mcp
+```
+
+This check does not interpret general shell control flow. Mentioning `servonaut` in a comment or printed text, quoting a lookup as literal data, or putting a launch behind a condition that skips it does not establish a working `PATH` fallback. Review other custom launchers yourself.
+
+If no named path is executable and no recognised lookup finds `servonaut`, the startup notification names the agent that needs attention. `--mcp-repair` says `which is not an executable file` for one unusable path, or `none of which is an executable file` for several. Fix the script by hand, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
 
 ### The `servonaut` command with only the desktop app
 
-The Linux desktop package installs `/usr/bin/servonaut`. The macOS app keeps its command line inside the app, so when it starts it links `~/.local/bin/servonaut` to it, the place pipx uses, if nothing is there yet. Agent entries and scripts that run `servonaut` or `~/.local/bin/servonaut` then keep working after you remove the pipx installation. A link the app made is moved along when you move the app, and a link that points nowhere is replaced; anything else at that path, such as the pipx installation's link or a script of your own, is left alone.
+The Linux desktop package installs `/usr/bin/servonaut`. The macOS app keeps its command line inside the app, so when it starts it links `~/.local/bin/servonaut` to it, the place pipx uses, if nothing is there yet. Agent entries and scripts that run `servonaut` or `~/.local/bin/servonaut` then keep working after you remove the pipx installation. A link the app made is moved along when you move the app, and a link that points nowhere is replaced; anything else at that path, such as the pipx installation's link or a script of your own, is left alone. If another installer takes the name before the app creates a new link, its command is kept.
 
-If `~/.local/bin` is not on your `PATH`, run the commands from this page with the full path, for example `~/.local/bin/servonaut --mcp-repair`; the startup notification names the command that works on your Mac. The install script hands the name back to pipx when you install the TUI later; with pipx itself, use `pipx install --force servonaut`. The link is made at startup only while `repair_stale_install_paths` is on.
+If `~/.local/bin` is not on your `PATH`, run the commands from this page with the full path, for example `~/.local/bin/servonaut --mcp-repair`; the startup notification names the command that works on your Mac.
+
+When you install the TUI later, `install.sh` releases the desktop app's link so pipx can use the name. Only after installation succeeds does it print `The servonaut command now runs this installation instead of the desktop app`. If installation fails, it attempts to restore the original app link while the name is still free; a command another installer has put there is kept. See [The install script stops](troubleshooting.md#the-install-script-stops). With pipx itself, use `pipx install --force servonaut`.
+
+The app creates its link at startup only while `repair_stale_install_paths` is on.
 
 ## Guard levels
 
