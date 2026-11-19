@@ -61,6 +61,10 @@ _WRAPPER_PATH_RE = re.compile(
     r"(?:\$\{HOME\}|\$HOME|~|/|[A-Za-z]:[\\/])"
     r"[^\s'\"`;|&()<>]*servonaut[^\s'\"`;|&()<>]*"
 )
+# ``servonaut`` as a bare command word (``command -v servonaut``,
+# ``exec servonaut``): the script resolves it on PATH. Not part of a path,
+# a variable, a host name or a URL.
+_PATH_LOOKUP_RE = re.compile(r"(?<![\w/\\.$~:-])servonaut(?![\w/\\.:-])")
 
 
 class RegistrationState(str, Enum):
@@ -68,7 +72,7 @@ class RegistrationState(str, Enum):
 
     OK = "ok"
     REPAIRED = "repaired"
-    # A hand-written wrapper names a Servonaut path that no longer exists.
+    # A hand-written wrapper can no longer find any Servonaut to run.
     STALE_WRAPPER = "stale_wrapper"
     FAILED = "failed"
 
@@ -191,6 +195,13 @@ def _wrapper_paths(argv: Sequence[str]) -> list[str]:
     return _WRAPPER_PATH_RE.findall(" ".join(argv[1:]))
 
 
+def _wrapper_finds_servonaut_on_path(argv: Sequence[str]) -> bool:
+    """Whether the wrapper looks ``servonaut`` up on PATH and would find it there."""
+    return bool(_PATH_LOOKUP_RE.search(" ".join(argv[1:]))) and (
+        shutil.which(SERVER_NAME) is not None
+    )
+
+
 @dataclass(frozen=True)
 class _Verdict:
     state: RegistrationState
@@ -208,12 +219,14 @@ def _judge(argv: Sequence[str]) -> _Verdict | None:
     if not paths:
         return None
     missing = [path for path in paths if not os.path.exists(_expand_home(path))]
-    if missing:
-        return _Verdict(
-            RegistrationState.STALE_WRAPPER,
-            f"its launch script names {', '.join(missing)}, which no longer exists",
-        )
-    return _Verdict(RegistrationState.OK)
+    # A wrapper often tries several places in turn; it still starts while any
+    # of them is there.
+    if len(missing) < len(paths) or _wrapper_finds_servonaut_on_path(argv):
+        return _Verdict(RegistrationState.OK)
+    return _Verdict(
+        RegistrationState.STALE_WRAPPER,
+        f"its launch script names {', '.join(missing)}, which no longer exists",
+    )
 
 
 def _entry_argv(entry: dict[str, Any], combined: bool) -> list[str] | None:

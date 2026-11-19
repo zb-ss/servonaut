@@ -638,3 +638,49 @@ def test_file_mode_is_kept(home: Path, servonaut_command: str) -> None:
     repair_stale_registrations(servonaut_command, ["--mcp"])
 
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+# --- wrappers that try several places ----------------------------------------
+
+_LOOKUP_WRAPPER = (
+    'p="$HOME/.local/bin/servonaut"; [ -x "$p" ] || p="$(command -v servonaut)"; '
+    'exec "$p" --mcp'
+)
+
+
+def _claude_wrapper(home: Path, script: str) -> Path:
+    return _write_json(
+        home / ".claude.json",
+        {"mcpServers": {"servonaut": {"command": "sh", "args": ["-c", script]}}},
+    )
+
+
+def test_a_wrapper_still_runs_while_any_path_it_tries_is_there(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda name: None)
+    _claude_wrapper(
+        home,
+        'p="$HOME/.local/bin/servonaut"; [ -x "$p" ] || p='
+        f'{servonaut_command}; exec "$p" --mcp',
+    )
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.state is RegistrationState.OK
+
+
+def test_a_wrapper_that_looks_servonaut_up_on_path_runs_while_it_is_there(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_wrapper(home, _LOOKUP_WRAPPER)
+
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda name: "/usr/bin/servonaut")
+    assert _one(repair_stale_registrations(servonaut_command, ["--mcp"])).state is (
+        RegistrationState.OK
+    )
+
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda name: None)
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+    assert report.state is RegistrationState.STALE_WRAPPER
+    assert "$HOME/.local/bin/servonaut" in report.detail
