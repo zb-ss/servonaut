@@ -36,7 +36,7 @@ from servonaut.screens.text_editor_modal import TextEditorModal
 from servonaut.services.ai_analysis_service import AIAnalysisService
 from servonaut.services.bug_report_service import BugReportPayload, BugReportService
 from servonaut.services.custom_server_service import CustomServerService
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests.test_navigation_dialog_contrast import _contrast, _paint_colours
 from tests.test_selection_copy import _Clipboard, clipboard  # noqa: F401
 from tests.test_settings_presentation import _Host as _SettingsHost
@@ -180,8 +180,9 @@ async def _mount_target(
         await wait_until(lambda: not screen.query_one("#btn_analyze", Button).disabled)
         services.analysis.analyze_text.assert_awaited_once_with(DRAFT, system_prompt="")
     elif target == "bug-report":
-        await wait_until(lambda: isinstance(app.screen, BugReportConsentModal))
+        await wait_for_screen_ready(app, BugReportConsentModal, required=("#continue",))
         services.reports.collect_diagnostics.assert_not_called()
+        await wait_for_click_target(app, "#continue")
         assert await pilot.click("#continue")
         await wait_until(lambda: app.screen is screen and screen._payload is not None)
         services.reports.collect_diagnostics.assert_called_once()

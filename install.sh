@@ -27,6 +27,9 @@ PRE_RELEASE_SPEC="servonaut>=0rc0"
 # 1 when --pre or SERVONAUT_PRE asks for the newest release candidate
 INSTALL_PRE=0
 
+# A failed install must leave the desktop app's working command available.
+DESKTOP_APP_LINK_TARGET=""
+
 # Color codes for terminal output
 # Use tput if available, otherwise fallback to ANSI codes
 if command -v tput >/dev/null 2>&1 && [ -t 1 ]; then
@@ -274,12 +277,35 @@ install_release_candidate() {
 release_desktop_app_link() {
     link="$HOME/.local/bin/servonaut"
     [ -L "$link" ] || return 0
-    case "$(readlink "$link")" in
+    target=$(readlink "$link") || return 0
+    case "$target" in
         *.app/Contents/MacOS/servonaut)
+            DESKTOP_APP_LINK_TARGET="$target"
+            trap restore_desktop_app_link EXIT
             rm -f "$link"
-            print_info "The servonaut command now runs this installation instead of the desktop app"
             ;;
     esac
+}
+
+restore_desktop_app_link() {
+    [ -n "$DESKTOP_APP_LINK_TARGET" ] || return 0
+    link="$HOME/.local/bin/servonaut"
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        return 0
+    fi
+    # Use the parent directory: ln then creates the final name exclusively,
+    # even if another installer publishes a file or directory in the meantime.
+    if ln -s -- "$DESKTOP_APP_LINK_TARGET" "$HOME/.local/bin/"; then
+        print_warning "Installation failed; the desktop app's servonaut command was restored"
+    fi
+    return 0
+}
+
+confirm_desktop_app_handoff() {
+    if [ -n "$DESKTOP_APP_LINK_TARGET" ]; then
+        print_info "The servonaut command now runs this installation instead of the desktop app"
+    fi
+    DESKTOP_APP_LINK_TARGET=""
 }
 
 # Install servonaut
@@ -288,6 +314,7 @@ install_servonaut() {
 
     if [ "$INSTALL_PRE" -eq 1 ]; then
         install_release_candidate
+        confirm_desktop_app_handoff
         return 0
     fi
 
@@ -298,6 +325,7 @@ install_servonaut() {
         print_info "Installing from local repository..."
         if pipx install . --force; then
             print_success "Servonaut installed successfully from local source"
+            confirm_desktop_app_handoff
             return 0
         else
             print_warning "Local install failed, trying PyPI..."
@@ -308,6 +336,7 @@ install_servonaut() {
     print_info "Installing from PyPI..."
     if pipx install servonaut; then
         print_success "Servonaut installed successfully from PyPI"
+        confirm_desktop_app_handoff
         return 0
     fi
 

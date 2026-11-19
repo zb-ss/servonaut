@@ -69,6 +69,11 @@ of the scripts, run `./install.sh --pre` or `.\install.ps1 -Pre`. Each
 candidate's release page also carries its own copy of the scripts, with
 `install-scripts_SHA256SUMS`.
 
+On macOS, `install.sh` can replace the desktop app's `servonaut` link with the
+pipx installation. It confirms the switch after a successful installation;
+if installation fails, it attempts to restore the app's link while the name
+is still free. See [Switching how Servonaut is installed](mcp-tools.md#switching-how-servonaut-is-installed).
+
 ### With pipx
 
 Install a specific candidate:

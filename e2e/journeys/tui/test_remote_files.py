@@ -390,7 +390,14 @@ async def test_remote_picker_failure_retry_and_cancel_preserves_inputs(tui, seed
         sshd.target.remote.write('/srv/retry-folder/recovered.txt', 'recovered')
         sshd.target.remote.write('/srv/retry-folder/1.1.1.1.txt', 'redaction fixture')
         await t.click('#path_picker_retry')
-        await t.wait_until(lambda: not t.screen._error and not t.screen.is_loading(), desc='retry listing succeeds')
+        await t.wait_until(
+            lambda: (
+                not t.screen._error
+                and not t.screen.is_loading()
+                and not t.on_screen('#path_picker_choose').disabled
+            ),
+            desc='retry listing succeeds and enables choose',
+        )
         assert not t.on_screen('#path_picker_choose').disabled
         tree = t.on_screen('#path_picker_tree')
         sensitive = next(node for node in tree.root.children[0].children if node.data and node.data['path'].endswith('/1.1.1.1.txt'))

@@ -12,6 +12,7 @@ from textual.widgets import Static
 
 from servonaut.screens.instance_list import FleetChip
 from servonaut.widgets.instance_table import InstanceTable
+from tests._async_bounds import wait_until
 
 from . import _harness
 
@@ -160,6 +161,11 @@ async def _sweep(pilot: Any, rows: list[dict]) -> dict[int, list[str]]:
         await pilot.resize_terminal(width, 44)
         await pilot.pause()
         await pilot.pause()
+        await wait_until(
+            lambda: not table._layout_refit_pending
+            and not table._redraw_queued
+            and 0 < table.virtual_size.width <= table.scrollable_content_region.width
+        )
         keys = [str(c.key.value) for c in table.columns.values()]
         seen[width] = keys
         assert table.virtual_size.width <= table.scrollable_content_region.width, (width, keys)
@@ -330,6 +336,11 @@ async def _fits_from_wide_to_narrow(pilot: Any) -> None:
         await pilot.resize_terminal(width, 44)
         await pilot.pause()
         await pilot.pause()
+        await wait_until(
+            lambda: not table._layout_refit_pending
+            and not table._redraw_queued
+            and 0 < table.virtual_size.width <= table.scrollable_content_region.width
+        )
         assert table.virtual_size.width <= table.scrollable_content_region.width, (
             width, table.virtual_size.width, table.scrollable_content_region.width,
         )

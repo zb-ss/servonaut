@@ -581,6 +581,7 @@ async def test_native_inline_form_and_draft_remain_owned_after_reflow(
         await open_chat(app, pilot, screen)
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
+        await wait_until(lambda: not content(screen).display)
         assert not content(screen).display
         await collapse_chat(app, pilot, screen)
         await wait_until(lambda: app.focused is field)
@@ -589,6 +590,10 @@ async def test_native_inline_form_and_draft_remain_owned_after_reflow(
             target = screen.query_one(selector, Button)
             await tab_to(pilot, target)
             await pilot.pause()
+            await wait_until(
+                lambda: screen.region.contains_region(target.region)
+                and app.get_widget_at(*target.region.center)[0] is target
+            )
             assert screen.region.contains_region(target.region)
             assert app.get_widget_at(*target.region.center)[0] is target
             assert target.label.plain in _painted(app, target)

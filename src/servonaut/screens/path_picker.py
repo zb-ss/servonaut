@@ -129,7 +129,13 @@ class PathPickerModal(ModalScreen[str | None]):
     def on_mount(self) -> None:
         self.refresh_after_demo_toggle()
 
+    def _is_open(self) -> bool:
+        # A popped screen can retain its DOM parent while Mount is pending.
+        return self.is_attached and self in self.app.screen_stack
+
     def refresh_after_demo_toggle(self) -> None:
+        if not self._is_open():
+            return
         field = self.query_one('#path_picker_location', Input)
         field.password = bool(getattr(self.app, 'demo_mode', False)) or single_line_text(field.value) != field.value
         self.query_one('#path_picker_tree').refresh_labels()
@@ -158,6 +164,8 @@ class PathPickerModal(ModalScreen[str | None]):
         return self.query_one('#path_picker_tree').is_listing
 
     def _load_state(self, event) -> None:
+        if not self._is_open():
+            return
         self._error = event.error
         self._retry_path = str(event.path)
         loading = event.loading or self.is_loading()
@@ -223,13 +231,17 @@ class LocalPathPickerModal(PathPickerModal):
         return LocalPathTree(self._start, scrub=self.scrub, id='path_picker_tree')
 
     def on_mount(self) -> None:
+        if not self._is_open():
+            return
         super().on_mount()
         self._load_state(LocalPathTree.LoadState(self._start, True))
         self.run_worker(self._initialize(), group='path_picker', exclusive=True, exit_on_error=False)
 
     async def _initialize(self) -> None:
+        if not self._is_open():
+            return
         start = await asyncio.to_thread(local_start, self._typed_path, self.source)
-        if self.is_attached:
+        if self._is_open():
             self._initializing = False
             self.query_one('#path_picker_location', Input).value = local_display_path(start)
             self.query_one('#path_picker_tree', LocalPathTree).navigate(start)
@@ -252,6 +264,8 @@ class LocalPathPickerModal(PathPickerModal):
         self._render_selection()
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        if not self._is_open():
+            return
         tree = self.query_one('#path_picker_tree', LocalPathTree)
         if event.node is tree.cursor_node and event.node.data is not None:
             self._set_selection(event.node.data.path, event.node.allow_expand)
@@ -341,10 +355,14 @@ class RemotePathPickerModal(PathPickerModal):
         )
 
     def on_mount(self) -> None:
+        if not self._is_open():
+            return
         super().on_mount()
         self.query_one('#path_picker_tree', RemoteTree).navigate(self._root, include_scan_paths=True)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        if not self._is_open():
+            return
         tree = self.query_one('#path_picker_tree', RemoteTree)
         data = tree.selected_entry or {}
         self._selected = data.get('path')

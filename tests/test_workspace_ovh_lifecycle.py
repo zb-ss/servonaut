@@ -273,6 +273,9 @@ async def _focus_row(pilot: Pilot, screen: OVHManagerScreen, row: int) -> DataTa
 
 
 async def _type_and_confirm(pilot: Pilot, confirm: ConfirmActionScreen, word: str) -> None:
+    # The dialog is the current screen as soon as it is pushed; wait for it to
+    # compose its input before using it.
+    await wait_until(lambda: bool(confirm.query("#confirm_input")))
     box = confirm.query_one("#confirm_input", Input)
     box.focus()
     await wait_until(lambda: confirm.app.focused is box)

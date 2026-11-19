@@ -280,6 +280,11 @@ def test_install_sh_takes_the_command_over_from_the_desktop_app(tmp_path: Path) 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not link.is_symlink()
     assert "pipx install servonaut" in _calls(tmp_path)
+    handoff = "The servonaut command now runs this installation instead of the desktop app"
+    assert handoff in result.stdout
+    assert result.stdout.index("Servonaut installed successfully from PyPI") < (
+        result.stdout.index(handoff)
+    )
 
 
 @needs_posix_shell
@@ -295,3 +300,24 @@ def test_install_sh_keeps_a_servonaut_command_it_did_not_link(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert os.readlink(link) == str(other)
+    assert "now runs this installation" not in result.stdout
+
+
+@needs_posix_shell
+@pytest.mark.parametrize("args", [(), ("--pre",)], ids=["stable", "candidate"])
+def test_failed_install_preserves_the_working_desktop_command(
+    tmp_path: Path, args: tuple[str, ...],
+) -> None:
+    app = tmp_path / "Applications" / "Servonaut.app" / "Contents" / "MacOS" / "servonaut"
+    app.parent.mkdir(parents=True)
+    app.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    app.chmod(0o755)
+    link = tmp_path / "home" / ".local" / "bin" / "servonaut"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(app)
+
+    result = _run_install_sh(tmp_path, *args, pipx_exit=1)
+
+    assert result.returncode == 1
+    assert link.is_symlink() and os.readlink(link) == str(app)
+    assert "now runs this installation" not in result.stdout

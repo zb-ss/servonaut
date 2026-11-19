@@ -27,7 +27,7 @@ from servonaut.screens.memory_keys import PassphraseEnrolModal
 from servonaut.screens.settings.shell import DiscardChangesModal
 from servonaut.services.memory import passphrase_store
 from servonaut.styles.themes import SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._theme_sets import theme_chunks
 from tests.test_navigation_dialog_contrast import PALETTES, _contrast, _paint_colours
 from tests.test_settings_presentation import _Host as _SettingsHost, _ready, _tab_to
@@ -379,7 +379,8 @@ async def test_vault_switch_save_reload_keep_and_discard_use_native_controls(
         await _settle(pilot, allow)
         assert not allow.value and panel.has_unsaved_changes()
         await _settings_destination(pilot, "general")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-cancel",))
+        await wait_for_click_target(app, "#discard-cancel", center=True)
         await _click(app, pilot, app.screen.query_one("#discard-cancel", Button))
         await wait_until(lambda: app.screen is screen)
         assert screen._active_id == "vault"
@@ -387,7 +388,8 @@ async def test_vault_switch_save_reload_keep_and_discard_use_native_controls(
         assert app.focused is not None and screen.region.contains_region(app.focused.region)
         assert (tmp_path / "config.json").read_bytes() == saved
         await _settings_destination(pilot, "general")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-confirm",))
+        await wait_for_click_target(app, "#discard-confirm", center=True)
         await _click(app, pilot, app.screen.query_one("#discard-confirm", Button))
         await wait_until(lambda: screen._active_id == "general")
         assert (tmp_path / "config.json").read_bytes() == saved

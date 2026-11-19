@@ -24,7 +24,7 @@ from servonaut.screens.log_viewer import LogViewerScreen
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample, ReflowCase, assert_essential_targets, assert_layout,
     assert_qualified_boundaries, assert_visibility_combinations,
@@ -449,9 +449,13 @@ async def test_closing_a_path_dialog_resumes_the_live_tail(
         screen = await open_case(case, app, pilot)
         await pilot.press("l" if route == "picker-escape" else "m")
         modal = LogPickerModal if route == "picker-escape" else ManagePathsModal
-        await wait_until(lambda: isinstance(app.screen, modal))
+        if route == "manage-close":
+            await wait_for_screen_ready(app, modal, required=("#manage_close",))
+        else:
+            await wait_until(lambda: isinstance(app.screen, modal))
         assert screen._is_paused and screen._flush_timer is None
         if route == "manage-close":
+            await wait_for_click_target(app, "#manage_close")
             await _click(pilot, "#manage_close")
         else:
             await pilot.press("escape")
@@ -473,8 +477,9 @@ async def test_nested_browse_from_manage_paths_characterises_stack_and_stream(
     async with app.run_test(size=(160, 50)) as pilot:
         viewer = await open_case(case, app, pilot)
         await pilot.press("m")
-        await wait_until(lambda: isinstance(app.screen, ManagePathsModal))
+        await wait_for_screen_ready(app, ManagePathsModal, required=("#manage_browse",))
         manage = app.screen
+        await wait_for_click_target(app, "#manage_browse")
         await _click(pilot, "#manage_browse")
         await wait_until(lambda: isinstance(app.screen, BrowseRemoteScreen))
         browse = app.screen

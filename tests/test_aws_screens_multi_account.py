@@ -23,11 +23,13 @@ from servonaut.config.schema import (
     IPBanConfig,
     ObjectStorageConfig,
 )
+from servonaut.screens.power_confirm import PowerActionConfirmModal
 from servonaut.services.accounts import AccountRegistry, UnknownAccountError
 from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 from servonaut.services.accounts.aws_account import AWSAccountContext
 from servonaut.services.cloudtrail_service import LookupPage
+from tests._async_bounds import wait_for_screen_ready
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +324,8 @@ async def test_manager_stops_in_the_rows_account_after_confirming(ec2) -> None:
         table.move_cursor(row=3)  # staging/worker-1, running
         await pilot.pause()
         screen.action_stop()
-        await _wait_for(
-            pilot, lambda: type(app.screen).__name__ == "PowerActionConfirmModal", "the prompt"
+        await wait_for_screen_ready(
+            app, PowerActionConfirmModal, required=("#btn_power_confirm_yes",),
         )
         assert "staging/worker-1" in str(app.screen.message)
         app.screen.query_one("#btn_power_confirm_yes", Button).press()

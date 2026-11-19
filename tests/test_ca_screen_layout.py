@@ -8,6 +8,7 @@ from textual.app import App, ComposeResult
 
 from servonaut.screens.ca import CaScreen
 from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 
 @pytest.mark.asyncio
@@ -33,5 +34,8 @@ async def test_ca_actions_scroll_into_reach_at_100x30() -> None:
         assert content.max_scroll_y > 0  # the column is taller than the terminal
         content.scroll_to_widget(scan, animate=False)
         await pilot.pause()
+        await wait_until(
+            lambda: content.scroll_y > 0 and scan.region.bottom <= content.region.bottom
+        )
         assert content.scroll_y > 0
         assert scan.region.bottom <= content.region.bottom

@@ -23,7 +23,7 @@ from servonaut.services.vault.auto_bind import (
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.styles import CSS_FILES
 from tests._shown_label import shown_label
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
 
@@ -322,9 +322,10 @@ async def test_fetch_action_opens_confirm_modal_and_fetches(monkeypatch) -> None
 
         # Press 'f' to fetch host keys
         await pilot.press("f")
-        await wait_until(lambda: isinstance(app.screen, AutoBindFetchConfirmModal))
+        await wait_for_screen_ready(app, AutoBindFetchConfirmModal, required=("#auto_bind_confirm_yes",))
 
         # Confirm connection
+        await wait_for_click_target(app, "#auto_bind_confirm_yes")
         await pilot.click("#auto_bind_confirm_yes")
         await wait_until(lambda: "Fetched host keys for 1 of 1 servers" in _status(app))
 
@@ -349,7 +350,8 @@ async def test_host_key_mismatch_row_is_never_selectable(monkeypatch) -> None:
         await wait_until(lambda: _rows(app))
         web2_idx = next(i for i, r in enumerate(app.screen._rows) if r.instance["name"] == "web-2")
         await pilot.press("f")
-        await wait_until(lambda: isinstance(app.screen, AutoBindFetchConfirmModal))
+        await wait_for_screen_ready(app, AutoBindFetchConfirmModal, required=("#auto_bind_confirm_yes",))
+        await wait_for_click_target(app, "#auto_bind_confirm_yes")
         await pilot.click("#auto_bind_confirm_yes")
         await wait_until(lambda: "1 failed or mismatched" in _status(app))
 

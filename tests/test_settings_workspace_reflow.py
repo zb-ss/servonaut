@@ -26,7 +26,7 @@ from servonaut.screens.settings.shell import DiscardChangesModal, SettingsScreen
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import (
     BoundarySample,
     ReflowCase,
@@ -360,7 +360,7 @@ async def test_reflow_keeps_dirty_guard_lazy_cache_search_and_parked_chat(
         destination = screen.query_one("#navbtn_history_paths", Button)
         await tab_to(pilot, destination)
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-cancel",))
         assert app.focused is app.screen.query_one("#discard-cancel")
         assert "history_paths" not in screen._panels
         await pilot.press("escape")
@@ -369,7 +369,8 @@ async def test_reflow_keeps_dirty_guard_lazy_cache_search_and_parked_chat(
         assert screen.query_one("#general_username", Input).value == USERNAME
         await tab_to(pilot, destination)
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-confirm",))
+        await wait_for_click_target(app, "#discard-confirm")
         await _click(pilot, "#discard-confirm")
         await wait_until(lambda: app.screen is screen)
         await _ready(screen)
@@ -573,7 +574,8 @@ async def test_escape_dirty_replaced_settings_keeps_visible_chat_then_discards(
         assert case.state(screen) == baseline
         assert editor.text == "Keep this visible draft"
         await pilot.press("escape")
-        await wait_until(lambda: isinstance(app.screen, DiscardChangesModal))
+        await wait_for_screen_ready(app, DiscardChangesModal, required=("#discard-confirm",))
+        await wait_for_click_target(app, "#discard-confirm")
         await _click(pilot, "#discard-confirm")
         await wait_until(lambda: app.screen is landing)
         assert not panel.is_dirty()

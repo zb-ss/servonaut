@@ -24,7 +24,7 @@ from servonaut.services.connection_service import ConnectionService
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
 
@@ -83,9 +83,16 @@ SCREEN_CASES = [
 
 
 async def _click_navigation(app: _ServerWorkspaceApp, pilot: Pilot) -> None:
-    button = app.screen.query_one("#workspace_navigation", Button)
-    await wait_until(lambda: not button.has_class("-active"))
+    button = await wait_for_click_target(app, "#workspace_navigation", center=True)
+    if button.has_class("-active"):
+        await wait_until(lambda: not button.has_class("-active"))
+        button = await wait_for_click_target(app, "#workspace_navigation", center=True)
+    sidebar = app.screen.query_one(Sidebar)
+    was_visible = sidebar.display
     assert await pilot.click(button)
+    await wait_until(
+        lambda: sidebar.display is (not was_visible) and not button.has_class("-active"),
+    )
     await pilot.pause()
 
 
@@ -156,19 +163,24 @@ async def test_deep_return_applies_navigation_preference_and_retains_selected_se
         table = fleet.query_one(InstanceTable)
         table.move_cursor(row=1)
         await pilot.press("o")
-        actions = app.screen
+        actions = await wait_for_screen_ready(app, ServerActionsScreen)
         assert isinstance(actions, ServerActionsScreen)
         await pilot.press(shortcut)
-        tool = app.screen
+        tool = await wait_for_screen_ready(
+            app, screen_type, required=("#workspace_navigation",),
+        )
         assert isinstance(tool, screen_type)
         assert tool._instance["id"] == app.instances[1]["id"]
+        await wait_until(lambda: tool.query_one(Sidebar).display is visible)
         assert tool.query_one(Sidebar).display is visible
         await _click_navigation(app, pilot)
         for expected in (actions, fleet):
             await pilot.press("escape")
-            await wait_until(lambda: app.screen is expected)
+            await wait_for_screen_ready(app, expected)
+            await wait_until(lambda target=expected: target.query_one(Sidebar).display is not visible)
             await pilot.pause()
             assert expected.query_one(Sidebar).display is not visible
+        await wait_until(lambda: table.cursor_row == 1 and app.focused is table)
         assert table.cursor_row == 1
         assert app.focused is table
 

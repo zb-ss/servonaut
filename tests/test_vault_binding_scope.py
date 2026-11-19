@@ -20,6 +20,7 @@ from servonaut.services.redaction_service import RedactionService
 from servonaut.services.shared_servers import shared_row
 from servonaut.services.vault import crypto
 from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_for_screen_ready
 from tests.test_vault_bind_picker import KEY_ITEM, PERSONAL_VAULT, TEAM_VAULT, _Service, _host_key, _settle
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -139,7 +140,7 @@ async def test_own_shared_server_binds_the_scope_chosen_by_the_user(
         assert app.screen.region.contains_region(modal.region)
         assert modal.region.contains_region(app.screen.query_one("#vault_scope_cancel").region)
         await _choose_scope(pilot, 2 if personal else 1)
-        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
         binding_modal = app.screen
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         service = app.vault_command_service
@@ -245,7 +246,7 @@ async def test_scope_permission_is_rechecked_before_opening_and_saving(after_key
         await _start(pilot)
         if after_key_picker:
             await _choose_scope(pilot, 0)
-            await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+            await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
             await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.instances[1]["team_role"] = "member"
         if after_key_picker:
@@ -296,7 +297,7 @@ async def test_team_binding_status_keeps_the_existing_personal_key() -> None:
     async with app.run_test() as pilot:
         await _start(pilot)
         await _choose_scope(pilot, 0)
-        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
@@ -316,7 +317,7 @@ async def test_demo_scope_uses_real_ids_and_keeps_names_hidden_after_binding() -
         prompt = app.screen.query_one(OptionList).get_option_at_index(0).prompt.plain
         assert "team-a" not in prompt
         await _choose_scope(pilot, 0)
-        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
@@ -358,7 +359,7 @@ async def test_replaced_shared_record_cannot_receive_a_stale_binding() -> None:
     async with app.run_test() as pilot:
         await _start(pilot)
         await _choose_scope(pilot, 0)
-        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.instances[1]["id"] = "replacement-server"
         await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
@@ -458,7 +459,7 @@ async def test_team_binding_reply_cannot_replace_cached_credentials_with_an_unus
         await _start(pilot)
         if not direct:
             await _choose_scope(pilot, 0)
-        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: bool(app.notices))
@@ -501,7 +502,7 @@ async def _bind_team_key(pilot: Any) -> None:
     app = pilot.app
     await _start(pilot)
     await _choose_scope(pilot, 0)
-    await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+    await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
     await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
     await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_confirm", Button).disabled)
     app.screen.query_one("#vault_bind_confirm", Button).press()
@@ -605,7 +606,7 @@ async def _open_team_key_dialog(pilot: Any) -> None:
     app = pilot.app
     await _start(pilot)
     await _choose_scope(pilot, 0)
-    await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+    await wait_for_screen_ready(app, VaultBindingModal, required=("#vault_bind_item",))
     await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
 
 

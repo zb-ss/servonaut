@@ -13,7 +13,7 @@ from servonaut.screens.log_picker import (
     AddDirectoryModal, AddPathModal, EditPathModal, LogPickerModal, ManagePathsModal,
 )
 from servonaut.widgets.dialogs import DialogFrame
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_for_screen_ready, wait_until
 from tests.test_basic_dialogs import BasicDialogHost
 from tests.test_workspace_pilot import _click
 from tests.test_workspace_reflow import _painted
@@ -102,7 +102,8 @@ async def test_log_picker_f2_opens_manage_paths_and_forwards_its_result() -> Non
         screen = _picker()
         await _open(app, pilot, screen, results)
         await pilot.press("f2")
-        await wait_until(lambda: isinstance(app.screen, ManagePathsModal))
+        await wait_for_screen_ready(app, ManagePathsModal, required=("#manage_add_file",))
+        await wait_for_click_target(app, "#manage_add_file")
         await _click(pilot, "#manage_add_file")
         await wait_until(lambda: results == [ADD_PATH_SENTINEL])
         assert screen not in app.screen_stack
@@ -233,7 +234,7 @@ async def test_manage_paths_forwards_nested_dialog_results_once(nested: str, fil
         await pilot.pause()
         await _click(pilot, nested)
         child_type = AddDirectoryModal if nested == "#manage_add_dir" else EditPathModal
-        await wait_until(lambda: isinstance(app.screen, child_type))
+        await wait_for_screen_ready(app, child_type, required=("Input",))
         child = app.screen
         child.query_one(Input).value = fill
         child.query_one(Input).focus()

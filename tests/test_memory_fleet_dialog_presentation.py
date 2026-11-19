@@ -19,7 +19,7 @@ from servonaut.screens.memory_summary import AIEnhanceConsentModal, MemorySummar
 from servonaut.widgets.upsell_modal import UpsellModal
 from servonaut.widgets.dialogs import DialogActions, DialogFrame
 from servonaut.widgets.sidebar import Sidebar
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import ReflowCase, assert_layout, collapse_chat, open_case, open_chat, tab_to
 from tests.test_memory_key_change_screen import NEW_FP, OLD_FP, _change
 from tests.test_memory_summary_ui import _MemorySummaryApp
@@ -231,8 +231,9 @@ async def test_ai_optin_real_caller_sends_only_after_exact_provider_consent(canc
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause()
         await pilot.press("A")
-        await wait_until(lambda: isinstance(app.screen, AIEnhanceConsentModal))
-        modal = app.screen
+        modal = await wait_for_screen_ready(
+            app, AIEnhanceConsentModal, required=("#ai-enhance-provider",),
+        )
         field = modal.query_one("#ai-enhance-provider", Select)
         await wait_until(lambda: app.focused is field)
         field.value = "anthropic"
@@ -302,8 +303,9 @@ async def test_drift_native_row_opens_exact_snapshot_pair_and_closes_to_same_tab
         table = screen.query_one("#drift-table")
         table.focus()
         await pilot.press("enter")
-        await wait_until(lambda: isinstance(app.screen, DriftDiffScreen))
-        modal = app.screen
+        modal = await wait_for_screen_ready(
+            app, DriftDiffScreen, required=("#drift-diff-content",),
+        )
         content_widget = modal.query_one("#drift-diff-content", Static)
         await wait_until(lambda: r"after caf\u00e9 [literal] \u03a9" in content_widget.render().plain)
         assert app.memory_retrieval_service.get_snapshot.await_args_list[0].args == ("id-web-1", "os", "old-one")

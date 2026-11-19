@@ -21,7 +21,7 @@ from servonaut.screens.command_picker import (
 )
 from servonaut.utils import platform_utils
 from servonaut.widgets.dialogs import DialogBody, DialogContent, DialogFrame
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests.test_dialog_frame import DialogHost
 
 
@@ -552,7 +552,7 @@ async def test_actual_picker_caller_only_fills_raw_input_cursor_and_focus() -> N
         await app.push_screen(caller)
         await wait_until(lambda: app.focused is caller.query_one(Input))
         await pilot.press("ctrl+r")
-        await wait_until(lambda: isinstance(app.screen, CommandPickerModal))
+        await wait_for_screen_ready(app, CommandPickerModal, required=("#picker_search",))
         await wait_until(lambda: app.focused is app.screen.query_one("#picker_search"))
         await pilot.press("enter")
         await wait_until(lambda: app.screen is caller)
