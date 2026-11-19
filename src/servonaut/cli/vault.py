@@ -29,7 +29,9 @@ from servonaut.services.vault.display import (
     ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import HostKeysNeeded, VaultKeyInUse, VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import (
+    UNBIND_NOT_AVAILABLE, HostKeysNeeded, VaultDuplicateKey, VaultKeyInUse, VaultUserError, vault_failure_reason,
+)
 from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
@@ -173,6 +175,10 @@ def add_vault_parser(subparsers: Any) -> None:
     delete = commands.add_parser("delete", help="Remove an unused SSH key from the vault only.")
     delete.add_argument("item_id")
     delete.add_argument("--vault", required=True, help=_VAULT_HELP)
+    delete.add_argument(
+        "--unbind", action="store_true",
+        help="Also remove the key's saved server assignments, for every member, then delete it (vault owner or admin).",
+    )
     delete.add_argument("--yes", action="store_true")
 
     imports = commands.add_parser("import", help="Import SSH material into the encrypted vault.")
@@ -869,18 +875,83 @@ async def _items_with_names(services: Any, args: argparse.Namespace) -> dict[str
     return {**listed, "data": [_named_row(row, names) for row in listed["data"]]}
 
 
+def _print_key_usage(exc: VaultKeyInUse) -> None:
+    for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
+                         ("Could not check", exc.unchecked)):
+        if names:
+            print(f"{label}: {', '.join(terminal_safe(name) for name in names)}", file=sys.stderr)
+    if exc.other_servers > 0:
+        print(f"Other members: {exc.other_servers} server(s) of {exc.other_members} member(s)", file=sys.stderr)
+
+
+async def _import_key(services: Any, args: argparse.Namespace, output: bool, source: str, **kwargs: Any) -> int:
+    """Import one key; a key the vault already holds is a skip, not a failure."""
+    try:
+        result = await _invoke(services, "import_keys", source=source, vault_id=args.vault, **kwargs)
+    except VaultDuplicateKey as exc:
+        logger.info("Vault key import (%s) into vault %s: %d imported, %d already in the vault, %d failed",
+                    source, args.vault, 0, 1, 0)
+        print(f"Skipped: this key is {exc.described()}; nothing was imported.", file=sys.stderr)
+        if output:
+            _print({"imported": False, "skipped": "already_in_vault", "item_id": exc.existing_item_id,
+                    "existing_item_id": exc.existing_item_id, "existing_name": exc.existing_name}, json_output=True)
+        return _EXIT_OK
+    except Exception:
+        logger.info("Vault key import (%s) into vault %s: %d imported, %d already in the vault, %d failed",
+                    source, args.vault, 0, 0, 1)
+        raise
+    logger.info("Vault key import (%s) into vault %s: %d imported, %d already in the vault, %d failed",
+                source, args.vault, 1, 0, 0)
+    _print({**result, "imported": True} if isinstance(result, Mapping) else result, json_output=output)
+    return _EXIT_OK
+
+
 async def _delete_ssh_key(services: Any, args: argparse.Namespace, output: bool) -> int:
     servers = _auto_bind_servers()
     usage = await _invoke(services, "ssh_key_usage", vault_id=args.vault, item_id=args.item_id, servers=servers)
     print(f"Vault key: {terminal_safe(usage.get('name') or 'Unnamed SSH key')} "
           f"({terminal_safe(usage.get('fingerprint') or args.item_id)})", file=sys.stderr)
-    if usage["team_servers"] or usage["own_servers"] or usage["unchecked"]:
-        raise VaultKeyInUse.from_usage(usage)
+    refusal = VaultKeyInUse.from_usage(usage)
+    unbind = bool(getattr(args, "unbind", False))
+    if refusal.unchecked or (refusal.in_use and not unbind):
+        raise refusal
+    if refusal.in_use and not refusal.can_unbind:
+        _print_key_usage(refusal)
+        raise VaultUserError(UNBIND_NOT_AVAILABLE)
+    if refusal.in_use:
+        if not _confirm_unbind(args, refusal):
+            return _EXIT_ABORTED
+        return await _delete_with(services, args, servers, output, unbind=True, confirmed=refusal)
     print("This removes the key from the vault only. Servers that accept it keep accepting it "
           "until it is removed from their authorized_keys.", file=sys.stderr)
     if not _confirm(args, "Delete this key from the vault"):
         return _EXIT_ABORTED
-    _print(await _invoke(services, "delete_ssh_key", vault_id=args.vault, item_id=args.item_id, servers=servers),
+    try:
+        return await _delete_with(services, args, servers, output, unbind=False)
+    except VaultKeyInUse as exc:
+        # Another device bound the key since the review: with --unbind the user may still choose to remove it.
+        if not (unbind and exc.in_use and exc.can_unbind) or exc.unchecked:
+            raise
+        if not _confirm_unbind(args, exc):
+            return _EXIT_ABORTED
+        return await _delete_with(services, args, servers, output, unbind=True, confirmed=exc)
+
+
+def _confirm_unbind(args: argparse.Namespace, usage: VaultKeyInUse) -> bool:
+    """Show who uses the key and ask whether to unbind it everywhere and delete it."""
+    _print_key_usage(usage)
+    print("This removes those saved assignments for every member and deletes the key from the vault. "
+          "Servers that accept it keep accepting it until it is removed from their authorized_keys.",
+          file=sys.stderr)
+    return _confirm(args, "Unbind this key everywhere and delete it")
+
+
+async def _delete_with(
+    services: Any, args: argparse.Namespace, servers: Any, output: bool, *, unbind: bool,
+    confirmed: VaultKeyInUse | None = None,
+) -> int:
+    extra = {"unbind": True, "confirmed_usage": confirmed.usage()} if unbind and confirmed else {}
+    _print(await _invoke(services, "delete_ssh_key", vault_id=args.vault, item_id=args.item_id, servers=servers, **extra),
            json_output=output)
     return _EXIT_OK
 
@@ -1022,11 +1093,11 @@ async def _handle(args: argparse.Namespace) -> int:
                 private_key = bytearray(key_text.encode("utf-8"))
                 del key_text
                 try:
-                    _print(await _invoke(
-                        services, "import_keys", source="bitwarden", vault_id=args.vault,
+                    return await _import_key(
+                        services, args, output, "bitwarden",
                         private_key=private_key, source_ref=args.item,
                         name=args.name if args.name is not None else item_name,
-                    ), json_output=output)
+                    )
                 finally:
                     _wipe(private_key)
             else:
@@ -1042,11 +1113,11 @@ async def _handle(args: argparse.Namespace) -> int:
                     print("Import cancelled; nothing was stored.", file=sys.stderr)
                     return _EXIT_ABORTED
                 try:
-                    _print(await _invoke(
-                        services, "import_keys", source="ssh", vault_id=args.vault, path=str(key_path),
+                    return await _import_key(
+                        services, args, output, "ssh", path=str(key_path),
                         private_key=private_key, name=args.name,
                         break_glass_from_cidrs=args.from_cidr if args.break_glass else None,
-                    ), json_output=output)
+                    )
                 finally:
                     _wipe(private_key)
         elif command == "bind":
@@ -1166,11 +1237,10 @@ async def _handle(args: argparse.Namespace) -> int:
         )
         return _EXIT_ERROR
     except VaultKeyInUse as exc:
-        for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
-                             ("Could not check", exc.unchecked)):
-            if names:
-                print(f"{label}: {', '.join(terminal_safe(name) for name in names)}", file=sys.stderr)
+        _print_key_usage(exc)
         print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        if exc.in_use and exc.can_unbind and not getattr(args, "unbind", False):
+            print("Pass --unbind to remove these assignments and delete the key.", file=sys.stderr)
         return _EXIT_ERROR
     except APIError as exc:
         print(f"Vault request failed ({vault_failure_reason(exc)}).", file=sys.stderr)

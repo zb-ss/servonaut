@@ -61,10 +61,14 @@ def test_bitwarden_name_matches_key_pair_then_can_be_renamed_and_safely_deleted(
     refused = cli(home, "vault", "delete", item_id, "--vault", vault_id, "--yes")
     assert refused.returncode == 1
     assert bound_name in refused.stderr and "another vault key" in refused.stderr
-    unused = _json(cli(home, "vault", "import", "bitwarden", "--vault", vault_id, "--item", bw_id,
+    spare = Ed25519PrivateKey.generate()
+    spare_private = spare.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()).decode("ascii")
+    spare_public = spare.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    spare_id = bitwarden.add_ssh_key_item("spare-key", spare_private, spare_public)
+    unused = _json(cli(home, "vault", "import", "bitwarden", "--vault", vault_id, "--item", spare_id,
                        "--name", "Unused key", "--json"))["item_id"]
     deleted = _json(cli(home, "vault", "delete", unused, "--vault", vault_id, "--yes", "--json"))
     assert deleted == {"item_id": unused, "deleted": True}
     remaining = _json(cli(home, "vault", "items", "--vault", vault_id, "--json"))
     assert [row["item_id"] for row in remaining["data"]] == [item_id]
-    fake_cloud.assert_absent_on_wire(private, bitwarden.session)
+    fake_cloud.assert_absent_on_wire(private, spare_private, bitwarden.session)

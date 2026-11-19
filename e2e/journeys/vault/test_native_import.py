@@ -12,9 +12,10 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from textual.app import App
-from textual.widgets import Button, SelectionList
+from textual.widgets import Button, DataTable, SelectionList, Static
 
 from e2e.harness.waits import wait_for_async
+from servonaut.screens.vault import VaultScreen
 from servonaut.screens.vault_import_modal import VaultImportModal
 from servonaut.services.api_client import APIClient
 from servonaut.services.auth_service import AuthService
@@ -141,3 +142,87 @@ def _ready_listing(app: App) -> SelectionList | None:
         return None
     listing = app.screen.query_one("#vault_import_list", SelectionList)
     return listing if listing.option_count == 2 else None
+
+
+class _VaultScreenHost(App):
+    """Hosts the Vault screen with a native command service."""
+
+    def __init__(self, service: VaultCommandService) -> None:
+        self.vault_command_service = service
+        self.vault_available = True
+        self.bw_session_service = None
+        self.instances: list[dict[str, Any]] = []
+        super().__init__()
+
+    def on_mount(self) -> None:
+        self.push_screen(VaultScreen())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)], ids=["wide", "narrow"])
+async def test_import_dialog_marks_a_key_the_vault_holds_and_imports_only_the_new_one(
+    fake_cloud: Any,
+    account_home: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    size: tuple[int, int],
+) -> None:
+    """A stored key is shown as already in the vault and cannot be picked again."""
+    sandbox = account_home("native-import-duplicate")
+    service = _native_service(fake_cloud, sandbox.home, monkeypatch)
+    vault = await service.create_vault(team=None, name="Personal vault", grant_policy="auto")
+    vault_id = vault["vault_id"]
+    ssh_dir = sandbox.home / ".ssh"
+    ssh_dir.mkdir()
+    for filename in ("stored_key", "new_key"):
+        (ssh_dir / filename).write_bytes(Ed25519PrivateKey.generate().private_bytes(
+            Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption(),
+        ))
+        (ssh_dir / filename).chmod(0o600)
+    await service.import_keys(
+        source="ssh", vault_id=vault_id, path=str(ssh_dir / "stored_key"), name="stored-key",
+    )
+    monkeypatch.setenv("HOME", str(sandbox.home))
+
+    app = _VaultScreenHost(service)
+    async with app.run_test(size=size) as pilot:
+        screen = await wait_for_async(
+            lambda: app.screen if isinstance(app.screen, VaultScreen) else None, desc="the Vault screen",
+        )
+        await wait_for_async(lambda: screen.query_one("#vault_table", DataTable).row_count >= 1, desc="the vaults table")
+        import_button = screen.query_one("#vault_import", Button)
+        await wait_for_async(lambda: not import_button.disabled, desc="the import button")
+        import_button.press()
+        modal = await wait_for_async(
+            lambda: app.screen if isinstance(app.screen, VaultImportModal) and app.screen.query("#vault_import_local") else None,
+            desc="the import dialog",
+        )
+        modal.query_one("#vault_import_local", Button).press()
+        listing = await wait_for_async(lambda: _ready_listing(app), desc="the scanned local key options")
+
+        rows = {
+            option.value: option for option in (listing.get_option_at_index(i) for i in range(listing.option_count))
+        }
+        stored = next(o for o in rows.values() if "already in this vault as stored-key" in str(o.prompt))
+        other = next(o for o in rows.values() if o is not stored)
+        assert stored.disabled is True
+        assert stored.value not in listing.selected
+        assert "already in this vault" not in str(other.prompt)
+        assert list(listing.selected) == [other.value]
+        listing.focus()
+        listing.highlighted = stored.value  # option value is its index
+        await pilot.press("space")
+        await pilot.pause()
+        assert stored.value not in listing.selected
+
+        confirm = modal.query_one("#vault_import_confirm", Button)
+        assert confirm.disabled is False
+        confirm.press()
+        await wait_for_async(lambda: app.screen is screen, desc="the dialog to close")
+        await wait_for_async(
+            lambda: "1 imported, 0 failed, 0 skipped: already in vault"
+            in str(screen.query_one("#vault_status", Static).render()),
+            desc="the import status",
+        )
+
+    live = [item for item in fake_cloud.vault._items[vault_id].values() if not item.get("deleted_at")]
+    assert len(live) == 2

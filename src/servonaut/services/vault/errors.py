@@ -9,7 +9,7 @@ happened or what to do.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from servonaut.services.api_client import APIError
@@ -18,6 +18,7 @@ from .display import strip_terminal_controls, terminal_safe
 
 _SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SAFE_FIELD = re.compile(r"[a-z][a-z0-9_.-]{0,127}")
+_UUID_TEXT = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 class VaultUserError(RuntimeError):
@@ -49,29 +50,101 @@ class HostKeysNeeded(VaultUserError):
         )
 
 
+class VaultDuplicateKey(VaultUserError):
+    """The key is already stored (live) in the target vault."""
+
+    def __init__(
+        self, *, existing_item_id: str | None = None, existing_name: str | None = None, fingerprint: str = "",
+    ) -> None:
+        self.existing_item_id = (
+            existing_item_id if isinstance(existing_item_id, str) and _UUID_TEXT.fullmatch(existing_item_id) else None
+        )
+        self.existing_name = (
+            terminal_safe(existing_name) if isinstance(existing_name, str) and existing_name else None
+        )
+        self.fingerprint = terminal_safe(fingerprint)
+        super().__init__("this key is already in this vault; nothing was imported")
+
+    def described(self) -> str:
+        """Short text for a row or note: where the key already is."""
+        if self.existing_name:
+            return f"already in this vault as {self.existing_name}"
+        return "already in this vault"
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
 class VaultKeyInUse(VaultUserError):
     """A key still bound to servers, or whose bindings could not be checked."""
 
     def __init__(
         self, *, team_servers: list[str], own_servers: list[str], unchecked: list[str],
+        other_members: int = 0, other_servers: int = 0, can_unbind: bool = False,
+        team_server_ids: Sequence[str] = (), own_targets: Sequence[Sequence[str]] = (),
     ) -> None:
+        # Identifiers, never shown: they let a delete compare what it removes with what was reviewed.
+        self.team_server_ids = [str(value) for value in team_server_ids]
+        self.own_targets = [[str(value) for value in target] for target in own_targets]
         self.team_servers = [terminal_safe(name) for name in team_servers]
         self.own_servers = [terminal_safe(name) for name in own_servers]
         self.unchecked = [terminal_safe(name) for name in unchecked]
-        message = (
-            "this key is still used by the servers listed: give them another vault key first"
-            if self.team_servers or self.own_servers else
-            "could not read the saved key assignments from the Servonaut service; "
-            "the hosts do not need to be running: retry the service check or use the Vault screen to confirm deletion with unchecked assignments"
-        )
+        self.other_members = _count(other_members)
+        self.other_servers = _count(other_servers)
+        self.can_unbind = can_unbind is True
+        if self.team_servers or self.own_servers:
+            message = "this key is still used by the servers listed: give them another vault key first"
+        elif self.other_servers > 0:
+            message = (
+                "this key is still used by other members' servers: "
+                "they must give those servers another vault key first"
+            )
+        else:
+            message = (
+                "could not read the saved key assignments from the Servonaut service; "
+                "the hosts do not need to be running: retry the service check or use the Vault screen to confirm deletion with unchecked assignments"
+            )
         super().__init__(message)
+
+    @property
+    def in_use(self) -> bool:
+        return bool(self.team_servers or self.own_servers or self.other_servers)
 
     @classmethod
     def from_usage(cls, usage: Mapping[str, Any]) -> VaultKeyInUse:
         """Build a refusal from the server-usage result shared by CLI and TUI."""
+        others = usage.get("other_members")
+        others = others if isinstance(others, Mapping) else {}
         return cls(
             team_servers=usage["team_servers"], own_servers=usage["own_servers"], unchecked=usage["unchecked"],
+            other_members=others.get("members", 0), other_servers=others.get("servers", 0),
+            can_unbind=usage.get("can_unbind") is True,
+            team_server_ids=usage.get("team_server_ids") or (), own_targets=usage.get("own_targets") or (),
         )
+
+    def usage(self) -> dict[str, Any]:
+        """This refusal in the shape of a usage result, for :meth:`from_usage` and the unbind comparison."""
+        return {
+            "team_servers": list(self.team_servers), "own_servers": list(self.own_servers),
+            "unchecked": list(self.unchecked), "unchecked_targets": [],
+            "team_server_ids": list(self.team_server_ids), "own_targets": [list(t) for t in self.own_targets],
+            "other_members": {"members": self.other_members, "servers": self.other_servers},
+            "can_unbind": self.can_unbind,
+        }
+
+
+UNBIND_NOT_AVAILABLE = (
+    "unbinding while deleting is not available for this vault: give the key's servers another vault key first"
+)
+KEY_IN_USE_ON_SERVICE = (
+    "the Servonaut service says this key is still in use; review the key again before deleting"
+)
+KEY_ASSIGNMENTS_CHANGED = (
+    "the key's saved assignments changed since you reviewed them; review the key again"
+)
+VAULT_UNREADABLE = "could not read the vault; try again"
+KEY_USAGE_MISSING = "the Servonaut service returned no usage for this key; review it again"
 
 
 # Why a recovery key was refused, in the user's terms.
@@ -199,6 +272,13 @@ def is_feature_disabled(exc: BaseException, feature: str) -> bool:
 def vault_failure_reason(exc: BaseException) -> str:
     """Return the short reason shown after "... failed" for *exc*, without control characters."""
     return strip_terminal_controls(_failure_reason(exc))
+
+
+def loggable_failure(exc: BaseException) -> str:
+    """The exception class and, for an API refusal, its status and code: never a message that may hold names."""
+    if isinstance(exc, APIError):
+        return f"{type(exc).__name__}: {vault_failure_reason(exc)}"
+    return type(exc).__name__
 
 
 def _failure_reason(exc: BaseException) -> str:

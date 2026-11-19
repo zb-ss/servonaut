@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import time
 from typing import Any, Awaitable, Callable, Hashable, Mapping, Optional
 
@@ -23,6 +24,10 @@ Binding = Optional[Mapping[str, Any]]
 
 _RATE_LIMITED = "rate_limited"
 _SIGNED_OUT = "signed_out"
+
+logger = logging.getLogger(__name__)
+
+_PAUSE_STATUS = {_RATE_LIMITED: 429, _SIGNED_OUT: 401}
 
 
 class BindingReadsPaused(VaultUserError):
@@ -100,6 +105,10 @@ class PersonalBindingReads:
         """Drop the answer for *key* (this process just changed that binding)."""
         self._entries.pop(key, None)
 
+    def forget_all(self) -> None:
+        """Drop every remembered answer; a running pause stays in force."""
+        self._entries.clear()
+
     def clear(self) -> None:
         """Drop every answer and any pause."""
         self._entries.clear()
@@ -108,7 +117,15 @@ class PersonalBindingReads:
         self._paused_session = None
 
     def _pause(self, kind: str, seconds: float | None) -> None:
-        until = self._clock() + (seconds if seconds is not None else self._backoff)
+        now = self._clock()
+        starting = kind != self._pause_kind or now >= self._paused_until
+        length = seconds if seconds is not None else self._backoff
+        until = now + length
+        if starting:
+            logger.warning(
+                "Vault key binding reads paused for %.0f s after HTTP %d (Retry-After %s)",
+                length, _PAUSE_STATUS[kind], "given" if seconds is not None else "not given",
+            )
         if kind == self._pause_kind:
             # Reads refused together keep the longest wait any of them was asked for.
             until = max(until, self._paused_until)

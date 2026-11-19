@@ -20,7 +20,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Sequence
 
 from servonaut.config.manager import ConfigManager
 from servonaut.services.api_client import APIClient
@@ -45,10 +45,17 @@ from .errors import (
     SERVER_MOVED_SINCE_BINDING,
     VAULT_ROTATION_FAILED,
     VAULT_ROTATION_NOT_PERMITTED,
+    KEY_ASSIGNMENTS_CHANGED,
+    KEY_IN_USE_ON_SERVICE,
+    KEY_USAGE_MISSING,
+    UNBIND_NOT_AVAILABLE,
+    VAULT_UNREADABLE,
     HostKeysNeeded,
+    VaultDuplicateKey,
     VaultKeyInUse,
     VaultRecoveryNotConfirmed,
     VaultUserError,
+    loggable_failure,
     vault_failure_reason,
 )
 from .grant_processor import GrantProcessor
@@ -77,6 +84,25 @@ from .team_vault_client import (
 
 
 logger = logging.getLogger(__name__)
+
+_CAP_ITEM_USAGE = "item_usage"
+_CAP_DELETE_REFUSES_BOUND = "delete_refuses_bound"
+_USAGE_BATCH = 500
+
+
+@dataclass(frozen=True)
+class _KeyChecks:
+    """How a vault's keys are reviewed and deleted: read once from the vault object."""
+
+    usage_endpoint: bool
+    refuses_bound: bool
+    can_unbind: bool
+
+
+def _lookup(usages: Mapping[str, dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+    """A key's usage by id; the service answers with lowercase ids."""
+    found = usages.get(item_id)
+    return found if found is not None else usages.get(item_id.lower())
 
 # SSH keys whose names a picker decrypts; beyond this they show by fingerprint.
 _NAMED_KEY_CHOICES = 50
@@ -978,6 +1004,7 @@ class VaultCommandService:
 
     async def ssh_key_choices(
         self, *, vault_id: str, name_limit: int | None = _NAMED_KEY_CHOICES,
+        listing: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """SSH keys in *vault_id*, as ``{"item_id", "label", "name", "fingerprint"}``.
 
@@ -986,9 +1013,12 @@ class VaultCommandService:
         decrypted locally for their names and nothing else is kept. Names are
         cached per item revision, and the items are fetched a few at a time.
         ``name`` is ``None`` for a key whose name is unknown or unverified.
+        A caller that already listed the vault passes it as *listing*.
         """
+        if listing is None:
+            listing = await self.list_items(vault_id=vault_id)
         rows = [
-            row for row in (await self.list_items(vault_id=vault_id))["data"]
+            row for row in listing["data"]
             if row.get("type") == "ssh_key" and not row.get("deleted") and isinstance(row.get("item_id"), str)
         ]
         limit = len(rows) if name_limit is None else name_limit
@@ -1119,14 +1149,57 @@ class VaultCommandService:
         finally:
             payload.clear()
 
+    async def _key_checks(self, vault_id: str, *, fail_closed: bool = False) -> _KeyChecks:
+        """The vault's optional service features; a missing field means an older service.
+
+        A failed vault read falls back to the per-server checks, unless
+        *fail_closed* (a delete): then the user is asked to try again.
+        """
+        try:
+            vault = await self.vaults.get_vault(vault_id)
+        except Exception as exc:  # noqa: BLE001 - reviews still work with the per-server checks
+            logger.warning(
+                "Could not read the vault's capabilities (%s); %s", loggable_failure(exc),
+                "refusing the delete" if fail_closed else "using the per-server key checks",
+            )
+            if fail_closed:
+                # A service refusal keeps its reason (rate limit, sign-in); callers map it for the user.
+                if isinstance(exc, APIError):
+                    raise
+                raise VaultUserError(VAULT_UNREADABLE) from exc
+            return _KeyChecks(False, False, False)
+        raw = vault.get("capabilities")
+        caps = frozenset(c for c in raw if isinstance(c, str)) if isinstance(raw, list) else frozenset()
+        refuses_bound = _CAP_DELETE_REFUSES_BOUND in caps
+        return _KeyChecks(
+            usage_endpoint=_CAP_ITEM_USAGE in caps,
+            refuses_bound=refuses_bound,
+            # The confirmation must come from the service's usage object, which knows other members' servers.
+            can_unbind=(
+                refuses_bound and _CAP_ITEM_USAGE in caps and vault.get("my_role") in {"owner", "admin"}
+            ),
+        )
+
+    async def key_checks_read_own_servers(self, *, vault_id: str) -> bool:
+        """Whether reviewing or deleting this vault's keys reads the user's own servers."""
+        checks = await self._key_checks(vault_id)
+        return not checks.usage_endpoint
+
     async def ssh_key_usage(
         self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
         """Team bindings and this computer's own servers using a vault SSH key."""
         item = await self._ssh_key_record(vault_id, item_id)
-        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
+        checks = await self._key_checks(vault_id)
+        if checks.usage_endpoint:
+            usage = _lookup(await self._service_usages(vault_id, [item_id], servers), item_id)
+            if usage is None:
+                raise VaultUserError(KEY_USAGE_MISSING)
+        else:
+            usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
         return {
-            **usage, "name": await self._ssh_key_display_name(vault_id, item),
+            **usage, "can_unbind": checks.can_unbind,
+            "name": await self._ssh_key_display_name(vault_id, item),
             "fingerprint": terminal_safe(item.get("public_fingerprint") or ""),
         }
 
@@ -1197,11 +1270,73 @@ class VaultCommandService:
         return {
             "team_servers": [terminal_safe(row.get("name") or row.get("server_id") or "Unnamed server")
                              for row in item.get("bound_server_ids", [])],
+            "team_server_ids": [str(row.get("server_id") or "") for row in item.get("bound_server_ids", [])],
+            "own_targets": [target for state, _, target in results if state == "own_servers"],
             "own_servers": [name for state, name, _ in results if state == "own_servers"],
             "unchecked": [name for state, name, _ in results if state == "unchecked"],
             "unchecked_targets": [target for state, _, target in results if state == "unchecked"],
             "checked": sum(state in {"own_servers", "unused"} for state, _, _ in results),
+            "other_members": {"members": 0, "servers": 0},
         }
+
+    @staticmethod
+    def _usage_from_service(usage: Any, servers: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """The same shape as :meth:`_usage_from`, from a usage object of the service."""
+        if not isinstance(usage, Mapping):
+            raise VaultStateError("vault key usage has an invalid response shape")
+        names: dict[tuple[str, str], str] = {}
+        for server in servers:
+            if not is_personal_server(server):
+                continue
+            try:
+                names[instance_target(server)] = terminal_safe(server.get("name") or server.get("id") or "Unnamed server")
+            except ValidationError:
+                continue
+
+        def rows(key: str) -> list[Mapping[str, Any]]:
+            value = usage.get(key)
+            return [row for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
+
+        own, own_targets = [], []
+        for row in rows("own_instances"):
+            provider, instance_id = str(row.get("provider") or ""), str(row.get("instance_id") or "")
+            own_targets.append([provider, instance_id])
+            own.append(names.get((provider, instance_id)) or terminal_safe(f"{provider} {instance_id}"))
+        others = usage.get("other_members")
+        others = others if isinstance(others, Mapping) else {}
+
+        def count(key: str) -> int:
+            value = others.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+        return {
+            "team_servers": [terminal_safe(row.get("name") or row.get("server_id") or "Unnamed server")
+                             for row in rows("team_servers")],
+            "team_server_ids": [str(row.get("server_id") or "") for row in rows("team_servers")],
+            "own_targets": own_targets,
+            "own_servers": own,
+            "unchecked": [],
+            "unchecked_targets": [],
+            "checked": 0,
+            "other_members": {"members": count("members"), "servers": count("servers")},
+        }
+
+    async def _service_usages(
+        self, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Usage of the keys from the service, one request per batch; keys it omits have no entry."""
+        unique = list(dict.fromkeys(item_ids))
+        usages: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(unique), _USAGE_BATCH):
+            response = await self.items.items_usage(vault_id, unique[start:start + _USAGE_BATCH])
+            data = response.get("data") if isinstance(response, Mapping) else None
+            if not isinstance(data, list) or not all(
+                isinstance(row, Mapping) and isinstance(row.get("item_id"), str) for row in data
+            ):
+                raise VaultStateError("vault key usage has an invalid response shape")
+            for row in data:
+                usages[row["item_id"]] = self._usage_from_service(row, servers)
+        return usages
 
     async def _ssh_key_usage(
         self, vault_id: str, item_id: str, item: Mapping[str, Any],
@@ -1216,13 +1351,25 @@ class VaultCommandService:
 
         A key that cannot be read gets ``{"error": <reason>}`` instead.
         """
-        states = await self._own_binding_states(servers)
+        checks = await self._key_checks(vault_id)
+        service_usage: dict[str, dict[str, Any]] | None = None
+        states: list[tuple[str, str, list[str], Any]] = []
+        if checks.usage_endpoint:
+            service_usage = await self._service_usages(vault_id, list(item_ids), servers)
+        else:
+            states = await self._own_binding_states(servers)
         usages: dict[str, dict[str, Any]] = {}
         for item_id in item_ids:
             try:
                 item = await self._ssh_key_record(vault_id, item_id)
+                if service_usage is not None:
+                    usage = _lookup(service_usage, item_id)
+                    if usage is None:
+                        raise VaultUserError(KEY_USAGE_MISSING)
+                else:
+                    usage = self._usage_from(vault_id, item_id, item, states)
                 usages[item_id] = {
-                    **self._usage_from(vault_id, item_id, item, states),
+                    **usage, "can_unbind": checks.can_unbind,
                     "name": await self._ssh_key_display_name(vault_id, item),
                     "fingerprint": terminal_safe(item.get("public_fingerprint") or ""),
                 }
@@ -1233,10 +1380,14 @@ class VaultCommandService:
     @staticmethod
     def _check_deletable(
         item_id: str, usage: Mapping[str, Any], exposures: Mapping[str, Any], *,
-        allow_unchecked: bool, unchecked_targets: Sequence[Sequence[str]] | None,
+        allow_unchecked: bool, unchecked_targets: Sequence[Sequence[str]] | None, unbind: bool = False,
     ) -> None:
-        """Refuse deleting a key in use, with open exposures, or with unreviewed unchecked servers."""
-        if usage["team_servers"] or usage["own_servers"]:
+        """Refuse deleting a key in use, with open exposures, or with unreviewed unchecked servers.
+
+        *unbind* waives only the in-use refusals: the service removes the bindings with the key.
+        """
+        others = usage.get("other_members") or {}
+        if not unbind and (usage["team_servers"] or usage["own_servers"] or others.get("servers", 0) > 0):
             raise VaultKeyInUse.from_usage(usage)
         if unchecked_targets is not None:
             valid = all(isinstance(target, (list, tuple)) and len(target) == 3
@@ -1249,22 +1400,87 @@ class VaultCommandService:
                and row.get("resolved_at") is None for row in exposures["data"]):
             raise VaultUserError("resolve or rotate its open exposures first")
 
+    async def _delete_key_item(
+        self, vault_id: str, item_id: str, revision: int, *, unbind: bool,
+        checks: _KeyChecks, servers: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Send the delete; the service's 409 ``item_in_use`` becomes a :class:`VaultKeyInUse`."""
+        try:
+            await self.items.delete_item(vault_id, item_id, revision, unbind=unbind)
+        except APIError as exc:
+            if exc.status != 409 or exc.code != "item_in_use":
+                raise
+            usage = self._usage_from_service(exc.details, servers) if isinstance(exc.details, Mapping) else None
+            if usage is None or not (usage["team_servers"] or usage["own_servers"] or usage["other_members"]["servers"]):
+                raise VaultUserError(KEY_IN_USE_ON_SERVICE) from exc
+            raise VaultKeyInUse.from_usage({**usage, "can_unbind": checks.can_unbind}) from exc
+
     async def delete_ssh_key(
         self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
         allow_unchecked: bool = False, unchecked_targets: Sequence[Sequence[str]] | None = None,
+        unbind: bool = False, confirmed_usage: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Delete an unassigned, unexposed key, optionally acknowledging unavailable binding reads."""
+        """Delete an unassigned, unexposed key, optionally acknowledging unavailable binding reads.
+
+        *unbind* (owner or admin, on a service that supports it) deletes a key
+        in use together with its bindings, but only those in *confirmed_usage*,
+        the usage the user was shown: it is required with *unbind*, and the
+        delete is refused when the service now reports more than that.
+        """
+        if unbind and confirmed_usage is None:
+            raise ValueError("unbind needs the usage the user confirmed")
         item = await self._ssh_key_record(vault_id, item_id)
+        checks = await self._key_checks(vault_id, fail_closed=True)
+        if unbind and not checks.can_unbind:
+            raise VaultUserError(UNBIND_NOT_AVAILABLE)
         # Read now, not reused: another device may have bound a server to this key since the review.
-        usage = await self._ssh_key_usage(vault_id, item_id, item, servers, fresh=True)
-        if usage["team_servers"] or usage["own_servers"]:
-            raise VaultKeyInUse.from_usage(usage)
+        reads_skipped = True
+        if unbind:
+            usage = _lookup(await self._service_usages(vault_id, [item_id], servers), item_id)
+            if usage is None:
+                raise VaultUserError(KEY_USAGE_MISSING)
+            self._check_unbind_scope(usage, confirmed_usage)
+        elif checks.refuses_bound:
+            # The service refuses a key still bound anywhere and answers with its full usage (409);
+            # nothing is decided here from this item's own record, which does not know other members.
+            usage = {
+                "team_servers": [], "own_servers": [], "unchecked": [], "unchecked_targets": [],
+                "other_members": {"members": 0, "servers": 0},
+            }
+        elif checks.usage_endpoint:
+            usage = _lookup(await self._service_usages(vault_id, [item_id], servers), item_id)
+            if usage is None:
+                raise VaultUserError(KEY_USAGE_MISSING)
+        else:
+            reads_skipped = False
+            usage = await self._ssh_key_usage(vault_id, item_id, item, servers, fresh=True)
         exposures = await self.list_exposures(vault_id=vault_id)
         self._check_deletable(
-            item_id, usage, exposures, allow_unchecked=allow_unchecked, unchecked_targets=unchecked_targets,
+            item_id, {**usage, "can_unbind": checks.can_unbind}, exposures,
+            allow_unchecked=allow_unchecked,
+            # Nothing was read here, so reviewed unchecked servers have nothing to compare against.
+            unchecked_targets=None if reads_skipped else unchecked_targets, unbind=unbind,
         )
-        await self.items.delete_item(vault_id, item_id, item["revision"])
+        await self._delete_key_item(
+            vault_id, item_id, item["revision"], unbind=unbind, checks=checks, servers=servers,
+        )
+        if unbind:
+            # Remembered binding answers may name the deleted key; a reconnect must read them again.
+            self.binding_reads.forget_all()
         return {"item_id": item_id, "deleted": True}
+
+    @staticmethod
+    def _check_unbind_scope(fresh: Mapping[str, Any], confirmed: Mapping[str, Any]) -> None:
+        """Refuse an unbind that would remove an assignment the user was not shown."""
+        others = confirmed.get("other_members")
+        shown_others = others.get("servers", 0) if isinstance(others, Mapping) else 0
+        now_others = fresh["other_members"]["servers"]
+        shown_teams = {str(value) for value in confirmed.get("team_server_ids") or ()}
+        shown_own = {tuple(target) for target in confirmed.get("own_targets") or ()}
+        now_teams = {str(value) for value in fresh.get("team_server_ids") or ()}
+        now_own = {tuple(target) for target in fresh.get("own_targets") or ()}
+        if not now_teams <= shown_teams or not now_own <= shown_own or now_others > shown_others:
+            raise VaultUserError(KEY_ASSIGNMENTS_CHANGED)
 
     async def delete_ssh_keys(
         self, *, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
@@ -1282,7 +1498,13 @@ class VaultCommandService:
         ids = list(item_ids)
         approved = dict(unchecked_by_key or {})
         try:
-            states = await self._own_binding_states(servers, fresh=True)
+            checks = await self._key_checks(vault_id, fail_closed=True)
+            skip_reads = checks.refuses_bound or checks.usage_endpoint
+            states = [] if skip_reads else await self._own_binding_states(servers, fresh=True)
+            service_usage = (
+                await self._service_usages(vault_id, ids, servers)
+                if checks.usage_endpoint and not checks.refuses_bound else None
+            )
             exposures = await self.list_exposures(vault_id=vault_id)
         except Exception as exc:  # noqa: BLE001 - nothing can be checked, so nothing is deleted
             failed = [KeyDeletion(item_id, False, exc) for item_id in ids]
@@ -1294,12 +1516,20 @@ class VaultCommandService:
         for index, item_id in enumerate(ids, start=1):
             try:
                 item = await self._ssh_key_record(vault_id, item_id)
-                targets = approved.get(item_id)
+                targets = None if skip_reads else approved.get(item_id)
+                if service_usage is not None:
+                    usage = _lookup(service_usage, item_id)
+                    if usage is None:
+                        raise VaultUserError(KEY_USAGE_MISSING)
+                else:
+                    usage = self._usage_from(vault_id, item_id, item, states)
                 self._check_deletable(
-                    item_id, self._usage_from(vault_id, item_id, item, states), exposures,
+                    item_id, {**usage, "can_unbind": checks.can_unbind}, exposures,
                     allow_unchecked=targets is not None, unchecked_targets=targets,
                 )
-                await self.items.delete_item(vault_id, item_id, item["revision"])
+                await self._delete_key_item(
+                    vault_id, item_id, item["revision"], unbind=False, checks=checks, servers=servers,
+                )
                 result = KeyDeletion(item_id, True)
             except Exception as exc:  # noqa: BLE001 - reported on its key, the others go on
                 result = KeyDeletion(item_id, False, exc)
@@ -1766,6 +1996,7 @@ class VaultCommandService:
         source_ref: str | None = None,
         name: str | None = None,
         break_glass_from_cidrs: Sequence[str] | None = None,
+        known_keys: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Validate SSH material locally then encrypt it as a fresh vault item.
 
@@ -1776,6 +2007,11 @@ class VaultCommandService:
         With *break_glass_from_cidrs* the key becomes the team's ``break_glass``
         item: an emergency root key that CA enrollment appends to a host's
         ``authorized_keys``, usable only from those source networks.
+
+        *known_keys* (the result of ``stored_keys``) replaces the per-key vault
+        listing for a run of several imports: a duplicate is refused from it,
+        and each key stored here is added to it. The service's own duplicate
+        refusal (409 ``duplicate_item``) remains the backstop.
         """
         if source not in {"ssh", "bitwarden"}:
             raise ValueError("unsupported SSH import source")
@@ -1801,6 +2037,16 @@ class VaultCommandService:
                     "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key, unlocked or with its passphrase"
                 ) from exc
             fingerprint = crypto.ssh_public_fingerprint(public_key)
+            if known_keys is not None:
+                known = known_keys.get(fingerprint)
+                if known is not None:
+                    raise await self._duplicate_key_error(vault_id, fingerprint, known.get("item_id"))
+            else:
+                for row in (await self.list_items(vault_id=vault_id))["data"]:
+                    if row.get("deleted") or row.get("deleted_at"):
+                        continue
+                    if row.get("public_fingerprint") == fingerprint:
+                        raise await self._duplicate_key_error(vault_id, fingerprint, row.get("item_id"))
             item_id = str(uuid.uuid4())
             payload = {
                 "name": item_name,
@@ -1816,11 +2062,58 @@ class VaultCommandService:
             if break_glass is not None:
                 payload.update(break_glass)
                 item_type = "break_glass"
-            result = await self.items.write_item(vault_id, item_id, item_type, payload, expected_revision=0)
+            try:
+                result = await self.items.write_item(vault_id, item_id, item_type, payload, expected_revision=0)
+            except APIError as exc:
+                if exc.status != 409 or exc.code != "duplicate_item":
+                    raise
+                details = exc.details if isinstance(exc.details, dict) else {}
+                raise await self._duplicate_key_error(
+                    vault_id, fingerprint, details.get("existing_item_id"),
+                ) from exc
+            if isinstance(known_keys, MutableMapping):
+                known_keys[fingerprint] = {"item_id": item_id, "name": item_name}
             return {"item_id": item_id, "name": item_name, "type": item_type, "public_fingerprint": fingerprint, "item": result}
         finally:
             for index in range(len(private_bytes)):
                 private_bytes[index] = 0
+
+    async def _duplicate_key_error(
+        self, vault_id: str, fingerprint: str, existing_item_id: Any,
+    ) -> VaultDuplicateKey:
+        """The refusal for a key the vault already holds, naming it when readable."""
+        name: str | None = None
+        if isinstance(existing_item_id, str):
+            try:
+                item = await self.items.get_item(vault_id, existing_item_id)
+                name = await self._ssh_key_display_name(vault_id, item)
+            except Exception:  # the refusal stands even when the name cannot be read
+                name = None
+        return VaultDuplicateKey(
+            existing_item_id=existing_item_id if isinstance(existing_item_id, str) else None,
+            existing_name=name, fingerprint=fingerprint,
+        )
+
+    async def stored_keys(self, *, vault_id: str) -> dict[str, dict[str, Any]]:
+        """Live keys of *vault_id* by public fingerprint: ``{"item_id", "name"}``.
+
+        Names exist only for SSH key items among the first few the picker names;
+        others are ``None``. The first row wins when a fingerprint repeats.
+        """
+        listing = await self.list_items(vault_id=vault_id)
+        rows = listing["data"]
+        names = {
+            choice["item_id"]: choice.get("name")
+            for choice in await self.ssh_key_choices(vault_id=vault_id, listing=listing)
+        }
+        stored: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            fingerprint = row.get("public_fingerprint")
+            if row.get("deleted") or row.get("deleted_at") or not isinstance(fingerprint, str) or not fingerprint:
+                continue
+            item_id = row.get("item_id")
+            stored.setdefault(fingerprint, {"item_id": item_id, "name": names.get(item_id)})
+        return stored
 
     async def bind(
         self,
