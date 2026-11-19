@@ -18,7 +18,7 @@ from servonaut.screens.remediation_confirm import RemediationConfirmModal
 from servonaut.services.redaction_service import RedactionService
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import ReflowCase, assert_essential_targets, assert_layout, collapse_chat, open_case, open_chat
 from tests.test_findings_screen import _revertible_finding, _revert_preview
 from tests.test_workspace_security_reflow import (
@@ -171,8 +171,9 @@ async def test_remediation_cancel_after_reflow_never_executes_signed_preview() -
         button.scroll_visible(animate=False, immediate=True)
         await pilot.pause()
         assert await pilot.click(button)
-        await wait_until(lambda: isinstance(app.screen, RemediationConfirmModal))
-        modal = app.screen
+        modal = await wait_for_screen_ready(
+            app, RemediationConfirmModal, required=("#remediation_confirm_input",),
+        )
         field = modal.query_one("#remediation_confirm_input", Input)
         await wait_until(lambda: app.focused is field)
         assert modal.query_one("#remediation_confirm_run", Button).disabled
@@ -344,8 +345,7 @@ async def test_cloudwatch_native_ban_handoff_keeps_real_address_under_demo(demo:
         await pilot.press("enter")
         await wait_until(lambda: screen._selected_ip_row == 0)
         await pilot.press("b")
-        await wait_until(lambda: isinstance(app.screen, IPBanScreen))
-        child = app.screen
+        child = await wait_for_screen_ready(app, IPBanScreen, required=("#ip_input",))
         shown = app.redaction_service.redact_ip("1.1.1.1") if demo else "1.1.1.1"
         field = child.query_one("#ip_input", Input)
         await wait_until(lambda: app.focused is field)

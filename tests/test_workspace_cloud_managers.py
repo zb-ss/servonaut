@@ -22,7 +22,7 @@ from servonaut.screens.ovh_manager import OVHManagerScreen
 from servonaut.widgets.chat_panel import ChatPanel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.workspace import WorkspaceScreen
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._workspace_reflow_conformance import assert_button_label_painted
 from tests.test_workspace_ovh_lifecycle import ROWS as OVH_ROWS, _OvhHost
 from tests.test_workspace_reflow import _painted
@@ -242,8 +242,7 @@ async def test_create_return_retains_selected_server_and_applies_pane_preference
         table = manager.query_one(f"#{table_id}", DataTable)
         table.move_cursor(row=1)
         await pilot.press("n")
-        await wait_until(lambda: isinstance(app.screen, create_type))
-        wizard = app.screen
+        wizard = await wait_for_screen_ready(app, create_type, required=(f"#{input_id}",))
         name = wizard.query_one(f"#{input_id}", Input)
         name.focus()
         await pilot.press(*"draft-nsd")
