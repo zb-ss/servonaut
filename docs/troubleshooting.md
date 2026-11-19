@@ -152,7 +152,16 @@ The file browser connects via SSH to list directory contents. If it fails:
 
 The install scripts install Servonaut from PyPI with pipx. When that fails,
 they show pipx's error and stop without installing anything else: they never
-fall back to unreleased code. Common causes:
+fall back to unreleased code.
+
+If `install.sh` was replacing the macOS desktop app's command, it attempts to
+restore the original `~/.local/bin/servonaut` link when installation fails.
+It leaves a command another installer has created there in place. A successful
+restore prints `Installation failed; the desktop app's servonaut command was restored`.
+Fix the pipx error before retrying; the takeover notice is printed only after
+an installation succeeds.
+
+Common causes:
 
 1. **PyPI is unreachable** — pip needs `https://pypi.org` and
    `https://files.pythonhosted.org`. Behind a proxy, set `HTTPS_PROXY` before
@@ -218,10 +227,11 @@ rather than a version Servonaut supports.
 Then restart the agent, or reconnect its MCP servers, so it starts the
 server again. Other start-up errors are written to the log described below.
 
-With only the macOS desktop app installed there is no `servonaut` on your
-`PATH` until the app has started once: it then links
-`~/.local/bin/servonaut` to its command line. Start the app, then run
-`~/.local/bin/servonaut --mcp-repair` to see which agents still need a fix.
+With startup path repair enabled (the default), start the macOS app once to create
+`~/.local/bin/servonaut` while that path is unused. An existing command from
+another installation is kept. Run `~/.local/bin/servonaut --mcp-repair` to see
+which agents still need a fix. If `~/.local/bin` is not on your `PATH`, keep
+using the full path or add that directory to `PATH`.
 If pipx later reports `File exists at ~/.local/bin/servonaut` and leaves the
 app's link in place, install with `pipx install --force servonaut`.
 

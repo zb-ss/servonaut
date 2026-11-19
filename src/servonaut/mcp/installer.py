@@ -190,9 +190,13 @@ def _load_json(path: Path) -> dict[str, Any]:
     return config
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Atomically write config text without replacing a dotfile symlink."""
-    target_path = path.resolve(strict=False) if path.is_symlink() else path
+def _atomic_write_text(path: Path, text: str, *, expected: str | None = None) -> bool:
+    """Replace config text, optionally declining a concurrent save before rename.
+
+    The final comparison is best effort: writers that do not share a lock can
+    still save between it and the rename. Dotfile symlinks remain intact.
+    """
+    target_path = path.resolve(strict=False)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     mode = (
         target_path.stat().st_mode & 0o777 if target_path.exists() else 0o600
@@ -212,11 +216,22 @@ def _atomic_write_text(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temp_path, mode)
+        if expected is not None and not _still_expected(path, target_path, expected):
+            return False
         os.replace(temp_path, target_path)
-    except Exception:
+        return True
+    finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-        raise
+
+
+def _still_expected(path: Path, target_path: Path, expected: str) -> bool:
+    try:
+        return path.resolve(strict=False) == target_path and (
+            path.read_text(encoding="utf-8") == expected
+        )
+    except FileNotFoundError:
+        return False
 
 
 def _save_json(path: Path, config: Mapping[str, Any]) -> None:
@@ -599,7 +614,9 @@ def _install_gemini(command: str, args: list[str]) -> None:
 
 
 _CODEX_TABLE = "mcp_servers.servonaut"
-_CODEX_HEADERS = (f"[{_CODEX_TABLE}]", '[mcp_servers."servonaut"]')
+_CODEX_HEADERS = (
+    f"[{_CODEX_TABLE}]", '[mcp_servers."servonaut"]', "[mcp_servers.'servonaut']",
+)
 
 # Managed values are rewritten safely; every other user-owned line survives.
 # Existing env_vars entries are merged with Servonaut's required variable names.

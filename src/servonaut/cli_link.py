@@ -128,27 +128,55 @@ def _link(link: Path, target: Path) -> CliLinkResult:
         if current == str(target):
             return CliLinkResult(link, CliLinkState.UNCHANGED, target)
         if not link.exists() or is_app_bundle_command(current):
-            _replace_with_link(link, target)
-            return CliLinkResult(link, CliLinkState.UPDATED, target)
-        return CliLinkResult(
-            link, CliLinkState.OCCUPIED, target, "it runs another install", current
-        )
+            identity = _link_identity(link)
+            if _replace_with_link(link, target, current, identity):
+                return CliLinkResult(link, CliLinkState.UPDATED, target)
+        return _occupied(link, target)
     if link.exists():
-        return CliLinkResult(
-            link, CliLinkState.OCCUPIED, target, "it is a file Servonaut did not make"
-        )
+        return _occupied(link, target)
     link.parent.mkdir(parents=True, exist_ok=True)
-    _replace_with_link(link, target)
+    try:
+        # Creating the final name exclusively cannot replace a command that
+        # another installer published after the check above.
+        link.symlink_to(target)
+    except FileExistsError:
+        return _occupied(link, target)
     return CliLinkResult(link, CliLinkState.CREATED, target)
 
 
-def _replace_with_link(link: Path, target: Path) -> None:
+def _occupied(link: Path, target: Path) -> CliLinkResult:
+    holder = os.readlink(link) if link.is_symlink() else ""
+    detail = "it runs another install" if holder else "it is a file Servonaut did not make"
+    return CliLinkResult(link, CliLinkState.OCCUPIED, target, detail, holder)
+
+
+def _link_identity(link: Path) -> tuple[int, int, int, int]:
+    state = link.lstat()
+    return state.st_dev, state.st_ino, state.st_mtime_ns, state.st_size
+
+
+def _replace_with_link(
+    link: Path,
+    target: Path,
+    expected_target: str,
+    expected_identity: tuple[int, int, int, int],
+) -> bool:
     # Build the link beside the old one and rename it over, so the name never
     # disappears while an agent may be starting it.
     staging = link.with_name(f".{link.name}.{os.getpid()}.tmp")
     try:
         staging.unlink(missing_ok=True)
         staging.symlink_to(target)
+        # Recheck after preparing the new link. An uncooperative writer can
+        # still race the final check and rename; replacing an existing name
+        # cannot make that comparison atomic on every supported filesystem.
+        if (
+            not link.is_symlink()
+            or os.readlink(link) != expected_target
+            or _link_identity(link) != expected_identity
+        ):
+            return False
         os.replace(staging, link)
+        return True
     finally:
         staging.unlink(missing_ok=True)

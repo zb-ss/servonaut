@@ -41,7 +41,7 @@ async def test_browse_changes_only_its_field_returns_focus_and_never_copies(tmp_
         await pilot.pause()
         await pilot.click(f'#{side}_path_browse')
         picker_class = LocalPathPickerModal if side == 'local' else RemotePathPickerModal
-        await wait_until(lambda: isinstance(app.screen, picker_class))
+        await wait_until(lambda: isinstance(app.screen, picker_class) and app.screen.is_mounted)
         picker = app.screen
         assert picker.source is ((side == 'local') == upload)
         chosen = str(tmp_path / 'chosen') if side == 'local' else '/srv/chosen/'
