@@ -278,6 +278,66 @@ def test_a_config_that_never_settles_is_reported(
     assert _read_json(path)["mcpServers"]["servonaut"]["command"] == _gone(home)
 
 
+@pytest.mark.parametrize("kind", ["json", "toml"])
+@pytest.mark.parametrize("redirect", [False, True], ids=["file", "retargeted-symlink"])
+def test_a_save_while_the_replacement_is_staged_survives(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch,
+    kind: str, redirect: bool,
+) -> None:
+    if kind == "json":
+        path = _write_json(
+            home / ".claude.json",
+            {"mcpServers": {"servonaut": {"command": _gone(home), "args": ["--mcp"]}}},
+        )
+        saved = json.dumps({
+            "theme": "dark",
+            "mcpServers": {
+                "servonaut": {"command": servonaut_command, "args": ["--mcp"]},
+                "other": {"command": "other-runtime"},
+            },
+        })
+    else:
+        path = _codex_config(
+            home, f"[mcp_servers.servonaut]\ncommand = {json.dumps(_gone(home))}\n"
+            'args = ["--mcp"]\n',
+        )
+        saved = (
+            'theme = "dark"\n[mcp_servers.servonaut]\n'
+            f"command = {json.dumps(servonaut_command)}\nargs = [\"--mcp\"]\n"
+            '[mcp_servers.other]\ncommand = "other-runtime"\n'
+        )
+    original = path.read_text(encoding="utf-8")
+    previous = path.with_name("previous-config")
+    replacement = path.with_name("replacement-config")
+    if redirect:
+        path.rename(previous)
+        path.symlink_to(previous)
+        replacement.write_text(saved, encoding="utf-8")
+    real_fsync = os.fsync
+    saves = []
+
+    def save_after_flush(descriptor: int) -> None:
+        real_fsync(descriptor)
+        if redirect:
+            path.unlink()
+            path.symlink_to(replacement)
+        else:
+            path.write_text(saved, encoding="utf-8")
+        saves.append(True)
+
+    monkeypatch.setattr(installer.os, "fsync", save_after_flush)
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert saves == [True]
+    assert report.state is RegistrationState.OK
+    assert path.read_text(encoding="utf-8") == saved
+    if redirect:
+        assert path.is_symlink() and path.resolve() == replacement
+        assert previous.read_text(encoding="utf-8") == original
+    assert not list(path.parent.glob(f".{path.name}.*"))
+
+
 # --- Codex TOML --------------------------------------------------------------
 
 
@@ -366,6 +426,7 @@ def test_a_working_shell_wrapper_is_ok(home: Path, servonaut_command: str) -> No
     console = Path(_gone(home))
     console.parent.mkdir(parents=True)
     console.write_text("", encoding="utf-8")
+    console.chmod(0o755)
     _codex_config(
         home,
         "[mcp_servers.servonaut]\n"
@@ -506,6 +567,7 @@ def test_the_launch_repair_is_silent_when_nothing_changed(
     console = Path(_gone(home))
     console.parent.mkdir(parents=True)
     console.write_text("", encoding="utf-8")
+    console.chmod(0o755)
     _codex_config(
         home,
         "[mcp_servers.servonaut]\n"
@@ -709,6 +771,91 @@ def _claude_wrapper(home: Path, script: str) -> Path:
         home / ".claude.json",
         {"mcpServers": {"servonaut": {"command": "sh", "args": ["-c", script]}}},
     )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'exec "$HOME/removed/servonaut" --mcp # servonaut',
+        'echo servonaut; exec "$HOME/removed/servonaut" --mcp',
+        'echo "command -v servonaut"; exec "$HOME/removed/servonaut" --mcp',
+        "printf '%s' '$(command -v servonaut)'; exec \"$HOME/removed/servonaut\" --mcp",
+        'false && exec servonaut --mcp; exec "$HOME/removed/servonaut" --mcp',
+        '"p=$(command -v servonaut)"; exec "$p" --mcp; '
+        'exec "$HOME/removed/servonaut" --mcp',
+    ],
+    ids=["comment", "argument", "quoted-command", "literal-substitution",
+         "skipped-launch", "quoted-assignment"],
+)
+def test_wrapper_data_does_not_count_as_a_path_lookup(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch, script: str,
+) -> None:
+    path = _claude_wrapper(home, script)
+    before = path.read_bytes()
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda _name: servonaut_command)
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.state is RegistrationState.STALE_WRAPPER
+    assert path.read_bytes() == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX execute permissions")
+def test_nonexecutable_wrapper_candidate_does_not_hide_a_missing_fallback(
+    home: Path, servonaut_command: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = home / "old" / "servonaut"
+    candidate.parent.mkdir()
+    candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+    candidate.chmod(0o644)
+    _claude_wrapper(
+        home,
+        'p="$HOME/old/servonaut"; [ -x "$p" ] || p="$HOME/removed/servonaut"; '
+        'exec "$p" --mcp',
+    )
+    monkeypatch.setattr(registration_repair.shutil, "which", lambda _name: None)
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.state is RegistrationState.STALE_WRAPPER
+
+
+def test_literal_quoted_codex_header_matches_an_existing_entry(
+    home: Path, servonaut_command: str,
+) -> None:
+    path = installer.client_config_path("codex")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "[mcp_servers.'servonaut']\n"
+        f"command = {json.dumps(servonaut_command)}\nargs = [\"--mcp\"]\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    report = _one(repair_stale_registrations(servonaut_command, ["--mcp"]))
+
+    assert report.state is RegistrationState.OK
+    assert path.read_bytes() == before
+
+
+def test_install_replaces_a_literal_quoted_codex_table_in_place(
+    home: Path, servonaut_command: str,
+) -> None:
+    path = installer.client_config_path("codex")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "[mcp_servers.'servonaut']\ncommand = \"/old/servonaut\"\n"
+        "args = [\"--mcp\"]\nstartup_timeout_sec = 42\n",
+        encoding="utf-8",
+    )
+
+    installer._install_codex(servonaut_command, ["--mcp"])
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("[mcp_servers.") == 1
+    assert text.count("command =") == 1
+    assert f"command = {json.dumps(servonaut_command)}" in text
+    assert "startup_timeout_sec = 42" in text
 
 
 def test_a_wrapper_still_runs_while_any_path_it_tries_is_there(
