@@ -33,7 +33,7 @@ def test_the_rules_are_fetched_at_start_and_the_schedule_stops_at_exit(monkeypat
             events.append("served")
 
     @contextlib.asynccontextmanager
-    async def stdio_server():
+    async def stdio_server(**_streams):
         yield None, None
 
     monkeypatch.setattr(mcp_server, "create_mcp_server", Server)
