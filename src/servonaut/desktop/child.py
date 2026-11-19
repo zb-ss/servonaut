@@ -53,6 +53,9 @@ async def run_desktop_child(
     frontend_dir: Path | None = None,
 ) -> int:
     """Run the authenticated desktop host and real app within the child process."""
+    from servonaut.services.client_identity import configure_client_identity
+
+    configure_client_identity(kind="desktop", runtime=runtime)
     out = stdout_stream or sys.stdout.buffer
     in_stream = stdin_stream or sys.stdin.buffer
 

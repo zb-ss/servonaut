@@ -4673,6 +4673,16 @@ class ChatPanel(Widget):
                 severity="warning",
                 markup=False,
             )
+        elif action == UserFacingAction.CLIENT_UPDATE_REQUIRED:
+            self._set_banner(
+                f"[$text-warning]{_rich_escape(payload.user_message)}[/$text-warning]"
+            )
+            self.app.notify(
+                payload.user_message,
+                severity="warning",
+                timeout=12,
+                markup=False,
+            )
         elif action == UserFacingAction.BANNER_FEATURE_OFF:
             self._set_banner(
                 f"[$text-warning]{_rich_escape(payload.user_message)}[/$text-warning]"

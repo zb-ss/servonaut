@@ -374,7 +374,9 @@ class VaultAutoBindScreen(WorkspaceScreen):
     def _status(self, message: str) -> None:
         self._status_raw = message
         try:
-            self.query_one("#auto_bind_status", Static).update(self.scrub_for_display(message))
+            self.query_one("#auto_bind_status", Static).update(
+                Text(self.scrub_for_display(message))
+            )
         except NoMatches:
             pass
 

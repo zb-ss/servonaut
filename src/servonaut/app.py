@@ -302,6 +302,11 @@ class ServonautApp(App):
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
         self.client_kind = client_kind
+        from servonaut.services.client_identity import configure_client_identity
+        configure_client_identity(
+            kind="desktop" if client_kind == "desktop" else "cli",
+            runtime=self.runtime_layout,
+        )
         self._changed_selection_editors: weakref.WeakSet[Any] = weakref.WeakSet()
 
     def notify(
@@ -995,6 +1000,26 @@ class ServonautApp(App):
                 )
             except Exception:
                 logger.debug("Failed to surface session-expired toast", exc_info=True)
+        elif (
+            new_state is RelayState.UPDATE_REQUIRED
+            and prior_state is not RelayState.UPDATE_REQUIRED
+        ):
+            try:
+                from servonaut.services.client_identity import format_update_required_message
+
+                manager = getattr(self, "relay_manager", None)
+                message = (
+                    getattr(manager, "update_required_message", None)
+                    or format_update_required_message(runtime=self.runtime_layout)
+                )
+                self.notify(
+                    message,
+                    severity="warning",
+                    timeout=12,
+                    markup=False,
+                )
+            except Exception:
+                logger.debug("Failed to surface update-required toast", exc_info=True)
 
     def _notify_saved_team_options(self, recorded: int) -> None:
         lead = (

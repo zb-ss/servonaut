@@ -2141,13 +2141,27 @@ class ServonautTools:
             return _error(_INVALID_ENDPOINT, str(exc))
         url = f"{base}{path}"
 
+        from servonaut.services.client_identity import (
+            client_request_headers,
+            format_update_required_from_response,
+            response_is_update_required,
+        )
+
+        identity_headers = client_request_headers()
+        protected_headers = {k.lower() for k in identity_headers} | {"authorization"}
         safe_headers: Dict[str, str] = {"Accept": "application/json"}
         if isinstance(headers, dict):
             for key, value in headers.items():
                 if not isinstance(key, str) or not isinstance(value, str):
                     continue
-                if key.lower() in _ALLOWED_REQUEST_HEADERS:
+                lowered = key.lower()
+                if lowered in _ALLOWED_REQUEST_HEADERS and lowered not in protected_headers:
                     safe_headers[key] = value
+        safe_headers = {
+            key: value for key, value in safe_headers.items()
+            if key.lower() not in protected_headers
+        }
+        safe_headers.update(identity_headers)
         safe_headers["Authorization"] = f"Bearer {access_token}"
 
         request_kwargs: Dict[str, Any] = {
@@ -2188,6 +2202,12 @@ class ServonautTools:
             return _error("timeout", "Request exceeded 10 second timeout.")
         except httpx.HTTPError as e:
             return _error("network_error", str(e))
+
+        if response_is_update_required(response):
+            return _error(
+                "client_update_required",
+                format_update_required_from_response(response),
+            )
 
         content = response.content or b""
         if len(content) > _MAX_RESPONSE_BYTES:
@@ -2429,6 +2449,13 @@ class ServonautTools:
         now_connected = None
         if not force:
             status = await self._fetch_relay_status()
+            if (
+                isinstance(status, dict)
+                and isinstance(status.get("error"), dict)
+                and status["error"].get("code") == "client_update_required"
+            ):
+                self._audit.log("relay_reconnect", args, "", False, "client_update_required")
+                return json.dumps(status)
             body = status.get("body")
             if isinstance(body, dict) and "connected" in body:
                 now_connected = bool(body.get("connected"))

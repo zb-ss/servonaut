@@ -37,6 +37,7 @@ _STATE_DISPLAY = {
     RelayState.STOPPED: ("○", "$text-muted", "disconnected"),
     RelayState.DISABLED: ("○", "$text-muted", "not logged in"),
     RelayState.SESSION_EXPIRED: ("○", "$text-error", "session expired"),
+    RelayState.UPDATE_REQUIRED: ("○", "$text-warning", "update required"),
 }
 
 
@@ -255,11 +256,14 @@ class RelayStatusScreen(WorkspaceScreen):
         if owner.pid is not None:
             text += f" — lock owner: {owner.mode} (PID {owner.pid})"
         manager = getattr(self.app, "relay_manager", None)
-        reason = getattr(manager, "last_error", None)
+        reason = getattr(manager, "last_error", None) or getattr(
+            manager, "update_required_message", None,
+        )
         if isinstance(reason, str) and reason:
-            # Why it failed (for example a refused relay URL), not just "error".
+            style = "$text-warning" if state is RelayState.UPDATE_REQUIRED else "$text-error"
+            # Why it failed (for example a refused relay URL or 426 update required).
             text = Content.assemble(
-                Content.from_markup(text), "\n", (display_text(self.app, reason), "$text-error"),
+                Content.from_markup(text), "\n", (display_text(self.app, reason), style),
             )
         self.query_one("#local_status", Static).update(text)
 

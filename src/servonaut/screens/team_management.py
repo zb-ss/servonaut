@@ -24,7 +24,7 @@ from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.bulk_action import BulkActionModal
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal
-from servonaut.services.api_client import APIError
+from servonaut.services.api_client import APIError, ClientUpdateRequiredError
 from servonaut.services.team_sharing import (
     SHARE_ADDRESS,
     address_choices,
@@ -748,6 +748,10 @@ class TeamManagementScreen(WorkspaceScreen):
         try:
             teams = await team_svc.list_teams()
             self._populate_teams_table(teams)
+        except ClientUpdateRequiredError as exc:
+            logger.warning("Teams list refused (426): %s", exc)
+            self.query_one("#team_workspace_summary", Static).update(Text(str(exc)))
+            self.notify(str(exc), severity="warning", timeout=10, markup=False)
         except Exception as exc:
             logger.error("Failed to load teams: %s", exc)
             self.query_one("#team_workspace_summary", Static).update("Could not load teams. Check the error notification for details.")
@@ -801,6 +805,16 @@ class TeamManagementScreen(WorkspaceScreen):
             self._restore_table_positions(positions)
             self._refresh_member_buttons()
             await self._show_agent_rules(slug, team, servers)
+        except ClientUpdateRequiredError as exc:
+            if generation != self._team_load_generation:
+                return
+            indicator.stop()
+            self._loaded_team_slug = None
+            if keep_view:
+                self._render_team_header(str(exc))
+            else:
+                self._invalidate_team_detail(slug)
+            self.notify(str(exc), severity="warning", timeout=10, markup=False)
         except Exception as exc:
             if generation != self._team_load_generation:
                 return
@@ -1060,6 +1074,9 @@ class TeamManagementScreen(WorkspaceScreen):
         user-readable so we surface it verbatim with appended actionable hint.
         """
         logger.error("Member write failed (%s): %s", exc.status, exc.message)
+        if isinstance(exc, ClientUpdateRequiredError) or exc.status == 426:
+            self.notify(exc.message, severity="warning", timeout=12, markup=False)
+            return
         if exc.status == 402:
             if self._can_manage_admins():
                 # Owner sees the direct billing CTA.
@@ -1135,6 +1152,9 @@ class TeamManagementScreen(WorkspaceScreen):
                 markup=False,
             )
             await self._load_team_detail(slug)
+        except ClientUpdateRequiredError as exc:
+            logger.error("Failed to share server (%s): %s", exc.status, exc.message)
+            self.notify(exc.message, severity="warning", timeout=12, markup=False)
         except APIError as exc:
             logger.error("Failed to share server (%s): %s", exc.status, exc.message)
             # Backend 409 example: "A server with this hostname is already shared."
@@ -1833,6 +1853,9 @@ class TeamManagementScreen(WorkspaceScreen):
             version = result.get("version", "?") if isinstance(result, dict) else "?"
             self.notify(f"Pushed config version {version}.", severity="information")
             await self._load_team_detail(slug)
+        except ClientUpdateRequiredError as exc:
+            logger.error("Push team config failed (%s): %s", exc.status, exc.message)
+            self.notify(exc.message, severity="warning", timeout=12, markup=False)
         except APIError as exc:
             logger.error("Push team config failed (%s): %s", exc.status, exc.message)
             if exc.status == 403:
@@ -1863,6 +1886,10 @@ class TeamManagementScreen(WorkspaceScreen):
             return
         try:
             latest = await team_svc.get_latest_team_config(slug)
+        except ClientUpdateRequiredError as exc:
+            logger.error("Pull team config failed (%s): %s", exc.status, exc.message)
+            self.notify(exc.message, severity="warning", timeout=12, markup=False)
+            return
         except APIError as exc:
             logger.error("Pull team config failed (%s): %s", exc.status, exc.message)
             self.notify(f"Pull failed: {exc.message}", severity="error", markup=False)

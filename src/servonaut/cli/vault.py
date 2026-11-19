@@ -21,7 +21,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from servonaut.services.api_client import APIError
+from servonaut.services.api_client import APIError, ClientUpdateRequiredError
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST,
     grant_summary,
@@ -1171,6 +1171,9 @@ async def _handle(args: argparse.Namespace) -> int:
             if names:
                 print(f"{label}: {', '.join(terminal_safe(name) for name in names)}", file=sys.stderr)
         print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR
+    except ClientUpdateRequiredError as exc:
+        print(exc.message, file=sys.stderr)
         return _EXIT_ERROR
     except APIError as exc:
         print(f"Vault request failed ({vault_failure_reason(exc)}).", file=sys.stderr)

@@ -487,6 +487,9 @@ def create_mcp_server():
 
 async def run_server() -> None:
     """Run the MCP server with stdio transport."""
+    from servonaut.services.client_identity import configure_client_identity
+
+    configure_client_identity(kind="mcp")
     try:
         from mcp.server.stdio import stdio_server
     except ImportError:
