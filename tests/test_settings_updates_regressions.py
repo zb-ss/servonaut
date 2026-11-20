@@ -300,7 +300,7 @@ async def test_app_upgrade_remains_single_flight_across_panel_teardown(
         active.add(tid)
         calls.append(tid)
         try:
-            release.wait(8)
+            release.wait()
             return SimpleNamespace(returncode=0, stdout="Updated")
         finally:
             active.remove(tid)
@@ -308,8 +308,8 @@ async def test_app_upgrade_remains_single_flight_across_panel_teardown(
     monkeypatch.setattr(app_module, "subprocess", SimpleNamespace(
         run=simulate_package_process, SubprocessError=RuntimeError,
     ))
-    try:
-        async with app.run_test(size=(160, 50)) as pilot:
+    async with app.run_test(size=(160, 50)) as pilot:
+        try:
             panel = await _wait_updates_panel(app, pilot)
             panel.query_one("#updates_btn_try", Button).press()
             await wait_until(lambda: len(active) == 1)
@@ -319,12 +319,14 @@ async def test_app_upgrade_remains_single_flight_across_panel_teardown(
             app.open_settings_screen("updates")
             new_panel = await _wait_updates_panel(app, pilot)
             assert new_panel is not panel
-            assert new_panel.query_one("#updates_busy", BusyIndicator).is_active
-            assert new_panel.query_one("#updates_btn_try", Button).disabled
+            busy = new_panel.query_one("#updates_busy", BusyIndicator)
+            try_button = new_panel.query_one("#updates_btn_try", Button)
+            await wait_until(lambda: busy.is_active and try_button.disabled)
             assert await app.run_requested_upgrade() == (False, "An update is already running.")
             assert len(calls) == 1
             release.set()
             await wait_until(lambda: not active and not app._update_in_progress)
-            await wait_until(lambda: not new_panel.query_one("#updates_btn_try", Button).disabled)
-    finally:
-        release.set()
+            await wait_until(lambda: not try_button.disabled)
+        finally:
+            # Let the worker finish before the test harness shuts down the app.
+            release.set()
