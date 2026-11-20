@@ -1768,7 +1768,7 @@ class VaultCommandService:
             if not isinstance(hostname, str) or not hostname or isinstance(port, bool) or not isinstance(port, int):
                 raise VaultStateError("bound server has no valid SSH destination")
             replacement = self.bindings.build_binding(
-                scope=str(vault["scope"]), target=f"shared_server:{shared['id']}",
+                vault=vault, target=f"shared_server:{shared['id']}",
                 hostname=hostname, port=port, login_user=str(binding["login_user"]),
                 vault_id=vault_id, vault_item_id=item_id, public_fingerprint=new_fingerprint,
                 host_keys=tuple(binding["host_keys"]),
@@ -2185,7 +2185,7 @@ class VaultCommandService:
             raise ValueError("a non-empty SSH login is required")
         target = f"shared_server:{shared['id']}"
         binding = self.bindings.build_binding(
-            scope=str(vault["scope"]), target=target, hostname=hostname, port=port,
+            vault=vault, target=target, hostname=hostname, port=port,
             login_user=login_user, vault_id=vault_id, vault_item_id=item_id,
             public_fingerprint=str(payload["public_fingerprint"]), host_keys=host_keys,
             binding_revision=revision,
@@ -2252,7 +2252,7 @@ class VaultCommandService:
             )
             revision = _positive_int(verified.get("binding_revision"), "binding.binding_revision") + 1
         binding = self.bindings.build_binding(
-            scope=str(vault["scope"]), target=target, hostname=hostname, port=port,
+            vault=vault, target=target, hostname=hostname, port=port,
             login_user=login, vault_id=vault_id, vault_item_id=item_id,
             public_fingerprint=fingerprint, host_keys=host_keys, binding_revision=revision,
         )
