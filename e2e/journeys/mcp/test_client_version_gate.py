@@ -56,6 +56,7 @@ async def test_mcp_cloud_tools_return_client_update_required_while_local_and_exe
         team = await _json(session, "api_request", {"method": "GET", "path": TEAM_PATH})
         assert team["error"]["code"] == "client_update_required", team
         assert MINIMUM_VERSION in team["error"]["message"]
+        assert "update your source checkout and reinstall" in team["error"]["message"]
         (team_request,) = fake_cloud.requests(TEAM_PATH)
         assert team_request["status"] == 426
         assert parse_client_signal(team_request["client_header"])[2] == "mcp"

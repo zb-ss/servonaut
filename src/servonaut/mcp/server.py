@@ -488,9 +488,14 @@ def create_mcp_server():
 
 async def run_server() -> None:
     """Run the MCP server with stdio transport."""
+    from servonaut.runtime import detect_runtime
     from servonaut.services.client_identity import configure_client_identity
 
-    configure_client_identity(kind="mcp")
+    try:
+        runtime = detect_runtime()
+    except Exception:  # noqa: BLE001 — retain a version-only identity if detection fails
+        runtime = None
+    configure_client_identity(kind="mcp", runtime=runtime)
     try:
         from mcp.server.stdio import stdio_server
     except ImportError:

@@ -113,6 +113,11 @@ async def test_enforce_mode_blocks_cloud_and_relay_while_local_fleet_and_updates
             f"servonaut.dev needs {MINIMUM_VERSION} or later for team, vault and AI features.",
             "Local features keep working.",
         )
+        assert 426 in fake_cloud.statuses("/api/v1/vault/identity/me")
+        assert all(
+            "Vault background access needs attention" not in message
+            for _, message in t.toasts()
+        )
 
         # Returning to the fleet confirms local views remain fully usable.
         await t.nav("nav_list")

@@ -1252,7 +1252,7 @@ class ServonautApp(App):
     async def _run_vault_background(self) -> None:
         """Discover native Vault support and process verified grant hints."""
         from httpx import TransportError
-        from servonaut.services.api_client import APIError
+        from servonaut.services.api_client import APIError, ClientUpdateRequiredError
         from servonaut.services.vault.identity_store import IdentityStoreError
         from servonaut.services.vault.crypto import VaultCryptoError
         from servonaut.services.vault.background import poll_vault
@@ -1271,6 +1271,9 @@ class ServonautApp(App):
             if not service.unlock_existing_identity():
                 return
             await poll_vault(service, discovered=True)
+        except ClientUpdateRequiredError:
+            # The shared update-required notice covers Vault as well.
+            return
         except TransportError as exc:
             # An optional Vault endpoint can be temporarily unavailable while
             # the rest of an authenticated session still works. There is no

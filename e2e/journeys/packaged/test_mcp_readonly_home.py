@@ -1,10 +1,13 @@
 """The installed MCP console works when its local logging storage is unwritable."""
 
+import asyncio
+import json
 import os
 
 import pytest
 
 from e2e.harness.processes import mcp_session
+from e2e.harness.waits import wait_for
 from e2e.journeys.packaged import support
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.timeout(300)]
@@ -41,6 +44,19 @@ async def test_mcp_lists_tools_without_writable_logs(
         ) as session:
             assert "list_instances" in await session.tool_names()
             assert not session.protocol_errors
+            # Keep the console alive to reap the updater it started. Otherwise
+            # the detached build can still be writing during sandbox teardown.
+            states = root / "updates" / "installs"
+
+            def builder_finished() -> bool:
+                return all(
+                    "builder" not in json.loads(path.read_text(encoding="utf-8"))
+                    for path in states.glob("*/state.json")
+                )
+
+            await asyncio.to_thread(
+                wait_for, builder_finished, timeout=90, desc="the MCP startup update builder",
+            )
     finally:
         restricted.chmod(original_mode)
 

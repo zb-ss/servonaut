@@ -46,8 +46,8 @@ from servonaut.services.memory.shared_view import (
     shared_source_text,
 )
 from servonaut.services.shared_servers import (
-    as_shared_row, fold_shared_rows, lacks_own_key, own_twin, team_key_fallback, team_key_target,
-    with_team_key,
+    SharedServers, as_shared_row, fold_shared_rows, lacks_own_key, own_twin,
+    team_key_fallback, team_key_target, with_team_key,
 )
 from servonaut.services.team_rules import (
     CREDENTIAL_CHECK_FAILED,
@@ -58,6 +58,7 @@ from servonaut.services.team_rules import (
     credential_rules_row,
     guard_for_target_from,
 )
+from servonaut.services.vault.display import terminal_safe
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
     AmbiguousInstanceError,
@@ -345,8 +346,8 @@ class ServonautTools:
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
-        # (expires_at, rows) of the last read of the teams' shared servers.
-        self._shared_memo: Optional[tuple] = None
+        # (expires_at, result) of the last read of the teams' shared servers.
+        self._shared_memo: Optional[tuple[float, SharedServers]] = None
         # Every provider account (AccountRegistry). The single-service
         # attributes above are each provider's default account; None keeps
         # them the only account (surfaces that never build the registry).
@@ -960,6 +961,12 @@ class ServonautTools:
             instances = [i for i in instances if i.get('state') == state]
 
         result = self._format_instances(instances) + self._agent_levels(instances)
+        if not account and self._shared_memo is not None:
+            problems = self._shared_memo[1].update_problems
+            if problems:
+                result += "\n\nSome team servers could not be listed: " + "; ".join(
+                    terminal_safe(problem) for problem in problems
+                )
         inventories = self._provider_inventories()
         for provider, label in (("aws", "AWS"), ("ovh", "OVH"), ("hetzner", "Hetzner")):
             if only_provider is not None and provider != only_provider:
@@ -5054,11 +5061,11 @@ class ServonautTools:
         """
         now = time.monotonic()
         if self._shared_memo is not None and self._shared_memo[0] > now:
-            return [dict(row) for row in self._shared_memo[1]]
+            return [dict(row) for row in self._shared_memo[1].rows]
         team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
-        rows: List[Dict] = []
-        read: frozenset = frozenset()
+        found = SharedServers()
         if team_service is not None:
+            from servonaut.services.api_client import ClientUpdateRequiredError
             from servonaut.services.shared_servers import load_shared_servers
 
             try:
@@ -5067,11 +5074,12 @@ class ServonautTools:
                     load_shared_servers(team_service, teams),
                     self._refresh_team_rules(teams),
                 )
-                rows, read = found.rows, frozenset(found.read)
+            except ClientUpdateRequiredError as exc:
+                found.update_problems.append(str(exc))
             except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
                 logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
-        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows, read)
-        return [dict(row) for row in rows]
+        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, found)
+        return [dict(row) for row in found.rows]
 
     async def connection_rows(self) -> tuple[List[Dict], List[Dict]]:
         """``(team_rows, fleet_rows)``: where a team key and a bastion's vault key are looked up.
@@ -5090,7 +5098,7 @@ class ServonautTools:
     @property
     def _shared_teams_read(self) -> frozenset:
         """The teams whose servers the last :meth:`_shared_server_rows` read in full."""
-        return self._shared_memo[2] if self._shared_memo is not None else frozenset()
+        return frozenset(self._shared_memo[1].read) if self._shared_memo is not None else frozenset()
 
     async def _refresh_team_rules(self, teams: Any) -> List[Any]:
         """Fetch the agent rules of *teams*; nothing without a refresher."""
