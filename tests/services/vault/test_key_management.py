@@ -45,6 +45,7 @@ def service() -> VaultCommandService:
         get_item=AsyncMock(return_value={"item_id": "key", "type": "ssh_key", "revision": 3, "bound_server_ids": [], "public_fingerprint": "SHA256:key"}),
         read_item=MagicMock(side_effect=lambda *_args: {"name": "web-1", "notes": "unchanged", "private_key_openssh": "opaque"}),
         write_item=AsyncMock(return_value={"revision": 4}), delete_item=AsyncMock(),
+        list_items=AsyncMock(return_value={"data": [], "meta": {"next_cursor": None}}),
     )
     service.vaults = SimpleNamespace(get_vault=AsyncMock(return_value={"vault_id": "vault"}))
     service.personal_binding = AsyncMock(return_value=None)
@@ -151,8 +152,9 @@ async def test_usage_filters_shared_rows_and_keeps_failed_reads_separate(service
 
     usage = await service.ssh_key_usage(vault_id="vault", item_id="key", servers=servers)
 
-    assert usage == {"team_servers": ["team-web"], "own_servers": ["web-1"], "unchecked": ["db-1"],
-                     "unchecked_targets": [["aws", "", "down"]], "checked": 2,
+    assert usage == {"team_servers": ["team-web"], "team_server_ids": ["shared"], "own_targets": [["aws", "", "own"]],
+                     "own_servers": ["web-1"], "unchecked": ["db-1"],
+                     "unchecked_targets": [["aws", "", "down"]], "checked": 2, "can_unbind": False, "other_members": {"members": 0, "servers": 0},
                      "name": "web-1", "fingerprint": "SHA256:key"}
     assert service.personal_binding.await_count == 3
 
@@ -223,7 +225,7 @@ async def test_delete_unused_key_uses_fresh_revision_and_ignores_other_or_closed
     ]}
     assert await service.delete_ssh_key(vault_id="vault", item_id="key", servers=[]) == {"item_id": "key", "deleted": True}
     service.items.get_item.assert_awaited_once_with("vault", "key")
-    service.items.delete_item.assert_awaited_once_with("vault", "key", 8)
+    service.items.delete_item.assert_awaited_once_with("vault", "key", 8, unbind=False)
 
 
 @pytest.mark.asyncio
@@ -258,7 +260,7 @@ async def test_unavailable_saved_assignments_need_explicit_acknowledgement(servi
         unchecked_targets=[["aws", "", "i-0001"]],
     )
     assert result["deleted"] is True
-    service.items.delete_item.assert_awaited_once_with("vault", "key", 3)
+    service.items.delete_item.assert_awaited_once_with("vault", "key", 3, unbind=False)
 
 
 @pytest.mark.asyncio
@@ -412,7 +414,7 @@ async def test_unsupported_ovh_targets_do_not_block_deleting_an_unused_key(servi
     }
     service.personal_binding.assert_not_awaited()
     service._personal_binding.assert_not_awaited()
-    service.items.delete_item.assert_awaited_once_with("vault", "key", 3)
+    service.items.delete_item.assert_awaited_once_with("vault", "key", 3, unbind=False)
 
 
 @pytest.mark.asyncio

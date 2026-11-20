@@ -97,6 +97,7 @@ class FakeCloud(LoopbackServer):
             lambda: self._store.snapshot().user_id, shared_servers=self.account.shared_servers,
             team_members=self.account.team_members,
         )
+        self.account.on_role_change = self.vault.team_role_changed
         # The hosted service can ship with SSH certificates switched off (Settings
         # feature.ssh_ca_enabled); see :meth:`switch_off_ssh_ca`.
         self.ssh_ca_switched_off = False

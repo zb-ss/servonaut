@@ -13,7 +13,14 @@ import pytest
 from servonaut.services.api_client import APIError
 from servonaut.services.vault import crypto
 from servonaut.services.vault.command_service import VaultCommandService, VaultSshLease
-from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import (
+    OWN_SERVER_KEY_REFUSED,
+    OWN_SERVER_PERSONAL_VAULT_ONLY,
+    OWN_SERVER_TEAM_KEY_REFUSED,
+    OWN_SERVER_VAULT_NOT_MANAGED,
+    VaultUserError,
+    vault_failure_reason,
+)
 from servonaut.services.vault.identity_client import DEVICE_PLATFORMS, device_platform
 from servonaut.services.vault.identity_store import IdentityStore
 from servonaut.services.vault.local_state import LocalStateError, VaultLocalState
@@ -1133,7 +1140,7 @@ async def test_personal_binding_uses_canonical_target_and_advances_verified_revi
 
     class Vaults:
         async def get_vault(self, _vault_id: str) -> dict[str, object]:
-            return {"scope": "user:1"}
+            return {"scope": "user:1", "kind": "personal"}
 
     class Items:
         async def get_item(self, _vault_id: str, _item_id: str) -> dict[str, object]:
@@ -1614,6 +1621,7 @@ async def test_break_glass_import_stores_root_login_and_normalised_source_networ
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     service.items = MagicMock()
     service.items.write_item = AsyncMock(return_value={"revision": 1})
+    service.items.list_items = AsyncMock(return_value={"data": [], "meta": {"next_cursor": None}})
 
     result = await service.import_keys(
         source="ssh", vault_id="11111111-1111-4111-8111-111111111111", path=str(key_path),
@@ -1956,7 +1964,7 @@ async def test_bind_personal_for_a_custom_server_signs_the_custom_target() -> No
     from servonaut.services.vault.personal_targets import custom_binding_id
 
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
-    vault = {"scope": "user:1"}
+    vault = {"scope": "user:1", "kind": "personal"}
     service.vaults.get_vault = AsyncMock(return_value=vault)  # type: ignore[method-assign]
     service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
@@ -1983,7 +1991,7 @@ async def test_binding_a_custom_server_on_a_service_without_support_says_so() ->
     from servonaut.services.vault.errors import VaultUserError
 
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
-    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1", "kind": "personal"})  # type: ignore[method-assign]
     service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
     service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
@@ -2487,18 +2495,50 @@ def test_the_tui_shows_the_waiting_jobs_notice_as_plain_text() -> None:
 @pytest.mark.asyncio
 async def test_vault_choices_offer_readable_vaults_personal_first_and_by_team() -> None:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    cap = ["own_server_team_keys"]
     service.list_vaults = AsyncMock(return_value=[  # type: ignore[method-assign]
-        {"vault_id": "v-team", "kind": "team", "name": "Ops", "team": {"slug": "ops"}, "my_grant": {"version": 1}},
+        {"vault_id": "v-team", "kind": "team", "name": "Ops", "team": {"slug": "ops"}, "my_grant": {"version": 1},
+         "capabilities": cap, "my_role": "owner"},
+        {"vault_id": "v-nocap", "kind": "team", "name": "Plain", "team": {"slug": "plain"},
+         "my_grant": {"version": 1}, "my_role": "owner"},
+        {"vault_id": "v-member", "kind": "team", "name": "Mem", "team": {"slug": "mem"},
+         "my_grant": {"version": 1}, "capabilities": cap, "my_role": "member"},
         {"vault_id": "v-wait", "kind": "team", "name": "Other", "team": {"slug": "other"}, "my_grant": None},
         {"vault_id": "v-me", "kind": "personal", "name": "Mine\x1b[2K", "team": None, "my_grant": {"version": 1}},
     ])
 
     every = await service.vault_choices()
-    for_team = await service.vault_choices(team="ops")
+    for_team = await service.vault_choices(team="plain")
 
-    assert [choice["vault_id"] for choice in every] == ["v-me", "v-team"]  # waiting-for-access left out
+    assert [choice["vault_id"] for choice in every] == ["v-me", "v-team"]
     assert every[0]["label"] == "Mine[2K (your personal vault)" and every[1]["label"] == "Ops (team ops)"
-    assert [choice["vault_id"] for choice in for_team] == ["v-team"]
+    assert [choice["vault_id"] for choice in for_team] == ["v-nocap"]
+
+
+@pytest.mark.parametrize(("vault", "expected"), [
+    ({"kind": "personal"}, None),
+    ({"kind": "team", "my_role": "owner"}, OWN_SERVER_PERSONAL_VAULT_ONLY),
+    ({"kind": "team", "my_role": "owner", "capabilities": "own_server_team_keys"}, OWN_SERVER_PERSONAL_VAULT_ONLY),
+    ({"kind": "team", "my_role": "owner", "capabilities": ["item_usage"]}, OWN_SERVER_PERSONAL_VAULT_ONLY),
+    ({"kind": "team", "my_role": "owner", "capabilities": ["own_server_team_keys"]}, None),
+    ({"kind": "team", "my_role": "admin", "capabilities": ["own_server_team_keys"]}, None),
+    ({"kind": "team", "my_role": "member", "capabilities": ["own_server_team_keys"]}, OWN_SERVER_VAULT_NOT_MANAGED),
+    ({"kind": "team", "my_role": "viewer", "capabilities": ["own_server_team_keys"]}, OWN_SERVER_VAULT_NOT_MANAGED),
+    ({"kind": "team", "capabilities": ["own_server_team_keys"]}, OWN_SERVER_VAULT_NOT_MANAGED),
+])
+def test_own_server_key_refusal_rule(vault, expected) -> None:
+    assert VaultCommandService.own_server_key_refusal(vault) == expected
+
+
+@pytest.mark.asyncio
+async def test_own_server_key_refusal_for_reads_the_vault_fresh_and_propagates_failures() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults.get_vault = AsyncMock(return_value={"kind": "team", "my_role": "owner"})  # type: ignore[method-assign]
+    assert await service.own_server_key_refusal_for(vault_id="v1") == OWN_SERVER_PERSONAL_VAULT_ONLY
+    service.vaults.get_vault.assert_awaited_once_with("v1")
+    service.vaults.get_vault = AsyncMock(side_effect=APIError(code="x", message="x", status=500))  # type: ignore[method-assign]
+    with pytest.raises(APIError):
+        await service.own_server_key_refusal_for(vault_id="v1")
 
 
 @pytest.mark.asyncio
@@ -2901,7 +2941,7 @@ async def test_a_bound_server_whose_address_moved_says_so(tmp_path) -> None:
 async def test_rebinding_a_server_whose_address_moved_replaces_the_old_destination() -> None:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     service.vaults = MagicMock()
-    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1", "kind": "personal"})
     service.items = MagicMock()
     service.items.get_item = AsyncMock(return_value={"type": "ssh_key"})
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:fixture"})
@@ -2929,7 +2969,7 @@ async def test_rebinding_a_server_whose_address_moved_replaces_the_old_destinati
 async def test_bind_personal_can_refuse_to_replace_an_existing_key() -> None:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     service.vaults = MagicMock()
-    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1", "kind": "personal"})
     service.items = MagicMock()
     service.items.get_item = AsyncMock(return_value={"type": "ssh_key"})
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:fixture"})
@@ -3202,7 +3242,7 @@ def test_the_vault_says_whether_it_is_unlocked(tmp_path) -> None:
 
 def _personal_bind_service(put_personal_binding) -> VaultCommandService:
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
-    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1", "kind": "personal"})  # type: ignore[method-assign]
     service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
     service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
@@ -3237,6 +3277,121 @@ async def test_a_binding_that_fails_leaves_the_generation(tmp_path) -> None:
     with pytest.raises(APIError):
         await _bind_web_1(service)
     assert service.binding_generation == before
+
+
+_OTHER_VAULT_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def _replacing_service(put, existing_vault_id: str):
+    """bind_personal on a server whose binding names *existing_vault_id*, not the new key's vault."""
+    service = _personal_bind_service(put)
+    existing = {"vault_id": existing_vault_id, "binding_revision": 4, "hostname": "192.0.2.10", "port": 22}
+    service._personal_binding = AsyncMock(return_value=(existing, "instance:aws:i-1"))  # type: ignore[method-assign]
+    new_vault = {"scope": "team:1", "kind": "team", "my_role": "owner", "capabilities": ["own_server_team_keys"]}
+    old_vault = {"scope": "user:1", "kind": "personal"}
+    service.vaults.get_vault = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda vault_id: old_vault if vault_id == existing_vault_id else new_vault,
+    )
+    service.bindings.verify_binding = MagicMock(return_value={"binding_revision": 4})  # type: ignore[method-assign]
+    return service, old_vault
+
+
+@pytest.mark.asyncio
+async def test_replacing_a_binding_from_another_vault_verifies_it_against_that_vault() -> None:
+    put = AsyncMock(return_value={"ok": True})
+    service, old_vault = _replacing_service(put, _OTHER_VAULT_ID)
+
+    assert await _bind_web_1(service) == {"ok": True}
+
+    service.vaults.get_vault.assert_any_await(_OTHER_VAULT_ID)
+    assert service.bindings.verify_binding.call_args.args[1] is old_vault
+    sent = put.await_args.args[2]
+    assert sent["binding_revision"] == 5
+    assert sent["vault_id"] == "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.mark.asyncio
+async def test_an_existing_binding_with_a_malformed_vault_is_not_replaced() -> None:
+    put = AsyncMock()
+    service, _old_vault = _replacing_service(put, "../not-a-vault")
+
+    with pytest.raises(ValueError):
+        await _bind_web_1(service)
+    put.assert_not_awaited()
+    service.bindings.verify_binding.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_vault_of_the_existing_binding_stops_the_bind() -> None:
+    put = AsyncMock()
+    service, _old_vault = _replacing_service(put, _OTHER_VAULT_ID)
+    refused = APIError(code="forbidden", message="forbidden", status=403)
+    new_vault = {"scope": "team:1", "kind": "team", "my_role": "owner", "capabilities": ["own_server_team_keys"]}
+
+    async def get_vault(vault_id):
+        if vault_id == _OTHER_VAULT_ID:
+            raise refused
+        return new_vault
+
+    service.vaults.get_vault = get_vault  # type: ignore[method-assign]
+
+    with pytest.raises(APIError) as raised:
+        await _bind_web_1(service)
+    assert raised.value is refused
+    put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("vault", "text"), [
+    ({"scope": "team:1", "kind": "team", "my_role": "owner"}, OWN_SERVER_PERSONAL_VAULT_ONLY),
+    ({"scope": "team:1", "kind": "team", "my_role": "member", "capabilities": ["own_server_team_keys"]},
+     OWN_SERVER_VAULT_NOT_MANAGED),
+])
+async def test_bind_personal_refuses_a_team_vault_that_does_not_qualify_before_sending(vault, text) -> None:
+    put = AsyncMock()
+    service = _personal_bind_service(put)
+    service.vaults.get_vault = AsyncMock(return_value=vault)  # type: ignore[method-assign]
+
+    with pytest.raises(VaultUserError) as raised:
+        await _bind_web_1(service)
+
+    assert str(raised.value) == text
+    service.items.get_item.assert_not_awaited()
+    put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bind_personal_accepts_a_team_vault_the_user_administers() -> None:
+    put = AsyncMock(return_value={"ok": True})
+    service = _personal_bind_service(put)
+    service.vaults.get_vault = AsyncMock(return_value={  # type: ignore[method-assign]
+        "scope": "team:1", "kind": "team", "my_role": "admin", "capabilities": ["own_server_team_keys"],
+    })
+
+    assert await _bind_web_1(service) == {"ok": True}
+    put.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("vault", "text"), [
+    ({"scope": "user:1", "kind": "personal"}, OWN_SERVER_KEY_REFUSED),
+    ({"scope": "team:1", "kind": "team", "my_role": "admin", "capabilities": ["own_server_team_keys"]},
+     OWN_SERVER_TEAM_KEY_REFUSED),
+])
+async def test_bind_personal_maps_a_wire_item_mismatch_to_client_text(vault, text) -> None:
+    server_text = "server wording that must not be shown"
+    service = _personal_bind_service(
+        AsyncMock(side_effect=APIError(code="item_mismatch", message=server_text, status=422)),
+    )
+    service.vaults.get_vault = AsyncMock(return_value=vault)  # type: ignore[method-assign]
+    service._forget_personal_binding = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(VaultUserError) as raised:
+        await _bind_web_1(service)
+
+    assert str(raised.value) == text
+    assert server_text not in str(raised.value)
+    service._forget_personal_binding.assert_called_once_with("aws", "i-1")
 
 
 # --- Device platform: a Mac is "macos" to the vault service, never "darwin" ---

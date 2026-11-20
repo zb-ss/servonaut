@@ -69,6 +69,11 @@ def _parser() -> argparse.ArgumentParser:
                     help="provide a fake Bitwarden Password Manager (bw CLI on PATH, "
                          "BW_SESSION in the child environment) seeded with native SSH-key items "
                          "for each distinct key pair of the fleet")
+    up.add_argument("--vault-capabilities", type=_vault_capabilities, default=None, metavar="LIST",
+                    help="answer like a vault service that announces these optional features: "
+                         "a comma-separated list of " + ", ".join(VAULT_CAPABILITIES) + ", or 'all', "
+                         "or 'none' (an empty list); without it, like an older service with no "
+                         "capabilities field")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
@@ -143,6 +148,27 @@ def _api_delay(value: str) -> float:
     return seconds
 
 
+# The optional vault features a Servonaut service can announce on its vault objects.
+VAULT_CAPABILITIES = ("duplicate_item", "item_usage", "delete_refuses_bound", "me_credential_bindings",
+                     "own_server_team_keys")
+
+
+def _vault_capabilities(value: str) -> list[str]:
+    text = value.strip()
+    if text == "all":
+        return list(VAULT_CAPABILITIES)
+    if text == "none":
+        return []
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    unknown = [name for name in names if name not in VAULT_CAPABILITIES]
+    if unknown or not names:
+        raise argparse.ArgumentTypeError(
+            f"unknown vault capability {', '.join(unknown) or repr(value)}: use "
+            + ", ".join(VAULT_CAPABILITIES) + ", all or none"
+        )
+    return names
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "up":
@@ -153,7 +179,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         api_delay=args.api_delay, teams=args.teams, account_email=args.account_email,
                         verification_uri=args.verification_uri, user_code=args.user_code,
                         hostname=args.hostname, ai_script=args.ai_script,
-                        team_server_as=args.team_server_as, bitwarden=args.bitwarden)
+                        team_server_as=args.team_server_as, bitwarden=args.bitwarden,
+                        vault_capabilities=args.vault_capabilities)
 
     from e2e.sandbox import client
 

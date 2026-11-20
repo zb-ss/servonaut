@@ -664,7 +664,7 @@ servonaut vault show ITEM_ID --vault VAULT_ID [--reveal --yes]
 servonaut vault import ssh --vault VAULT_ID --path PATH [--name NAME] [--break-glass --from-cidr CIDR [--from-cidr CIDR ...]]
 servonaut vault import bitwarden --vault VAULT_ID --item BITWARDEN_ITEM_ID [--name NAME]
 servonaut vault rename ITEM_ID --vault VAULT_ID --name NAME
-servonaut vault delete ITEM_ID --vault VAULT_ID [--yes]
+servonaut vault delete ITEM_ID --vault VAULT_ID [--unbind] [--yes]
 servonaut vault bind SERVER ITEM_ID --vault VAULT_ID --team TEAM [--login USER] (--host-key 'OPENSSH_HOST_KEY' [--host-key ...] | --pin-host-key) --yes
 servonaut vault bind-personal --vault VAULT_ID --item ITEM_ID --provider PROVIDER --instance-id INSTANCE_ID --hostname HOST --login USER --host-key 'OPENSSH_HOST_KEY' [--host-key 'OPENSSH_HOST_KEY' ...]
 servonaut vault auto-bind [--vault VAULT_ID | --team TEAM] [--fetch-host-keys] [--dry-run] [--yes]
@@ -678,6 +678,19 @@ servonaut vault verify-member MEMBER
 Every `--vault VAULT_ID` also accepts the vault's name as `vault list` shows
 it (matched exactly, or ignoring case when that is unambiguous). If several
 vaults share a name, pass the id.
+
+`delete` refuses a key that is still assigned to servers. With `--unbind` (vault
+owner or admin) it first removes the saved assignments for every member, then
+deletes the key, after you confirm the unbind (`--yes` skips the prompt); a key that
+shows no assignments is deleted normally, and `--unbind` only comes into play if the
+service then reports it in use. Importing a key the vault already holds is skipped with a note
+and exit code 0.
+
+With `--json`, `import` prints one object. A stored key is
+`{"imported": true, "item_id": ..., "name": ..., "type": ..., "public_fingerprint": ..., "item": {...}}`
+(`item` is the stored, encrypted record); a key the vault already holds is
+`{"imported": false, "skipped": "already_in_vault", "item_id": ..., "existing_item_id": ..., "existing_name": ...}`,
+where `item_id` and `existing_item_id` are the existing key's id. Check `imported` to tell them apart.
 
 `import ssh` stores the private key file given with `--path`; the file itself
 is left unchanged. A key with a passphrase is unlocked first: the command asks

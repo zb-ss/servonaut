@@ -184,6 +184,9 @@ def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int,
     return status, {"error": error}
 
 
+OWN_BINDING_MISMATCH = "Personal instances can use an item of your personal vault or of a team vault you manage."
+
+
 def _iso(moment: float) -> str:
     return dt.datetime.fromtimestamp(int(moment), tz=dt.timezone.utc).isoformat()
 
@@ -266,6 +269,135 @@ class VaultCloud:
             self.ca_activation_refusal: Optional[str] = None
             # Vaults whose key becomes due for rotation when their next item write arrives.
             self._rotation_due_on_item_write: set[str] = set()
+            # None models an old service (no ``capabilities`` field on vaults).
+            self._capabilities: Optional[list[str]] = None
+            # (vault_id, item_id) -> {"members": m, "servers": s} for other members' bindings.
+            self._other_member_bindings: dict[tuple[str, str], dict[str, int]] = {}
+
+    def set_capabilities(self, capabilities: Optional[Any]) -> None:
+        """Control: the optional feature strings the service announces on vaults.
+
+        ``None`` (the default) models an old service: vault objects carry no
+        ``capabilities`` field. Known strings are ``duplicate_item``,
+        ``item_usage``, ``delete_refuses_bound`` and ``own_server_team_keys`` (a
+        user's own server may use a key of a team vault they own or administer);
+        others are passed through
+        so a journey can check that clients ignore them.
+        """
+        with self._lock:
+            self._capabilities = None if capabilities is None else [str(c) for c in capabilities]
+
+    def _has(self, capability: str) -> bool:
+        return capability in (self._capabilities or ())
+
+    def bind_for_other_members(self, vault_id: str, item_id: str, *, members: int, servers: int) -> None:
+        """Control: other members hold *servers* personal bindings to this item, in total."""
+        with self._lock:
+            self._other_member_bindings[(vault_id, item_id)] = {"members": int(members), "servers": int(servers)}
+
+    def item_usage(self, vault_id: str, item_id: str) -> dict[str, Any]:
+        """Where the item is bound: team servers, the caller's own instances, other members' counts."""
+        with self._lock:
+            empty = {"item_id": item_id, "team_servers": [], "own_instances": [],
+                     "other_members": {"members": 0, "servers": 0}}
+            item = self._items.get(vault_id, {}).get(item_id)
+            if item is None or item.get("deleted_at"):
+                return empty
+            team = (self._vaults.get(vault_id) or {}).get("team") or {}
+            team_servers = sorted(
+                ({"server_id": str(server["id"]), "name": server.get("name")}
+                 for server in self._shared_servers(str(team.get("slug") or ""))
+                 if (binding := self._bindings.get(("team", str(server["id"]))))
+                 and binding.get("vault_id") == vault_id and binding.get("vault_item_id") == item_id),
+                key=lambda entry: str(entry["name"]),
+            )
+            own = [{"provider": provider, "instance_id": instance_id}
+                   for (provider, instance_id), binding in self._bindings.items()
+                   if provider != "team" and binding.get("vault_id") == vault_id
+                   and binding.get("vault_item_id") == item_id]
+            others = dict(self._other_member_bindings.get((vault_id, item_id), {"members": 0, "servers": 0}))
+            return {"item_id": item_id, "team_servers": team_servers, "own_instances": own, "other_members": others}
+
+    def usage_batch(self, vault_id: str, body: dict[str, Any], user_id: int) -> tuple[int, dict[str, Any]]:
+        """``POST …/items/usage``: the usage of up to 500 items in one request."""
+        with self._lock:
+            vault = self._vaults.get(vault_id)
+            if not self._has("item_usage") or vault is None or self._role(vault, user_id) is None:
+                return _refusal(404, "not_found", "Not found")
+            if self._role(vault, user_id) not in {"owner", "admin"}:
+                return _refusal(403, "forbidden", "Only an owner or admin may review key usage")
+            ids = body.get("item_ids")
+            if (not isinstance(ids, list) or not 1 <= len(ids) <= 500 or len(set(map(str, ids))) != len(ids)
+                    or any(_uuid(i) is None for i in ids)):
+                return _refusal(422, "validation_failed", "Invalid value", field="item_ids")
+            items = self._items.get(vault_id, {})
+            known = [i for i in ids if i in items]
+            return 200, {"data": [self.item_usage(vault_id, i) for i in known],
+                         "meta": {"unknown_item_ids": [i for i in ids if i not in items]}}
+
+    def own_binding_refusal(self, body: dict[str, Any], user_id: int) -> Optional[tuple[int, dict[str, Any]]]:
+        """The refusal for an own-server binding whose vault or item may not be used, else None."""
+        with self._lock:
+            vault_id = str(body.get("vault_id"))
+            vault = self._vaults.get(vault_id)
+            item = self._items.get(vault_id, {}).get(str(body.get("vault_item_id")))
+            allowed_vault = vault is not None and (
+                (vault["kind"] == "personal" and vault["owner_user_id"] == user_id)
+                or (vault["kind"] == "team" and self._has("own_server_team_keys")
+                    and self._role(vault, user_id) in {"owner", "admin"})
+            )
+            if allowed_vault and item is not None and not item.get("deleted_at") and item.get("type") == "ssh_key":
+                return None
+            return _refusal(422, "item_mismatch", OWN_BINDING_MISMATCH)
+
+    def _drop_own_server_bindings(self, vault_id: str, user_id: int) -> int:
+        identity = self._identity(user_id)
+        if identity is None:
+            return 0
+        doomed = [key for key, binding in self._bindings.items()
+                  if key[0] != "team" and binding.get("vault_id") == vault_id
+                  and binding.get("binder_identity_id") == identity["identity_id"]]
+        for key in doomed:
+            del self._bindings[key]
+        return len(doomed)
+
+    def set_member_role(self, vault_id: str, user_id: int, role: Optional[str]) -> int:
+        """Control: set a user's role in a vault's own roster (None removes them).
+
+        As on the service, a role below admin drops that user's personal
+        bindings to the vault; returns how many. owner and admin drop nothing.
+        """
+        with self._lock:
+            vault = self._vaults[vault_id]
+            self._apply_role(vault, user_id, role)
+            return 0 if role in {"owner", "admin"} else self._drop_own_server_bindings(vault_id, user_id)
+
+    @staticmethod
+    def _apply_role(vault: dict[str, Any], user_id: int, role: Optional[str]) -> None:
+        for entry in vault["roster"]:
+            if entry["user_id"] == user_id:
+                if role is None:
+                    entry["status"] = "removed"
+                else:
+                    entry["role"] = role
+                    # Added back after a removal: their earlier grant applies again.
+                    if entry.get("status") == "removed":
+                        entry["status"] = "granted"
+
+    def team_role_changed(self, slug: str, user_id: int, role: Optional[str]) -> int:
+        """Hook for the team fake: a member's role changed (None: removed). Returns bindings dropped.
+
+        Every change reaches the vault rosters; only a role below admin (or
+        leaving) drops the member's personal bindings to the team's vaults.
+        """
+        dropped = 0
+        with self._lock:
+            for vault_id, vault in self._vaults.items():
+                if vault["kind"] == "team" and (vault.get("team") or {}).get("slug") == slug:
+                    self._apply_role(vault, user_id, role)
+                    if role not in {"owner", "admin"}:
+                        dropped += self._drop_own_server_bindings(vault_id, user_id)
+        return dropped
 
     def refuse_ca_activation(self, kind: Optional[str]) -> None:
         """Control: refuse every CA switch-on and rollover start with *kind*.
@@ -768,6 +900,8 @@ class VaultCloud:
                        "counts": {"items": live_item_count, "open_exposures": open_exposure_count,
                                   "pending_recipients": sum(entry["status"] == "awaiting_grant" for entry in roster)},
                        "poll_after_seconds": 300, "access_recovery": None})
+        if self._capabilities is not None:
+            answer["capabilities"] = list(self._capabilities)
         if vault["kind"] == "team":
             answer["roster"] = copy.deepcopy(roster)
             answer["identities"] = self._referenced_identities(vault, roster)
@@ -837,6 +971,14 @@ class VaultCloud:
                 return 409, {"error": {"code": "revision_conflict", "message": "Item revision changed"}}
             if old is None and expected not in (None, 0):
                 return 409, {"error": {"code": "revision_conflict", "message": "Item does not exist"}}
+            if self._has("duplicate_item") and (old is None or old.get("public_fingerprint") != body.get("public_fingerprint")):
+                fingerprint = body.get("public_fingerprint")
+                twin = next((other_id for other_id, other in self._items[vault_id].items()
+                             if fingerprint is not None and other_id != item_id and not other.get("deleted_at")
+                             and other.get("public_fingerprint") == fingerprint), None)
+                if twin is not None:
+                    return _refusal(409, "duplicate_item", "This key is already stored in this vault",
+                                    existing_item_id=twin)
             revision = 1 if old is None else old["revision"] + 1
             item = copy.deepcopy(body)
             item.update({
@@ -980,6 +1122,9 @@ class VaultCloud:
 
     def delete_item(self, vault_id: str, item_id: str, body: dict[str, Any], user_id: int) -> tuple[int, dict[str, Any]]:
         with self._lock:
+            refuses_bound = self._has("delete_refuses_bound")
+            if refuses_bound and "unbind" in body and not isinstance(body["unbind"], bool):
+                return _refusal(422, "validation_failed", "Invalid value", field="unbind")
             item = self._items.get(vault_id, {}).get(item_id)
             if item is None:
                 return 404, {"error": {"code": "not_found", "message": "Item not found"}}
@@ -987,6 +1132,16 @@ class VaultCloud:
                 return _refusal(409, "item_deleted", "Item already deleted")
             if type(body.get("revision")) is not int or body["revision"] != item["revision"] + 1:
                 return _refusal(409, "revision_conflict", "Item revision changed")
+            if refuses_bound:
+                usage = self.item_usage(vault_id, item_id)
+                in_use = (usage["team_servers"] or usage["own_instances"] or usage["other_members"]["servers"])
+                if in_use and body.get("unbind") is not True:
+                    return _refusal(409, "item_in_use", "This key is still in use", **usage)
+                if body.get("unbind") is True:
+                    for key in [k for k, b in self._bindings.items()
+                                if b.get("vault_id") == vault_id and b.get("vault_item_id") == item_id]:
+                        del self._bindings[key]
+                    self._other_member_bindings.pop((vault_id, item_id), None)
             item["deleted_at"] = _now()
             item["revision"] += 1
             return 200, {"item_id": item_id, "revision": item["revision"], "deleted_at": item["deleted_at"]}
@@ -1839,6 +1994,11 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
         status, body = vault.delete_item(request.match_info["vault_id"], request.match_info["item_id"], await json_body(request), device.user_id)
         return web.json_response(body, status=status)
 
+    async def item_usage_route(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
+        status, body = vault.usage_batch(request.match_info["vault_id"], await json_body(request), device.user_id)
+        return web.json_response(body, status=status)
+
     async def grants(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
         status, body = vault.add_grants(request.match_info["vault_id"], await json_body(request), device.user_id)
@@ -1905,6 +2065,10 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
             return _not_found()
         assert device is not None
         body = await json_body(request)
+        refusal = vault.own_binding_refusal(body, device.user_id)
+        if refusal is not None:
+            status, answer = refusal
+            return web.json_response(answer, status=status)
         target = f"instance:{request.match_info['provider']}:{request.match_info['instance_id']}"
         if not _valid_binding(vault, body, device, target):
             return _problem("credential_binding")
@@ -2107,6 +2271,7 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
     router.add_post("/api/v1/teams/{slug}/vaults", route(team_create))
     router.add_get(f"{VAULTS}/{{vault_id}}", route(vault_read))
     router.add_get(f"{VAULTS}/{{vault_id}}/items", route(item_list))
+    router.add_post(f"{VAULTS}/{{vault_id}}/items/usage", route(item_usage_route))
     router.add_get(f"{VAULTS}/{{vault_id}}/items/{{item_id}}", route(item_read))
     router.add_put(f"{VAULTS}/{{vault_id}}/items/{{item_id}}", route(item_put))
     router.add_delete(f"{VAULTS}/{{vault_id}}/items/{{item_id}}", route(item_delete))

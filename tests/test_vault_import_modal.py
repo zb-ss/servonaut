@@ -15,6 +15,13 @@ from servonaut.services.bw_session_service import BwAuthState, BwItemSummary
 from tests._async_bounds import wait_until
 
 
+def _service(stored: dict | None = None) -> MagicMock:
+    """A vault service double whose listing of existing keys succeeds."""
+    service = MagicMock()
+    service.stored_keys = AsyncMock(return_value=stored or {})
+    return service
+
+
 class _List:
     def __init__(self, selected: list[int]) -> None:
         self.selected = selected
@@ -26,6 +33,7 @@ class _Harness:
         self.app = MagicMock()
         self.app.demo_mode = False
         self.modal.dismiss = MagicMock()
+        self.modal._existing_ok = True
         self.modal._confirm = MagicMock(return_value=MagicMock())
         self.modal._set_status = MagicMock()
         self._patcher = patch.object(type(modal), "app", property(lambda _modal: self.app))
@@ -43,7 +51,7 @@ def test_modal_is_optional_metadata_result() -> None:
 
 
 def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(tmp_path: Path) -> None:
-    service = MagicMock()
+    service = _service()
     service.import_keys = AsyncMock(return_value={"item_id": "vault-item-1", "name": "Stored local key", "public_fingerprint": "SHA256:local"})
     modal = VaultImportModal(service, "vault-1", tmp_path)
     modal._source = "ssh"
@@ -62,12 +70,14 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
     call = service.import_keys.await_args.kwargs
     assert call["source"] == "ssh"
     assert call["vault_id"] == "vault-1"
+    assert "known_keys" in call
     assert call["path"].endswith("id_ed25519")
     harness.modal.dismiss.assert_called_once_with(
         {
             "imported": 1,
             "skipped": 0,
             "failed": 0,
+            "duplicates": 0,
             "imported_ids": ["vault-item-1"],
             "references": [
                 {
@@ -83,7 +93,7 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
 
 
 def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path) -> None:
-    service = MagicMock()
+    service = _service()
     service.import_keys = AsyncMock(return_value={"item_id": "vault-item-2", "name": "Stored Bitwarden key", "public_fingerprint": "SHA256:bitwarden"})
     resolver = MagicMock()
     resolver.resolve_ssh_key.return_value = "fixture-private"
@@ -108,6 +118,7 @@ def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path
     call = service.import_keys.await_args.kwargs
     assert call["source"] == "bitwarden"
     assert call["source_ref"] == "item-uuid-1"
+    assert "known_keys" in call
     assert "delete" not in " ".join(name for name in dir(resolver) if "delete" in name)
     assert harness.modal.dismiss.call_args.args[0]["references"] == [
         {"vault_item_id": "vault-item-2", "source": "bitwarden", "source_ref": "item-uuid-1",
@@ -116,7 +127,7 @@ def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path
 
 
 def test_local_scan_failure_is_not_reported_as_empty_directory(tmp_path: Path) -> None:
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     modal._show_options = MagicMock()
     harness = _Harness(modal)
 
@@ -139,7 +150,7 @@ def test_local_scan_failure_is_not_reported_as_empty_directory(tmp_path: Path) -
 
 
 def test_local_symlink_provenance_is_escaped_and_demo_redacted(tmp_path: Path) -> None:
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     modal._show_options = MagicMock()
     harness = _Harness(modal)
     harness.app.demo_mode = True
@@ -168,7 +179,7 @@ def test_local_symlink_provenance_is_escaped_and_demo_redacted(tmp_path: Path) -
 
 
 def test_import_in_progress_cannot_switch_source(tmp_path: Path) -> None:
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     modal._importing = True
     modal.run_worker = MagicMock()
 
@@ -180,7 +191,7 @@ def test_import_in_progress_cannot_switch_source(tmp_path: Path) -> None:
 
 
 def test_encrypted_local_key_uses_masked_existing_passphrase_modal(tmp_path: Path) -> None:
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     harness = _Harness(modal)
     harness.app.push_screen_wait = AsyncMock(return_value="correct-passphrase")
     expected = DecryptedKey("normalised", "ssh-ed25519 AAAA", "SHA256:fixture", "ed25519")
@@ -207,7 +218,7 @@ async def test_modal_journey_renders_source_choice_without_key_content(tmp_path:
 
     class Host(App):
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
 
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -231,7 +242,7 @@ async def test_demo_toggle_redraws_import_status_without_exposing_source_metadat
         redaction_service = Redactor()
 
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
 
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -265,7 +276,7 @@ async def test_modal_local_and_bitwarden_source_journeys(tmp_path: Path) -> None
 
     class Host(App):
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path, session_service=session))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path, session_service=session))
 
     async def immediate_thread(function, *args, **kwargs):
         return function(*args, **kwargs)
@@ -312,7 +323,7 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
 
     class LocalHost(App):
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
 
     with patch("servonaut.screens.vault_import_modal.scan_directory", return_value=[local_key]), patch(
         "servonaut.screens.vault_import_modal.asyncio.to_thread", new=delayed_local_scan
@@ -351,7 +362,7 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
             return True
 
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path, session_service=session))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path, session_service=session))
 
     app = BitwardenHost()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -377,7 +388,7 @@ def test_bitwarden_unreadable_material_keeps_fixed_tui_notice_and_wipes_buffer(t
 
     core = VaultCommandService.__new__(VaultCommandService)
     core.items = SimpleNamespace(write_item=AsyncMock())
-    service = MagicMock()
+    service = _service()
     service.import_keys = AsyncMock(side_effect=core.import_keys)
     resolver = MagicMock()
     resolver.resolve_ssh_key.return_value = "unreadable key material"
@@ -410,7 +421,7 @@ async def test_bitwarden_labels_render_hostile_brackets_literally(tmp_path: Path
 
     class Host(App):
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
 
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -433,7 +444,7 @@ async def test_local_filename_and_target_render_unclosed_brackets_and_trailing_b
 
     class Host(App):
         def on_mount(self) -> None:
-            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
 
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -492,3 +503,223 @@ def test_import_reference_only_includes_string_fingerprint(fingerprint: object) 
         assert reference["fingerprint"] == fingerprint
     else:
         assert "fingerprint" not in reference
+
+
+# --- keys the vault already holds -------------------------------------------
+
+_FP = "SHA256:fixture-dup"
+
+
+def _local_modal(tmp_path: Path, stored: dict | None, **service_extra) -> tuple[VaultImportModal, MagicMock]:
+    service = _service(stored)
+    for name, value in service_extra.items():
+        setattr(service, name, value)
+    modal = VaultImportModal(service, "vault-1", tmp_path)
+    modal._source = "ssh"
+    modal._local_keys = [
+        ScannedKey(path=tmp_path / "id_a", filename="id_a", encrypted=False, fingerprint=_FP),
+        ScannedKey(path=tmp_path / "id_b", filename="id_b", encrypted=False, fingerprint="SHA256:other"),
+    ]
+    return modal, service
+
+
+
+
+def test_local_row_already_in_vault_is_disabled_and_named(tmp_path: Path) -> None:
+    modal, _ = _local_modal(tmp_path, {_FP: {"item_id": "i-1", "name": "key [1]"}})
+    modal._existing_ok = True
+    modal._existing = {_FP: {"item_id": "i-1", "name": "key [1]"}}
+    modal._show_options = MagicMock()
+    harness = _Harness(modal)
+    try:
+        modal._show_local_options()
+    finally:
+        harness.close()
+    options, message = modal._show_options.call_args.args
+    assert options[0].disabled and options[0].initial_state is False
+    assert not options[1].disabled
+    assert "already in this vault as" in str(options[0].prompt)
+    assert "as key [1]" in str(options[0].prompt)
+    assert message.endswith("1 already in this vault.")
+
+
+def test_local_row_without_stored_name_says_only_already_in_vault(tmp_path: Path) -> None:
+    modal, _ = _local_modal(tmp_path, None)
+    modal._existing_ok = True
+    modal._existing = {_FP: {"item_id": "i-1", "name": None}}
+    modal._show_options = MagicMock()
+    harness = _Harness(modal)
+    try:
+        modal._show_local_options()
+    finally:
+        harness.close()
+    prompt = str(modal._show_options.call_args.args[0][0].prompt)
+    assert "already in this vault" in prompt and " as " not in prompt
+
+
+def test_bitwarden_row_already_in_vault_is_disabled(tmp_path: Path) -> None:
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
+    modal._existing_ok = True
+    modal._existing = {_FP: {"item_id": "i-1", "name": "stored-key"}}
+    modal._bw_items = [
+        BwItemSummary(id="bw-1", name="a", type=5, has_ssh_key=True, fingerprint=_FP),
+        BwItemSummary(id="bw-2", name="b", type=5, has_ssh_key=True, fingerprint="SHA256:other"),
+    ]
+    modal._show_options = MagicMock()
+    harness = _Harness(modal)
+    try:
+        modal._show_bitwarden_options()
+    finally:
+        harness.close()
+    options, _message = modal._show_options.call_args.args
+    assert options[0].disabled and not options[1].disabled
+    assert "already in this vault as stored-key" in str(options[0].prompt)
+
+
+def test_failed_vault_listing_names_the_reason_and_logs_it(tmp_path: Path, caplog) -> None:
+    from servonaut.services.api_client import APIError
+
+    refusal = APIError(code="rate_limited", message="private-detail", status=429)
+    modal, _service = _local_modal(tmp_path, None, stored_keys=AsyncMock(side_effect=refusal))
+    harness = _Harness(modal)
+    try:
+        with caplog.at_level("WARNING"):
+            asyncio.run(modal._load_existing())
+        message = modal._found_message("Found 2 local SSH key candidate(s).", 0)
+    finally:
+        harness.close()
+    assert "HTTP 429, rate_limited" in message and "import is blocked" in message
+    assert "private-detail" not in message
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ["Could not read the vault's existing keys (APIError: HTTP 429, rate_limited)"]
+
+
+def test_failed_vault_listing_blocks_the_import(tmp_path: Path) -> None:
+    modal, service = _local_modal(tmp_path, None, stored_keys=AsyncMock(side_effect=RuntimeError("boom")))
+    modal._list = MagicMock(return_value=_List([0]))
+    harness = _Harness(modal)
+    harness.modal._existing_ok = False
+    try:
+        asyncio.run(modal._load_existing())
+        assert modal._existing_ok is False and modal._existing == {}
+        modal._show_options = VaultImportModal._show_options.__get__(modal)
+        asyncio.run(modal._import_selected())
+        message = modal._found_message("Found 2 local SSH key candidate(s).", 0)
+    finally:
+        harness.close()
+    service.import_keys.assert_not_called()
+    harness.app.notify.assert_called_once()
+    assert harness.app.notify.call_args.kwargs == {"severity": "error", "markup": False}
+    assert "import is blocked" in message and "boom" not in message
+    modal.dismiss.assert_not_called()
+
+
+def test_duplicate_found_at_import_time_counts_as_duplicate_and_wipes_buffer(tmp_path: Path, caplog) -> None:
+    from servonaut.services.vault.errors import VaultDuplicateKey
+
+    private = bytearray(b"fixture-private")
+    exc = VaultDuplicateKey(
+        existing_item_id="3f2a1b4c-0000-4000-8000-000000000001", existing_name="stored-key", fingerprint=_FP,  # synthetic fixture  leak-guard:allow
+    )
+    modal, service = _local_modal(tmp_path, None, import_keys=AsyncMock(side_effect=exc))
+    modal._local_private_key = AsyncMock(return_value=private)
+    modal._list = MagicMock(return_value=_List([0]))
+    harness = _Harness(modal)
+    modal._source = "ssh"
+    try:
+        with caplog.at_level("INFO", logger="servonaut.screens.vault_import_modal"):
+            asyncio.run(modal._import_selected())
+    finally:
+        harness.close()
+    summary = modal.dismiss.call_args.args[0]
+    assert summary["duplicates"] == 1 and summary["failed"] == 0 and summary["imported"] == 0
+    assert private == bytearray(len(b"fixture-private"))
+    assert modal._existing[_FP]["name"] == "stored-key"
+    harness.app.notify.assert_called_once_with(
+        "id_a: already in this vault as stored-key; skipped.", severity="warning", markup=False,
+    )
+    lines = [r.getMessage() for r in caplog.records if r.name == "servonaut.screens.vault_import_modal"]
+    assert lines == ["Vault key import (ssh) into vault vault-1: 0 imported, 1 already in the vault, 0 failed"]
+    assert "fixture-private" not in caplog.text
+
+
+def test_second_copy_of_an_imported_key_is_a_duplicate(tmp_path: Path) -> None:
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
+    modal._remember_import({"item_id": "i-1", "name": "stored", "public_fingerprint": _FP})
+    assert modal._existing[_FP] == {"item_id": "i-1", "name": "stored"}
+
+
+def test_vault_screen_status_reports_skipped_duplicates() -> None:
+    from servonaut.screens.vault import VaultScreen
+
+    screen = VaultScreen.__new__(VaultScreen)
+    screen._status = MagicMock()
+    screen.run_worker = MagicMock()
+    screen._refresh_imported_vault_metadata = MagicMock()
+    VaultScreen._handle_import_result(
+        screen, "vault-1", {"imported": 2, "failed": 1, "duplicates": 3, "references": []},
+    )
+    screen._status.assert_called_once_with("SSH key import complete: 2 imported, 1 failed, 3 skipped: already in vault.")
+    assert screen._refresh_imported_vault_metadata.call_args.args[-1] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_a_stored_name_ending_in_a_backslash_keeps_the_row_closed(tmp_path: Path, source: str) -> None:
+    from textual.app import App
+    from textual.widgets import SelectionList
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._existing_ok = True
+        modal._existing = {_FP: {"item_id": "i-1", "name": "deploy\\"}}
+        if source == "local":
+            modal._local_keys = [ScannedKey(path=tmp_path / "id_a", filename="id_a", encrypted=False, fingerprint=_FP)]
+            modal._show_local_options()
+        else:
+            modal._bw_items = [BwItemSummary(id="bw-1", name="a", type=5, has_ssh_key=True, fingerprint=_FP)]
+            modal._show_bitwarden_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 1)
+        plain = listing.get_option_at_index(0).prompt.plain
+        assert plain.rstrip().endswith("already in this vault as deploy\\")
+        assert "[/dim]" not in plain
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_key_list_keeps_rows_on_a_short_terminal(tmp_path: Path) -> None:
+    """At 100x30 the dialog gives up spacing so the list still shows keys and Import stays on screen."""
+    from textual.app import App
+    from textual.widgets import SelectionList
+
+    from servonaut.styles import CSS_FILES
+
+    class Host(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(_service(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._local_keys = [
+            ScannedKey(path=tmp_path / f"id_{n}", filename=f"id_{n}", encrypted=False, fingerprint=f"SHA256:k{n}")
+            for n in range(3)
+        ]
+        modal._show_local_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 3)
+        await wait_until(lambda: listing.content_region.height >= 3)
+        confirm = modal.query_one("#vault_import_confirm")
+        assert confirm.region.height > 0 and confirm.region.bottom <= 30
+        await pilot.pause()
+

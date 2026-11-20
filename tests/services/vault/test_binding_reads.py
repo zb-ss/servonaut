@@ -233,3 +233,98 @@ async def test_clear_drops_answers_and_the_pause() -> None:
     fetch = _Fetch(None)
     await reads.read("a", fetch)
     assert fetch.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_forget_all_drops_answers_but_keeps_a_running_pause() -> None:
+    clock = _Clock()
+    reads = _reads(clock, backoff=30.0)
+    await reads.read("a", _Fetch(None))
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("b", _Fetch(error=_refusal(429, retry_after="42")))
+    reads.forget_all()
+    again = _Fetch(None)
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("a", again)
+    assert again.calls == 0
+    clock.now += 42
+    assert await reads.read("a", again) is None
+    assert again.calls == 1
+
+
+_LOGGER = "servonaut.services.vault.binding_reads"
+
+
+def _pause_records(caplog):
+    return [r for r in caplog.records if r.name == _LOGGER and r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+async def test_a_429_with_retry_after_logs_one_warning(caplog) -> None:
+    caplog.set_level("WARNING", logger=_LOGGER)
+    reads = _reads(_Clock())
+    with pytest.raises(BindingReadsPaused):
+        await reads.read(("secret-key", "dev-1"), _Fetch(error=_refusal(429, retry_after="42")))
+    records = _pause_records(caplog)
+    assert len(records) == 1
+    text = records[0].getMessage()
+    assert "429" in text and "given" in text and "not given" not in text and "42 s" in text
+    assert "secret-key" not in text and "dev-1" not in text and "/" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_429_without_retry_after_logs_the_backoff(caplog) -> None:
+    caplog.set_level("WARNING", logger=_LOGGER)
+    reads = _reads(_Clock(), backoff=30.0)
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("a", _Fetch(error=_refusal(429)))
+    (record,) = _pause_records(caplog)
+    assert "not given" in record.getMessage() and "30 s" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_401_logs_one_warning(caplog) -> None:
+    caplog.set_level("WARNING", logger=_LOGGER)
+    reads = _reads(_Clock(), backoff=60.0)
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("a", _Fetch(error=_refusal(401)))
+    (record,) = _pause_records(caplog)
+    assert "401" in record.getMessage() and "not given" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_six_concurrent_refusals_log_once_and_refused_reads_add_none(caplog) -> None:
+    caplog.set_level("WARNING", logger=_LOGGER)
+    clock = _Clock()
+    reads = _reads(clock)
+    answer = asyncio.Event()
+
+    async def refused():
+        await answer.wait()
+        raise _refusal(429, "30")
+
+    tasks = [asyncio.create_task(reads.read(i, refused)) for i in range(6)]
+    await asyncio.sleep(0)
+    answer.set()
+    for task in tasks:
+        with pytest.raises(BindingReadsPaused):
+            await task
+    assert len(_pause_records(caplog)) == 1
+
+    clock.now += 5
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("x", _Fetch(None))
+    assert len(_pause_records(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_pause_after_the_previous_one_ended_logs_again(caplog) -> None:
+    caplog.set_level("WARNING", logger=_LOGGER)
+    clock = _Clock()
+    reads = _reads(clock)
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("a", _Fetch(error=_refusal(429, "10")))
+    clock.now += 11
+    with pytest.raises(BindingReadsPaused):
+        await reads.read("a", _Fetch(error=_refusal(429, "10")))
+    assert len(_pause_records(caplog)) == 2

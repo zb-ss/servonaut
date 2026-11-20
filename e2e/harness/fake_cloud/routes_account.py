@@ -78,6 +78,8 @@ class AccountData:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Called as (slug, user_id, role) after a member's role changed; role None: removed.
+        self.on_role_change: Optional[Callable[[str, int, Optional[str]], None]] = None
         self.reset()
 
     def reset(self) -> None:
@@ -294,12 +296,22 @@ class AccountData:
                     base_url: str) -> dict[str, Any]:
         with self._lock:
             member = self._managed_for(slug, user_id).change_role(user_id, member_id, role)
-            return member.row(base_url, manager=True)
+            row = member.row(base_url, manager=True)
+        self._notify_role(slug, member, member.role)
+        return row
 
     def remove_member(self, slug: str, user_id: int, member_id: str) -> dict[str, Any]:
         with self._lock:
             member = self._managed_for(slug, user_id).remove(user_id, member_id)
-            return {"removed": True, "id": member.id}
+            answer = {"removed": True, "id": member.id}
+        self._notify_role(slug, member, None)
+        return answer
+
+    def _notify_role(self, slug: str, member: Any, role: Optional[str]) -> None:
+        # Outside the lock: the hook reads team_members, which takes it again.
+        user_id = getattr(member, "user_id", None)
+        if self.on_role_change is not None and user_id is not None:
+            self.on_role_change(slug, int(user_id), role)
 
     def _require_manager(self, slug: str, user_id: int, *, scenario_account: bool) -> None:
         role = self.caller_role(slug, user_id, scenario_account=scenario_account)

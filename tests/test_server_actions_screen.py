@@ -1426,3 +1426,81 @@ class TestConfirmSshVerifyModalVaultText:
 
         assert modal._vault is True
         assert modal._has_ref is False
+
+
+# ---------------------------------------------------------------------------
+# _resolve_and_launch_ssh — a team key that is gone
+# ---------------------------------------------------------------------------
+
+_LOST_KEY = (
+    "Your vault key for this server is gone: it came from a team vault "
+    "you no longer own or administer."
+)
+
+
+def _lost_key_connect(*, resolved: bool, takes: list):
+    runtime = MagicMock()
+    runtime.take_lost_team_key = MagicMock(side_effect=takes)
+    app = MagicMock()
+    app.demo_mode = False
+    app.redaction_service = None
+    app.instances = []
+    app.vault_command_service = runtime
+    app.vault_lease_cache = None
+    app.connection_service.resolve_profile.return_value = None
+    app.connection_service.get_extra_options.return_value = []
+    app.ssh_service.get_key_path.return_value = None
+    app.ssh_service.discover_key.return_value = None
+    app.ssh_service.build_ssh_command.return_value = ["ssh"]
+    app.terminal_service.launch_ssh_in_terminal.return_value = True
+    app.config_manager.get.return_value.default_username = "ec2-user"
+    ref = SimpleNamespace(source="local", local_key_path=None, login_user=None) if resolved else None
+    resolver = MagicMock(resolve=AsyncMock(return_value=ref))
+    screen = object.__new__(ServerActionsScreen)
+    screen._instance = _make_instance()
+    screen._vault_binding_source = "servonaut_vault"
+    screen._render_server_info = MagicMock()
+
+    async def connect():
+        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: app)), \
+                patch.object(type(screen), "is_mounted", new_callable=lambda: property(lambda self: True)), \
+                patch.object(screen, "_ssh_ref_resolver", AsyncMock(return_value=resolver)):
+            await screen._resolve_and_launch_ssh(MagicMock())
+
+    return screen, app, connect
+
+
+def _warnings(app) -> list:
+    return [c for c in app.notify.call_args_list if c.args and c.args[0].startswith("Your vault key")]
+
+
+class TestLostTeamKeyOnConnect:
+    def test_the_notice_says_the_connection_goes_on_without_it(self):
+        screen, app, connect = _lost_key_connect(resolved=True, takes=[True, False])
+        asyncio.run(connect())
+        (notice,) = _warnings(app)
+        assert notice.args[0] == f"{_LOST_KEY} Connecting without it."
+        assert notice.kwargs["markup"] is False
+        assert notice.kwargs["severity"] == "warning"
+        assert screen._vault_binding_source is None
+        screen._render_server_info.assert_called_once()
+
+    def test_the_notice_stands_alone_when_nothing_resolved(self):
+        screen, app, connect = _lost_key_connect(resolved=False, takes=[True, False])
+        asyncio.run(connect())
+        (notice,) = _warnings(app)
+        assert notice.args[0] == _LOST_KEY
+        assert notice.kwargs["markup"] is False
+        assert app.notify.call_args.args[0] == "No SSH key configured for this instance."
+
+    def test_it_is_not_repeated_on_the_next_connect(self):
+        screen, app, connect = _lost_key_connect(resolved=True, takes=[True, False])
+        asyncio.run(connect())
+        asyncio.run(connect())
+        assert len(_warnings(app)) == 1
+
+    def test_nothing_is_said_without_a_lost_key(self):
+        screen, app, connect = _lost_key_connect(resolved=True, takes=[False])
+        asyncio.run(connect())
+        assert _warnings(app) == []
+        assert screen._vault_binding_source == "servonaut_vault"

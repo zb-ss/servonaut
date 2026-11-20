@@ -42,7 +42,7 @@ from servonaut.services.vault.display import (
     strip_terminal_controls, terminal_safe,
 )
 from servonaut.services.vault.errors import (
-    VaultKeyInUse, VaultRecoveryNotConfirmed, vault_failure_reason,
+    VaultKeyInUse, VaultRecoveryNotConfirmed, loggable_failure, vault_failure_reason,
 )
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -2263,7 +2263,52 @@ class VaultScreen(WorkspaceScreen):
                              ("Could not check", refusal.unchecked)):
             if names:
                 lines.append(f"{label}: " + ", ".join(self._display_record_name(name) for name in names))
+        if refusal.other_servers > 0:
+            lines.append(self._other_members_text(refusal, "Other members: "))
         self.app.notify("\n".join(lines), severity="warning", markup=False)
+
+    @staticmethod
+    def _other_members_text(refusal: VaultKeyInUse, prefix: str = "") -> str:
+        """Other members' usage as counts only; their server names are never shown."""
+        return f"{prefix}{refusal.other_servers} server(s) of {refusal.other_members} member(s)"
+
+    def _unbind_key_confirmation(self, item: Mapping[str, Any], usage: Mapping[str, Any] | VaultKeyInUse) -> ConfirmActionScreen:
+        refusal = usage if isinstance(usage, VaultKeyInUse) else VaultKeyInUse.from_usage(usage)
+        details = {} if isinstance(usage, VaultKeyInUse) else usage
+        name = details.get("name") or self._key_names.get(str(item["item_id"])) or "(name unknown)"
+        fingerprint = details.get("fingerprint") or item.get("public_fingerprint") or ""
+        name = markup_literal(self._display_record_name(name))
+        fingerprint = markup_literal(self.scrub_for_display(terminal_safe(fingerprint)))
+
+        def names(values: Sequence[str]) -> str:
+            return markup_literal(", ".join(self._display_record_name(value) for value in values))
+
+        consequences = [f"remove the key {name} ({fingerprint}) from this vault"]
+        if refusal.team_servers:
+            consequences.append(f"remove its saved assignment from team servers: {names(refusal.team_servers)}")
+        if refusal.own_servers:
+            consequences.append(f"remove its saved assignment from your servers: {names(refusal.own_servers)}")
+        if refusal.other_servers > 0:
+            consequences.append(
+                f"remove its saved assignment from {refusal.other_servers} server(s) of {refusal.other_members} other member(s)"
+            )
+        consequences.extend([
+            "leave those servers without a vault key until another one is assigned",
+            "not remove it from servers: those that accept it keep accepting it until it is removed from their authorized_keys",
+        ])
+        confirmation = ConfirmActionScreen(
+            "Unbind and delete vault key", f"Unbind the vault key {name} everywhere and delete it?", consequences,
+            "UNBIND AND DELETE", "Unbind and delete", severity="danger",
+        )
+        confirmation.add_class("vault_key_delete")
+        confirmation.add_class("vault_key_unbind")
+        return confirmation
+
+    def _item_for_key(self, item_id: str) -> Mapping[str, Any]:
+        for item in self._items:
+            if str(item.get("item_id")) == item_id:
+                return item
+        return {"item_id": item_id}
 
     def _delete_key_confirmation(self, item: Mapping[str, Any], usage: Mapping[str, Any]) -> ConfirmActionScreen:
         name = usage.get("name") or self._key_names.get(str(item["item_id"])) or "(name unknown)"
@@ -2299,44 +2344,73 @@ class VaultScreen(WorkspaceScreen):
         service = self._service()
         if service is None:
             return
-        servers = self._deletion_servers()
+        servers = await self._deletion_servers(service, self._selected_vault_id)
         if servers is None:
             return
         try:
             async with self._busy("Checking where this key is used…"):
                 usage = await _invoke(service, "ssh_key_usage", vault_id=self._selected_vault_id, item_id=item_id, servers=servers)
         except Exception as exc:
+            logger.warning("Vault key deletion failed: %s", self._key_deletion_log(exc))
             self.app.notify(f"Could not check key usage ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         refusal = VaultKeyInUse.from_usage(usage)
-        if refusal.team_servers or refusal.own_servers:
+        if refusal.in_use and not refusal.can_unbind:
+            logger.warning("Vault key deletion failed: %s", self._key_deletion_log(refusal))
             self._notify_key_in_use(refusal)
+            return
+        if refusal.in_use:
+            if await self.app.push_screen_wait(self._unbind_key_confirmation(item, usage)):
+                await self._remove_vault_key(service, item_id, servers, unbind=True, confirmed_usage=usage)
             return
         confirmation = self._delete_key_confirmation(item, usage)
         if await self.app.push_screen_wait(confirmation):
             await self._remove_vault_key(service, item_id, servers, unchecked_targets=usage.get("unchecked_targets") or ())
 
-    def _deletion_servers(self) -> list[dict[str, Any]] | None:
+    async def _deletion_servers(self, service: Any, vault_id: str | None) -> list[dict[str, Any]] | None:
         servers = real_fleet_rows(self.app)
-        if servers is None:
+        if servers is not None:
+            return servers
+        try:
+            needed = await _invoke(service, "key_checks_read_own_servers", vault_id=vault_id)
+        except Exception:
+            needed = True
+        if needed:
             self.app.notify(UNRESOLVED_MESSAGE, severity="error", markup=False)
-        return servers
+            return None
+        return []
 
     async def _remove_vault_key(
-        self, service: Any, item_id: str, servers: list[dict[str, Any]], *, unchecked_targets: Sequence[Sequence[str]] = (),
+        self, service: Any, item_id: str, servers: list[dict[str, Any]], *,
+        unchecked_targets: Sequence[Sequence[str]] = (), unbind: bool = False,
+        confirmed_usage: Mapping[str, Any] | None = None,
     ) -> None:
-        servers = self._deletion_servers()
+        servers = await self._deletion_servers(service, self._selected_vault_id)
         if servers is None:
             return
+        offer: VaultKeyInUse | None = None
         try:
             async with self._busy("Deleting the vault key…", holds_screen=True):
-                options = {"allow_unchecked": True, "unchecked_targets": list(unchecked_targets)} if unchecked_targets else {}
+                options: dict[str, Any] = (
+                    {"allow_unchecked": True, "unchecked_targets": list(unchecked_targets)} if unchecked_targets else {}
+                )
+                if unbind:
+                    options["unbind"] = True
+                    options["confirmed_usage"] = confirmed_usage
                 await _invoke(service, "delete_ssh_key", vault_id=self._selected_vault_id, item_id=item_id, servers=servers, **options)
         except VaultKeyInUse as exc:
-            self._notify_key_in_use(exc)
-            return
+            logger.warning("Vault key deletion failed: %s", self._key_deletion_log(exc))
+            if not (exc.in_use and exc.can_unbind and not unbind):
+                self._notify_key_in_use(exc)
+                return
+            offer = exc
         except Exception as exc:
+            logger.warning("Vault key deletion failed: %s", self._key_deletion_log(exc))
             self.app.notify(f"Could not delete the vault key ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        if offer is not None:
+            if await self.app.push_screen_wait(self._unbind_key_confirmation(self._item_for_key(item_id), offer)):
+                await self._remove_vault_key(service, item_id, servers, unbind=True, confirmed_usage=offer.usage())
             return
         self.app.notify("Vault key deleted.", markup=False)
         await self._load_items()
@@ -2408,8 +2482,10 @@ class VaultScreen(WorkspaceScreen):
 
     async def _review_vault_deletion(self, vault_id: str, item_ids: list[str]) -> None:
         service = self._service()
-        servers = self._deletion_servers()
-        if service is None or servers is None:
+        if service is None:
+            return
+        servers = await self._deletion_servers(service, vault_id)
+        if servers is None:
             return
         self._deletion_review_active = True
         try:
@@ -2445,7 +2521,7 @@ class VaultScreen(WorkspaceScreen):
                     failures.append(f"{label}: could not check usage ({usage['error']}).")
                     continue
                 refusal = VaultKeyInUse.from_usage(usage)
-                if refusal.team_servers or refusal.own_servers:
+                if refusal.in_use:
                     failures.append(f"{label}: {self._key_refusal_text(refusal)}")
                 else:
                     usages[key] = dict(usage)
@@ -2457,8 +2533,10 @@ class VaultScreen(WorkspaceScreen):
         unchecked_by_key: Mapping[str, Sequence[Sequence[str]]] | None = None, initial_failures: Sequence[str] = (),
     ) -> None:
         service = self._service()
-        servers = self._deletion_servers()
-        if service is None or servers is None:
+        if service is None:
+            return
+        servers = await self._deletion_servers(service, vault_id)
+        if servers is None:
             return
         failures: list[str] = list(initial_failures)
         async with self._busy("Deleting selected vault keys…", holds_screen=True) as work:
@@ -2498,6 +2576,7 @@ class VaultScreen(WorkspaceScreen):
             return reported, failures
 
     def _deletion_summary(self, deleted: int, failures: Sequence[str]) -> None:
+        # The notifications stop after a few failures and point here for the rest.
         for failure in failures:
             logger.warning("Vault key deletion failed: %s", failure)
         summary = f"Deleted {deleted} vault key(s); {len(failures)} kept."
@@ -2512,7 +2591,20 @@ class VaultScreen(WorkspaceScreen):
                              ("Could not check", refusal.unchecked)):
             if names:
                 lines.append(f"{label}: " + ", ".join(self._display_record_name(name) for name in names))
+        if refusal.other_servers > 0:
+            lines.append(self._other_members_text(refusal, "Other members: "))
         return "; ".join(lines)
+
+    @staticmethod
+    def _key_deletion_log(error: BaseException | None) -> str:
+        """A log line for a failed key deletion: no key name, item id or server name, only kinds and counts."""
+        if isinstance(error, VaultKeyInUse):
+            return (
+                f"{type(error).__name__} (team servers {len(error.team_servers)}, own servers {len(error.own_servers)}, "
+                f"unchecked {len(error.unchecked)}, other members' servers {error.other_servers} "
+                f"of {error.other_members} member(s))"
+            )
+        return loggable_failure(error) if error is not None else "unknown"
 
     def _key_deletion_failure(self, item_id: str, error: Exception) -> str:
         label = self._display_record_name(self._key_names.get(item_id) or item_id)
@@ -2914,13 +3006,18 @@ class VaultScreen(WorkspaceScreen):
         failed = summary.get("failed")
         imported_count = imported if isinstance(imported, int) and not isinstance(imported, bool) else 0
         failed_count = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
+        duplicates = summary.get("duplicates")
+        duplicate_count = duplicates if isinstance(duplicates, int) and not isinstance(duplicates, bool) else 0
         references = summary.get("references")
         safe_references = references if isinstance(references, list) else []
         self._selected_vault_id = vault_id
-        self._status(f"SSH key import complete: {imported_count} imported, {failed_count} failed.")
+        self._status(
+            f"SSH key import complete: {imported_count} imported, {failed_count} failed, "
+            f"{duplicate_count} skipped: already in vault."
+        )
         self.run_worker(
             self._refresh_imported_vault_metadata(
-                vault_id, imported_count, failed_count, safe_references,
+                vault_id, imported_count, failed_count, safe_references, duplicate_count,
             ),
             group="vault",
             exclusive=True,
@@ -2932,9 +3029,13 @@ class VaultScreen(WorkspaceScreen):
         imported_count: int,
         failed_count: int,
         references: list[Any],
+        duplicate_count: int = 0,
     ) -> None:
         """Re-read counts and retain the imported vault's selected table row."""
-        message = f"SSH key import complete: {imported_count} imported, {failed_count} failed."
+        message = (
+            f"SSH key import complete: {imported_count} imported, {failed_count} failed, "
+            f"{duplicate_count} skipped: already in vault."
+        )
         service = self._service()
         if service is None:
             return

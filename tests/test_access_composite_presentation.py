@@ -154,6 +154,7 @@ def boundaries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _returns(bw.list_items, [BwItemSummary(id="item-1", name=NAME, type=5, has_ssh_key=True)])
     _returns(bw.sync_now, None)
     _returns(refs.get_personal_config, {"config": {}})
+    _returns(vault.stored_keys, {})
     keys = [ScannedKey(tmp_path / ".ssh" / f"key-{i:02d}", f"key-{i:02d} {NAME}", False, fingerprint=f"SHA256:fixture{i}") for i in range(45)]
     scans = {}
     for module in (bw_key_import, vault_import_modal):
@@ -708,7 +709,7 @@ async def test_encrypted_key_native_retry_or_skip_retains_parent_selection(kind,
             boundaries.bw.sync_now.assert_awaited_once()
             assert results == [{"imported": int(not skip), "skipped": int(skip), "duplicates": 0, "failed": 0}]
         else:
-            assert set(results[0]) == {"imported", "skipped", "failed", "imported_ids", "references"}
+            assert set(results[0]) == {"imported", "skipped", "failed", "duplicates", "imported_ids", "references"}
 
 
 @pytest.mark.asyncio
@@ -790,7 +791,7 @@ async def test_vault_import_result_metadata_targets_and_transient_wipe(source, b
         assert isinstance(private, bytearray)
         # Snapshot only a digest and routing metadata before the modal zeroes it.
         boundaries.transient.append(private)
-        boundaries.import_metadata.append({**kwargs, "digest": hashlib.sha256(private).hexdigest()})
+        boundaries.import_metadata.append({**{k: v for k, v in kwargs.items() if k != "known_keys"}, "digest": hashlib.sha256(private).hexdigest()})
         return {"item_id": "created-1", "name": "Stored example", "public_fingerprint": "SHA256:fixture0"}
     boundaries.vault.import_keys.side_effect = import_keys
     screen = _modal("vault_import", boundaries)
@@ -813,7 +814,7 @@ async def test_vault_import_result_metadata_targets_and_transient_wipe(source, b
         await _click(app, pilot, screen, "vault_import_confirm")
         await wait_until(lambda: bool(results))
         reference = {"vault_item_id": "created-1", "source": source, "source_ref": boundaries.keys[0].filename if source == "ssh" else "item-1", "name": "Stored example", "fingerprint": "SHA256:fixture0"}
-        assert results == [{"imported": 1, "skipped": 0, "failed": 0, "imported_ids": ["created-1"], "references": [reference]}]
+        assert results == [{"imported": 1, "skipped": 0, "failed": 0, "duplicates": 0, "imported_ids": ["created-1"], "references": [reference]}]
     assert boundaries.transient and all(not any(data) for data in boundaries.transient)
     expected = {"source": source, "vault_id": "vault-1", "digest": expected_digest}
     if source == "ssh":

@@ -184,3 +184,25 @@ async def test_demo_mode_hides_key_and_server_names_in_partial_results():
         messages = "\n".join(message for message, _ in app.notes)
         assert "private-key" not in messages and "private-server" not in messages
         assert "private-key" not in screen._item_name_cell(service.items[0])
+
+
+@pytest.mark.asyncio
+async def test_bulk_review_keeps_a_key_used_only_by_other_members_with_counts():
+    service = _keys()
+
+    async def usage(**kwargs):
+        service.usage_calls.append(kwargs)
+        others = kwargs["item_id"] == "k1"
+        return {"team_servers": [], "own_servers": [], "unchecked": [], "checked": 0,
+                "other_members": {"members": 2 if others else 0, "servers": 3 if others else 0}}
+
+    service.ssh_key_usage = usage
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _loaded(app, pilot)
+        modal = await _open(app, screen)
+        modal.query_one("#bulk_action_list", SelectionList).select_all()
+        modal = await _review(app, pilot, modal)
+        assert "Other members: 3 server(s) of 2 member(s)" in "\n".join(
+            str(w.render()) for w in modal.query("Static"))
+        assert "server-1" in "\n".join(str(w.render()) for w in modal.query("Static"))

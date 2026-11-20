@@ -338,6 +338,7 @@ def test_bitwarden_import_passes_the_item_name(tmp_path: Path) -> None:
     resolver.resolve_ssh_key.return_value = "fixture-private"
     modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
     modal._source = "bitwarden"
+    modal._existing_ok = True
     modal._bw_items = [BwItemSummary(id="item-uuid-1", name="Production key", type=5, has_ssh_key=True)]
     modal._list = MagicMock(return_value=type("_List", (), {"selected": [0]})())
     modal.dismiss = MagicMock()

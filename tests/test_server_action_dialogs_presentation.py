@@ -83,6 +83,7 @@ class _Service:
         self.bind = AsyncMock(side_effect=AssertionError("Unexpected binding mutation"))
         self.bind_personal = AsyncMock(side_effect=AssertionError("Unexpected personal mutation"))
         self.personal_binding = AsyncMock(side_effect=AssertionError("Unexpected binding lookup"))
+        self.own_server_key_refusal_for = AsyncMock(return_value=None)
 
     async def _wait(self, name: str) -> None:
         if name in self.gates:

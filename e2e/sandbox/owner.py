@@ -384,7 +384,8 @@ class Owner:
                  teams: bool = False, account_email: str = "",
                  verification_uri: Optional[str] = None, user_code: Optional[str] = None,
                  hostname: Optional[str] = None, ai_script: Optional[dict] = None,
-                 team_server_as: Optional[str] = None, bitwarden: bool = False) -> None:
+                 team_server_as: Optional[str] = None, bitwarden: bool = False,
+                 vault_capabilities: Optional[list[str]] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -400,6 +401,8 @@ class Owner:
         # --team-server-as: the AWS fleet server the team's shared server also is.
         self.team_server_as = team_server_as
         self.bitwarden = bitwarden
+        # --vault-capabilities: None = an older service without the field.
+        self.vault_capabilities = vault_capabilities
         self.bitwarden_vault: Any = None
         self._bitwarden_items: list[dict[str, str]] = []
         self.account_email = account_email
@@ -503,6 +506,8 @@ class Owner:
             self.fake_cloud.vault.refuse_ca_activation(self.ssh_ca_refuse)
         if self.api_delay:
             self.fake_cloud.slow_down(self.api_delay)
+        if self.vault_capabilities is not None:
+            self.fake_cloud.vault.set_capabilities(self.vault_capabilities)
         if self.account_email or self.verification_uri:
             self.fake_cloud.configure(email=self.account_email, verification_uri=self.verification_uri)
         if self.user_code:
@@ -614,6 +619,7 @@ class Owner:
             "ssh_ca_off": self.ssh_ca_off,
             "ssh_ca_refuse": self.ssh_ca_refuse,
             "api_delay": self.api_delay,
+            "vault_capabilities": self.vault_capabilities,
             "keep": self.keep,
             "started_at": self.claim_record["started_at"],
             "owner_pid": self.claim_record["owner_pid"],
@@ -1187,6 +1193,7 @@ def up(
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
     ai_script: Optional[Path] = None, user_code: Optional[str] = None,
     team_server_as: Optional[str] = None, bitwarden: bool = False,
+    vault_capabilities: Optional[list[str]] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -1231,7 +1238,7 @@ def up(
                           ssh_ca_refuse=ssh_ca_refuse, api_delay=api_delay, teams=teams, account_email=account_email,
                           verification_uri=verification_uri, user_code=user_code,
                           hostname=hostname, ai_script=script, team_server_as=team_server_as,
-                          bitwarden=bitwarden)
+                          bitwarden=bitwarden, vault_capabilities=vault_capabilities)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

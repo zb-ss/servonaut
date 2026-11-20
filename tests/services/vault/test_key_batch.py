@@ -90,7 +90,7 @@ async def test_a_delete_pass_reads_bindings_and_exposures_once_and_reports_each_
     assert isinstance(results[1].error, VaultKeyInUse)
     assert isinstance(results[2].error, VaultUserError) and "exposures" in str(results[2].error)
     assert progress == [(1, 3, "k1", True), (2, 3, "k2", False), (3, 3, "k3", False)]
-    service.items.delete_item.assert_awaited_once_with("vault", "k1", 3)
+    service.items.delete_item.assert_awaited_once_with("vault", "k1", 3, unbind=False)
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_an_unchecked_override_applies_only_to_the_key_and_servers_reviewe
 
     assert [r.deleted for r in results] == [True, False]
     assert isinstance(results[1].error, VaultKeyInUse)
-    service.items.delete_item.assert_awaited_once_with("vault", "k1", 3)
+    service.items.delete_item.assert_awaited_once_with("vault", "k1", 3, unbind=False)
 
 
 @pytest.mark.asyncio
