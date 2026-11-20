@@ -149,7 +149,8 @@ def _api_delay(value: str) -> float:
 
 
 # The optional vault features a Servonaut service can announce on its vault objects.
-VAULT_CAPABILITIES = ("duplicate_item", "item_usage", "delete_refuses_bound", "me_credential_bindings")
+VAULT_CAPABILITIES = ("duplicate_item", "item_usage", "delete_refuses_bound", "me_credential_bindings",
+                     "own_server_team_keys")
 
 
 def _vault_capabilities(value: str) -> list[str]:

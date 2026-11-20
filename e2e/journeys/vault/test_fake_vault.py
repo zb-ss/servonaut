@@ -386,3 +386,123 @@ async def test_vault_count_excludes_resolved_exposures_but_history_keeps_them(fa
     assert (await service.list_vaults())[0]["counts"]["open_exposures"] == 0
     history = await service.rotation.list_exposures(vault_id, status="all")
     assert [(row["exposure_id"], row["status"]) for row in history["data"]] == [(exposure_id, "resolved")]
+
+
+# --- own servers on team-vault keys --------------------------------------
+
+_MISMATCH = "Personal instances can use an item of your personal vault or of a team vault you manage."
+
+
+def _team_vault(cloud, vault_id="team-vault", slug="example-team", roles=None):
+    _plain_vault(cloud, vault_id)
+    vault = cloud._vaults[vault_id]
+    vault.update(kind="team", owner_user_id=None, scope="team:example", team={"slug": slug})
+    vault["roster"] = [{"user_id": uid, "role": role, "status": "granted"} for uid, role in (roles or {}).items()]
+    for uid in (roles or {}):
+        cloud._identities.setdefault(uid, {"identity_id": f"identity-{uid}"})
+
+
+def _ssh_item(cloud, vault_id, item_id="key", **changes):
+    _live_item(cloud, item_id, vault_id)
+    cloud._items[vault_id][item_id].update({"type": "ssh_key", **changes})
+
+
+def _bind_body(vault_id, item_id="key"):
+    return {"vault_id": vault_id, "vault_item_id": item_id}
+
+
+def _assert_mismatch(refusal):
+    assert refusal is not None
+    status, body = refusal
+    assert status == 422
+    assert body["error"]["code"] == "item_mismatch" and body["error"]["message"] == _MISMATCH
+
+
+def test_fake_own_binding_refusal_matrix(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud, "mine", owner=1)
+    _plain_vault(cloud, "theirs", owner=2)
+    _ssh_item(cloud, "mine")
+    _ssh_item(cloud, "theirs")
+    assert cloud.own_binding_refusal(_bind_body("mine"), 1) is None
+    _assert_mismatch(cloud.own_binding_refusal(_bind_body("theirs"), 1))
+    _assert_mismatch(cloud.own_binding_refusal(_bind_body("missing"), 1))
+    _assert_mismatch(cloud.own_binding_refusal(_bind_body("mine", "unknown"), 1))
+    _ssh_item(cloud, "mine", "gone", deleted_at="now")
+    _ssh_item(cloud, "mine", "note", type="secure_note")
+    _assert_mismatch(cloud.own_binding_refusal(_bind_body("mine", "gone"), 1))
+    _assert_mismatch(cloud.own_binding_refusal(_bind_body("mine", "note"), 1))
+
+
+def test_fake_own_binding_on_a_team_vault_needs_the_capability_and_a_managing_role(fake_cloud):
+    cloud = fake_cloud.vault
+    _team_vault(cloud, roles={1: "owner", 2: "admin", 3: "member", 4: "viewer"})
+    _ssh_item(cloud, "team-vault")
+    body = _bind_body("team-vault")
+    _assert_mismatch(cloud.own_binding_refusal(body, 1))
+    cloud.set_capabilities(["own_server_team_keys"])
+    assert cloud.own_binding_refusal(body, 1) is None
+    assert cloud.own_binding_refusal(body, 2) is None
+    for user_id in (3, 4, 9):
+        _assert_mismatch(cloud.own_binding_refusal(body, user_id))
+
+
+def _seed_bindings(cloud, vault_id, user_id):
+    mine = f"identity-{user_id}"
+    cloud._bindings[("aws", "i-1")] = {"vault_id": vault_id, "binder_identity_id": mine}
+    cloud._bindings[("custom", "c-1")] = {"vault_id": vault_id, "binder_identity_id": mine}
+    cloud._bindings[("team", "srv")] = {"vault_id": vault_id, "binder_identity_id": mine}
+    cloud._bindings[("aws", "i-2")] = {"vault_id": "other-vault", "binder_identity_id": mine}
+    cloud._bindings[("aws", "i-3")] = {"vault_id": vault_id, "binder_identity_id": "identity-1"}
+
+
+@pytest.mark.parametrize("role", ["member", "viewer", None])
+def test_fake_losing_the_right_drops_only_that_users_own_bindings(fake_cloud, role):
+    cloud = fake_cloud.vault
+    _team_vault(cloud, roles={1: "owner", 2: "admin"})
+    _seed_bindings(cloud, "team-vault", 2)
+    assert cloud.set_member_role("team-vault", 2, role) == 2
+    assert set(cloud._bindings) == {("team", "srv"), ("aws", "i-2"), ("aws", "i-3")}
+    if role is None:
+        assert cloud._role(cloud._vaults["team-vault"], 2) is None
+
+
+def test_fake_owner_admin_changes_drop_nothing(fake_cloud):
+    cloud = fake_cloud.vault
+    _team_vault(cloud, roles={1: "owner", 2: "admin"})
+    _seed_bindings(cloud, "team-vault", 2)
+    assert cloud.set_member_role("team-vault", 2, "owner") == 0
+    assert cloud.set_member_role("team-vault", 2, "admin") == 0
+    assert len(cloud._bindings) == 5
+
+
+def test_fake_regaining_the_right_restores_the_role(fake_cloud):
+    cloud = fake_cloud.vault
+    _team_vault(cloud, roles={1: "owner", 2: "admin"})
+    vault = cloud._vaults["team-vault"]
+    cloud.set_member_role("team-vault", 2, None)
+    assert cloud._role(vault, 2) is None
+    cloud.set_member_role("team-vault", 2, "admin")
+    assert cloud._role(vault, 2) == "admin"
+    cloud.team_role_changed("example-team", 2, "member")
+    cloud.team_role_changed("example-team", 2, "admin")
+    assert cloud._role(vault, 2) == "admin"
+
+
+def test_fake_team_changes_drop_the_users_own_bindings(fake_cloud):
+    cloud, account = fake_cloud.vault, fake_cloud.account
+    account.create_team(name="Example", owner_user_id=1, slug="managed-team")
+    account.join_team("managed-team", user_id=2, role="admin", email="two@example.com")
+    account.join_team("managed-team", user_id=3, role="admin", email="three@example.com")
+    _team_vault(cloud, slug="managed-team", roles={1: "owner"})
+    for user_id in (2, 3):
+        cloud._identities.setdefault(user_id, {"identity_id": f"identity-{user_id}"})
+    _seed_bindings(cloud, "team-vault", 2)
+    cloud._bindings[("aws", "i-4")] = {"vault_id": "team-vault", "binder_identity_id": "identity-3"}
+    ids = {m["user"]["id"]: m["id"] for m in account.members("managed-team")}
+    account.change_role("managed-team", 1, ids[2], "member", "")
+    assert ("aws", "i-1") not in cloud._bindings and ("custom", "c-1") not in cloud._bindings
+    assert ("aws", "i-3") in cloud._bindings and ("aws", "i-4") in cloud._bindings
+    account.remove_member("managed-team", 1, ids[3])
+    assert ("aws", "i-4") not in cloud._bindings
+    assert ("team", "srv") in cloud._bindings
