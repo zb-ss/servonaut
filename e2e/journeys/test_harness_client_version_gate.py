@@ -269,13 +269,13 @@ def test_log_mode_marks_only_gated_requests_from_old_clients(fake_cloud):
 
 
 @pytest.mark.asyncio
-async def test_version_policy_client_fetches_and_caches_from_fake_cloud(fake_cloud, tmp_path):
+async def test_version_policy_client_fetches_and_caches_from_fake_cloud(fake_cloud, journey):
     fake_cloud.set_client_version_policy(
         mode="enforce",
         minimum_version="99.0.0",
         update_hints={"pipx": "pipx upgrade servonaut"},
     )
-    cache_path = tmp_path / "version-policy.json"
+    cache_path = journey.directory / "version-policy.json"
     client = VersionPolicyClient(cache_path=cache_path)
 
     policy = await client.fetch(force_refresh=True)
