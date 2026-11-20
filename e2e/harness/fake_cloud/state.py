@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 from e2e.harness.fake_cloud.session import ACCESS_TOKEN, REFRESH_TOKEN, TokenSession
 from e2e.harness.fake_cloud.users import Accounts, current_account
+from servonaut.services.version_policy import DEFAULT_UPDATE_URL, normalize_public_version
 
 __all__ = ["ACCESS_TOKEN", "REFRESH_TOKEN", "USER_CODE", "Scenario", "ScenarioStore"]
 
@@ -15,8 +17,18 @@ USER_CODE = "E2E-0001"
 
 # Device-flow poll outcomes a scenario can script for /api/oauth/token.
 TOKEN_OUTCOMES = frozenset({"pending", "slow_down", "expired", "denied", "success"})
-# Scenario keys holding lists: stored as copies so a caller's list stays its own.
-_LIST_KEYS = frozenset({"token_outcomes", "pypi_files", "pypi_yanked_files"})
+CLIENT_VERSION_MODES = frozenset({"off", "log", "enforce"})
+# Scenario keys holding lists or dicts: stored as deep copies so caller objects stay independent.
+_COPY_KEYS = frozenset({
+    "token_outcomes",
+    "pypi_files",
+    "pypi_yanked_files",
+    "quota",
+    "balance",
+    "client_upcoming",
+    "client_latest",
+    "client_update_hints",
+})
 
 
 @dataclass
@@ -63,6 +75,13 @@ class Scenario:
     # When set, personal binding reads answer 429 with this Retry-After
     # (seconds), like the service's per-user request limiter.
     binding_reads_retry_after: Optional[int] = None
+    # Client-version policy & HTTP 426 enforcement gate.
+    client_version_mode: str = "off"
+    client_minimum_version: Optional[str] = None
+    client_upcoming: Optional[dict[str, str]] = None
+    client_latest: Optional[dict[str, Optional[str]]] = None
+    client_update_url: str = DEFAULT_UPDATE_URL
+    client_update_hints: Optional[dict[str, str]] = None
 
 
 class ScenarioStore:
@@ -104,9 +123,18 @@ class ScenarioStore:
         files = changes.get("pypi_files")
         if files is not None and not all(str(f).endswith(".whl") for f in files):
             raise ValueError("the package index offers wheel files only")
+        mode = changes.get("client_version_mode")
+        if mode is not None and mode not in CLIENT_VERSION_MODES:
+            raise ValueError(f"client_version_mode must be among {sorted(CLIENT_VERSION_MODES)}")
+        min_ver = changes.get("client_minimum_version")
+        if min_ver is not None:
+            normalized = normalize_public_version(min_ver)
+            if normalized is None:
+                raise ValueError(f"invalid client_minimum_version: {min_ver!r}")
+            changes = {**changes, "client_minimum_version": normalized}
         with self._lock:
             for key, value in changes.items():
-                setattr(self._scenario, key, list(value) if key in _LIST_KEYS else value)
+                setattr(self._scenario, key, copy.deepcopy(value) if key in _COPY_KEYS else value)
 
     def snapshot(self) -> Scenario:
         """The scenario, as the user the current request was made by sees it.
@@ -116,7 +144,14 @@ class ScenarioStore:
         """
         with self._lock:
             current = self._scenario
-            scenario = Scenario(**{f.name: getattr(current, f.name) for f in fields(Scenario)})
+            scenario = Scenario(**{
+                f.name: (
+                    copy.deepcopy(getattr(current, f.name))
+                    if f.name in _COPY_KEYS
+                    else getattr(current, f.name)
+                )
+                for f in fields(Scenario)
+            })
         account = current_account()
         if account is not None:
             scenario.user_id, scenario.plan = account.user_id, account.plan

@@ -43,6 +43,8 @@ async def json_body(request: web.Request) -> dict[str, Any]:
 
 def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
     """The ``/api/entitlements`` document for the current scenario (and user)."""
+    from e2e.harness.fake_cloud.routes_version_policy import policy_payload
+
     scenario = store.snapshot()
     account = current_account()
     return {
@@ -53,6 +55,7 @@ def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
         "mcp_connections": scenario.mcp_connections,
         "quota": scenario.quota,
         "balance": scenario.balance,
+        "client_version_policy": policy_payload(store),
     }
 
 
