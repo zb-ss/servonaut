@@ -184,6 +184,9 @@ def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int,
     return status, {"error": error}
 
 
+OWN_BINDING_MISMATCH = "Personal instances can use an item of your personal vault or of a team vault you manage."
+
+
 def _iso(moment: float) -> str:
     return dt.datetime.fromtimestamp(int(moment), tz=dt.timezone.utc).isoformat()
 
@@ -276,7 +279,9 @@ class VaultCloud:
 
         ``None`` (the default) models an old service: vault objects carry no
         ``capabilities`` field. Known strings are ``duplicate_item``,
-        ``item_usage`` and ``delete_refuses_bound``; others are passed through
+        ``item_usage``, ``delete_refuses_bound`` and ``own_server_team_keys`` (a
+        user's own server may use a key of a team vault they own or administer);
+        others are passed through
         so a journey can check that clients ignore them.
         """
         with self._lock:
@@ -329,6 +334,70 @@ class VaultCloud:
             known = [i for i in ids if i in items]
             return 200, {"data": [self.item_usage(vault_id, i) for i in known],
                          "meta": {"unknown_item_ids": [i for i in ids if i not in items]}}
+
+    def own_binding_refusal(self, body: dict[str, Any], user_id: int) -> Optional[tuple[int, dict[str, Any]]]:
+        """The refusal for an own-server binding whose vault or item may not be used, else None."""
+        with self._lock:
+            vault_id = str(body.get("vault_id"))
+            vault = self._vaults.get(vault_id)
+            item = self._items.get(vault_id, {}).get(str(body.get("vault_item_id")))
+            allowed_vault = vault is not None and (
+                (vault["kind"] == "personal" and vault["owner_user_id"] == user_id)
+                or (vault["kind"] == "team" and self._has("own_server_team_keys")
+                    and self._role(vault, user_id) in {"owner", "admin"})
+            )
+            if allowed_vault and item is not None and not item.get("deleted_at") and item.get("type") == "ssh_key":
+                return None
+            return _refusal(422, "item_mismatch", OWN_BINDING_MISMATCH)
+
+    def _drop_own_server_bindings(self, vault_id: str, user_id: int) -> int:
+        identity = self._identity(user_id)
+        if identity is None:
+            return 0
+        doomed = [key for key, binding in self._bindings.items()
+                  if key[0] != "team" and binding.get("vault_id") == vault_id
+                  and binding.get("binder_identity_id") == identity["identity_id"]]
+        for key in doomed:
+            del self._bindings[key]
+        return len(doomed)
+
+    def set_member_role(self, vault_id: str, user_id: int, role: Optional[str]) -> int:
+        """Control: set a user's role in a vault's own roster (None removes them).
+
+        As on the service, a role below admin drops that user's personal
+        bindings to the vault; returns how many. owner and admin drop nothing.
+        """
+        with self._lock:
+            vault = self._vaults[vault_id]
+            self._apply_role(vault, user_id, role)
+            return 0 if role in {"owner", "admin"} else self._drop_own_server_bindings(vault_id, user_id)
+
+    @staticmethod
+    def _apply_role(vault: dict[str, Any], user_id: int, role: Optional[str]) -> None:
+        for entry in vault["roster"]:
+            if entry["user_id"] == user_id:
+                if role is None:
+                    entry["status"] = "removed"
+                else:
+                    entry["role"] = role
+                    # Added back after a removal: their earlier grant applies again.
+                    if entry.get("status") == "removed":
+                        entry["status"] = "granted"
+
+    def team_role_changed(self, slug: str, user_id: int, role: Optional[str]) -> int:
+        """Hook for the team fake: a member's role changed (None: removed). Returns bindings dropped.
+
+        Every change reaches the vault rosters; only a role below admin (or
+        leaving) drops the member's personal bindings to the team's vaults.
+        """
+        dropped = 0
+        with self._lock:
+            for vault_id, vault in self._vaults.items():
+                if vault["kind"] == "team" and (vault.get("team") or {}).get("slug") == slug:
+                    self._apply_role(vault, user_id, role)
+                    if role not in {"owner", "admin"}:
+                        dropped += self._drop_own_server_bindings(vault_id, user_id)
+        return dropped
 
     def refuse_ca_activation(self, kind: Optional[str]) -> None:
         """Control: refuse every CA switch-on and rollover start with *kind*.
@@ -1996,6 +2065,10 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
             return _not_found()
         assert device is not None
         body = await json_body(request)
+        refusal = vault.own_binding_refusal(body, device.user_id)
+        if refusal is not None:
+            status, answer = refusal
+            return web.json_response(answer, status=status)
         target = f"instance:{request.match_info['provider']}:{request.match_info['instance_id']}"
         if not _valid_binding(vault, body, device, target):
             return _problem("credential_binding")

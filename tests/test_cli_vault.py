@@ -2012,3 +2012,32 @@ def test_bind_without_host_keys_names_the_cli_flags(monkeypatch, capsys, looked_
 
     err = capsys.readouterr().err
     assert all(flag in err for flag in flags)
+
+
+def test_personal_binding_refusal_is_reported_on_stderr(capsys) -> None:
+    from servonaut.services.vault.errors import OWN_SERVER_PERSONAL_VAULT_ONLY, VaultUserError
+
+    class Service:
+        close = MagicMock()
+
+        async def bind_personal(self, **kwargs):
+            raise VaultUserError(OWN_SERVER_PERSONAL_VAULT_ONLY)
+
+    service = Service()
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        args = _parser().parse_args(
+            [
+                "vault", "bind-personal", "--vault", VAULT_ID, "--item", "item-1",
+                "--provider", "aws", "--instance-id", "i-123", "--hostname", "host.example",
+                "--login", "ubuntu", "--host-key", "ssh-ed25519 AAAA", "--yes",
+            ]
+        )
+        assert vault.handle_vault_command(args) != 0
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert (
+        "Vault operation failed (this Servonaut service only lets your own servers use keys "
+        "from your personal vault)." in capsys.readouterr().err
+    )

@@ -255,6 +255,16 @@ async def test_no_vault_or_a_failed_key_load_says_what_to_do() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_an_own_server_without_a_usable_vault_says_to_create_a_personal_one(size) -> None:
+    app = _Host(_Service(vaults=[]), {"id": "s1", "is_shared": False})
+    async with app.run_test(size=size) as pilot:
+        message = lambda: str(app.screen.query_one("#vault_bind_message", Static).render())  # noqa: E731
+        await _settle(pilot, lambda: "No vault holds keys your own servers can use yet" in message())
+        assert "create your personal vault on the Vault screen first." in message()
+
+
+@pytest.mark.asyncio
 async def test_the_dialog_fits_a_narrow_terminal_with_the_choices_in_view(monkeypatch) -> None:
     monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: [_host_key()] * 3)
     app = _Host(_Service(), {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})

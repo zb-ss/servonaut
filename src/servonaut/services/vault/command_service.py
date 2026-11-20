@@ -48,6 +48,10 @@ from .errors import (
     KEY_ASSIGNMENTS_CHANGED,
     KEY_IN_USE_ON_SERVICE,
     KEY_USAGE_MISSING,
+    OWN_SERVER_KEY_REFUSED,
+    OWN_SERVER_PERSONAL_VAULT_ONLY,
+    OWN_SERVER_TEAM_KEY_REFUSED,
+    OWN_SERVER_VAULT_NOT_MANAGED,
     UNBIND_NOT_AVAILABLE,
     VAULT_UNREADABLE,
     HostKeysNeeded,
@@ -86,6 +90,7 @@ from .team_vault_client import (
 logger = logging.getLogger(__name__)
 
 _CAP_ITEM_USAGE = "item_usage"
+_CAP_OWN_SERVER_TEAM_KEYS = "own_server_team_keys"
 _CAP_DELETE_REFUSES_BOUND = "delete_refuses_bound"
 _USAGE_BATCH = 500
 
@@ -293,6 +298,8 @@ class VaultCommandService:
             backoff_seconds=settings.binding_read_backoff_seconds,
             session=lambda: self.auth.access_token,
         )
+        # Own servers whose binding was just found gone, per signing device (taken once by the connect flow).
+        self._lost_team_keys: set[tuple[str, str, str]] = set()
         self.teams = team_service or TeamService(api)
         self.remote_executor_factory = remote_executor_factory
         self._secret_references: dict[str, dict[str, str]] = {}
@@ -982,9 +989,10 @@ class VaultCommandService:
     async def vault_choices(self, *, team: str | None = None) -> list[dict[str, str]]:
         """Vaults this user can read, as ``{"vault_id", "label"}`` for a picker.
 
-        With *team*, only that team's vault; otherwise every readable vault,
-        the personal one first. A vault still waiting for this user's access
-        is left out: nothing in it can be used yet.
+        With *team*, only that team's vault. Without it (a server of the
+        user's own), the personal vault first, then only team vaults whose
+        keys the user's own servers may use. A vault still waiting for this
+        user's access is left out: nothing in it can be used yet.
         """
         choices: list[tuple[int, dict[str, str]]] = []
         for vault in await self.list_vaults():
@@ -995,6 +1003,8 @@ class VaultCommandService:
             if team is not None and owner.get("slug") != team:
                 continue
             personal = vault.get("kind") == "personal"
+            if team is None and not personal and self.own_server_key_refusal(vault) is not None:
+                continue
             where = "your personal vault" if personal else f"team {owner.get('slug') or '?'}"
             label = f"{terminal_safe(vault.get('name') or 'Vault')} ({terminal_safe(where)})"
             choices.append((0 if personal else 1, {
@@ -1148,6 +1158,28 @@ class VaultCommandService:
             return {"item_id": item_id, "name": cleaned, "revision": revision}
         finally:
             payload.clear()
+
+    @staticmethod
+    def own_server_key_refusal(vault: Mapping[str, Any]) -> str | None:
+        """Why a key of *vault* cannot be bound to the user's own servers; None when it can.
+
+        A team vault qualifies only when the service announces the capability
+        and the user owns or administers it. A missing capability means an
+        older service. No version is ever checked.
+        """
+        if vault.get("kind") == "personal":
+            return None
+        raw = vault.get("capabilities")
+        caps = frozenset(c for c in raw if isinstance(c, str)) if isinstance(raw, list) else frozenset()
+        if _CAP_OWN_SERVER_TEAM_KEYS not in caps:
+            return OWN_SERVER_PERSONAL_VAULT_ONLY
+        if vault.get("my_role") not in {"owner", "admin"}:
+            return OWN_SERVER_VAULT_NOT_MANAGED
+        return None
+
+    async def own_server_key_refusal_for(self, *, vault_id: str) -> str | None:
+        """:meth:`own_server_key_refusal` on a fresh read of the vault; a failed read raises."""
+        return self.own_server_key_refusal(await self.vaults.get_vault(vault_id))
 
     async def _key_checks(self, vault_id: str, *, fail_closed: bool = False) -> _KeyChecks:
         """The vault's optional service features; a missing field means an older service.
@@ -2189,6 +2221,9 @@ class VaultCommandService:
             raise ValueError("personal binding requires verified host pins")
         self.bindings._validate_host_keys(host_keys)
         vault = await self.vaults.get_vault(vault_id)
+        refusal = self.own_server_key_refusal(vault)
+        if refusal is not None:
+            raise VaultUserError(refusal)
         item = await self.items.get_item(vault_id, item_id)
         payload = self.items.read_item(vault, item)
         fingerprint = payload.get("public_fingerprint")
@@ -2205,8 +2240,14 @@ class VaultCommandService:
         else:
             # The existing binding only has to be ours: its address may be the
             # one that changed (a cloud server's public IP after a restart).
+            # It may name another vault than the new key's (a personal key replaced by a team vault's).
+            existing_vault_id = str(existing.get("vault_id") or "")
+            existing_vault = vault
+            if existing_vault_id and existing_vault_id != vault_id:
+                _uuid(existing_vault_id, "binding.vault_id")
+                existing_vault = await self.vaults.get_vault(existing_vault_id)
             verified = self.bindings.verify_binding(
-                existing, vault, target=existing_target,
+                existing, existing_vault, target=existing_target,
                 hostname=str(existing.get("hostname") or ""), port=existing.get("port"),
             )
             revision = _positive_int(verified.get("binding_revision"), "binding.binding_revision") + 1
@@ -2224,10 +2265,16 @@ class VaultCommandService:
                 raise VaultUserError(
                     "this Servonaut service does not accept vault keys for custom servers yet"
                 ) from exc
+            if exc.status == 422 and exc.code == "item_mismatch":
+                # The vault passed the check above, so the key itself or the user's role changed since.
+                raise VaultUserError(
+                    OWN_SERVER_KEY_REFUSED if vault.get("kind") == "personal" else OWN_SERVER_TEAM_KEY_REFUSED
+                ) from exc
             raise
         finally:
             # Whatever the PUT did, the remembered answer may no longer be the stored one.
             self._forget_personal_binding(normalized_provider, normalized_instance_id)
+            self._discard_lost_team_key(normalized_provider, normalized_instance_id)
         self._binding_generation += 1
         return result
 
@@ -2587,7 +2634,14 @@ class VaultCommandService:
         hostname, port = self.ssh_destination(instance)
         if not isinstance(hostname, str) or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise VaultStateError("bound server has no valid hostname or port")
-        vault = await self.vaults.get_vault(vault_id)
+        own = instance.get("is_shared") is not True
+        try:
+            vault = await self.vaults.get_vault(vault_id)
+        except APIError as exc:
+            # A user's personal vault does not refuse its owner, so an unreadable vault of an own-server binding is a team vault.
+            if own and await self._own_binding_lost(instance, exc):
+                return None
+            raise
         try:
             verified = self.bindings.verify_binding(binding, vault, target=target, hostname=hostname, port=port)
         except BindingDestinationChangedError as exc:
@@ -2595,7 +2649,12 @@ class VaultCommandService:
         pins = tuple(verified.get("host_keys", ()))
         if not pins:
             raise VaultStateError("native SSH binding has no verified host pins")
-        item = await self.items.get_item(vault_id, item_id)
+        try:
+            item = await self.items.get_item(vault_id, item_id)
+        except APIError as exc:
+            if own and vault.get("kind") != "personal" and await self._own_binding_lost(instance, exc):
+                return None
+            raise
         payload = self.items.read_item(vault, item)
         private = bytearray(payload["private_key_openssh"].encode("utf-8"))
         public_key = crypto.openssh_public_key_from_private(private)
@@ -2722,9 +2781,13 @@ class VaultCommandService:
         vault key. '' for a team vault that does not name its team. Decides
         as :meth:`resolve_ssh` does: a locked vault resolves no native key.
 
+        None also when the vault refuses the read (403/404) and a fresh
+        binding read shows the binding is gone (see :meth:`take_lost_team_key`).
+
         Raises:
-            Exception: the binding or its vault could not be read; the
-                caller must not take the key for a personal one.
+            Exception: the binding or its vault could not be read and the
+                binding still stands; the caller must not take the key for a
+                personal one.
         """
         if instance.get("is_shared") is True or self.store.identity is None:
             return None
@@ -2738,12 +2801,68 @@ class VaultCommandService:
         vault_id = binding.get("vault_id")
         if not isinstance(vault_id, str) or not vault_id:
             raise VaultStateError("native credential binding is malformed")
-        vault = await self.vaults.get_vault(vault_id)
+        try:
+            vault = await self.vaults.get_vault(vault_id)
+        except APIError as exc:
+            if await self._own_binding_lost(instance, exc):
+                return None
+            raise
         if vault.get("kind") == "personal":
             return None
         team = vault.get("team") if isinstance(vault.get("team"), Mapping) else {}
         slug = team.get("slug")
         return slug if isinstance(slug, str) else ""
+
+    async def _own_binding_lost(self, instance: Mapping[str, Any], exc: APIError) -> bool:
+        """Whether an own server's remembered binding is gone, after the service refused its vault or key.
+
+        Only a remembered answer (see ``vault.binding_read_cache_seconds``)
+        gets here: a fresh read of a removed binding is already "no binding",
+        and that server simply connects as an unbound one, without a notice.
+        A user moved from admin to member still reads the vault, so their
+        removed binding is never explained either; it only stops resolving.
+        """
+        if exc.status not in (403, 404):
+            return False
+        provider, instance_id = instance_target(instance)
+        self._forget_personal_binding(provider, instance_id)
+        try:
+            binding, _ = await self._personal_binding(provider, instance_id, fresh=True)
+        except Exception:
+            return False
+        if isinstance(binding, Mapping):
+            return False
+        key = self._lost_team_key(provider, instance_id)
+        if key is None:
+            return False
+        self._lost_team_keys.add(key)
+        logger.info(
+            "A server's vault key binding is gone: its team vault no longer lets this account use it; connecting without it"
+        )
+        return True
+
+    def take_lost_team_key(self, instance: Mapping[str, Any]) -> bool:
+        """Whether this server's vault key binding was just found gone because its team vault refused the read; answers True once per loss."""
+        try:
+            key = self._lost_team_key(*instance_target(instance))
+        except ValueError:
+            return False
+        if key is not None and key in self._lost_team_keys:
+            self._lost_team_keys.discard(key)
+            return True
+        return False
+
+    def _lost_team_key(self, provider: str, instance_id: str) -> tuple[str, str, str] | None:
+        """The key a lost binding is remembered under: per signing device, like the binding reads."""
+        if self.store.identity is None:
+            return None
+        return (self.store.signer().device_id, provider, instance_id)
+
+    def _discard_lost_team_key(self, provider: str, instance_id: str) -> None:
+        """A binding read or written since: an earlier loss no longer describes the server."""
+        key = self._lost_team_key(provider, instance_id)
+        if key is not None:
+            self._lost_team_keys.discard(key)
 
     async def _credential_binding(
         self, instance: Mapping[str, Any],
@@ -2771,6 +2890,8 @@ class VaultCommandService:
             lambda: self._get_personal_binding(provider, instance_id, device),
             fresh=fresh,
         )
+        if isinstance(binding, Mapping):
+            self._lost_team_keys.discard((device.device_id, provider, instance_id))
         return binding, f"instance:{provider}:{instance_id}"
 
     def _forget_personal_binding(self, provider: str, instance_id: str) -> None:

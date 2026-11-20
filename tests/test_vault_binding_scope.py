@@ -66,6 +66,7 @@ class _BindingService(_Service):
         self.personal_binding = AsyncMock(return_value=None)
         self.bind = AsyncMock(side_effect=lambda **values: _signed_binding(values["server"]))
         self.bind_personal = AsyncMock(return_value={"source": "servonaut_vault"})
+        self.own_server_key_refusal_for = AsyncMock(return_value=None)
 
     def ssh_destination(self, instance: dict) -> tuple[str, int]:
         return instance["public_ip"], instance.get("port", 22)
@@ -549,6 +550,43 @@ async def test_a_team_key_on_your_own_server_offers_to_update_your_own_binding(
     else:
         service.bind_personal.assert_not_awaited()
         assert "You still connect with your own key, as ec2-user." in app.notices[-1][0]
+    service.own_server_key_refusal_for.assert_awaited_once_with(vault_id=TEAM_VAULT)
+
+
+_PERSONAL_ONLY = "this Servonaut service only lets your own servers use keys from your personal vault"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("failure", [False, True])
+async def test_a_team_vault_the_service_refuses_for_own_servers_offers_no_update(
+    size: tuple[int, int], failure: bool,
+) -> None:
+    from servonaut.screens.server_actions import OwnKeyUpdateModal
+
+    app = _Host([_own(), _shared()])
+    service = app.vault_command_service
+    service.bind = AsyncMock(return_value=_signed_binding())
+    service.personal_binding.return_value = {
+        "source": "servonaut_vault", "login_user": "ec2-user", "public_fingerprint": "SHA256:old",
+    }
+    if failure:
+        service.own_server_key_refusal_for.side_effect = RuntimeError("boom")
+    else:
+        service.own_server_key_refusal_for.return_value = _PERSONAL_ONLY
+    async with app.run_test(size=size) as pilot:
+        await _bind_team_key(pilot)
+        await _settle(pilot, lambda: bool(app.notices))
+        assert not isinstance(app.screen, OwnKeyUpdateModal)
+
+    service.bind_personal.assert_not_awaited()
+    message, kwargs = app.notices[-1]
+    assert "You still connect with your own key, as ec2-user." in message
+    if failure:
+        assert message.endswith("Updating it to the team's key was not offered: the team's vault could not be checked.")
+    else:
+        assert f"Updating it to the team's key was not offered: {_PERSONAL_ONLY}." in message
+    assert kwargs.get("markup") is False
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,7 @@ _CREDENTIAL_SOURCE_LABELS: dict[str, str] = {
 
 #: Binding source of a native Servonaut Vault key.
 _VAULT_SOURCE = "servonaut_vault"
+_TEAM_VAULT_UNCHECKED = "the team's vault could not be checked"
 
 
 def credential_source_label(source: object) -> Optional[str]:
@@ -669,7 +670,10 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             self._say(
                 f"Team {self._team} has no vault you can read yet: an owner or admin creates it, "
                 "or grants your access, on the Vault screen."
-                if self._team else "You have no vault yet: create one on the Vault screen first."
+                if self._team else (
+                    "No vault holds keys your own servers can use yet: "
+                    "create your personal vault on the Vault screen first."
+                )
             )
             return
         self._vault_choices = choices
@@ -2076,6 +2080,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
         resolver = await self._ssh_ref_resolver()
         own_row = instance.get("is_shared") is not True
+        own = instance
 
         try:
             # Without a key of the user's own, a team's key for the same
@@ -2091,6 +2096,17 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 markup=False,
             )
             return
+
+        if own_row:
+            from servonaut.services.ssh_credentials import lost_team_key_hint
+
+            lost = lost_team_key_hint(own, getattr(self.app, "vault_command_service", None))
+            if lost:
+                self._vault_binding_source = None
+                if self.is_mounted:
+                    self._render_server_info()
+                text = lost + (" Connecting without it." if resolved is not None else "")
+                self.app.notify(scrub_for_display(self.app, text), severity="warning", markup=False)
 
         if resolved is None:
             hint = team_key_hint(
@@ -2661,6 +2677,8 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         team key with another key or login changes nothing for the user
         until they agree to update their own. Returns the sentence to add to
         the outcome; None when they have no personal binding or it matches.
+        The update is offered only when the service lets the user's own
+        servers use that team vault's keys.
         """
         from servonaut.services.vault.errors import vault_failure_reason
         from servonaut.services.vault.personal_targets import instance_provider
@@ -2689,6 +2707,16 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         destination, port = service.ssh_destination(own)
         if not team_login or not host_keys or not destination or not isinstance(port, int):
             return kept
+        job = self._busy.begin("Checking your own key for this server…", hold=("#btn_use_vault_key",))
+        try:
+            refusal = await service.own_server_key_refusal_for(vault_id=values["vault_id"])
+        except Exception:  # noqa: BLE001 - unknown, so the update is not offered
+            logger.debug("Could not check the team vault for an own-key update", exc_info=True)
+            refusal = _TEAM_VAULT_UNCHECKED
+        finally:
+            self._busy.end(job)
+        if refusal is not None:
+            return f"{kept} Updating it to the team's key was not offered: {refusal}."
         changes = [
             change for change, differs in (
                 ("the team's key", not same_key), (f"the login {team_login}", own_login != team_login),

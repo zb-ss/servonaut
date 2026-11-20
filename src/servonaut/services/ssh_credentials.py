@@ -434,6 +434,22 @@ def bastion_hop_hint(profile: Any, rows: Iterable[Mapping[str, Any]], vault_runt
     )
 
 
+LOST_TEAM_KEY = "Your vault key for this server is gone: it came from a team vault you no longer own or administer."
+
+
+def lost_team_key_hint(instance: Mapping[str, Any], vault_runtime: Any) -> Optional[str]:
+    """The notice for an own server whose team-vault key binding was just found gone, else None."""
+    try:
+        if is_shared_row(instance):
+            return None
+        take = getattr(vault_runtime, "take_lost_team_key", None)
+        if not callable(take):
+            return None
+        return LOST_TEAM_KEY if take(dict(instance)) is True else None
+    except Exception:
+        return None
+
+
 def _behind_proxy(row: Mapping[str, Any], name: str, connection_service: Any) -> bool:
     """Whether a connection rule routes the bastion's server *row* through a bastion or proxy itself."""
     if connection_service is None:
