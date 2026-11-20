@@ -56,6 +56,7 @@ def _service(tmp_path, answer: object) -> tuple[VaultCommandService, _Api]:
     })
     service._ssh_key_display_name = AsyncMock(return_value="deploy key")  # type: ignore[method-assign]
     service.list_exposures = AsyncMock(return_value={"data": []})  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value={"vault_id": VAULT_ID})  # type: ignore[method-assign]
     service.items.delete_item = AsyncMock()  # type: ignore[method-assign]
     return service, api
 

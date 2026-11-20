@@ -42,6 +42,13 @@ _TO_THREAD = "servonaut.screens.vault_import_modal.asyncio.to_thread"
 _SCAN = "servonaut.screens.vault_import_modal.scan_directory"
 
 
+def _service() -> MagicMock:
+    """A vault service double whose listing of existing keys succeeds."""
+    service = MagicMock()
+    service.stored_keys = AsyncMock(return_value={})
+    return service
+
+
 class _Gate:
     """Holds one awaited call until the test releases it."""
 
@@ -134,7 +141,7 @@ async def test_a_button_disabled_before_the_work_stays_disabled_after_it() -> No
 
 
 def test_work_on_a_dialog_that_is_not_mounted_is_skipped() -> None:
-    modal = VaultImportModal(MagicMock(), "vault-1", Path("/tmp"))
+    modal = VaultImportModal(_service(), "vault-1", Path("/tmp"))
     work = BusyWork(modal, "#vault_import_busy")
     with work.running("Loading…", hold=("#vault_import_local",)):
         assert work.holds("#vault_import_local")
@@ -191,7 +198,7 @@ async def test_reading_local_keys_shows_progress_and_holds_the_source_buttons(tm
         return function(*args, **kwargs)
 
     key = ScannedKey(path=tmp_path / "id_ed25519", filename="id_ed25519", encrypted=False)
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     with patch(_SCAN, return_value=[key]), patch(_TO_THREAD, new=slow_thread):
         app = _ImportHost(modal)
         async with app.run_test(size=size) as pilot:
@@ -226,7 +233,7 @@ async def test_a_failed_local_read_hides_the_progress_and_gives_the_buttons_back
         await gate.wait()
         return function(*args, **kwargs)
 
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     with patch(_SCAN, side_effect=KeyImportError("unreadable")), patch(_TO_THREAD, new=slow_thread):
         app = _ImportHost(modal)
         async with app.run_test(size=(100, 30)) as pilot:
@@ -255,7 +262,7 @@ async def test_listing_bitwarden_items_shows_progress_until_it_ends(tmp_path: Pa
         return [BwItemSummary(id="bw-item-1", name="Deploy key", type=5, has_ssh_key=True)]
 
     session.list_items = AsyncMock(side_effect=list_items)
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path, session_service=session)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path, session_service=session)
     app = _ImportHost(modal)
     async with app.run_test(size=(100, 30)) as pilot:
         await wait_until(lambda: app.screen is modal)
@@ -285,7 +292,7 @@ async def test_importing_counts_the_keys_and_cannot_be_closed_or_restarted_midwa
         await gates[position].wait()
         return {"item_id": f"item-{position + 1}"}
 
-    service = MagicMock()
+    service = _service()
     service.import_keys = AsyncMock(side_effect=import_keys)
     modal = VaultImportModal(service, "vault-1", tmp_path)
     with patch(_SCAN, return_value=keys), patch(_TO_THREAD, new=_immediate_thread):
@@ -331,7 +338,7 @@ async def test_a_bitwarden_import_says_when_it_reads_the_key_and_when_it_imports
         await import_gate.wait()
         raise RuntimeError("upload failed")
 
-    service = MagicMock()
+    service = _service()
     service.import_keys = AsyncMock(side_effect=import_keys)
     session = MagicMock()
     session.list_items = AsyncMock(
@@ -373,7 +380,7 @@ async def test_leaving_while_keys_load_cancels_the_read_quietly(tmp_path: Path) 
         await gate.wait()
         return function(*args, **kwargs)
 
-    modal = VaultImportModal(MagicMock(), "vault-1", tmp_path)
+    modal = VaultImportModal(_service(), "vault-1", tmp_path)
     with patch(_SCAN, return_value=[]), patch(_TO_THREAD, new=slow_thread):
         app = _ImportHost(modal)
         async with app.run_test(size=(100, 30)) as pilot:
@@ -586,7 +593,7 @@ async def _server_screen(app: _ServerHost) -> ServerActionsScreen:
 @pytest.mark.parametrize("size", SIZES)
 async def test_binding_shows_progress_and_cannot_be_restarted_midway(size) -> None:
     gate = _Gate()
-    service = MagicMock()
+    service = _service()
 
     async def bind(**_kwargs):
         await gate.wait()
@@ -622,7 +629,7 @@ async def test_binding_shows_progress_and_cannot_be_restarted_midway(size) -> No
 @pytest.mark.asyncio
 async def test_a_failed_binding_hides_the_progress_and_gives_the_button_back() -> None:
     gate = _Gate()
-    service = MagicMock()
+    service = _service()
 
     async def bind(**_kwargs):
         await gate.wait()

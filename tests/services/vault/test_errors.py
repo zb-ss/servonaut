@@ -223,3 +223,57 @@ def test_a_due_vault_key_rotation_says_who_rotates_it_and_how() -> None:
         "rotates it with Rotate vault key or `servonaut vault rotate --vault <vault>`, then try again"
     )
     assert "server text" not in reason
+
+
+def test_duplicate_key_message_and_description() -> None:
+    from servonaut.services.vault.errors import VaultDuplicateKey
+
+    existing = "11111111-1111-4111-8111-111111111111"
+    exc = VaultDuplicateKey(existing_item_id=existing, existing_name="key-1\x1b[31m", fingerprint="SHA256:abc")
+    assert str(exc) == "this key is already in this vault; nothing was imported"
+    assert exc.existing_item_id == existing
+    assert "\x1b" not in exc.existing_name
+    assert exc.described().startswith("already in this vault as key-1")
+    assert isinstance(exc, VaultUserError)
+
+
+def test_duplicate_key_unknown_name_and_bad_id() -> None:
+    from servonaut.services.vault.errors import VaultDuplicateKey
+
+    exc = VaultDuplicateKey(existing_item_id="not-a-uuid", existing_name="")
+    assert exc.existing_item_id is None
+    assert exc.existing_name is None
+    assert exc.described() == "already in this vault"
+
+
+def test_key_in_use_new_fields_and_messages() -> None:
+    from servonaut.services.vault.errors import VaultKeyInUse
+
+    others = VaultKeyInUse(team_servers=[], own_servers=[], unchecked=[], other_members=2, other_servers=3, can_unbind=True)
+    assert others.in_use and others.can_unbind
+    assert (others.other_members, others.other_servers) == (2, 3)
+    assert str(others) == (
+        "this key is still used by other members' servers: they must give those servers another vault key first"
+    )
+    listed = VaultKeyInUse(team_servers=["site-1"], own_servers=[], unchecked=[], other_servers=1)
+    assert str(listed) == "this key is still used by the servers listed: give them another vault key first"
+    empty = VaultKeyInUse(team_servers=[], own_servers=[], unchecked=["site-2"])
+    assert not empty.in_use
+    assert str(empty).startswith("could not read the saved key assignments")
+
+
+def test_key_in_use_coerces_bad_counts_and_flag() -> None:
+    from servonaut.services.vault.errors import VaultKeyInUse
+
+    exc = VaultKeyInUse(team_servers=[], own_servers=[], unchecked=[], other_members=True, other_servers=-1, can_unbind="yes")  # type: ignore[arg-type]
+    assert (exc.other_members, exc.other_servers, exc.can_unbind) == (0, 0, False)
+
+
+def test_key_in_use_from_usage_with_and_without_new_keys() -> None:
+    from servonaut.services.vault.errors import VaultKeyInUse
+
+    base = {"team_servers": ["site-1"], "own_servers": [], "unchecked": []}
+    old = VaultKeyInUse.from_usage(base)
+    assert (old.other_members, old.other_servers, old.can_unbind) == (0, 0, False)
+    new = VaultKeyInUse.from_usage({**base, "other_members": {"members": 2, "servers": 4}, "can_unbind": True})
+    assert (new.other_members, new.other_servers, new.can_unbind) == (2, 4, True)

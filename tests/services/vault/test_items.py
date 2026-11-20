@@ -213,3 +213,73 @@ def test_sparse_personal_item_requires_matching_local_owner() -> None:
 def test_existing_item_names_are_not_cleaned_or_rejected_on_read() -> None:
     service, vault, item, payload = _sparse_personal_item(name=" \u202eold\n ")
     assert service.read_item(vault, item) == payload
+
+
+_DEL_VAULT = "11111111-1111-4111-8111-111111111111"
+_DEL_ITEM = "22222222-2222-4222-8222-222222222222"
+
+
+def _signing_service():
+    calls: list[dict] = []
+    identity = SimpleNamespace(identity_id="33333333-3333-4333-8333-333333333333", signing_seed=b"a" * 32)
+
+    class Vaults:
+        _identity_store = SimpleNamespace(identity=identity)
+
+        def _signer(self):
+            return "device"
+
+    class Api:
+        async def request_signed(self, method, path, *, json=None, device=None):
+            calls.append({"method": method, "path": path, "json": json, "device": device})
+            return {"ok": True}
+
+    return VaultItemService(Api(), Vaults()), calls
+
+
+@pytest.mark.asyncio
+async def test_delete_body_has_no_unbind_by_default() -> None:
+    service, calls = _signing_service()
+    await service.delete_item(_DEL_VAULT, _DEL_ITEM, 3)
+    body = calls[0]["json"]
+    assert calls[0]["method"] == "DELETE"
+    assert set(body) == {"revision", "deleter_identity_id", "signature"}
+    assert body["revision"] == 4
+
+
+@pytest.mark.asyncio
+async def test_delete_with_unbind_adds_only_the_flag() -> None:
+    service, calls = _signing_service()
+    await service.delete_item(_DEL_VAULT, _DEL_ITEM, 3)
+    await service.delete_item(_DEL_VAULT, _DEL_ITEM, 3, unbind=True)
+    plain, unbound = calls[0]["json"], calls[1]["json"]
+    assert unbound["unbind"] is True
+    assert {k: v for k, v in unbound.items() if k != "unbind"} == plain
+
+
+@pytest.mark.asyncio
+async def test_items_usage_path_method_and_body() -> None:
+    service, calls = _signing_service()
+    other = "44444444-4444-4444-8444-444444444444"
+    result = await service.items_usage(_DEL_VAULT, [_DEL_ITEM, other, _DEL_ITEM])
+    assert result == {"ok": True}
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == f"/api/v1/vaults/{_DEL_VAULT}/items/usage"
+    assert calls[0]["json"] == {"item_ids": [_DEL_ITEM, other]}
+    assert calls[0]["device"] == "device"
+
+
+@pytest.mark.asyncio
+async def test_items_usage_validates_ids_and_count() -> None:
+    service, calls = _signing_service()
+    with pytest.raises(ValueError, match="1 to 500"):
+        await service.items_usage(_DEL_VAULT, [])
+    with pytest.raises(ValueError):
+        await service.items_usage(_DEL_VAULT, ["not-a-uuid"])
+    with pytest.raises(ValueError):
+        await service.items_usage("bad", [_DEL_ITEM])
+    ids = [f"00000000-0000-4000-8000-{n:012d}" for n in range(501)]
+    with pytest.raises(ValueError, match="1 to 500"):
+        await service.items_usage(_DEL_VAULT, ids)
+    await service.items_usage(_DEL_VAULT, ids[:500])
+    assert len(calls) == 1 and len(calls[0]["json"]["item_ids"]) == 500

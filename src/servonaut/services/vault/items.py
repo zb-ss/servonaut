@@ -6,7 +6,7 @@ import inspect
 import json
 import secrets
 from urllib.parse import urlencode
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from . import crypto
@@ -205,7 +205,9 @@ class VaultItemService:
         }
         return await self._signed("PUT", f"/api/v1/vaults/{vault_id}/items/{item_id}", body)
 
-    async def delete_item(self, vault_id: str, item_id: str, revision: int) -> dict[str, Any]:
+    async def delete_item(
+        self, vault_id: str, item_id: str, revision: int, *, unbind: bool = False,
+    ) -> dict[str, Any]:
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
@@ -216,11 +218,27 @@ class VaultItemService:
             identity_signing_seed(identity),
             crypto.item_tombstone_message(vault_id, item_id, next_revision, str(identity.identity_id)),
         )
-        return await self._signed(
-            "DELETE",
-            f"/api/v1/vaults/{vault_id}/items/{item_id}",
-            {"revision": next_revision, "deleter_identity_id": str(identity.identity_id), "signature": base64.b64encode(signature).decode()},
-        )
+        body: dict[str, Any] = {
+            "revision": next_revision,
+            "deleter_identity_id": str(identity.identity_id),
+            "signature": base64.b64encode(signature).decode(),
+        }
+        if unbind is True:
+            # Not part of the tombstone signature; only ever sent when true.
+            body["unbind"] = True
+        return await self._signed("DELETE", f"/api/v1/vaults/{vault_id}/items/{item_id}", body)
+
+    async def items_usage(self, vault_id: str, item_ids: Sequence[str]) -> dict[str, Any]:
+        """Ask the service which servers use the given items (one batch, at most 500 ids)."""
+        _uuid(vault_id, "vault_id")
+        ids: list[str] = []
+        for item_id in item_ids:
+            normalized = _uuid(item_id, "item_id").lower()
+            if normalized not in ids:
+                ids.append(normalized)
+        if not 1 <= len(ids) <= 500:
+            raise ValueError("item usage needs 1 to 500 item ids")
+        return await self._signed("POST", f"/api/v1/vaults/{vault_id}/items/usage", {"item_ids": ids})
 
     def _version(self, vault: Mapping[str, Any], number: int) -> Mapping[str, Any]:
         for version in vault.get("versions", []):

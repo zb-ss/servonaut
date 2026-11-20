@@ -182,6 +182,172 @@ def test_fake_item_metadata_lists_only_the_items_team_server_bindings(fake_cloud
     assert "bound_server_ids" not in item
 
 
+def _plain_vault(cloud, vault_id="vault", owner=1):
+    cloud._vaults[vault_id] = {
+        "vault_id": vault_id, "kind": "personal", "scope": f"user:{owner}", "owner_user_id": owner, "team": None,
+        "name": "Personal vault", "grant_policy": "auto", "created_at": "", "updated_at": "",
+        "rotation": {"required": False}, "grants": {}, "versions": [], "roster": [], "current_version": 1,
+    }
+    cloud._items.setdefault(vault_id, {})
+
+
+def _put(cloud, item_id, fingerprint, *, vault_id="vault", expected=None):
+    body = {"type": "ssh_key", "nonce": base64.b64encode(b"n" * 24).decode(),
+            "ciphertext": base64.b64encode(b"c" * 32).decode(), "public_fingerprint": fingerprint,
+            "expected_revision": expected}
+    return cloud.put_item(vault_id, item_id, body, 1)
+
+
+def _live_item(cloud, item_id="key", vault_id="vault", revision=1, fingerprint="SHA256:aaa"):
+    cloud._items.setdefault(vault_id, {})[item_id] = {
+        "item_id": item_id, "vault_id": vault_id, "revision": revision, "deleted_at": None,
+        "public_fingerprint": fingerprint,
+    }
+
+
+def test_fake_capabilities_are_absent_by_default_and_announced_once_set(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud)
+    assert "capabilities" not in cloud._vault_payload(cloud._vaults["vault"], 1)
+    cloud.set_capabilities(["item_usage", "unknown_feature"])
+    assert cloud._vault_payload(cloud._vaults["vault"], 1)["capabilities"] == ["item_usage", "unknown_feature"]
+    cloud.set_capabilities([])
+    assert cloud._vault_payload(cloud._vaults["vault"], 1)["capabilities"] == []
+    cloud.set_capabilities(None)
+    assert "capabilities" not in cloud._vault_payload(cloud._vaults["vault"], 1)
+
+
+def test_fake_duplicate_refusal_rules(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud)
+    _plain_vault(cloud, "other-vault")
+    ids = [str(uuid4()) for _ in range(4)]
+    # Without the capability the fake stores duplicates, as an old service does.
+    assert _put(cloud, ids[0], "SHA256:one")[0] == 201
+    assert _put(cloud, ids[1], "SHA256:one")[0] == 201
+    cloud._items["vault"].clear()
+    cloud.set_capabilities(["duplicate_item"])
+    assert _put(cloud, ids[0], "SHA256:one")[0] == 201
+    status, body = _put(cloud, ids[1], "SHA256:one")
+    assert status == 409 and body["error"]["code"] == "duplicate_item"
+    assert body["error"]["details"] == {"existing_item_id": ids[0]}
+    # Same fingerprint kept on update: never refused.
+    assert _put(cloud, ids[0], "SHA256:one", expected=1)[0] == 200
+    # An update that changes the fingerprint onto another live item's is refused.
+    assert _put(cloud, ids[2], "SHA256:two")[0] == 201
+    status, body = _put(cloud, ids[2], "SHA256:one", expected=1)
+    assert status == 409 and body["error"]["details"]["existing_item_id"] == ids[0]
+    # Other vaults are not considered.
+    assert _put(cloud, ids[3], "SHA256:one", vault_id="other-vault")[0] == 201
+    # A deleted item does not count.
+    cloud._items["vault"][ids[0]]["deleted_at"] = "now"
+    assert _put(cloud, ids[1], "SHA256:one")[0] == 201
+
+
+def test_fake_item_usage_lists_team_own_and_other_member_bindings(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud)
+    _live_item(cloud)
+    empty = {"item_id": "key", "team_servers": [], "own_instances": [], "other_members": {"members": 0, "servers": 0}}
+    assert cloud.item_usage("vault", "key") == empty
+    cloud._vaults["vault"]["team"] = {"slug": "example-team"}
+    server = cloud._shared_servers("example-team")[0]
+    cloud._bindings[("team", str(server["id"]))] = {"vault_id": "vault", "vault_item_id": "key"}
+    cloud._bindings[("aws", "i-1")] = {"vault_id": "vault", "vault_item_id": "key"}
+    cloud._bindings[("aws", "i-2")] = {"vault_id": "vault", "vault_item_id": "other"}
+    cloud.bind_for_other_members("vault", "key", members=2, servers=3)
+    usage = cloud.item_usage("vault", "key")
+    assert usage["team_servers"] == [{"server_id": str(server["id"]), "name": server["name"]}]
+    assert usage["own_instances"] == [{"provider": "aws", "instance_id": "i-1"}]
+    assert usage["other_members"] == {"members": 2, "servers": 3}
+    cloud._items["vault"]["key"]["deleted_at"] = "now"
+    assert cloud.item_usage("vault", "key") == empty
+    assert cloud.item_usage("missing-vault", "key") == empty
+
+
+def test_fake_delete_refuses_a_bound_item_with_the_usage_and_unbind_clears_it(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud)
+    _live_item(cloud, revision=4)
+    cloud._bindings[("aws", "i-1")] = {"vault_id": "vault", "vault_item_id": "key"}
+    cloud.bind_for_other_members("vault", "key", members=1, servers=2)
+    # Old service: the bound item is deleted regardless.
+    cloud._items["vault"]["old"] = {"item_id": "old", "vault_id": "vault", "revision": 1, "deleted_at": None}
+    assert cloud.delete_item("vault", "old", {"revision": 2, "unbind": "x"}, 1)[0] == 200
+    cloud.set_capabilities(["delete_refuses_bound"])
+    status, body = cloud.delete_item("vault", "key", {"revision": 5}, 1)
+    assert status == 409 and body["error"]["code"] == "item_in_use"
+    assert body["error"]["details"] == cloud.item_usage("vault", "key")
+    assert cloud._items["vault"]["key"]["deleted_at"] is None
+    for bad in ("true", 1, None):
+        status, body = cloud.delete_item("vault", "key", {"revision": 5, "unbind": bad}, 1)
+        assert status == 422 and body["error"]["details"] == {"field": "unbind"}
+    status, body = cloud.delete_item("vault", "key", {"revision": 5, "unbind": True}, 1)
+    assert status == 200 and body["revision"] == 5
+    assert cloud._bindings == {}
+    assert cloud.item_usage("vault", "key")["other_members"] == {"members": 0, "servers": 0}
+    assert cloud._other_member_bindings == {}
+
+
+def test_fake_delete_with_capability_still_orders_revision_checks_first(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud)
+    _live_item(cloud, revision=4)
+    cloud._bindings[("aws", "i-1")] = {"vault_id": "vault", "vault_item_id": "key"}
+    cloud.set_capabilities(["delete_refuses_bound"])
+    status, body = cloud.delete_item("vault", "key", {"revision": 9}, 1)
+    assert status == 409 and body["error"]["code"] == "revision_conflict"
+    assert cloud.delete_item("vault", "nope", {"revision": 1}, 1)[0] == 404
+    _live_item(cloud, "unused", revision=1)
+    assert cloud.delete_item("vault", "unused", {"revision": 2}, 1)[0] == 200
+
+
+def test_fake_usage_route_rules(fake_cloud):
+    cloud = fake_cloud.vault
+    user_id = fake_cloud.entitlements()["user_id"]
+    persona = cloud.seed_identity(user_id)
+    access, _ = fake_cloud.tokens()
+    _plain_vault(cloud, owner=user_id)
+    ids = [str(uuid4()), str(uuid4())]
+    _live_item(cloud, ids[0])
+    cloud._bindings[("aws", "i-1")] = {"vault_id": "vault", "vault_item_id": ids[0]}
+    path = "/api/v1/vaults/vault/items/usage"
+    counter = iter(range(1, 100))
+
+    def post(payload, route=path):
+        raw = json.dumps(payload).encode()
+        headers = {"Authorization": f"Bearer {access}", "Content-Type": "application/json",
+                   **_signed_headers(persona, "POST", route, raw, bytes([next(counter)]) * 16)}
+        with httpx.Client(base_url=fake_cloud.url, verify=False, timeout=10) as client:
+            return client.post(route, content=raw, headers=headers)
+
+    # An old service has no such route.
+    assert post({"item_ids": ids}).status_code == 404
+    cloud.set_capabilities(["item_usage"])
+    answer = post({"item_ids": ids})
+    assert answer.status_code == 200
+    data = answer.json()
+    assert [u["item_id"] for u in data["data"]] == [ids[0]]
+    assert data["data"][0]["own_instances"] == [{"provider": "aws", "instance_id": "i-1"}]
+    assert data["meta"] == {"unknown_item_ids": [ids[1]]}
+    for bad in ([], "x", [ids[0], ids[0]], ["not-a-uuid"], [ids[0].upper()], [str(uuid4()) for _ in range(501)]):
+        refused = post({"item_ids": bad})
+        assert refused.status_code == 422
+        assert refused.json()["error"]["details"] == {"field": "item_ids"}
+    assert post({}).status_code == 422
+    assert post({"item_ids": ids}, "/api/v1/vaults/missing/items/usage").status_code == 404
+
+
+def test_fake_usage_route_refuses_a_non_admin_caller(fake_cloud):
+    cloud = fake_cloud.vault
+    _plain_vault(cloud, owner=1)
+    cloud._vaults["vault"].update(kind="team", roster=[{"user_id": 7, "status": "granted", "role": "member"}])
+    cloud.set_capabilities(["item_usage"])
+    status, body = cloud.usage_batch("vault", {"item_ids": [str(uuid4())]}, 7)
+    assert status == 403 and body["error"]["code"] == "forbidden"
+    assert cloud.usage_batch("vault", {"item_ids": [str(uuid4())]}, 8)[0] == 404
+
+
 @pytest.mark.asyncio
 async def test_vault_count_excludes_deleted_items_but_history_keeps_them(fake_cloud, account_home, monkeypatch) -> None:
     home = account_home("vault-live-count")

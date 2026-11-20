@@ -9,6 +9,7 @@ argument list.
 from __future__ import annotations
 
 import asyncio
+import logging
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -20,7 +21,7 @@ from textual.content import Content
 from textual.screen import ModalScreen
 
 from servonaut.widgets.dialogs import (
-    DialogActions, DialogFrame, DialogNotificationSpace,
+    DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogFrame, DialogNotificationSpace,
 )
 from textual.widgets import Button, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -43,9 +44,12 @@ from servonaut.services.bw_key_import import (
 )
 from servonaut.services.bw_resolver import BwResolver
 from servonaut.services.bw_session_service import BwItemSummary, BwSessionService
+from servonaut.services.vault.errors import VaultDuplicateKey, loggable_failure, vault_failure_reason
 from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.widgets.busy_indicator import BusyIndicator
 
+
+logger = logging.getLogger(__name__)
 
 ImportSummary = dict[str, Any]
 
@@ -67,6 +71,8 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     """
 
     DEFAULT_CLASSES = "dialog-screen"
+    # On a short terminal the dialog gives up spacing so the key list keeps rows.
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -102,6 +108,9 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         self._source: str | None = None
         self._local_keys: list[ScannedKey] = []
         self._bw_items: list[BwItemSummary] = []
+        self._existing: dict[str, dict[str, Any]] = {}
+        self._existing_ok = False
+        self._existing_failure = ""
         self._loading = False
         self._importing = False
         self._status_raw = "Choose a source to begin."
@@ -181,8 +190,38 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         listing.add_options(options)
         # A running import holds Import back and gives its state back when it ends.
         if not self._busy.holds("#vault_import_confirm"):
-            self._confirm().disabled = not bool(options)
+            self._confirm().disabled = not bool(options) or not self._existing_ok
         self._set_status(message)
+
+    async def _load_existing(self) -> None:
+        """Read the keys the vault already holds; a failure blocks the import."""
+        try:
+            self._existing = dict(await self._service.stored_keys(vault_id=self._vault_id))
+            self._existing_ok = True
+            self._existing_failure = ""
+        except Exception as exc:
+            logger.warning("Could not read the vault's existing keys (%s)", loggable_failure(exc))
+            self._existing = {}
+            self._existing_ok = False
+            self._existing_failure = vault_failure_reason(exc)
+
+    def _existing_note(self, fingerprint: str | None) -> str:
+        """Label suffix for a key the vault holds ('' when it does not)."""
+        if not fingerprint or fingerprint not in self._existing:
+            return ""
+        name = self._existing[fingerprint].get("name")
+        if isinstance(name, str) and name:
+            # A separator keeps a name ending in a backslash from escaping the closing tag.
+            return f"  [dim]already in this vault as {markup_literal(self._display(name))} [/dim]"
+        return "  [dim]already in this vault[/dim]"
+
+    def _found_message(self, found: str, duplicates: int) -> str:
+        if not self._existing_ok:
+            return (
+                f"{found[:-1]}; could not check the vault for existing keys ({self._existing_failure}), "
+                "so import is blocked. Cancel and reopen to retry."
+            )
+        return found + (f" {duplicates} already in this vault." if duplicates else "")
 
     def _directory_label(self) -> str:
         """The scanned directory as the user knows it: under ``~`` when it is in their home."""
@@ -198,6 +237,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         try:
             with self._busy.running(f"Reading SSH keys in {self._directory_label()}…", hold=_SOURCE_BUTTONS):
                 self._local_keys = await asyncio.to_thread(scan_directory, self._directory)
+                await self._load_existing()
         except KeyImportError:
             self._show_options([], "Could not scan the selected SSH directory.")
             return
@@ -208,6 +248,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
 
     def _show_local_options(self) -> None:
         options: list[Selection] = []
+        duplicates = 0
         for index, key in enumerate(self._local_keys):
             label = markup_literal(self._display(key.filename))
             if key.resolved_target:
@@ -216,10 +257,16 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
                 label += "  [dim]encrypted — select to enter its passphrase[/dim]"
             if key.error:
                 label += "  [dim]unreadable or unsupported[/dim]"
+            note = self._existing_note(getattr(key, "fingerprint", None))
+            if note:
+                duplicates += 1
+                options.append(Selection(label + note, index, initial_state=False, disabled=True))
+                continue
             options.append(
                 Selection(label, index, initial_state=not key.encrypted and not key.error, disabled=bool(key.error))
             )
-        self._show_options(options, f"Found {len(self._local_keys)} local SSH key candidate(s).")
+        found = f"Found {len(self._local_keys)} local SSH key candidate(s)."
+        self._show_options(options, self._found_message(found, duplicates))
 
     async def _load_bitwarden(self) -> None:
         service = self._bw_service()
@@ -237,6 +284,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
                     return
                 self._busy.say(job, "Loading Bitwarden SSH items…")
                 self._bw_items = await service.list_items(folder_id=None, ssh_only=True)
+                await self._load_existing()
         except BwError as exc:
             self._set_status(exc.message)
             return
@@ -249,16 +297,22 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         self._show_bitwarden_options()
 
     def _show_bitwarden_options(self) -> None:
-        options = [
-            Selection(
+        options: list[Selection] = []
+        duplicates = 0
+        for index, item in enumerate(self._bw_items):
+            if not item.id:
+                continue
+            label = (
                 f"{markup_literal(self._display(item.name or 'Unnamed SSH key'))}"
-                f"  [dim]{markup_literal(self._display(item.fingerprint or item.id))} [/dim]",
-                index,
+                f"  [dim]{markup_literal(self._display(item.fingerprint or item.id))} [/dim]"
             )
-            for index, item in enumerate(self._bw_items)
-            if item.id
-        ]
-        self._show_options(options, f"Found {len(options)} Bitwarden SSH item(s).")
+            note = self._existing_note(item.fingerprint)
+            if note:
+                duplicates += 1
+                options.append(Selection(label + note, index, initial_state=False, disabled=True))
+            else:
+                options.append(Selection(label, index))
+        self._show_options(options, self._found_message(f"Found {len(options)} Bitwarden SSH item(s).", duplicates))
 
     async def _local_private_key(self, key: ScannedKey) -> bytearray | None:
         try:
@@ -305,7 +359,11 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         try:
             result = await self._service.import_keys(
                 source="ssh", vault_id=self._vault_id, path=str(key.path), private_key=private,
+                known_keys=self._existing,
             )
+        except VaultDuplicateKey as exc:
+            self._note_duplicate(summary, key.filename, exc)
+            return
         except Exception:
             summary["failed"] += 1
             self.app.notify("Could not import the selected SSH key.", severity="error", markup=False)
@@ -314,6 +372,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             for position in range(len(private)):
                 private[position] = 0
         self._record_import(summary, result, "ssh", key.filename)
+        self._remember_import(result)
 
     async def _import_bitwarden(
         self, index: int, summary: ImportSummary, say: Callable[[str], None] = lambda _message: None,
@@ -345,8 +404,11 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         try:
             result = await self._service.import_keys(
                 source="bitwarden", vault_id=self._vault_id, private_key=private, source_ref=item.id,
-                name=item.name,
+                name=item.name, known_keys=self._existing,
             )
+        except VaultDuplicateKey as exc:
+            self._note_duplicate(summary, item.name or "Bitwarden SSH key", exc)
+            return
         except Exception:
             summary["failed"] += 1
             self.app.notify("Could not import the selected Bitwarden SSH key.", severity="error", markup=False)
@@ -355,6 +417,26 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             for position in range(len(private)):
                 private[position] = 0
         self._record_import(summary, result, "bitwarden", item.id)
+        self._remember_import(result)
+
+    def _note_duplicate(self, summary: ImportSummary, label: str, exc: VaultDuplicateKey) -> None:
+        summary["duplicates"] += 1
+        self.app.notify(
+            f"{self._display(label)}: {exc.described()}; skipped.", severity="warning", markup=False,
+        )
+        if exc.fingerprint:
+            self._existing[exc.fingerprint] = {"item_id": exc.existing_item_id, "name": exc.existing_name}
+
+    def _remember_import(self, result: Any) -> None:
+        """Note a stored key so a second selected copy is refused as a duplicate."""
+        if not isinstance(result, dict) or not isinstance(result.get("item_id"), str):
+            return
+        fingerprint = result.get("public_fingerprint")
+        if isinstance(fingerprint, str) and fingerprint:
+            name = result.get("name")
+            self._existing[fingerprint] = {
+                "item_id": result["item_id"], "name": name if isinstance(name, str) and name else None,
+            }
 
     @staticmethod
     def _record_import(summary: ImportSummary, result: Any, source: str, source_ref: str) -> None:
@@ -377,12 +459,19 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         if self._source is None:
             self.app.notify("Choose an import source first.", severity="warning", markup=False)
             return
+        if not self._existing_ok:
+            self.app.notify(
+                "Could not check the vault for existing keys: import is blocked to avoid duplicates. "
+                "Cancel and reopen to retry.",
+                severity="error", markup=False,
+            )
+            return
         selected = list(self._list().selected)
         if not selected:
             self.app.notify("Select at least one SSH key.", severity="warning", markup=False)
             return
         self._importing = True
-        summary: ImportSummary = {"imported": 0, "skipped": 0, "failed": 0, "imported_ids": [], "references": []}
+        summary: ImportSummary = {"imported": 0, "skipped": 0, "failed": 0, "duplicates": 0, "imported_ids": [], "references": []}
         total = len(selected)
         try:
             with self._busy.running(f"Importing {_which_key(1, total)}…", hold=_IMPORT_HOLDS) as job:
@@ -393,6 +482,10 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
                         await self._import_local(index, summary)
                     else:
                         await self._import_bitwarden(index, summary, partial(self._busy.say, job), which)
+            logger.info(
+                "Vault key import (%s) into vault %s: %d imported, %d already in the vault, %d failed",
+                self._source, self._vault_id, summary["imported"], summary["duplicates"], summary["failed"],
+            )
             self.dismiss(summary)
         finally:
             self._importing = False

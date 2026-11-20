@@ -1614,6 +1614,7 @@ async def test_break_glass_import_stores_root_login_and_normalised_source_networ
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     service.items = MagicMock()
     service.items.write_item = AsyncMock(return_value={"revision": 1})
+    service.items.list_items = AsyncMock(return_value={"data": [], "meta": {"next_cursor": None}})
 
     result = await service.import_keys(
         source="ssh", vault_id="11111111-1111-4111-8111-111111111111", path=str(key_path),

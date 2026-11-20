@@ -20,8 +20,11 @@ credential variables each call saw, by name only.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import secrets
 import uuid
@@ -175,13 +178,28 @@ class FakeBitwarden:
                     "sshKey": {
                         "privateKey": private_key,
                         "publicKey": public_key,
-                        "keyFingerprint": "SHA256:" + secrets.token_urlsafe(32),
+                        "keyFingerprint": _key_fingerprint(public_key),
                     },
                     "collectionIds": [],
                     "revisionDate": _now(),
                 }
             )
         return item_id
+
+
+def _key_fingerprint(public_key: str) -> str:
+    """Bitwarden's ``keyFingerprint``: the key's ssh-keygen SHA256 fingerprint.
+
+    A public key that does not parse gets a random one, as an unreadable item would.
+    """
+    parts = public_key.split()
+    try:
+        blob = base64.b64decode(parts[1], validate=True) if len(parts) > 1 else b""
+    except (binascii.Error, ValueError):
+        blob = b""
+    if not blob:
+        return "SHA256:" + secrets.token_urlsafe(32)
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
 
 
 def _now() -> str:
