@@ -97,6 +97,10 @@ class _DialogHost(App):
         self.push_screen(VaultBindingModal(self.service, self.instance))
 
 
+# What the key picker says once a vault's keys have loaded (or failed to).
+_SETTLED_KEY_PROMPTS = {"Choose an SSH key", "No SSH key in this vault", "SSH keys could not be loaded"}
+
+
 async def _offered_vaults(service: Any, instance: dict) -> list[str]:
     app = _DialogHost(service, instance)
     async with app.run_test(size=(160, 50)):
@@ -109,11 +113,14 @@ async def _offered_vaults(service: Any, instance: dict) -> list[str]:
             desc="the vault list",
         )
         offered = [value for _prompt, value in select._options if isinstance(value, str)]
-        # A single obvious vault is chosen at once and its keys start loading: let that
-        # finish, or leaving would tear the dialog down under it.
+        # The obvious vault is chosen at once and its keys load after that choice is
+        # handled: wait for the key list's final state, or leaving would tear the
+        # dialog down under the loading.
         dialog = app.screen
+        keys = dialog.query_one("#vault_bind_item", Select)
         await wait_for_async(
-            lambda: all(worker.is_finished for worker in dialog.workers), desc="the dialog's key loading",
+            lambda: keys.prompt in _SETTLED_KEY_PROMPTS and all(worker.is_finished for worker in dialog.workers),
+            desc="the dialog's key list",
         )
         return offered
 
