@@ -730,6 +730,97 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "261b7c1196a9e39c6a3b4691f532a099c9efa3edf1864c85a1caedbb5dd827ee",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "click._termui_impl",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "click._winconsole",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "getpass",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "textual.drivers.win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          }
+        ],
+        "module": "msvcrt",
+        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
+        "target_facts": {
+          "lock_sha256": "8ff8757dc1dd75b168d32389837a64ff385222fa036cd57e734882bfb7f5ed3a",
+          "target": "linux-x64-ubuntu-22.04",
+          "toolchain_sha256": "4d6a45353012c2777dd60af6c5ad47028e2f6753d6c990285ed173882872bf87"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -6002,91 +6093,6 @@
           "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
         },
         "expires_on": "2027-09-18",
-        "fingerprint": "f612b9720187160f47b78ee8c722e3a2d569804ddb66e7683144a4c6638218af",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "click._termui_impl",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "click._winconsole",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "getpass",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "textual.drivers.win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          }
-        ],
-        "module": "msvcrt",
-        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
-        "target_facts": {
-          "lock_sha256": "8ff8757dc1dd75b168d32389837a64ff385222fa036cd57e734882bfb7f5ed3a",
-          "target": "linux-x64-ubuntu-22.04",
-          "toolchain_sha256": "4d6a45353012c2777dd60af6c5ad47028e2f6753d6c990285ed173882872bf87"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
         "fingerprint": "f63b50a7858004495887884ea7a22d377e443a8e01acc8b510706dd6c15a1f24",
         "importers": [
           {
@@ -8794,6 +8800,97 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "44a41994cf0b3f21c33a6fa046df0df49c83643aa5f84ff395135045c6b34846",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "click._termui_impl",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "click._winconsole",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "getpass",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "textual.drivers.win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          }
+        ],
+        "module": "msvcrt",
+        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
+        "target_facts": {
+          "lock_sha256": "3a2d25c164b01e45420b87313040bfa7f792b7ade17bec6ec3baeee58a6e75b4",
+          "target": "macos-arm64",
+          "toolchain_sha256": "f7b3ee0c69bb3fc5b44648642ae904e7a756139d50df40e73219c5fa102a6329"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -10648,91 +10745,6 @@
         ],
         "module": "winreg",
         "reason": "Reviewed PyInstaller missing-module for winreg.",
-        "target_facts": {
-          "lock_sha256": "3a2d25c164b01e45420b87313040bfa7f792b7ade17bec6ec3baeee58a6e75b4",
-          "target": "macos-arm64",
-          "toolchain_sha256": "f7b3ee0c69bb3fc5b44648642ae904e7a756139d50df40e73219c5fa102a6329"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "93993c922e732f0599f4615d7a596d4087feada7be9442cafa86596cb1b9873d",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "click._termui_impl",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "click._winconsole",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "getpass",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "textual.drivers.win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          }
-        ],
-        "module": "msvcrt",
-        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
         "target_facts": {
           "lock_sha256": "3a2d25c164b01e45420b87313040bfa7f792b7ade17bec6ec3baeee58a6e75b4",
           "target": "macos-arm64",
@@ -16567,6 +16579,97 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "8e35c5e1737b600d5ed3936a16a82acf6aca4e90359ca38398bfa51fe86cb43b",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "click._termui_impl",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "click._winconsole",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "getpass",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "textual.drivers.win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          }
+        ],
+        "module": "msvcrt",
+        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
+        "target_facts": {
+          "lock_sha256": "629d61b75fd9fec266bf248d63a0401477c22a90801d887cf27b314b2292794b",
+          "target": "macos-x64",
+          "toolchain_sha256": "d240f46055004a48bedc10de080b2555a5f854dfb9200d305ba265fd28c1539f"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -17620,91 +17723,6 @@
         ],
         "module": "wsproto.extensions",
         "reason": "Reviewed PyInstaller missing-module for wsproto.extensions.",
-        "target_facts": {
-          "lock_sha256": "629d61b75fd9fec266bf248d63a0401477c22a90801d887cf27b314b2292794b",
-          "target": "macos-x64",
-          "toolchain_sha256": "d240f46055004a48bedc10de080b2555a5f854dfb9200d305ba265fd28c1539f"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "c21058ad58e5ff59017dafe48d9b4a6e64711731f3202e6f2507273d858dd20c",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "click._termui_impl",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "click._winconsole",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "getpass",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "textual.drivers.win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          }
-        ],
-        "module": "msvcrt",
-        "reason": "Reviewed PyInstaller missing-module for msvcrt.",
         "target_facts": {
           "lock_sha256": "629d61b75fd9fec266bf248d63a0401477c22a90801d887cf27b314b2292794b",
           "target": "macos-x64",
@@ -24136,60 +24154,6 @@
       {
         "classification": {
           "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "b13b4ea61ea3723490456871bb24a78981d0b5d53f4c171c279dd8d92e2d3c7a",
-        "importers": [
-          {
-            "module": "pty",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.bw_ssh_config_service",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.vault.ca_pins",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          }
-        ],
-        "module": "fcntl",
-        "reason": "Reviewed PyInstaller missing-module for fcntl.",
-        "target_facts": {
-          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
-          "target": "windows-x64",
-          "toolchain_sha256": "351bfee41230cc303385d2b2451076ed1cb54671a17028540aba6019e13b25b9"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
           "conditional": true,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -24658,6 +24622,66 @@
         ],
         "module": "IPython.core",
         "reason": "Reviewed PyInstaller missing-module for IPython.core.",
+        "target_facts": {
+          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
+          "target": "windows-x64",
+          "toolchain_sha256": "351bfee41230cc303385d2b2451076ed1cb54671a17028540aba6019e13b25b9"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "c664241975d61aa8e7a570ec65ca1820bb7ea4e983927d3cc2ce40b0bd207776",
+        "importers": [
+          {
+            "module": "pty",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.bw_ssh_config_service",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.vault.ca_pins",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          }
+        ],
+        "module": "fcntl",
+        "reason": "Reviewed PyInstaller missing-module for fcntl.",
         "target_facts": {
           "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
           "target": "windows-x64",
