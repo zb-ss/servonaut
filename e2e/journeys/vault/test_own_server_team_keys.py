@@ -108,7 +108,14 @@ async def _offered_vaults(service: Any, instance: dict) -> list[str]:
             ),
             desc="the vault list",
         )
-        return [value for _prompt, value in select._options if isinstance(value, str)]
+        offered = [value for _prompt, value in select._options if isinstance(value, str)]
+        # A single obvious vault is chosen at once and its keys start loading: let that
+        # finish, or leaving would tear the dialog down under it.
+        dialog = app.screen
+        await wait_for_async(
+            lambda: all(worker.is_finished for worker in dialog.workers), desc="the dialog's key loading",
+        )
+        return offered
 
 
 @pytest.mark.asyncio
