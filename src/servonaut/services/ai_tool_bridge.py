@@ -127,6 +127,9 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # when invoked with mutate=true (server enforces the dangerous tier for
     # that path), so the chat-side floor is "standard", not "readonly".
     "aws_call": "standard",
+    "s3_get_bucket_policy": "readonly",
+    "s3_get_public_object_url": "readonly",
+    "s3_set_bucket_policy": "dangerous",
     # Group C: WAF mitigation — mutate live traffic handling.
     "waf_rate_rule_set": "dangerous",
     "block_ip": "dangerous",
@@ -241,9 +244,12 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     # --- S3 read (readonly) ---
     "s3_list_buckets":            "s3_list_buckets",
     "s3_list_objects":            "s3_list_objects",
+    "s3_get_bucket_policy":       "s3_get_bucket_policy",
+    "s3_get_public_object_url":   "s3_get_public_object_url",
 
     # --- S3 mutations (dangerous tier) ---
     "s3_create_bucket":           "s3_create_bucket",
+    "s3_set_bucket_policy":       "s3_set_bucket_policy",
     "s3_delete_bucket":           "s3_delete_bucket",
     "s3_upload_object":           "s3_upload_object",
     "s3_delete_object":           "s3_delete_object",
@@ -1124,7 +1130,7 @@ class AIToolBridge(_FloorDangerousMixin):
         try:
             self._audit.log(
                 call.tool,
-                dict(call.args),
+                _tool_audit_args(call),
                 "",
                 False,
                 reason,
@@ -1662,7 +1668,7 @@ class AIToolBridge(_FloorDangerousMixin):
         try:
             self._audit.log(
                 call.tool,
-                dict(call.args),
+                _tool_audit_args(call),
                 result.result or "",
                 allowed,
                 reason,
@@ -1684,6 +1690,13 @@ class AIToolBridge(_FloorDangerousMixin):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _tool_audit_args(call: ToolCall) -> Dict[str, Any]:
+    args = dict(call.args)
+    if call.tool == "s3_set_bucket_policy":
+        args["replacement_policy"] = args.pop("policy_json", None) is not None
+    return args
 
 
 def _split_supported_args(handler: Any, args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:

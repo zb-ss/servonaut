@@ -1,4 +1,4 @@
-"""Tests for dangerous_tool_floor: 18-pattern regex set and _floor_dangerous helper."""
+"""Tests for the dangerous-tool regex set and guard escalation."""
 from __future__ import annotations
 
 import pytest
@@ -14,8 +14,8 @@ from servonaut.services.ai_tool_bridge import _FloorDangerousMixin
 # Pattern compilation
 # ---------------------------------------------------------------------------
 
-def test_exactly_18_patterns():
-    assert len(DANGEROUS_FLOOR_PATTERNS) == 18
+def test_exactly_19_patterns():
+    assert len(DANGEROUS_FLOOR_PATTERNS) == 19
 
 
 def test_all_patterns_are_compiled_regexes():
@@ -34,6 +34,7 @@ DANGEROUS_TOOL_NAMES = [
     "aws_terminate_instance",
     # S3 mutations + presigned URL
     "s3_create_bucket",
+    "s3_set_bucket_policy",
     "s3_delete_bucket",
     "s3_delete_object",
     "s3_upload_object",
@@ -81,6 +82,8 @@ SAFE_TOOL_NAMES = [
     "aws_reboot_instance",
     "s3_list_buckets",
     "s3_list_objects",
+    "s3_get_bucket_policy",
+    "s3_get_public_object_url",
     "s3_download_object",
     "hetzner_list_servers",
     "hetzner_list_server_types",

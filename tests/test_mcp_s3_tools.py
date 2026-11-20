@@ -1,4 +1,4 @@
-"""Tests for MCP S3 / object-storage tools — 10 tools across 3 providers.
+"""Tests for MCP S3 and object-storage tools across three providers.
 
 Covers the per-tool matrix from the workflow plan §5:
 1. Happy path — service mock returns canned data; correct string/JSON returned.
@@ -99,6 +99,8 @@ def _make_s3_svc():
     svc.create_bucket = AsyncMock()
     svc.delete_bucket = AsyncMock()
     svc.copy_object = AsyncMock()
+    svc.get_bucket_policy = AsyncMock(return_value=None)
+    svc.set_bucket_policy = AsyncMock(return_value=None)
     svc.move_object = AsyncMock()
     svc.generate_presigned_url = AsyncMock(
         return_value="https://s3.amazonaws.com/bucket/key?X-Amz-Signature=abc123"
@@ -203,6 +205,82 @@ class TestS3ListBuckets:
         tools = make_tools(aws_os_service=_make_s3_svc())
         result = run(tools.s3_list_buckets(provider="aws"))
         assert "Region" not in result
+
+
+def test_get_policy_available_at_readonly_tier():
+    svc = _make_s3_svc()
+    tools = make_tools(guard_level=GuardLevel.READONLY, hetzner_os_service=svc)
+    result = run(tools.s3_get_bucket_policy(provider="hetzner", bucket="my-bucket"))
+    assert json.loads(result)["policy"] is None
+    assert tools._audit.log.call_args.kwargs["public_scope"] == []
+    svc.get_bucket_policy.assert_awaited_once_with("my-bucket", "")
+
+
+@pytest.mark.parametrize("level", [GuardLevel.READONLY, GuardLevel.STANDARD])
+def test_policy_change_blocked_without_dangerous_tier(level):
+    svc = _make_s3_svc()
+    tools = make_tools(guard_level=level, ovh_os_service=svc)
+    result = run(tools.s3_set_bucket_policy(
+        provider="ovh", bucket="my-bucket", policy_json='{"private":"fixture"}',
+    ))
+    assert result.startswith("Blocked:")
+    svc.set_bucket_policy.assert_not_awaited()
+    tools._audit.log.assert_called_once()
+    assert tools._audit.log.call_args.args[3] is False
+    assert "policy_json" not in tools._audit.log.call_args.args[1]
+
+
+def test_policy_change_reports_scope_in_result_and_audit():
+    svc = _make_s3_svc()
+    tools = make_tools(ovh_os_service=svc)
+    svc.set_bucket_policy.return_value = {"Statement": {
+        "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::my-bucket/docs/*",
+    }}
+    result = run(tools.s3_set_bucket_policy("ovh", "my-bucket", region="de", policy_json="fixture"))
+    (scope,) = json.loads(result)["public_scope"]
+    assert scope["actions"] == ["s3:GetObject"]
+    assert scope["prefixes"] == ["docs/"]
+    assert tools._audit.log.call_args.kwargs["public_scope"] == [scope]
+    assert "policy_json" not in tools._audit.log.call_args.args[1]
+    svc.set_bucket_policy.assert_awaited_once_with(
+        "my-bucket", "de", policy_json="fixture", public_read=None, allow_public_write=False,
+    )
+
+
+def test_disable_warns_when_an_unmanaged_grant_remains():
+    svc = _make_s3_svc()
+    tools = make_tools(aws_os_service=svc)
+    svc.set_bucket_policy.return_value = {"Statement": {
+        "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::my-bucket/docs/*",
+    }}
+    result = json.loads(run(tools.s3_set_bucket_policy("aws", "my-bucket", public_read=False)))
+    assert "still grants anonymous access" in result["message"]
+    assert result["public_scope"][0]["prefixes"] == ["docs/"]
+
+
+def test_upload_explicit_header_overrides_guess():
+    svc = _make_s3_svc()
+    tools = make_tools(aws_os_service=svc)
+    run(tools.s3_upload_object(
+        "aws", "my-bucket", "packages/file.deb", "/tmp/file.deb",
+        content_type="application/octet-stream", cache_control="no-store",
+    ))
+    svc.upload_object.assert_awaited_once_with(
+        "my-bucket", "packages/file.deb", "/tmp/file.deb", "",
+        content_type="application/octet-stream", cache_control="no-store",
+    )
+
+
+def test_copy_infers_content_type_from_destination():
+    svc = _make_s3_svc()
+    tools = make_tools(aws_os_service=svc)
+    run(tools.s3_copy_object("aws", "src-bucket", "source", "dst-bucket", "release.JSON"))
+    svc.copy_object.assert_awaited_once_with(
+        "src-bucket", "source", "dst-bucket", "release.JSON", "",
+        content_type="application/json", cache_control=None,
+    )
 
 
 # ---------------------------------------------------------------------------

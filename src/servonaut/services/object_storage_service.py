@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import boto3
 import logging
+from botocore.exceptions import ClientError
 
 from servonaut.services.interfaces import BucketListing, ObjectStorageServiceInterface
+from servonaut.services.object_storage_regions import AWS_S3_DEFAULT_REGION
+from servonaut.services.s3_bucket_policy import check_policy, parse_policy, with_public_read
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,21 @@ _VALID_PROVIDERS = frozenset({"aws", "hetzner", "ovh"})
 # Region format: lowercase alphanumeric and hyphens, 1–32 chars.
 # Used both here and in app.py (imported from this module).
 S3_REGION_RE = re.compile(r'^[a-z0-9\-]{1,32}$')
+_COPY_METADATA = (
+    "CacheControl", "ContentDisposition", "ContentEncoding", "ContentLanguage",
+    "ContentType", "Expires", "Metadata", "WebsiteRedirectLocation",
+)
+
+
+def _object_headers(content_type: str | None, cache_control: str | None) -> dict[str, str]:
+    headers = {}
+    for name, value in (("ContentType", content_type), ("CacheControl", cache_control)):
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip() or not value.isascii() or not value.isprintable():
+            raise ValueError(f"{name} must be a nonempty printable ASCII header value.")
+        headers[name] = value
+    return headers
 
 
 def _is_ip_address(value: str) -> bool:
@@ -234,6 +253,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         # region → client, for the regional endpoints of endpoint_template.
         self._regional_clients: Dict[str, Any] = {}
         self._regional_clients_lock = threading.Lock()
+        self._policy_lock = threading.Lock()
         # bucket name → home region, populated by discovery and bucket searches.
         self._bucket_regions: Dict[str, str] = {}
 
@@ -367,7 +387,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
 
         # The value arrives off the wire and is fed straight into a boto3
         # client config, so it gets the same format check as configured input.
-        if region and not S3_REGION_RE.match(region):
+        if region and not S3_REGION_RE.fullmatch(region):
             logger.warning(
                 "Ignoring malformed x-amz-bucket-region %r for bucket %r",
                 region, bucket,
@@ -434,7 +454,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         Raises:
             ValueError: If the region is non-empty and malformed.
         """
-        if region and not S3_REGION_RE.match(region):
+        if region and not S3_REGION_RE.fullmatch(region):
             raise ValueError(
                 f"Invalid region {region!r}. Must match ^[a-z0-9-]{{1,32}}$."
             )
@@ -489,7 +509,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         Raises:
             ValueError: If the name is invalid.
         """
-        if not bucket or not _BUCKET_RE.match(bucket):
+        if not bucket or not _BUCKET_RE.fullmatch(bucket):
             raise ValueError(
                 f"Invalid bucket name {bucket!r}. Must be 3–63 lowercase "
                 "alphanumeric characters, dots, or hyphens; must start and "
@@ -577,8 +597,8 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         ):
             raise ValueError(
                 f"Path {path!r} resolves to {resolved} which is outside the "
-                "allowed roots (home directory, Downloads, or current working "
-                "directory). Refusing for security."
+                "allowed roots (home directory, ~/Downloads, or current working "
+                "directory). Use a path under ~/Downloads."
             )
 
         if must_exist:
@@ -827,6 +847,9 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         key: str,
         local_path: str,
         region: str = "",
+        *,
+        content_type: str | None = None,
+        cache_control: str | None = None,
     ) -> None:
         """Upload a local file to *bucket* at *key*.
 
@@ -836,6 +859,8 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             local_path: Absolute path to the local file.
             region: Region the bucket lives in.  Empty → resolved from the
                 configured region, with botocore redirecting if it is wrong.
+            content_type: Optional Content-Type header.
+            cache_control: Optional Cache-Control header.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -844,10 +869,12 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._validate_object_key(key)
         self._check_region_arg(region)
         resolved = self._validate_local_path(local_path, must_exist=True)
+        headers = _object_headers(content_type, cache_control)
 
         def _sync() -> None:
             client = self._client_for_bucket(bucket, region)
-            client.upload_file(str(resolved), bucket, key)
+            extra = {"ExtraArgs": headers} if headers else {}
+            client.upload_file(str(resolved), bucket, key, **extra)
 
         await asyncio.to_thread(_sync)
 
@@ -915,6 +942,9 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         dst_bucket: str,
         dst_key: str,
         region: str = "",
+        *,
+        content_type: str | None = None,
+        cache_control: str | None = None,
     ) -> None:
         """Server-side copy of an object.
 
@@ -929,6 +959,8 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             dst_key: Destination object key.
             region: Region *dst_bucket* lives in.  Empty → resolved from the
                 configured region, with botocore redirecting if it is wrong.
+            content_type: Optional replacement for the source Content-Type.
+            cache_control: Optional replacement for the source Cache-Control.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -938,16 +970,114 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._validate_bucket(dst_bucket)
         self._validate_object_key(dst_key)
         self._check_region_arg(region)
+        headers = _object_headers(content_type, cache_control)
 
         def _sync() -> None:
             client = self._client_for_bucket(dst_bucket, region)
+            source = {"Bucket": src_bucket, "Key": src_key}
+            options = {}
+            if headers:
+                source_client = client if src_bucket == dst_bucket else self._client_for_bucket(src_bucket)
+                metadata = source_client.head_object(**source)
+                options = {name: metadata[name] for name in _COPY_METADATA if name in metadata}
+                options.update(headers, MetadataDirective="REPLACE")
+                if metadata.get("VersionId"):
+                    source["VersionId"] = metadata["VersionId"]
+                if metadata.get("ETag"):
+                    options["CopySourceIfMatch"] = metadata["ETag"]
             client.copy_object(
-                CopySource={"Bucket": src_bucket, "Key": src_key},
-                Bucket=dst_bucket,
-                Key=dst_key,
+                CopySource=source, Bucket=dst_bucket, Key=dst_key, **options,
             )
 
         await asyncio.to_thread(_sync)
+
+    @staticmethod
+    def _read_bucket_policy(client: Any, bucket: str) -> dict | None:
+        try:
+            policy = client.get_bucket_policy(Bucket=bucket)["Policy"]
+        except ClientError as exc:
+            if _error_code(exc) == "NoSuchBucketPolicy":
+                return None
+            raise
+        return parse_policy(policy)
+
+    async def get_bucket_policy(self, bucket: str, region: str = "") -> dict | None:
+        """Return the bucket policy, or None if there is no policy."""
+        self._validate_bucket(bucket)
+        self._check_region_arg(region)
+
+        def _sync() -> dict | None:
+            return self._read_bucket_policy(self._client_for_bucket(bucket, region), bucket)
+
+        return await asyncio.to_thread(_sync)
+
+    async def set_bucket_policy(
+        self, bucket: str, region: str = "", *, policy_json: str | None = None,
+        public_read: bool | None = None, allow_public_write: bool = False,
+    ) -> dict | None:
+        """Replace a policy or change only its managed public-read grant."""
+        self._validate_bucket(bucket)
+        self._check_region_arg(region)
+        if (policy_json is None) == (public_read is None):
+            raise ValueError("Supply exactly one of policy_json or public_read.")
+        if type(allow_public_write) is not bool or (public_read is not None and type(public_read) is not bool):
+            raise ValueError("public_read and allow_public_write must be booleans.")
+        if policy_json is not None:
+            policy = parse_policy(policy_json)
+            check_policy(policy, allow_public_write=allow_public_write)
+        else:
+            policy = None
+
+        def _sync() -> dict | None:
+            with self._policy_lock:
+                client = self._client_for_bucket(bucket, region)
+                if public_read is None:
+                    client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+                    return policy
+                return self._set_public_read(client, bucket, public_read)
+
+        return await asyncio.to_thread(_sync)
+
+    def _set_public_read(self, client: Any, bucket: str, enabled: bool) -> dict | None:
+        original = self._read_bucket_policy(client, bucket)
+        partition = client.meta.partition if self._provider == "aws" else "aws"
+        policy = with_public_read(original, f"arn:{partition}:s3:::{bucket}", enabled)
+        if policy != original:
+            if policy is None:
+                client.delete_bucket_policy(Bucket=bucket)
+            else:
+                client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+        return policy
+
+    async def public_object_url(self, bucket: str, key: str, region: str = "") -> str:
+        """Return the unsigned HTTPS URL for a public object."""
+        self._validate_bucket(bucket)
+        self._validate_object_key(key)
+        self._check_region_arg(region)
+        effective = await asyncio.to_thread(self._region_for_bucket, bucket, region, discover=True)
+        endpoint = self._endpoint_for_region(effective)
+        host = urlparse(endpoint).netloc
+        path = "/".join(
+            segment.replace(".", "%2E") if segment in (".", "..") else quote(segment, safe="")
+            for segment in key.split("/")
+        )
+        if self._provider == "ovh":
+            if not effective:
+                match = re.fullmatch(r"s3\.([a-z0-9-]+)\.io\.cloud\.ovh\.net", host)
+                if not match:
+                    raise ValueError("The OVH bucket region is required to form its public URL.")
+                effective = match[1]
+            return f"https://{bucket}.s3.{effective}.io.cloud.ovh.net/{path}"
+        if self._provider == "hetzner":
+            return f"https://{bucket}.{host}/{path}"
+        if host:
+            return f"https://{host}/{bucket}/{path}"
+        aws_region = effective or AWS_S3_DEFAULT_REGION
+        suffix = "amazonaws.com.cn" if aws_region.startswith("cn-") else "amazonaws.com"
+        host = f"s3.{aws_region}.{suffix}"
+        if "." in bucket:
+            return f"https://{host}/{bucket}/{path}"
+        return f"https://{bucket}.{host}/{path}"
 
     async def move_object(
         self,

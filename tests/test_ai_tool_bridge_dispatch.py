@@ -90,11 +90,11 @@ class TestLocalToolHandlerMapCompleteness:
             f"from ServonautTools: {missing}"
         )
 
-    def test_additional_local_handler_count_is_82(self):
+    def test_additional_local_handler_count_is_85(self):
         """Pin the active local-handler inventory beyond the two originals."""
         new_entries = {k for k in _LOCAL_TOOL_HANDLERS if k not in _ORIGINAL_TOOLS}
-        assert len(new_entries) == 82, (
-            f"Expected 82 additional entries, got {len(new_entries)}: {sorted(new_entries)}"
+        assert len(new_entries) == 85, (
+            f"Expected 85 additional entries, got {len(new_entries)}: {sorted(new_entries)}"
         )
 
 
@@ -121,8 +121,11 @@ _DISPATCH_CASES = [
     # --- S3 read ---
     ("s3_list_buckets",            "s3_list_buckets",            "my-bucket"),
     ("s3_list_objects",            "s3_list_objects",            "object.txt"),
+    ("s3_get_bucket_policy",       "s3_get_bucket_policy",       "{}"),
+    ("s3_get_public_object_url",   "s3_get_public_object_url",   "https://example.com/object"),
     # --- S3 mutations ---
     ("s3_create_bucket",           "s3_create_bucket",           "created"),
+    ("s3_set_bucket_policy",       "s3_set_bucket_policy",       "{}"),
     ("s3_delete_bucket",           "s3_delete_bucket",           "deleted"),
     ("s3_upload_object",           "s3_upload_object",           "uploaded"),
     ("s3_delete_object",           "s3_delete_object",           "deleted"),
@@ -210,6 +213,25 @@ def test_unknown_tool_returns_error():
     result = run(bridge.handle_tool_call(call))
     assert result.status == "error"
     assert result.skipped is True
+
+
+def test_bucket_policy_escalates_and_keeps_full_document_out_of_chat_audit():
+    bridge, tools = _make_bridge_with_tools({"s3_set_bucket_policy": "{}"})
+    request = ToolCall(
+        tool_call_id="tc-policy",
+        tool="s3_set_bucket_policy",
+        args={"provider": "aws", "bucket": "example-assets", "policy_json": '{"Statement":[]}'},
+        guard_level="readonly",
+        conversation_id="conv-policy",
+    )
+    result = run(bridge.handle_tool_call(request))
+    assert result.status == "ok"
+    assert request.guard_level == "dangerous"
+    bridge._confirm.assert_awaited_once()
+    tools.s3_set_bucket_policy.assert_awaited_once_with(**request.args)
+    for row in bridge._audit.log.call_args_list:
+        assert "policy_json" not in row.args[1]
+        assert row.args[1]["replacement_policy"] is True
 
 
 # ---------------------------------------------------------------------------

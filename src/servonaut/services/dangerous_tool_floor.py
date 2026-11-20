@@ -23,6 +23,7 @@ DANGEROUS_FLOOR_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"^aws_terminate_instance$",
         # S3 mutations + presigned URL (bearer credential)
         r"^s3_create_bucket$",
+        r"^s3_set_bucket_policy$",
         r"^s3_delete_",
         r"^s3_upload_object$",
         r"^s3_copy_object$",
