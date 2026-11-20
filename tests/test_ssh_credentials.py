@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.services.ssh_credentials import (
+    LOST_TEAM_KEY,
     VaultCredentialError,
     VaultLeaseCache,
     apply_vault_lease,
     lease_key,
+    lost_team_key_hint,
     resolve_with_vault,
     ssh_identity_kwargs,
     vault_lease,
@@ -173,3 +175,20 @@ def test_identity_kwargs_name_the_builder_arguments(tmp_path):
         "certificate_file": "/c.pub",
         "known_hosts_file": conn["known_hosts_path"],
     }
+
+
+class _Lost:
+    def __init__(self, answer):
+        self.take_lost_team_key = MagicMock(return_value=answer)
+
+
+def test_lost_team_key_hint_names_the_loss_once_the_runtime_reports_it():
+    assert lost_team_key_hint(CUSTOM, _Lost(True)) == LOST_TEAM_KEY
+
+
+def test_lost_team_key_hint_is_silent_otherwise():
+    shared = {"id": "s1", "name": "web-1", "is_shared": True}
+    assert lost_team_key_hint(shared, _Lost(True)) is None
+    assert lost_team_key_hint(CUSTOM, object()) is None
+    assert lost_team_key_hint(CUSTOM, _Lost(False)) is None
+    assert lost_team_key_hint(CUSTOM, _Lost(MagicMock())) is None

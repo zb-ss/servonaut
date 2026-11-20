@@ -56,7 +56,7 @@ def _service(tmp_path, answer: object) -> tuple[VaultCommandService, _Api]:
     })
     service._ssh_key_display_name = AsyncMock(return_value="deploy key")  # type: ignore[method-assign]
     service.list_exposures = AsyncMock(return_value={"data": []})  # type: ignore[method-assign]
-    service.vaults.get_vault = AsyncMock(return_value={"vault_id": VAULT_ID})  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value={"vault_id": VAULT_ID, "kind": "personal"})  # type: ignore[method-assign]
     service.items.delete_item = AsyncMock()  # type: ignore[method-assign]
     return service, api
 
@@ -119,7 +119,7 @@ async def test_a_refused_sign_in_stops_the_review_and_says_to_sign_in(tmp_path) 
 async def test_binding_a_server_reads_its_binding_fresh_and_forgets_the_old_answer(tmp_path) -> None:
     service, api = _service(tmp_path, _not_found())
     server = _fleet(1)[0]
-    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1", "kind": "personal"})  # type: ignore[method-assign]
     service.items.get_item = AsyncMock(return_value={"item_id": ITEM_ID})  # type: ignore[method-assign]
     service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
     service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]

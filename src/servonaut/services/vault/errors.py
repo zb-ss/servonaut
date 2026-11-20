@@ -137,6 +137,19 @@ class VaultKeyInUse(VaultUserError):
 UNBIND_NOT_AVAILABLE = (
     "unbinding while deleting is not available for this vault: give the key's servers another vault key first"
 )
+OWN_SERVER_PERSONAL_VAULT_ONLY = (
+    "this Servonaut service only lets your own servers use keys from your personal vault"
+)
+OWN_SERVER_VAULT_NOT_MANAGED = (
+    "your own servers can use keys from your personal vault, or from a team vault you own or administer"
+)
+OWN_SERVER_KEY_REFUSED = (
+    "the Servonaut service refused this key for your server: it may have been deleted; choose the key again"
+)
+OWN_SERVER_TEAM_KEY_REFUSED = (
+    "the Servonaut service refused this key for your server: it may have been deleted, "
+    "or you no longer own or administer its team vault"
+)
 KEY_IN_USE_ON_SERVICE = (
     "the Servonaut service says this key is still in use; review the key again before deleting"
 )
