@@ -9,6 +9,7 @@ operations are never blocked by version-policy checks.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -28,7 +29,7 @@ from servonaut.utils.package_version import PackageVersion
 
 logger = logging.getLogger(__name__)
 
-_BIDI_CONTROLS: Final = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+_BIDI_CONTROLS: Final = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 def _terminal_safe(value: object) -> str:
@@ -527,5 +528,5 @@ class VersionPolicyClient:
         self._cached = policy
         self._cached_monotonic = time.monotonic()
         self._effective_ttl = _parse_cache_ttl(response.headers, self._max_age_seconds)
-        save_cached_version_policy(policy, self._cache_path)
+        await asyncio.to_thread(save_cached_version_policy, policy, self._cache_path)
         return policy

@@ -61,7 +61,7 @@ def _seed_state(home: Path, monkeypatch: pytest.MonkeyPatch, scenario: str) -> R
             )
             updates_status.write_json(
                 directory / "leases.json",
-                {"101": {"role": "mcp", "version": _SNAPSHOT_VERSION}},
+                {"101": {"role": "mcp", "version": "2.33.0"}},
             )
         elif scenario == "server_minimum":
             updates_status.write_json(

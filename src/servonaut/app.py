@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 import weakref
@@ -244,7 +245,8 @@ class ServonautApp(App):
 
     # True while the self-update worker runs; a second press is refused
     # rather than starting a concurrent package-manager process.
-    _update_in_progress: bool = False
+    _update_in_progress = reactive(False)
+    _requested_upgrade_task: asyncio.Task[tuple[bool, str]] | None = None
 
     # Timestamp of the last successful auto-scan cycle (epoch seconds).
     # Zero means no cycle has ever completed.  Seeded from the persisted
@@ -3646,7 +3648,7 @@ class ServonautApp(App):
         self._legacy_generation_update = False
         target = public_version(snapshot.target_version)
         current = public_version(snapshot.installed_version)
-        if target is None or current is None or target <= current:
+        if target is None or current is None or target <= current or snapshot.ready_for_other_channel:
             if getattr(self, "_last_generation_offer", None) is not None:
                 self.screen.query("#nav_update").add_class("hidden")
                 self._last_generation_offer = None
@@ -3661,13 +3663,14 @@ class ServonautApp(App):
             self._latest_version = snapshot.target_version
             self._show_update_button(snapshot.target_version)
             message = (
-                f"{snapshot.target_version} is ready · starts the next time you open Servonaut"
-                if ready else f"Servonaut {snapshot.target_version} is being prepared"
+                f"Servonaut {snapshot.target_version} is being prepared" if not ready
+                else f"{snapshot.target_version} is ready and postponed" if snapshot.postponed_until
+                else f"{snapshot.target_version} is ready · starts the next time you open Servonaut"
             )
             self.notify(message, markup=False)
-            if getattr(self, "_last_generation_presentation", None) != snapshot.target_version:
-                if await asyncio.to_thread(mark_update_presented, snapshot.target_version):
-                    self._last_generation_presentation = snapshot.target_version
+        if (ready or preparing) and getattr(self, "_last_generation_presentation", None) != snapshot.target_version:
+            if await asyncio.to_thread(mark_update_presented, snapshot.target_version):
+                self._last_generation_presentation = snapshot.target_version
 
     def _show_update_button(self, version: str) -> None:
         """Reveal the update button on the current screen's sidebar."""
@@ -3675,27 +3678,18 @@ class ServonautApp(App):
         try:
             btn = self.screen.query_one("#nav_update", Button)
             btn.label = f"Update to v{version}"
+            btn.disabled = self._update_in_progress
             btn.remove_class("hidden")
         except Exception:
             pass
 
     def _run_update(self) -> None:
-        """Run the upgrade via pipx/pip."""
-        from servonaut.updates.layout import UpdateLayout
-
-        if (not getattr(self, "_legacy_generation_update", False)
-                and UpdateLayout.detect() is not None):
-            self.open_settings_screen("updates")
-            return
-        if not self._latest_version:
-            self.notify("Already up to date!", severity="information")
-            return
-        if self._update_in_progress:
+        """Open Updates or start the existing manual upgrade from the sidebar."""
+        if self._update_in_progress or any(
+            worker.name == "update" and not worker.is_finished for worker in self.workers
+        ):
             self.notify("An update is already running.", severity="information")
             return
-        self._update_in_progress = True
-        self._set_update_button_disabled(True)
-        self.notify("Updating Servonaut...", severity="information")
         # A dedicated, non-exclusive group: an exclusive worker in the default
         # group would cancel unrelated workers (relay start, scans) as well.
         self.run_worker(
@@ -3706,18 +3700,55 @@ class ServonautApp(App):
         )
 
     async def _do_update(self) -> None:
-        """Worker: run the upgrade."""
-        try:
-            success, message = await self.run_requested_upgrade()
-        finally:
-            self._update_in_progress = False
-            self._set_update_button_disabled(False)
+        """Worker: resolve the installation before routing the sidebar action."""
+        from servonaut.updates.layout import UpdateLayout
+
+        if (not getattr(self, "_legacy_generation_update", False)
+                and await asyncio.to_thread(UpdateLayout.detect) is not None):
+            self.open_settings_screen("updates")
+            return
+        if not self._latest_version:
+            self.notify("Already up to date!", severity="information")
+            return
+        self.notify("Updating Servonaut...", severity="information")
+        success, message = await self.run_requested_upgrade()
         severity = "information" if success else "error"
         # The message can quote package-manager output, which is not markup.
         self.notify(message, severity=severity, timeout=10, markup=False)
 
     async def run_requested_upgrade(self) -> tuple[bool, str]:
         """Run a manual update through the owning install."""
+        return await self._run_upgrade_once(self._upgrade_owning_install)
+
+    async def run_requested_download(self) -> tuple[bool, str]:
+        """Download the verified installer for a frozen build."""
+        return await self._run_upgrade_once(self.update_service.run_upgrade)
+
+    async def _run_upgrade_once(
+        self, operation: Callable[[], Awaitable[tuple[bool, str]]],
+    ) -> tuple[bool, str]:
+        if self._update_in_progress:
+            return False, "An update is already running."
+        self._update_in_progress = True
+        self._set_update_button_disabled(True)
+        task = asyncio.create_task(self._finish_requested_upgrade(operation))
+        self._requested_upgrade_task = task
+        return await asyncio.shield(task)
+
+    async def _finish_requested_upgrade(
+        self, operation: Callable[[], Awaitable[tuple[bool, str]]],
+    ) -> tuple[bool, str]:
+        try:
+            return await operation()
+        except Exception:
+            logger.exception("Manual update failed")
+            return False, "Could not run the update. Try again or update Servonaut manually."
+        finally:
+            self._requested_upgrade_task = None
+            self._update_in_progress = False
+            self._set_update_button_disabled(False)
+
+    async def _upgrade_owning_install(self) -> tuple[bool, str]:
         from servonaut.updates.layout import UpdateLayout
 
         layout = await asyncio.to_thread(UpdateLayout.detect)

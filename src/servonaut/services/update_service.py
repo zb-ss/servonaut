@@ -615,7 +615,7 @@ class UpdateService:
             self._update_status = _SOURCE_UPDATE_GUIDANCE
             return False, self._update_status
 
-        before = self.installed_version_external() or self._current
+        before = await asyncio.to_thread(self.installed_version_external) or self._current
         if self.follows_prereleases:
             # An offer can be days old in an open TUI: since then the version
             # may have been yanked, which pip would still install when a
@@ -624,10 +624,10 @@ class UpdateService:
             await asyncio.to_thread(self.check_for_update)
             target = self._latest
         else:
-            target = self._latest or self.check_for_update()
+            target = self._latest or await asyncio.to_thread(self.check_for_update)
         # The installation may also have moved on since this process started.
         installed = self._highest_version(
-            self._installed_package_version(), before, self._current
+            await asyncio.to_thread(self._installed_package_version), before, self._current
         )
         try:
             with _upgrade_environment(self.prerelease_target(installed)) as environment:
@@ -650,7 +650,7 @@ class UpdateService:
                 f"{output[-800:] or '(no output)'}"
             )
 
-        after = self.installed_version_external()
+        after = await asyncio.to_thread(self.installed_version_external)
         if after and self._is_newer(after, before):
             return True, f"Updated v{before} → v{after}. Restart Servonaut to use it."
         if after and target and not self._is_newer(target, after):

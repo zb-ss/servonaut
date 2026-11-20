@@ -9,7 +9,8 @@ from pathlib import Path
 from servonaut.updates.index import public_version
 from servonaut.updates.layout import generation_id, python_for
 from servonaut.updates.state import InstallState, Preferences
-from servonaut.updates.status import locate_install
+from servonaut.updates.status import active_postponement, locate_install
+from servonaut.utils.package_version import PackageVersion
 
 
 def directory_for(store: InstallState, identifier: str) -> Path:
@@ -30,11 +31,15 @@ def healthy(store: InstallState, state: dict, identifier: object) -> bool:
             and locate_install(directory) == (store.root, identifier))
 
 
+def channel_allows_version(version: PackageVersion, channel: str) -> bool:
+    return not version.is_prerelease or channel == "rc"
+
+
 def _ready_allowed(state: dict, identifier: str, prefs: Preferences,
-                   launcher_version: str) -> bool:
+                   launcher_version: str, *, for_display: bool = False) -> bool:
     record = state["generations"][identifier]
     version = public_version(record.get("version"))
-    if version is None or (version.is_prerelease and prefs.channel != "rc"):
+    if version is None or not channel_allows_version(version, prefs.channel):
         return False
     launcher = public_version(launcher_version)
     pinned_from = public_version(state.get("pin", {}).get("from"))
@@ -49,9 +54,13 @@ def _ready_allowed(state: dict, identifier: str, prefs: Preferences,
     active = state["generations"].get(state.get("current"), {})
     if record["version"] == active.get("version"):
         return True
-    if state.get("postponed", {}).get(record["version"], 0) > now:
-        return False
     if state.get("offered") != record["version"]:
+        return False
+    # The panel can display an eligible offer before it has been seen and
+    # continues to display the deadline while the update is postponed.
+    if for_display:
+        return True
+    if active_postponement(state.get("postponed", {}).get(record["version"]), now) is not None:
         return False
     offered_at = state.get("offered_at", now)
     presented_at = state.get("presented_at", 0)
@@ -65,9 +74,11 @@ def clear_offer(state: dict) -> None:
 
 
 def eligible_generation(store: InstallState, state: dict, prefs: Preferences,
-                        launcher_version: str) -> str | None:
+                        launcher_version: str, *, for_display: bool = False) -> str | None:
     ready = state.get("ready")
-    if healthy(store, state, ready) and _ready_allowed(state, ready, prefs, launcher_version):
+    if healthy(store, state, ready) and _ready_allowed(
+        state, ready, prefs, launcher_version, for_display=for_display,
+    ):
         return ready
     return None
 

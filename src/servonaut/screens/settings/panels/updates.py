@@ -14,6 +14,8 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.timer import Timer
+from textual.worker import Worker
 from textual.widgets import Button, RadioButton, RadioSet, Static
 
 from servonaut import get_version
@@ -36,6 +38,7 @@ from servonaut.services.version_policy import (
 from servonaut.updates import status as updates_status
 from servonaut.updates.status import (
     Channel,
+    STATUS_POLL_SECONDS,
     UpdateStatus,
     postpone_update,
     read_update_status,
@@ -138,7 +141,10 @@ def format_checked_ago(checked_at: float, *, now: Optional[float] = None) -> str
 
 def format_postponed_until(timestamp: float) -> str:
     """Format a Unix UTC timestamp in local time, e.g. ``Fri 20 Nov, 18:40``."""
-    dt = datetime.fromtimestamp(timestamp).astimezone()
+    try:
+        dt = datetime.fromtimestamp(timestamp).astimezone()
+    except (OverflowError, OSError, TypeError, ValueError):
+        return ""
     return f"{dt:%a} {dt.day} {dt:%b}, {dt:%H:%M}"
 
 
@@ -301,6 +307,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._release_notes_target: Optional[str] = None
         self._loading_controls: bool = False
         self._presented_versions: set[str] = set()
+        self._presentations_in_progress: set[str] = set()
+        self._status_worker: Worker[None] | None = None
+        self._status_timer: Timer | None = None
+        self._poll_seconds = STATUS_POLL_SECONDS
+        self._saving_channel = False
+        self._check_baseline: UpdateStatus | None = None
 
     # ------------------------------------------------------------------
     # Composition
@@ -393,10 +405,22 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
 
     def on_mount(self) -> None:
         super().on_mount()
+        if self._status is None:
+            self.query_one("#updates_channel_radio", RadioSet).disabled = True
+            self.query_one("#save_updates", Button).disabled = True
+        if hasattr(self.app, "_update_in_progress"):
+            self.watch(self.app, "_update_in_progress", self._sync_action_busy, init=False)
+        self._status_timer = self.set_interval(self._poll_seconds, self._queue_status_refresh)
+        self._sync_action_busy()
         self.call_after_refresh(self._apply_layout_to_size)
 
     def on_show(self) -> None:
         self.call_after_refresh(self._apply_layout_to_size)
+        self._queue_status_refresh(redraw=True)
+
+    def on_unmount(self) -> None:
+        if self._status_timer is not None:
+            self._status_timer.stop()
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout(event.size.width)
@@ -444,26 +468,64 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         return None
 
     def load(self) -> None:
-        """Read local update status without network I/O and populate controls."""
-        self._status = read_update_status(self._runtime())
-        if self._policy is None:
-            self._policy = self._load_cached_policy()
+        """Restore saved controls and refresh local state off the UI thread."""
         self._details_expanded = False
-        self._set_radio_channel(self._status.channel)
-        self._render_status()
-        self._snapshot_now()
+        if self._status is not None:
+            self._set_radio_channel(self._status.channel)
+            self._snapshot_now()
+            self._render_status()
+        self._queue_status_refresh()
 
     def refresh_external_state(self) -> None:
         """Refresh local status when returning from another screen without clobbering edits."""
-        dirty_before = self.is_dirty()
-        selected = self._selected_channel()
-        self._status = read_update_status(self._runtime())
-        if not dirty_before:
-            self._set_radio_channel(self._status.channel)
+        self._queue_status_refresh()
+
+    def refresh_after_demo_toggle(self) -> None:
+        if self._status is not None and self.is_attached:
+            self._render_status()
+
+    def _queue_status_refresh(self, *, redraw: bool = False) -> None:
+        if (not self.is_attached or not self.display or self.screen is not self.app.screen
+                or self._saving_channel):
+            return
+        if self._status_worker is not None and not self._status_worker.is_finished:
+            return
+        self._status_worker = self.run_worker(
+            self._refresh_local_status(redraw=redraw), group="updates_status", exit_on_error=False,
+        )
+
+    async def _refresh_local_status(self, *, redraw: bool) -> None:
+        snapshot = await asyncio.to_thread(read_update_status, self._runtime())
+        policy = self._policy or await asyncio.to_thread(self._load_cached_policy)
+        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+            return
+        changed = policy != self._policy
+        self._policy = policy
+        self._accept_snapshot(snapshot, redraw=redraw or changed)
+
+    def _accept_snapshot(self, snapshot: UpdateStatus, *, redraw: bool = False) -> None:
+        previous = self._status
+        self._status = snapshot
+        if previous is None or (not self.is_dirty() and self._selected_channel() != snapshot.channel):
+            self._set_radio_channel(snapshot.channel)
             self._snapshot_now()
-        else:
-            self._set_radio_channel(selected)
-        self._render_status()
+            self._refresh_dirty_marker()
+        if snapshot.poll_seconds != self._poll_seconds:
+            if self._status_timer is not None:
+                self._status_timer.stop()
+            self._poll_seconds = snapshot.poll_seconds
+            self._status_timer = self.set_interval(self._poll_seconds, self._queue_status_refresh)
+        baseline = self._check_baseline
+        if baseline is not None and not snapshot.checking and (
+            snapshot.checked_at != baseline.checked_at
+            or snapshot.state != baseline.state
+            or snapshot.target_version != baseline.target_version
+        ):
+            self._check_baseline = None
+            self._last_checked_at = time.time()
+            redraw = True
+        if redraw or snapshot != previous:
+            self._render_status()
 
     def _selected_channel(self) -> Channel:
         try:
@@ -502,21 +564,43 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         return {"channel": channel}
 
     def persist(self) -> None:
+        if self._status is None or self._saving_channel:
+            return
         fields = self.collect()
         channel: Channel = fields["channel"]
         if self._status is not None and self._status.state == "managed_elsewhere":
             self._finish_save("No changes to save.")
             return
-        if not set_update_channel(channel, runtime=self._runtime()):
-            raise ValidationError(
-                "updates_channel_radio",
-                "Could not save release channel for this installation.",
-            )
+        self._saving_channel = True
+        if self._status_worker is not None:
+            self._status_worker.cancel()
+        self._sync_channel_controls(self._status)
+        self.run_worker(self._save_channel(channel), group="updates_save", exit_on_error=False)
+
+    @staticmethod
+    def _persist_channel(channel: Channel, runtime: RuntimeLayout | None) -> UpdateStatus | None:
+        if not set_update_channel(channel, runtime=runtime):
+            return None
         configure_client_identity(channel=channel)
-        self._status = read_update_status(self._runtime())
-        self._set_radio_channel(self._status.channel)
-        self._render_status()
-        self._finish_save("Release channel saved.")
+        return read_update_status(runtime)
+
+    async def _save_channel(self, channel: Channel) -> None:
+        try:
+            snapshot = await asyncio.to_thread(self._persist_channel, channel, self._runtime())
+            if not self.is_attached:
+                return
+            if snapshot is None:
+                message = "Couldn't save the update channel right now. Try again."
+                self.mark_field_error("updates_channel_radio", message)
+                self.app.notify(message, severity="warning", markup=False)
+                return
+            self._set_radio_channel(snapshot.channel)
+            self._finish_save("Release channel saved.")
+            self._accept_snapshot(snapshot, redraw=True)
+        finally:
+            self._saving_channel = False
+            if self.is_attached and self._status is not None:
+                self._sync_channel_controls(self._status)
 
     @on(RadioSet.Changed, "#updates_channel_radio")
     def _on_channel_changed(self, _event: RadioSet.Changed) -> None:
@@ -614,7 +698,14 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 primary_widget.add_class("-accent")
             if notes_ver:
                 self._configure_release_notes_link(link_notes, notes_ver)
-        elif pinned_version:
+        elif status.ready_for_other_channel and status.target_version:
+            target = _terminal_safe(status.target_version).strip()
+            primary_text = (
+                f"{target} was prepared for Release candidates and won't be used "
+                "on the Stable channel. You'll get the next stable release."
+            )
+            btn_check.display = True
+        elif pinned_version and not status.ready_for_offer:
             # Manual install pinned to a specific version; not an error state
             # and never offers Postpone.
             if pinned_until_newer_than:
@@ -646,6 +737,9 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             btn_try.display = True
             failure_text = _terminal_safe(status.last_failure or "").strip()
             if failure_text:
+                redactor = getattr(self.app, "redact_display_text", None)
+                if callable(redactor):
+                    failure_text = redactor(failure_text)
                 link_details.label = "Hide details" if self._details_expanded else "Details →"
                 link_details.display = True
                 details_widget.update(failure_text)
@@ -653,12 +747,14 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         elif status.state in ("ready", "offered", "building"):
             # State 2 — update ready / offered / building.
             target = _terminal_safe(status.target_version or self._discovered_version or "").strip()
+            when = (
+                format_postponed_until(status.postponed_until)
+                if status.postponed_until is not None else ""
+            )
             if status.state == "ready":
-                primary_text = (
-                    f"{target} is ready  ·  starts the next time you open Servonaut"
-                    if target
-                    else "An update is ready  ·  starts the next time you open Servonaut"
-                )
+                primary_text = f"{target or 'An update'} is ready"
+                if not when:
+                    primary_text += "  ·  starts the next time you open Servonaut"
             elif status.state == "building":
                 primary_text = (
                     f"Preparing {target} in the background…"
@@ -666,21 +762,18 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     else "Preparing an update in the background…"
                 )
             else:
-                primary_text = (
-                    f"{target} is available  ·  will install in the background"
-                    if target
-                    else "An update is available  ·  will install in the background"
-                )
+                primary_text = f"{target or 'An update'} is available"
+                if not when:
+                    primary_text += "  ·  will install in the background"
             primary_widget.add_class("-accent")
 
             detail_lines = []
-            if status.postponed_until is not None:
-                when = format_postponed_until(status.postponed_until)
+            if when:
                 detail_lines.append(
-                    f"Postponed until {when} — installs at the next start after that"
+                    f"Postponed until {when}, installs at the next start after that"
                 )
             if status.old_sessions:
-                sessions_line = format_old_sessions(status.old_sessions, installed)
+                sessions_line = format_old_sessions(status.old_sessions, status.old_session_version or "")
                 if sessions_line:
                     detail_lines.append(sessions_line)
             secondary_text = "\n".join(detail_lines)
@@ -694,7 +787,10 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         else:
             # State 1 — up to date (or interactive check found a newer release).
             discovered = _terminal_safe(self._discovered_version or "").strip()
-            if discovered and self._is_newer(discovered, installed):
+            if self._check_baseline is not None or status.checking:
+                primary_text = "Checking for updates…"
+                btn_check.display = True
+            elif discovered and self._is_newer(discovered, installed):
                 suffix = (
                     f"  ·  checked {format_checked_ago(self._last_checked_at)}"
                     if self._last_checked_at is not None
@@ -809,10 +905,10 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     def _sync_channel_controls(self, status: UpdateStatus) -> None:
         managed = status.state == "managed_elsewhere"
         radio = self.query_one("#updates_channel_radio", RadioSet)
-        radio.disabled = managed
+        radio.disabled = managed or self._saving_channel
         try:
             save_btn = self.query_one(f"#save_{self.PANEL_ID}", Button)
-            save_btn.disabled = managed
+            save_btn.disabled = managed or self._saving_channel
         except NoMatches:
             pass
         self.query_one("#updates_auto_note", Static).display = not managed
@@ -844,6 +940,11 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         note.display = False
 
     def _sync_action_busy(self) -> None:
+        if not self.is_attached:
+            return
+        updating = bool(getattr(self.app, "_update_in_progress", False))
+        checking = self._check_baseline is not None or bool(self._status and self._status.checking)
+        locked = updating or self._busy or self._status is None
         for selector in (
             "#updates_btn_check",
             "#updates_btn_postpone",
@@ -852,19 +953,36 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             "#updates_link_download",
         ):
             try:
-                self.query_one(selector, Button).disabled = self._busy
+                self.query_one(selector, Button).disabled = locked or (
+                    selector == "#updates_btn_check" and checking
+                )
             except NoMatches:
                 pass
+        if self._busy:
+            return
+        busy = self.query_one("#updates_busy", BusyIndicator)
+        if updating:
+            busy.start("Updating Servonaut…")
+        elif self._status is None:
+            busy.start("Reading update status…")
+        elif checking:
+            busy.start("Checking for updates…")
+        elif busy.is_active:
+            busy.stop()
 
     def _notify_update_presented(self, version: str) -> None:
         """Record that *version* was shown to the user once per rendered version."""
         cleaned = version.strip()
-        if not cleaned or cleaned in self._presented_versions:
+        if (
+            not cleaned or cleaned in self._presented_versions
+            or cleaned in self._presentations_in_progress
+            or not self.is_attached or not self.display or self.screen is not self.app.screen
+        ):
             return
         marker = getattr(updates_status, "mark_update_presented", None)
         if not callable(marker):
             return
-        self._presented_versions.add(cleaned)
+        self._presentations_in_progress.add(cleaned)
         self.run_worker(
             self._run_mark_presented(marker, cleaned),
             name=f"updates_mark_presented_{cleaned}",
@@ -872,12 +990,14 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             exit_on_error=False,
         )
 
-    @staticmethod
-    async def _run_mark_presented(marker: Any, version: str) -> None:
+    async def _run_mark_presented(self, marker: Any, version: str) -> None:
         try:
-            await asyncio.to_thread(marker, version)
+            if await asyncio.to_thread(marker, version):
+                self._presented_versions.add(version)
         except Exception as exc:  # noqa: BLE001 — bookkeeping must never break the panel
             logger.debug("Could not record presented update %s: %s", version, exc)
+        finally:
+            self._presentations_in_progress.discard(version)
 
     @staticmethod
     def _is_newer(candidate: str, current: str) -> bool:
@@ -894,7 +1014,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     @on(Button.Pressed, "#updates_btn_check")
     def _on_check_now_pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._busy:
+        if self._busy or self._check_baseline is not None:
             return
         self.run_worker(
             self._run_check_now(),
@@ -1003,9 +1123,20 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             outcome: Any = None
             latest: Optional[str] = None
             check_error: Optional[str] = None
+            generation_check = False
             if callable(requester):
+                baseline = self._status
                 outcome = await requester()
-                if outcome in (None, "queued"):
+                if not self.is_attached:
+                    return
+                if (
+                    outcome == "queued" and baseline is not None
+                    and baseline.state != "managed_elsewhere"
+                ):
+                    generation_check = True
+                    self._check_baseline = baseline
+                    self._render_status()
+                elif outcome in (None, "queued"):
                     for worker in list(getattr(self.app, "workers", ())):
                         if worker.group == "update_check_requested" and not worker.is_finished:
                             try:
@@ -1040,7 +1171,6 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     latest = getattr(service, "latest_version", None) or getattr(
                         self.app, "_latest_version", None
                     )
-            self._status = status
             if policy is not None:
                 self._policy = policy
             # For managed-by-updater pipx installs, status.json is authoritative;
@@ -1056,11 +1186,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     str(outcome),
                     ("Couldn't start an update check.", "error"),
                 )
-                self._render_status()
+                self._accept_snapshot(status, redraw=True)
                 self.app.notify(toast_msg, severity=toast_severity, markup=False)
             else:
-                self._last_checked_at = time.time()
-                self._render_status()
+                if not generation_check:
+                    self._last_checked_at = time.time()
+                self._accept_snapshot(status, redraw=True)
         finally:
             self._busy = False
             if self.is_attached:
@@ -1078,11 +1209,15 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             status = await asyncio.to_thread(read_update_status, self._runtime())
             if not self.is_attached:
                 return
-            self._status = status
-            self._render_status()
+            self._accept_snapshot(status, redraw=True)
             if ok:
+                when = (
+                    format_postponed_until(status.postponed_until)
+                    if status.postponed_until is not None else ""
+                )
                 self.app.notify(
-                    f"Postponed {version} for 24 hours.",
+                    f"Postponed {_terminal_safe(version)} until {when}." if when
+                    else f"Postponed {_terminal_safe(version)}.",
                     severity="information",
                     markup=False,
                 )
@@ -1117,7 +1252,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                             markup=False,
                         )
                     return
-                success, message = await service.run_upgrade()
+                downloader = getattr(self.app, "run_requested_download", None)
+                success, message = await (downloader() if callable(downloader) else service.run_upgrade())
             elif callable(runner):
                 success, message = await runner()
             elif service is not None:
@@ -1133,8 +1269,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             status = await asyncio.to_thread(read_update_status, self._runtime())
             if not self.is_attached:
                 return
-            self._status = status
-            self._render_status()
+            self._accept_snapshot(status, redraw=True)
             self.app.notify(
                 _terminal_safe(message),
                 severity="information" if success else "error",

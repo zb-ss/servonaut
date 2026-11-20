@@ -36,6 +36,7 @@ Channel = Literal["stable", "rc"]
 UpdateCheckOutcome = Literal["queued", "busy", "skipped", "failed"]
 ADMISSION_DEFAULT = 3.0
 POSTPONE_LIMIT = 24 * 60 * 60
+STATUS_POLL_SECONDS = 5.0
 MARKER_NAME = ".servonaut-generation.json"
 PIPX_METADATA = "pipx_metadata.json"
 _GENERATION_ID = re.compile(r"[a-f0-9]{32}")
@@ -192,6 +193,12 @@ class UpdateStatus:
     last_failure: str | None = None
     pinned_version: str | None = None
     pinned_until_newer_than: str | None = None
+    ready_for_offer: bool = False
+    ready_for_other_channel: bool = False
+    checking: bool = False
+    checked_at: float | None = None
+    poll_seconds: float = STATUS_POLL_SECONDS
+    old_session_version: str | None = None
 
 
 def public_version(value: object) -> PackageVersion | None:
@@ -218,33 +225,75 @@ def _kind(runtime: RuntimeLayout | None) -> str:
     return runtime.kind.value
 
 
-def _read_status(directory: Path, version: str) -> UpdateStatus:
-    from servonaut.services.version_policy import VersionPolicyClient
+def active_postponement(value: object, now: float) -> float | None:
+    """Return a valid future deadline within the updater's postponement limit."""
+    deadline = positive(value, 0)
+    return deadline if now < deadline <= now + POSTPONE_LIMIT else None
 
+
+def _read_status(root: Path, version: str) -> UpdateStatus:
+    from servonaut.services.version_policy import VersionPolicyClient
+    from servonaut.updates.generations import channel_allows_version, eligible_generation
+    from servonaut.updates.state import InstallState, Preferences, lease_is_live
+
+    store = InstallState(root)
+    directory = store.directory
     (
         state, prefs, leases,
     ) = (read_json(directory / name) for name in ("state.json", "preferences.json", "leases.json"))
     offer = state.get("offered")
     postponed = state.get("postponed", {}).get(offer)
-    channel = prefs.get("channel", default_channel(version))
-    comparison = public_version(offer or version)
+    preferences = Preferences.parse(prefs, version)
+    channel = preferences.channel
+    comparison = public_version(offer)
     cached = VersionPolicyClient().cached()
     policy = ({"mode": cached.mode, "minimum_version": cached.minimum_version}
               if cached else state.get("policy", {}))
+    current = public_version(state.get("generations", {}).get(state.get("current"), {}).get("version"))
+    own_version = public_version(version)
     roles = []
-    for lease in leases.values():
-        if not isinstance(lease, dict) or not lease_acknowledged(directory, lease):
+    session_versions: set[str] = set()
+    for pid, lease in leases.items():
+        if (
+            pid == str(os.getpid()) or not isinstance(lease, dict)
+            or not lease_acknowledged(directory, lease)
+        ):
             continue
         running = public_version(lease.get("version"))
-        if comparison is not None and running is not None and running < comparison:
+        if (
+            comparison is not None and running is not None
+            and running < comparison and running not in (own_version, current)
+        ):
             roles.append(str(lease["role"]))
+            session_versions.add(running.text)
     pin = state.get("pin", {})
+    update_state = state.get("status", "up_to_date")
+    launcher = state.get("last_launcher_version") or state.get("launcher_version") or version
+    ready_id = state.get("ready")
+    ready = (
+        eligible_generation(store, state, preferences, launcher, for_display=True)
+        if update_state == "ready" and ready_id else None
+    )
+    builder = state.get("builder", {})
+    checking = isinstance(builder, dict) and any(
+        isinstance(record, dict) and type(record.get("pid")) is int and record["pid"] > 0
+        and lease_is_live(str(record["pid"]), record)
+        for record in (builder, builder.get("writer"))
+    )
     return UpdateStatus(
-        state.get("status", "up_to_date"), version, "pipx", channel,
-        offer, postponed if postponed and postponed > time.time() else None,
+        update_state, version, "pipx", channel,
+        offer, active_postponement(postponed, time.time()),
         bool(offer and postponed is None), tuple(sorted(roles)),
         _minimum(policy, version), state.get("failure", {}).get("message"),
         pin.get("version"), pin.get("from"),
+        ready_for_offer=ready is not None,
+        ready_for_other_channel=bool(
+            update_state == "ready" and comparison and not channel_allows_version(comparison, channel)
+        ),
+        checking=checking,
+        checked_at=positive(state.get("checked_at"), 0) or None,
+        poll_seconds=preferences.status_poll_seconds,
+        old_session_version=next(iter(session_versions)) if len(session_versions) == 1 else None,
     )
 
 
@@ -255,7 +304,7 @@ def read_update_status(runtime: RuntimeLayout | None = None) -> UpdateStatus:
         layout = locate_install()
         if layout is None or os.environ.get("SERVONAUT_SKIP_AUTO_APPLY") == "1":
             return UpdateStatus("managed_elsewhere", version, _kind(runtime), default_channel(version))
-        return _read_status(storage_for(layout[0]), version)
+        return _read_status(layout[0], version)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return UpdateStatus("failed", version, "pipx", "stable",
                             last_failure="Update status is unavailable.")

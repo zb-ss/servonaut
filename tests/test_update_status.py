@@ -69,7 +69,7 @@ def test_old_sessions_and_server_floor_are_independent_of_ready_state(pipx_home)
             "policy": {"mode": "enforce", "minimum_version": "2.34.1"},
         })
         status.write_json(directory / "leases.json", {
-            "123": {"role": "mcp", "version": "2.34.0"},
+            "123": {"role": "mcp", "version": "2.33.0"},
             "456": {"role": "cli", "version": "2.35.0"},
         })
     actual = status.read_update_status()

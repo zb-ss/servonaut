@@ -115,13 +115,14 @@ async def test_updates_panel_up_to_date(tui, seed, monkeypatch):
 
 
 async def test_updates_panel_ready_with_mcp_lease_and_postpone(tui, seed, monkeypatch):
-    installed, next_version = _installed_and_next_version()
+    _, next_version = _installed_and_next_version()
+    old_version = "1.0.0"
     directory = _seed_pipx_state(
         seed,
         monkeypatch,
         state={"status": "ready", "offered": next_version},
         preferences={"channel": "stable"},
-        leases={"101": {"role": "mcp", "version": installed}},
+        leases={"101": {"role": "mcp", "version": old_version}},
     )
 
     async with tui() as t:
@@ -129,7 +130,7 @@ async def test_updates_panel_ready_with_mcp_lease_and_postpone(tui, seed, monkey
         await t.wait_for_text(
             f"{next_version} is ready",
             "starts the next time you open Servonaut",
-            f"1 MCP server keeps {installed} until your agent restarts it",
+            f"1 MCP server keeps {old_version} until your agent restarts it",
             f"What's new in {next_version}",
             "Postpone 24 h",
         )

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -324,7 +325,7 @@ async def test_state_2_ready_old_sessions_release_notes_and_one_shot_postpone(
         pipx_env,
         state={"status": "ready", "offered": "2.35.0"},
         leases={
-            "101": {"role": "mcp", "version": "2.34.0"},
+            "101": {"role": "mcp", "version": "2.33.0"},
             "102": {"role": "cli", "version": "2.35.0"},
         },
     )
@@ -345,7 +346,7 @@ async def test_state_2_ready_old_sessions_release_notes_and_one_shot_postpone(
         secondary = str(panel.query_one("#updates_status_secondary", Static).render())
         assert "2.35.0 is ready" in primary
         assert "starts the next time you open Servonaut" in primary
-        assert "1 MCP server keeps 2.34.0 until your agent restarts it" in secondary
+        assert "1 MCP server keeps 2.33.0 until your agent restarts it" in secondary
 
         notes_link = panel.query_one("#updates_link_release_notes", LinkButton)
         assert notes_link.display is True
@@ -372,7 +373,7 @@ async def test_state_2_ready_old_sessions_release_notes_and_one_shot_postpone(
         assert saved_state["presented_at"] == 1_763_600_000.0
         expected_when = format_postponed_until(saved_state["postponed"]["2.35.0"])
         updated_secondary = str(panel.query_one("#updates_status_secondary", Static).render())
-        assert f"Postponed until {expected_when} — installs at the next start after that" in updated_secondary
+        assert f"Postponed until {expected_when}, installs at the next start after that" in updated_secondary
         assert panel.query_one("#updates_btn_postpone", Button).display is False
         # Still called only once after re-render.
         assert len(presented) == 1
@@ -670,6 +671,8 @@ async def test_check_now_shows_busy_indicator_and_updates_on_completion(
         queued.append((store.root, installed_version))
         started.set()
         release.wait(timeout=5.0)
+        with store.gate():
+            store.write("state.json", {"status": "up_to_date", "checked_at": time.time()})
         return "queued"
 
     monkeypatch.setattr(updates_builder, "queue_update_check", slow_queue_check)

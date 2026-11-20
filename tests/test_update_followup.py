@@ -464,6 +464,6 @@ async def test_public_manual_upgrade_routes_to_the_pipx_anchor(install, monkeypa
         return SimpleNamespace(returncode=0, stdout="Updated successfully\n")
 
     monkeypatch.setattr(app.subprocess, "run", upgrade)
-    result = await app.ServonautApp.run_requested_upgrade(SimpleNamespace())
+    result = await app.ServonautApp().run_requested_upgrade()
     assert result == (True, "Updated successfully")
     assert called == [([str(installed.launcher), "--update"], store.root)]

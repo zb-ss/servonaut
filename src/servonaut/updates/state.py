@@ -13,7 +13,7 @@ from typing import Any
 from servonaut import get_version
 from servonaut.updates.processes import birth, boot_identity
 from servonaut.updates.status import (
-    ADMISSION_DEFAULT, POSTPONE_LIMIT, InvalidUpdateState, acknowledgement_path,
+    ADMISSION_DEFAULT, POSTPONE_LIMIT, STATUS_POLL_SECONDS, InvalidUpdateState, acknowledgement_path,
     default_channel, lease_acknowledged_at, positive, read_json, replace_bytes,
     storage_for, update_gate, write_json,
 )
@@ -42,7 +42,7 @@ class Preferences:
     startup_attempt_window_seconds: float = 10 * 60.0
     lease_quarantine_max_seconds: float = 7 * 24 * 3600.0
     build_timeout: float = 300.0
-    status_poll_seconds: float = 5.0
+    status_poll_seconds: float = STATUS_POLL_SECONDS
 
     @classmethod
     def parse(cls, data: dict[str, Any], version: str = "") -> Preferences:
