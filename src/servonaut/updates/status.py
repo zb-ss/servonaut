@@ -101,11 +101,16 @@ def locate_install(prefix: Path | None = None) -> tuple[Path, str | None] | None
     return None
 
 
-def read_json(path: Path) -> dict[str, Any]:
+def read_json(path: Path, *, maximum_bytes: int | None = None) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_bytes())
+        with path.open("rb") as stream:
+            payload = stream.read(-1 if maximum_bytes is None else maximum_bytes + 1)
     except FileNotFoundError:
         return {}
+    if maximum_bytes is not None and len(payload) > maximum_bytes:
+        raise InvalidUpdateState("Updater state exceeds its size limit")
+    try:
+        value = json.loads(payload)
     except (UnicodeError, ValueError) as exc:
         raise InvalidUpdateState("Updater state could not be read") from exc
     if not isinstance(value, dict):

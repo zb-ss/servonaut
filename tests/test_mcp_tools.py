@@ -467,6 +467,19 @@ class TestGetLogs:
 
 
 class TestGetServerInfo:
+    @pytest.mark.parametrize("returncode", (0, 1, None))
+    def test_reconnect_hint_only_eligible_for_successful_returncode(self, returncode):
+        from servonaut.mcp.reconnect import MCPDisplayText
+        from servonaut.utils.ssh_utils import SSHOutput
+
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS)
+        output = SSHOutput(b"host metrics", b"", returncode)
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=AsyncMock(return_value=output)):
+            result = run(tools.get_server_info("i-abc123"))
+
+        assert result == "host metrics"
+        assert isinstance(result, MCPDisplayText) is (returncode == 0)
+
     @pytest.mark.parametrize("instance_key", [None, "~/.ssh/server-key"])
     def test_ovh_metrics_use_configured_ssh_credentials(self, instance_key):
         from servonaut.services.connection_service import ConnectionService

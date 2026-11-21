@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from e2e.harness import fleet
 from e2e.harness.bootstrap import DEAD_HTTPS_URL
 from e2e.harness.installs import ENV_PYPI_URL, build_wheel, copy_sources
 from e2e.harness.processes import mcp_session, require_armed
@@ -126,6 +127,10 @@ async def test_switch_keeps_running_mcp_pinned(
     for module in ("argparse", "types"):
         (sandbox.base / f"{module}.py").write_text("raise AssertionError(\"unexpected working-directory import\")\n")
     assert support.reported_version(pipx, sandbox) == build_version
+    preferences_path = directory / "preferences.json"
+    preferences = json.loads(preferences_path.read_text())
+    preferences["status_poll_seconds"] = 0.1
+    preferences_path.write_text(json.dumps(preferences))
     installs.offer(current_wheel, newer_wheel, version=newer_version)
     async with mcp_session(
         [str(pipx.console)], env=installs.env(sandbox), cwd=sandbox.base,
@@ -147,9 +152,27 @@ async def test_switch_keeps_running_mcp_pinned(
         assert _state(sandbox)[1]["current"] == first
         await asyncio.to_thread(_present_offer, installs, sandbox, pipx, newer_version)
         assert _state(sandbox)[1]["current"] == first
+        assert len((await server.session.call_tool("whoami")).content) == 1
         await asyncio.to_thread(_launch, pipx, sandbox)
         assert await asyncio.to_thread(support.reported_version, pipx, sandbox) == newer_version
         assert _state(sandbox)[1]["current"] == second
+        expected = (
+            f"Servonaut is running {build_version}. {newer_version} is installed. "
+            "Reconnect this MCP server to use it."
+        )
+
+        async def wait_for_notice():
+            while expected not in await server.call("whoami"):
+                await asyncio.sleep(0.1)
+
+        await asyncio.wait_for(wait_for_notice(), timeout=10)
+        whoami = (await server.session.call_tool("whoami")).content
+        assert "logged_in" in json.loads(whoami[0].text)
+        assert whoami[1].text == expected
+        assert whoami[1].meta["servonaut.dev/reason"] == "pipx_generation_current"
+        assert expected in await server.call("check_status", {"instance_id": fleet.APP_1.instance_id})
+        assert expected in await server.call("list_instances")
+        assert expected not in await server.call("list_instances")
         leases = json.loads((directory / "leases.json").read_text())
         assert any(row["role"] == "mcp" and row["generation"] == first
                    and row["version"] == build_version for row in leases.values())
@@ -161,6 +184,7 @@ async def test_switch_keeps_running_mcp_pinned(
             stderr_path=sandbox.base / "mcp-new-stderr.log", armed_log=installs.armed_log,
         ) as new_server:
             assert await new_server.tool_names() == tools_before
+            assert expected not in await new_server.call("whoami")
             assert not new_server.protocol_errors
             leases = json.loads((directory / "leases.json").read_text())
             assert any(row["role"] == "mcp" and row["generation"] == second
