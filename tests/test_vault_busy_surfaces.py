@@ -32,6 +32,7 @@ from servonaut.services.bw_session_service import BwItemSummary
 from servonaut.services.ssh_ref_resolver import ResolvedSshRef
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.busy_indicator import BusyIndicator
+from servonaut.widgets.filterable_selection import FilterableSelection
 from tests._async_bounds import STEP_TIMEOUT_SECONDS, wait_until
 from tests.test_ca_screen_pickers import _PickerService, _choose_team, _click, _picker
 
@@ -276,7 +277,10 @@ async def test_listing_bitwarden_items_shows_progress_until_it_ends(tmp_path: Pa
         await _idle(busy)
         if failure is None:
             await wait_until(lambda: modal.query_one(SelectionList).option_count == 1)
-            assert _disabled(modal, *_IMPORT_BUTTONS) == [False, False, False]
+            # The sources are back; Import waits for a selected row.
+            assert _disabled(modal, *_IMPORT_BUTTONS) == [False, False, True]
+            modal.query_one(FilterableSelection).select_visible()
+            await wait_until(lambda: _disabled(modal, *_IMPORT_BUTTONS) == [False, False, False])
         else:
             await wait_until(lambda: _status(modal) == "Bitwarden is locked.")
             assert _disabled(modal, *_IMPORT_BUTTONS) == [False, False, True]

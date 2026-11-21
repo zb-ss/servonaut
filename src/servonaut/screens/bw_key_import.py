@@ -1,7 +1,7 @@
 """Bitwarden key-import modal — scan a directory and upload keys to the vault.
 
 Scans the chosen directory (via :func:`servonaut.services.bw_key_import.scan_directory`)
-for SSH private keys, renders them in a :class:`SelectionList` (unencrypted keys
+for SSH private keys, renders them in a filterable picker (unencrypted keys
 pre-selected, encrypted keys deliberate opt-in, already-in-vault / unreadable
 rows disabled), and imports the selected keys as native Bitwarden SSH items.
 
@@ -21,17 +21,24 @@ import asyncio
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 
 from servonaut.widgets.dialogs import (
-    DialogActions, DialogFrame, DialogNotificationSpace,
+    DIALOG_VERTICAL_BREAKPOINTS,
+    DialogActions, DialogContent, DialogFrame, DialogNotificationSpace,
 )
-from textual.widgets import Button, SelectionList, Static
-from textual.widgets.selection_list import Selection
+from servonaut.widgets.filterable_selection import (
+    PICKER_BINDINGS,
+    FilterableSelection,
+    PickerActions,
+    SelectionRow,
+    SortOrder,
+    without_digest_prefix,
+)
+from textual.widgets import Button, Static
 
 from servonaut.screens.bw_passphrase_modal import BwPassphraseModal
 from servonaut.services.bw_errors import BwError
@@ -46,6 +53,7 @@ from servonaut.services.bw_key_import import (
     scan_directory,
 )
 from servonaut.services.bw_session_service import BwSessionService
+from servonaut.services.vault.display import markup_literal, terminal_safe
 
 # NOTE: U+1F512 has no VS16 variant selector — safe in labels per project rule.
 _ENCRYPTED_MARKER = "🔒 encrypted"
@@ -58,7 +66,7 @@ _SEMANTICS_TEXT = (
 )
 
 
-class BwKeyImportModal(ModalScreen[Optional[dict]]):
+class BwKeyImportModal(PickerActions, ModalScreen[Optional[dict]]):
     """Scan-and-import modal for local SSH private keys.
 
     Dismisses a summary dict ``{"imported", "skipped", "duplicates", "failed"}``
@@ -69,7 +77,10 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        *PICKER_BINDINGS,
     ]
+
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     DEFAULT_CSS = ""  # styling lives in the styles bundle (secrets.tcss)
 
@@ -89,6 +100,9 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
         # silent duplicate items.
         self._existing_ok: bool = False
         self._scan_complete: bool = False
+        self._scan_failed: bool = False
+        # Last status text before demo scrubbing, so a toggle can redraw it.
+        self._status_raw: str = "Scanning…"
         self._importing: bool = False
 
     def _service(self) -> Optional[BwSessionService]:
@@ -106,9 +120,17 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                     "[bold $text-accent]Import SSH keys into Bitwarden[/bold $text-accent]",
                     id="bw_import_title",
                 ),
-                Static(escape(_SEMANTICS_TEXT), id="bw_import_semantics"),
+                Static(markup_literal(_SEMANTICS_TEXT), id="bw_import_semantics"),
             ),
-            body=SelectionList(id="bw_import_list"),
+            body=DialogContent(
+                FilterableSelection(
+                    prefix="bw_import",
+                    sort_orders=(
+                        SortOrder("name", "Name"),
+                        SortOrder("fingerprint", "Fingerprint"),
+                    ),
+                ),
+            ),
             status=Static("[dim]Scanning…[/dim]", id="bw_import_status"),
             actions=DialogActions(
                 Button("Cancel", variant="default", id="bw_import_cancel_btn"),
@@ -119,33 +141,62 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
             id="bw_import_container",
         )
 
+    def _focus_picker(self) -> None:
+        try:
+            self.query_one(FilterableSelection).focus_list()
+        except Exception:  # noqa: BLE001 - dialog closed before the refresh
+            pass
+
     def on_mount(self) -> None:
         # Own group: the import worker's exclusive=True must never cancel a
         # still-running scan (which would strand the modal at "Scanning…").
         self.run_worker(self._scan(), group="bw_key_import_scan", exclusive=True)
+        # Children are mounted after the screen's own mount handler runs.
+        self.call_after_refresh(self._focus_picker)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _display_name(self, text: str) -> str:
-        """Demo-mode scrub for file-origin names before they hit the screen."""
+        """Inert, demo-scrubbed text for file-origin strings before they hit the screen."""
+        text = terminal_safe(text)
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
             return self.app.redaction_service.scrub_stream(text)
         return text
 
     def _set_status(self, text: str) -> None:
         """Update the status line (demo-scrubbed and escaped — never raw markup)."""
+        self._status_raw = text
+        text = terminal_safe(text)
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
             text = self.app.redaction_service.scrub_stream(text)
         try:
-            self.query_one("#bw_import_status", Static).update(escape(text))
+            self.query_one("#bw_import_status", Static).update(markup_literal(text))
         except Exception:  # noqa: BLE001
             pass
 
+    def _update_import_button(self) -> None:
+        """Show how many keys the import takes, hidden rows included."""
+        if not self._scan_complete:
+            return
+        try:
+            button = self.query_one("#bw_import_btn", Button)
+        except Exception:  # noqa: BLE001 - dialog closed before the refresh
+            return
+        count = len(self._selected_indices())
+        button.label = f"Import ({count})"
+        button.disabled = count == 0
+        # A label change alone keeps the button's old width and clips the count.
+        button.refresh(layout=True)
+
+    def on_filterable_selection_changed(self, event: FilterableSelection.Changed) -> None:
+        event.stop()
+        self._update_import_button()
+
     def _selected_indices(self) -> List[int]:
         try:
-            return list(self.query_one("#bw_import_list", SelectionList).selected)
+            return list(self.query_one(FilterableSelection).selected)
         except Exception:  # noqa: BLE001
             return []
 
@@ -167,10 +218,12 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
             # An unreadable directory must not masquerade as an empty one —
             # "no keys found" would send the user down the wrong path.
             self._scan_complete = True
+            self._scan_failed = True
             self._set_status(
                 f"Could not read directory {self._directory} — check permissions, "
                 "then cancel and retry."
             )
+            self._update_import_button()
             return
 
         svc = self._service()
@@ -198,24 +251,47 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
         self._scan_complete = True
         self._populate()
 
-    def _populate(self) -> None:
-        """Fill the SelectionList: one row per scanned key."""
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw labels and search text under the new demo mode.
+
+        Selection, filter text and sort order are kept. A scan still running
+        is drawn under the current mode once it finishes.
+        """
+        if not self._scan_complete:
+            return
+        if self._scan_failed:
+            self._set_status(self._status_raw)
+            return
+        self._populate(keep_selection=True)
+
+    def _populate(self, *, keep_selection: bool = False) -> None:
+        """Fill the picker: one row per scanned key."""
         try:
-            sel_list = self.query_one("#bw_import_list", SelectionList)
+            picker = self.query_one(FilterableSelection)
         except Exception:  # noqa: BLE001
             return
-        sel_list.clear_options()
 
-        options: List[Selection] = []
+        rows: List[SelectionRow] = []
         in_vault = 0
         for idx, key in enumerate(self._keys):
             label, selectable, initial = self._row_for(key)
             if key.fingerprint and key.fingerprint in self._existing:
                 in_vault += 1
-            options.append(
-                Selection(label, idx, initial_state=initial, disabled=not selectable)
+            rows.append(
+                SelectionRow(
+                    value=idx,
+                    label=label,
+                    search_text=self._search_text(key),
+                    selected=initial,
+                    disabled=not selectable,
+                    sort_keys={
+                        "name": self._display_name(key.filename).casefold(),
+                        "fingerprint": key.fingerprint or None,
+                    },
+                )
             )
-        sel_list.add_options(options)
+        picker.set_rows(rows, keep_selection=keep_selection)
+        self._update_import_button()
 
         if not self._keys:
             self._set_status(f"No SSH private keys found in {self._directory}.")
@@ -229,21 +305,39 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                 f"{len(self._keys)} key(s) found — {in_vault} already in vault."
             )
 
+    def _search_text(self, key: ScannedKey) -> str:
+        """Plain text the filter matches: what the row shows, demo-scrubbed."""
+        pieces = [self._display_name(key.filename)]
+        if key.resolved_target:
+            pieces.append(self._display_name(key.resolved_target))
+        if key.error:
+            pieces.append(self._display_name(key.error))
+        else:
+            if key.key_type:
+                pieces.append(self._display_name(key.key_type))
+            if key.fingerprint:
+                pieces.append(without_digest_prefix(self._display_name(key.fingerprint)))
+            if key.encrypted:
+                pieces.append(_ENCRYPTED_MARKER)
+            if key.fingerprint and key.fingerprint in self._existing:
+                pieces.append("already in vault")
+        return " ".join(pieces)
+
     def _row_for(self, key: ScannedKey) -> Tuple[str, bool, bool]:
         """Build ``(label, selectable, initially_selected)`` for one scanned key."""
-        name = escape(self._display_name(key.filename))
+        name = markup_literal(self._display_name(key.filename))
         if key.resolved_target:
             # Symlink provenance: the basename alone would hide that the key
             # bytes actually come from elsewhere on disk.
-            name += f" [dim]→ {escape(self._display_name(key.resolved_target))}[/dim]"
+            name += f" [dim]→ {markup_literal(self._display_name(key.resolved_target))} [/dim]"
         if key.error:
-            return f"[dim]{name} — {escape(key.error)}[/dim]", False, False
+            return f"[dim]{name} — {markup_literal(self._display_name(key.error))} [/dim]", False, False
 
         parts = [name]
         if key.key_type:
-            parts.append(escape(key.key_type))
+            parts.append(markup_literal(self._display_name(key.key_type)))
         if key.fingerprint:
-            parts.append(escape(self._short_fp(key.fingerprint)))
+            parts.append(markup_literal(self._display_name(self._short_fp(key.fingerprint))))
         if key.encrypted:
             parts.append(_ENCRYPTED_MARKER)
         label = "  ".join(parts)
@@ -271,7 +365,7 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
             data = await asyncio.to_thread(read_key_bytes, key.path)
         except KeyImportError:
             self.app.notify(
-                f"{self._display_name(key.filename)}: could not read file.",
+                self._display_name(f"{key.filename}: could not read file."),
                 severity="warning",
                 markup=False,
             )
@@ -282,7 +376,7 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                 return "ok", await asyncio.to_thread(load_unencrypted_key, data)
             except KeyImportError as exc:
                 self.app.notify(
-                    f"{self._display_name(key.filename)}: {exc.message}",
+                    self._display_name(f"{key.filename}: {exc.message}"),
                     severity="warning",
                     markup=False,
                 )
@@ -301,13 +395,13 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                 )
             except WrongPassphraseError as exc:
                 self.app.notify(
-                    f"{self._display_name(key.filename)}: {exc.message}",
+                    self._display_name(f"{key.filename}: {exc.message}"),
                     severity="warning",
                     markup=False,
                 )
             except KeyImportError as exc:
                 self.app.notify(
-                    f"{self._display_name(key.filename)}: {exc.message}",
+                    self._display_name(f"{key.filename}: {exc.message}"),
                     severity="warning",
                     markup=False,
                 )
@@ -351,7 +445,7 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                 if idx < 0 or idx >= len(self._keys):
                     continue
                 key = self._keys[idx]
-                self._set_status(f"Importing {self._display_name(key.filename)}…")
+                self._set_status(f"Importing {key.filename}…")
 
                 # Pre-decrypt dedupe when the scan already knows the fingerprint.
                 if key.fingerprint and key.fingerprint in self._existing:
@@ -388,14 +482,14 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
                 except BwError as exc:
                     counts["failed"] += 1
                     self.app.notify(
-                        f"{self._display_name(key.filename)}: {exc.message}",
+                        self._display_name(f"{key.filename}: {exc.message}"),
                         severity="error",
                         markup=False,
                     )
                     continue
                 self._existing.add(decrypted.fingerprint)
                 counts["imported"] += 1
-                self._set_status(f"Imported {self._display_name(key.filename)}.")
+                self._set_status(f"Imported {key.filename}.")
 
             self._set_status("Syncing vault…")
             await svc.sync_now()

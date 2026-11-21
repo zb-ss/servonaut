@@ -340,7 +340,7 @@ def test_bitwarden_import_passes_the_item_name(tmp_path: Path) -> None:
     modal._source = "bitwarden"
     modal._existing_ok = True
     modal._bw_items = [BwItemSummary(id="item-uuid-1", name="Production key", type=5, has_ssh_key=True)]
-    modal._list = MagicMock(return_value=type("_List", (), {"selected": [0]})())
+    modal._picker = MagicMock(return_value=type("_Picker", (), {"selected": [0]})())
     modal.dismiss = MagicMock()
 
     async def run() -> None:

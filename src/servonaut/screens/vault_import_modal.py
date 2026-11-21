@@ -21,10 +21,13 @@ from textual.content import Content
 from textual.screen import ModalScreen
 
 from servonaut.widgets.dialogs import (
-    DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogFrame, DialogNotificationSpace,
+    DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogContent, DialogFrame, DialogNotificationSpace,
 )
-from textual.widgets import Button, SelectionList, Static
-from textual.widgets.selection_list import Selection
+from servonaut.widgets.filterable_selection import (
+    PICKER_BINDINGS, FilterableSelection, PickerActions, SelectionRow, SortOrder,
+    without_digest_prefix,
+)
+from textual.widgets import Button, Static
 
 from servonaut.utils.markup import literal
 
@@ -62,7 +65,7 @@ def _which_key(position: int, total: int) -> str:
     return "the key" if total == 1 else f"key {position} of {total}"
 
 
-class VaultImportModal(ModalScreen[ImportSummary | None]):
+class VaultImportModal(PickerActions, ModalScreen[ImportSummary | None]):
     """Choose a local or Bitwarden SSH key and import it into one vault.
 
     The dismissal result is deliberately metadata-only. ``references`` carries
@@ -74,7 +77,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     # On a short terminal the dialog gives up spacing so the key list keeps rows.
     VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel"), *PICKER_BINDINGS]
 
     DEFAULT_CSS = """
     VaultImportModal { align: center middle; }
@@ -83,7 +86,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     VaultImportModal #vault_import_intro { color: $text-muted; }
     VaultImportModal #vault_import_local,
     VaultImportModal #vault_import_bitwarden { width: 1fr; }
-    VaultImportModal #vault_import_list { height: 1fr; min-height: 3; margin-top: 1; }
+    VaultImportModal DialogContent { margin-top: 1; }
     VaultImportModal #vault_import_status { height: auto; min-height: 1; margin-top: 1; }
     VaultImportModal #vault_import_busy { margin: 0; }
     """
@@ -136,9 +139,9 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         """Redraw source metadata from cached summaries after a mode switch."""
         # A list still loading is drawn under the current mode once it arrives.
         if self._source == "ssh" and not self._loading:
-            self._show_local_options()
+            self._show_local_options(keep_selection=True)
         elif self._source == "bitwarden" and not self._loading:
-            self._show_bitwarden_options()
+            self._show_bitwarden_options(keep_selection=True)
         self._set_status(self._status_raw)
         self._busy.redraw()
 
@@ -164,7 +167,12 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
                     id="vault_import_choices",
                 ),
             ),
-            body=SelectionList(id="vault_import_list"),
+            body=DialogContent(
+                FilterableSelection(
+                    prefix="vault_import",
+                    sort_orders=(SortOrder("name", "Name"), SortOrder("fingerprint", "Fingerprint")),
+                ),
+            ),
             status=Vertical(
                 Static("Choose a source to begin.", id="vault_import_status"),
                 BusyIndicator(id="vault_import_busy"),
@@ -178,20 +186,33 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             id="vault_import_modal",
         )
 
-    def _list(self) -> SelectionList:
-        return self.query_one("#vault_import_list", SelectionList)
-
     def _confirm(self) -> Button:
         return self.query_one("#vault_import_confirm", Button)
 
-    def _show_options(self, options: list[Selection], message: str) -> None:
-        listing = self._list()
-        listing.clear_options()
-        listing.add_options(options)
+    def _label_confirm(self, text: str) -> None:
+        button = self._confirm()
+        button.label = text
+        # A label change alone keeps the button's old width and clips the count.
+        button.refresh(layout=True)
+
+    def _refresh_confirm(self) -> None:
+        """Show how many keys the import takes, hidden rows included."""
+        picker = self._picker()
+        count = len(picker.selected)
+        button = self._confirm()
+        self._label_confirm(f"Import selected ({count})")
         # A running import holds Import back and gives its state back when it ends.
-        if not self._busy.holds("#vault_import_confirm"):
-            self._confirm().disabled = not bool(options) or not self._existing_ok
+        if not self._busy.holds("#vault_import_confirm") and not self._loading and not self._importing:
+            button.disabled = not count or not self._existing_ok
+
+    def _show_options(self, rows: list[SelectionRow], message: str, *, keep_selection: bool = False) -> None:
+        self._picker().set_rows(rows, keep_selection=keep_selection)
+        self._refresh_confirm()
         self._set_status(message)
+
+    def on_filterable_selection_changed(self, event: FilterableSelection.Changed) -> None:
+        event.stop()
+        self._refresh_confirm()
 
     async def _load_existing(self) -> None:
         """Read the keys the vault already holds; a failure blocks the import."""
@@ -204,6 +225,15 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             self._existing = {}
             self._existing_ok = False
             self._existing_failure = vault_failure_reason(exc)
+
+    def _existing_plain(self, fingerprint: str | None) -> str:
+        """Plain text of the note for a key the vault holds ('' when it does not)."""
+        if not fingerprint or fingerprint not in self._existing:
+            return ""
+        name = self._existing[fingerprint].get("name")
+        if isinstance(name, str) and name:
+            return f"already in this vault as {self._display(name)}"
+        return "already in this vault"
 
     def _existing_note(self, fingerprint: str | None) -> str:
         """Label suffix for a key the vault holds ('' when it does not)."""
@@ -233,6 +263,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     async def _load_local(self) -> None:
         self._loading = True
         self._confirm().disabled = True
+        self._label_confirm("Import selected")
         self._set_status("")
         try:
             with self._busy.running(f"Reading SSH keys in {self._directory_label()}…", hold=_SOURCE_BUTTONS):
@@ -246,27 +277,41 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
 
         self._show_local_options()
 
-    def _show_local_options(self) -> None:
-        options: list[Selection] = []
+    def _show_local_options(self, *, keep_selection: bool = False) -> None:
+        rows: list[SelectionRow] = []
         duplicates = 0
         for index, key in enumerate(self._local_keys):
-            label = markup_literal(self._display(key.filename))
+            name = self._display(key.filename)
+            target = self._display(key.resolved_target) if key.resolved_target else ""
+            fingerprint = getattr(key, "fingerprint", None)
+            shown_fingerprint = self._display(fingerprint) if fingerprint else None
+            label = markup_literal(name)
+            pieces = [name]
             if key.resolved_target:
-                label += f"  [dim]→ {markup_literal(self._display(key.resolved_target))} [/dim]"
+                label += f"  [dim]→ {markup_literal(target)} [/dim]"
+                pieces.append(target)
             if key.encrypted:
                 label += "  [dim]encrypted — select to enter its passphrase[/dim]"
+                pieces.append("encrypted")
             if key.error:
                 label += "  [dim]unreadable or unsupported[/dim]"
-            note = self._existing_note(getattr(key, "fingerprint", None))
+                pieces.append("unreadable or unsupported")
+            note = self._existing_note(fingerprint)
             if note:
                 duplicates += 1
-                options.append(Selection(label + note, index, initial_state=False, disabled=True))
-                continue
-            options.append(
-                Selection(label, index, initial_state=not key.encrypted and not key.error, disabled=bool(key.error))
-            )
+                pieces.append(self._existing_plain(fingerprint))
+            if shown_fingerprint:
+                pieces.append(without_digest_prefix(shown_fingerprint))
+            rows.append(SelectionRow(
+                value=index,
+                label=label + note,
+                search_text=" ".join(pieces),
+                selected=not note and not key.encrypted and not key.error,
+                disabled=bool(note) or bool(key.error),
+                sort_keys={"name": name.casefold(), "fingerprint": shown_fingerprint},
+            ))
         found = f"Found {len(self._local_keys)} local SSH key candidate(s)."
-        self._show_options(options, self._found_message(found, duplicates))
+        self._show_options(rows, self._found_message(found, duplicates), keep_selection=keep_selection)
 
     async def _load_bitwarden(self) -> None:
         service = self._bw_service()
@@ -275,6 +320,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             return
         self._loading = True
         self._confirm().disabled = True
+        self._label_confirm("Import selected")
         self._set_status("")
         try:
             with self._busy.running("Unlocking Bitwarden…", hold=_SOURCE_BUTTONS) as job:
@@ -296,23 +342,34 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
 
         self._show_bitwarden_options()
 
-    def _show_bitwarden_options(self) -> None:
-        options: list[Selection] = []
+    def _show_bitwarden_options(self, *, keep_selection: bool = False) -> None:
+        rows: list[SelectionRow] = []
         duplicates = 0
         for index, item in enumerate(self._bw_items):
             if not item.id:
                 continue
-            label = (
-                f"{markup_literal(self._display(item.name or 'Unnamed SSH key'))}"
-                f"  [dim]{markup_literal(self._display(item.fingerprint or item.id))} [/dim]"
-            )
+            name = self._display(item.name or "Unnamed SSH key")
+            detail = self._display(item.fingerprint or item.id)
+            label = f"{markup_literal(name)}  [dim]{markup_literal(detail)} [/dim]"
             note = self._existing_note(item.fingerprint)
+            pieces = [name, without_digest_prefix(detail)]
             if note:
                 duplicates += 1
-                options.append(Selection(label + note, index, initial_state=False, disabled=True))
-            else:
-                options.append(Selection(label, index))
-        self._show_options(options, self._found_message(f"Found {len(options)} Bitwarden SSH item(s).", duplicates))
+                pieces.append(self._existing_plain(item.fingerprint))
+            rows.append(SelectionRow(
+                value=index,
+                label=label + note,
+                search_text=" ".join(pieces),
+                disabled=bool(note),
+                sort_keys={
+                    "name": name.casefold(),
+                    "fingerprint": self._display(item.fingerprint) if item.fingerprint else None,
+                },
+            ))
+        self._show_options(
+            rows, self._found_message(f"Found {len(rows)} Bitwarden SSH item(s).", duplicates),
+            keep_selection=keep_selection,
+        )
 
     async def _local_private_key(self, key: ScannedKey) -> bytearray | None:
         try:
@@ -466,7 +523,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
                 severity="error", markup=False,
             )
             return
-        selected = list(self._list().selected)
+        selected = list(self._picker().selected)
         if not selected:
             self.app.notify("Select at least one SSH key.", severity="warning", markup=False)
             return
@@ -496,9 +553,11 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
             self.action_cancel()
         elif button_id == "vault_import_local" and not self._loading and not self._importing:
             self._source = "ssh"
+            self._picker().clear_search()
             self.run_worker(self._load_local(), group="vault_import", exclusive=True)
         elif button_id == "vault_import_bitwarden" and not self._loading and not self._importing:
             self._source = "bitwarden"
+            self._picker().clear_search()
             self.run_worker(self._load_bitwarden(), group="vault_import", exclusive=True)
         elif button_id == "vault_import_confirm" and not self._loading and not self._importing:
             self.run_worker(self._import_selected(), group="vault_import", exclusive=True)
