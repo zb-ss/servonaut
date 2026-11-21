@@ -241,12 +241,7 @@ def verify_manifest(
     _check_freshness(manifest, policy, now)
     _check_download_origins(manifest, policy)
 
-    trusted = _count_trusted_signatures(manifest, policy)
-    if trusted < policy.minimum_signatures:
-        raise ManifestSignatureError(
-            f"Release manifest requires at least {policy.minimum_signatures} trusted signature(s), "
-            f"found {trusted}."
-        )
+    verify_release_signatures(manifest.canonical_bytes(), manifest.signatures, policy)
 
 
 def _check_freshness(
@@ -337,10 +332,13 @@ def _validate_origin_prefix(prefix: object, *, enforce_https: bool) -> None:
         )
 
 
-def _count_trusted_signatures(manifest: ReleaseManifest, policy: TrustPolicy) -> int:
-    canonical_bytes = manifest.canonical_bytes()
+def verify_release_signatures(
+    canonical_bytes: bytes, signatures: Sequence[ManifestSignature], policy: TrustPolicy,
+    *, label: str = "Release manifest",
+) -> None:
+    """Require the configured threshold of distinct pinned Ed25519 signers."""
     valid_key_ids: set[str] = set()
-    for sig in manifest.signatures:
+    for sig in signatures:
         public_key = policy.trusted_public_keys.get(sig.key_id)
         if sig.algorithm.lower() != "ed25519" or public_key is None:
             continue
@@ -351,7 +349,11 @@ def _count_trusted_signatures(manifest: ReleaseManifest, policy: TrustPolicy) ->
                 f"Cryptographic signature verification failed for key_id {bounded_repr(sig.key_id)}."
             ) from err
         valid_key_ids.add(sig.key_id)
-    return len(valid_key_ids)
+    if len(valid_key_ids) < policy.minimum_signatures:
+        raise ManifestSignatureError(
+            f"{label} requires at least {policy.minimum_signatures} trusted signature(s), "
+            f"found {len(valid_key_ids)}."
+        )
 
 
 def check_downgrade(

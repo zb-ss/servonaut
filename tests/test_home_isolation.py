@@ -26,6 +26,16 @@ def test_home_is_the_session_throwaway_directory() -> None:
         assert not _under(Path.home(), isolation.real_home)
 
 
+def test_home_isolation_removes_inherited_runner_command_files(monkeypatch, tmp_path) -> None:
+    command_files = {"GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_ENV"}
+    for name in command_files:
+        monkeypatch.setenv(name, str(tmp_path / name))
+
+    _home_isolation._point_environment_at(_home_isolation.current().temp_home)
+
+    assert command_files.isdisjoint(os.environ)
+
+
 def test_import_time_runtime_paths_resolve_inside_the_throwaway_home() -> None:
     from servonaut.config import manager
     from servonaut.services import auth_service, relay_lock, ssh_service

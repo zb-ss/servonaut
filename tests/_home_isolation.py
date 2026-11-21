@@ -37,9 +37,8 @@ _WINDOWS_DIRECTORIES: Dict[str, Tuple[str, ...]] = {
     "LOCALAPPDATA": ("AppData", "Local"),
 }
 
-# Variables that redirect a data location of their own, or name a profile
-# defined in a file under the real home. Cleared so the defaults under the
-# throwaway home apply, as they do on a CI runner.
+# Environment variables that point outside the throwaway home, including
+# command files owned by the CI runner. Tests may set fixture paths explicitly.
 _CLEARED_VARIABLES = (
     "SERVONAUT_VOICE_MODELS_DIR",
     "CODEX_HOME",
@@ -50,6 +49,9 @@ _CLEARED_VARIABLES = (
     "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_PROFILE",
     "AWS_DEFAULT_PROFILE",
+    "GITHUB_OUTPUT",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_ENV",
 )
 
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC

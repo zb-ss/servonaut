@@ -451,6 +451,8 @@ class Sidebar(Widget):
         # ----- Initial active highlight + auto-expand -----
         self._update_active()
         self._sync_update_button()
+        if hasattr(self.app, "apt_upgrade_state"):
+            self.watch(self.app, "apt_upgrade_state", self._sync_update_button, init=False)
 
         # ----- Sync relay indicator -----
         try:
@@ -526,16 +528,24 @@ class Sidebar(Widget):
         if button.display:
             button.scroll_visible(animate=False, immediate=True)
 
-    def _sync_update_button(self) -> None:
-        """Show the update button if the app already found a newer version."""
+    def _sync_update_button(self, _state: object = None) -> None:
+        """Keep an installed package's restart notice available across screens."""
+        from servonaut.services.apt_runtime import AptChange
+
+        state = getattr(self.app, "apt_upgrade_state", None)
         latest = getattr(self.app, "_latest_version", None)
-        if latest:
-            try:
-                btn = self.query_one("#nav_update", Button)
+        try:
+            btn = self.query_one("#nav_update", Button)
+            if state is not None and state.restart_version:
+                btn.label = "Restart to update"
+                btn.remove_class("hidden")
+            elif latest and (state is None or state.change is AptChange.UNCHANGED):
                 btn.label = f"Update to v{latest}"
                 btn.remove_class("hidden")
-            except NoMatches:
-                pass
+            else:
+                btn.add_class("hidden")
+        except NoMatches:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Propagate nav button presses to the parent screen.

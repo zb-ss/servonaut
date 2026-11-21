@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 
-from servonaut.desktop.launcher import DesktopLaunchRequest, run_desktop
+from servonaut.desktop.launcher import DesktopLaunchRequest, run_desktop, show_native_error
 from servonaut.runtime import (
     DesktopProcessRole,
     DistributionKind,
     detect_runtime,
     validate_desktop_process_role,
 )
+from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE, exec_apt_restart
 from servonaut.utils.logging_setup import configure_rotating_log
 
 # The GUI keeps a file of its own: the child process writes the app log, and
@@ -39,7 +41,28 @@ def main(argv: list[str] | None = None) -> int:
         runtime.data_root / "logs", filename=_GUI_LOG_NAME
     )
     request = DesktopLaunchRequest(runtime=runtime, log_file=log_file)
-    return run_desktop(request)
+    exit_code = run_desktop(request)
+    if exit_code == APT_RESTART_EXIT_CODE:
+        try:
+            exec_apt_restart(runtime.executable, [])
+        except (OSError, ValueError) as error:
+            logging.getLogger(__name__).error("Servonaut could not restart: %s", error)
+            return 1
+    if sys.platform == "darwin":
+        from servonaut.updates.macos_install import (
+            GUIDANCE, INSTALL_QUIT_CODE, MacUpdateError, recover_after_quit, start_on_quit,
+        )
+
+        if exit_code == INSTALL_QUIT_CODE:
+            try:
+                start_on_quit(runtime)
+                return 0
+            except (OSError, MacUpdateError, ValueError) as exc:
+                logging.getLogger(__name__).warning("Could not prepare application replacement: %s", exc)
+                show_native_error("Servonaut update", GUIDANCE)
+                return 1
+        recover_after_quit(runtime)
+    return exit_code
 
 
 if __name__ == "__main__":

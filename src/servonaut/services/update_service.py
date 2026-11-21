@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import subprocess
+import stat
 import tempfile
 import threading
 import time
@@ -22,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import BinaryIO, Final, Optional
@@ -43,11 +45,17 @@ from servonaut.distribution import (
     trust_root,
     verify_manifest,
 )
+from servonaut.distribution.apply_policy import DesktopApplyPolicy, DesktopArtifactIdentity
+from servonaut.distribution.manifest import parse_timestamp
+from servonaut.distribution.verify import verify_file_sha256
 from servonaut.runtime import (
     DistributionKind,
     RuntimeCapabilityError,
     RuntimeLayout,
     detect_runtime,
+)
+from servonaut.updates.desktop_apply import (
+    DesktopApplyDecision, DesktopApplyEvidence, StagedDesktopUpdate, prepare_desktop_apply, read_desktop_apply_policy,
 )
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 from servonaut.utils.package_version import PackageVersion
@@ -198,6 +206,7 @@ class UpdateService:
         self._last_result: Optional[UpdateCheckResult] = None
         self._latest_manifest: Optional[ReleaseManifest] = None
         self._target_artifact: Optional[ReleaseArtifact] = None
+        self._macos_offer: tuple[DesktopArtifactIdentity, str] | None = None
         self._downloaded_path: Optional[Path] = None
         self._download_lock = threading.Lock()
 
@@ -248,7 +257,25 @@ class UpdateService:
 
     def check_for_update(self) -> Optional[str]:
         """Check for an update depending on the distribution channel."""
+        self._macos_offer = None
         if self._runtime.is_frozen:
+            if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+                from servonaut.updates.apt import (
+                    APT_UPGRADE_COMMAND,
+                    is_apt_probe_candidate,
+                    refresh_apt_status,
+                )
+
+                if is_apt_probe_candidate(self._runtime):
+                    apt_status = refresh_apt_status(self._runtime)
+                    if apt_status.managed:
+                        self._latest = None
+                        self._last_result = UpdateCheckResult.NOT_CONFIGURED
+                        self._update_status = (
+                            "Updates are managed by apt. "
+                            f"To update now, run: {APT_UPGRADE_COMMAND}"
+                        )
+                        return None
             return self._check_frozen_update()
 
         try:
@@ -344,19 +371,83 @@ class UpdateService:
         self._update_status = f"Could not check for updates: {exc}"
         return None
 
-    def _fetch_manifest(self, url: str) -> bytes:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": f"servonaut/{self._current}",
-            },
-        )
+    def _fetch_manifest(self, url: str, *, uncached: bool = False) -> bytes:
+        headers = {"Accept": "application/json", "User-Agent": f"servonaut/{self._current}"}
+        if uncached:
+            headers["Cache-Control"] = "no-cache, no-store, max-age=0"
+            headers["Pragma"] = "no-cache"
+        request = urllib.request.Request(url, headers=headers)
         deadline = time.monotonic() + self._manifest_deadline_seconds
         with self._opener.open(request, timeout=_MANIFEST_SOCKET_TIMEOUT_SECONDS) as response:
             return b"".join(
                 _read_limited(response, max_bytes=_MAX_MANIFEST_BYTES, deadline=deadline)
             )
+
+    def authorize_staged_desktop_apply(self, staged: StagedDesktopUpdate) -> DesktopApplyDecision:
+        """Check both signed documents before a staged desktop replacement."""
+        result = self.prepare_staged_desktop_apply(staged)
+        return DesktopApplyDecision.AUTHORIZED if isinstance(result, DesktopApplyEvidence) else result
+
+    def prepare_staged_desktop_apply(self, staged: StagedDesktopUpdate) -> DesktopApplyEvidence | DesktopApplyDecision:
+        """Fetch and verify a staged replacement before excluding launches."""
+        if self._runtime.kind is not DistributionKind.PACKAGED_DESKTOP or self._trust_policy is None:
+            return DesktopApplyDecision.DEFERRED
+        try:
+            manifest_url = self._resolve_manifest_url()
+            if manifest_url is None:
+                return DesktopApplyDecision.DEFERRED
+            return prepare_desktop_apply(
+                staged, data_root=self._runtime.data_root,
+                fetch=lambda url: self._fetch_manifest(url, uncached=True),
+                manifest_url=manifest_url, trust=self._trust_policy,
+                channel=ReleaseChannel(self._runtime.release_channel),
+                running_version=self._current, running_revision=self._current_revision,
+                status=self._record_desktop_apply_warning,
+            )
+        except _TRANSFER_ERRORS:
+            return DesktopApplyDecision.DEFERRED
+
+    def _read_macos_policy(self) -> DesktopApplyPolicy | None:
+        try:
+            manifest_url = self._resolve_manifest_url()
+            if manifest_url is not None and self._trust_policy is not None:
+                return read_desktop_apply_policy(
+                    data_root=self._runtime.data_root, fetch=lambda url: self._fetch_manifest(url, uncached=True),
+                    manifest_url=manifest_url, trust=self._trust_policy, channel=ReleaseChannel(self._runtime.release_channel),
+                    warn=log.warning,
+                )
+        except (ManifestError, RecursionError, *_TRANSFER_ERRORS):
+            log.debug("Automatic macOS update policy is unavailable.")
+        return None
+
+    def _check_macos_offer(self, manifest: ReleaseManifest, target: ReleaseArtifact) -> None:
+        from servonaut.updates.macos_install import Installation, MacUpdateError
+
+        try:
+            installation = Installation.from_runtime(self._runtime)
+            if installation is None:
+                return
+            installation.validate_offer()
+        except (OSError, MacUpdateError, KeyError, ValueError):
+            return
+        policy = self._read_macos_policy()
+        identity = DesktopArtifactIdentity.from_artifact(manifest, target)
+        if policy is not None and not policy.paused and identity in policy.permitted and identity not in policy.withdrawn:
+            self._macos_offer = identity, policy.expires_at
+
+    @property
+    def macos_install_offered(self) -> bool:
+        if self._macos_offer is None or self._latest_manifest is None or self._target_artifact is None:
+            return False
+        identity, expires = self._macos_offer
+        return (
+            self._last_result is UpdateCheckResult.UPDATE_AVAILABLE
+            and identity == DesktopArtifactIdentity.from_artifact(self._latest_manifest, self._target_artifact)
+            and datetime.now(timezone.utc) < parse_timestamp(expires)
+        )
+
+    def _record_desktop_apply_warning(self, message: str) -> None:
+        self._update_status = message
 
     def _select_update(self, manifest: ReleaseManifest) -> Optional[str]:
         """Accept a verified manifest when it is newer and has an artifact for this host."""
@@ -378,6 +469,9 @@ class UpdateService:
 
         self._latest_manifest = manifest
         self._target_artifact = target
+        self._macos_offer = None
+        if target.kind is ArtifactKind.MACOS_DMG:
+            self._check_macos_offer(manifest, target)
         # Offered as its tag spells it: a candidate reads X.Y.ZrcN, not X.Y.Z-rc.N.
         self._latest = build_version_text(manifest.product_version)
         return self._record(UpdateCheckResult.UPDATE_AVAILABLE)
@@ -411,6 +505,47 @@ class UpdateService:
         finally:
             self._download_lock.release()
 
+    def stage_macos_desktop_update(self) -> StagedDesktopUpdate:
+        """Download the selected signed DMG into private desktop apply staging."""
+        from servonaut.updates.desktop_apply import DESKTOP_STAGING_DIR
+
+        if not self._download_lock.acquire(blocking=False):
+            raise UpdateInProgressError(_DOWNLOAD_IN_PROGRESS_MESSAGE)
+        try:
+            target, manifest = self._target_artifact, self._latest_manifest
+            if (
+                manifest is None or target is None or target.kind is not ArtifactKind.MACOS_DMG
+                or target not in manifest.artifacts
+            ):
+                raise RuntimeCapabilityError("Check for a verified macOS update first.")
+            identity = DesktopArtifactIdentity.from_artifact(manifest, target)
+            policy = self._read_macos_policy()
+            if policy is None or policy.paused or identity not in policy.permitted or identity in policy.withdrawn:
+                self._macos_offer = None
+                raise RuntimeCapabilityError("Automatic installation is unavailable. Use Download and install in Updates.")
+            staged = self._runtime.data_root / DESKTOP_STAGING_DIR
+            staged.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = staged.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise RuntimeCapabilityError("The application update folder is not private.")
+            path = staged / f"{target.sha256.lower()}.dmg"
+            if not self._reusable_macos_download(path, target):
+                path = self._download_verified(target, staged, filename=path.name, mode=0o600)
+            return StagedDesktopUpdate(identity, path)
+        finally:
+            self._download_lock.release()
+
+    @staticmethod
+    def _reusable_macos_download(path: Path, target: ReleaseArtifact) -> bool:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        return (
+            stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+            and info.st_nlink == 1 and info.st_size == target.byte_size and verify_file_sha256(path, target.sha256)
+        )
+
     def _download_exclusive(
         self,
         destination_dir: Optional[Path],
@@ -432,7 +567,10 @@ class UpdateService:
         self,
         target: ReleaseArtifact,
         dest_dir: Path,
-        progress_callback: Optional[Callable[[int, int], None]],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        *,
+        filename: str | None = None,
+        mode: int = 0o644,
     ) -> Path:
         """Stream into a private temporary file; move it into place only once verified."""
         # A temporary file per call, so concurrent or leftover downloads never
@@ -452,8 +590,8 @@ class UpdateService:
                 )
             # mkstemp creates owner-only files; give the verified download the
             # permissions of an ordinary downloaded file.
-            os.chmod(part_file, 0o644)
-            return part_file.replace(dest_dir / target.filename)
+            os.chmod(part_file, mode)
+            return part_file.replace(dest_dir / (filename or target.filename))
         except BaseException:
             part_file.unlink(missing_ok=True)
             raise
@@ -608,6 +746,21 @@ class UpdateService:
         import asyncio
 
         if self._runtime.is_frozen:
+            if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+                from servonaut.updates.apt import (
+                    APT_UPGRADE_COMMAND,
+                    is_apt_probe_candidate,
+                    refresh_apt_status,
+                )
+
+                if is_apt_probe_candidate(self._runtime):
+                    apt_status = await asyncio.to_thread(refresh_apt_status, self._runtime)
+                    if apt_status.managed:
+                        self._update_status = (
+                            "Updates are managed by apt. "
+                            f"To update now, run: {APT_UPGRADE_COMMAND}"
+                        )
+                        return False, self._update_status
             return await self._run_frozen_upgrade()
 
         command = self.get_upgrade_command()

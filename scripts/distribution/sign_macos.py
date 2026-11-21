@@ -26,6 +26,8 @@ from scripts.distribution.macos_layout import (
     verify_app_layout,
 )
 
+from servonaut.updates.macos_native import WORKER_SUFFIX
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACOS_PACKAGING = _REPO_ROOT / "packaging" / "macos"
 # The hardened runtime's entitlements hold only what the app needs. The
@@ -96,6 +98,7 @@ def nested_code(app_path: Path) -> list[Path]:
     """
     preserved = {app_path / path for path in PRESERVED_SIGNATURES}
     executables = {app_path / MACOS_DIR / name for name in EXECUTABLES}
+    executables.update(path.with_name(f"{path.name}{WORKER_SUFFIX}") for path in tuple(executables))
     found: list[Path] = []
     for location in (FRAMEWORKS_DIR, MACOS_DIR):
         for directory, subdirectories, files in os.walk(app_path / location):
@@ -196,6 +199,13 @@ def sign_app_bundle(
             raise MacosSigningError(f"Helper executable missing: {helper_name}")
         _sign(helper_args, helper_path, "helper", dry_run=dry_run)
         signed_items.append(helper_path)
+
+    for name in EXECUTABLES:
+        worker = app_path / MACOS_DIR / f"{name}{WORKER_SUFFIX}"
+        if worker.is_file():
+            worker_args = [*base_args, "--entitlements", str(entitlements if name == MAIN_EXECUTABLE else helper_entitlements)]
+            _sign(worker_args, worker, "frozen runtime", dry_run=dry_run)
+            signed_items.append(worker)
 
     if not (app_path / MACOS_DIR / MAIN_EXECUTABLE).is_file():
         raise MacosSigningError(f"Main executable missing: {MAIN_EXECUTABLE}")

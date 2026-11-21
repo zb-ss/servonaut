@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import subprocess
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -16,9 +17,14 @@ from textual._event_broker import NoHandler, extract_handler_actions
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
+from textual import events
 from textual.screen import ModalScreen
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
+from servonaut.services.apt_runtime import (
+    APT_RESTART_EXIT_CODE, AptBuildIdentity, AptChange, AptRuntimeMonitor, AptUpgradeState,
+    apt_runtime_poll_seconds,
+)
 from servonaut.updates.status import UpdateCheckOutcome
 from servonaut.styles import CSS_FILES, widen_parse_cache
 from servonaut.styles.parse_cache import install_shared_parse_cache
@@ -163,6 +169,7 @@ class ServonautApp(App):
     voice_output_service = None  # local text-to-speech for spoken replies, optional deps
     voice_conversation_service = None  # hands-free conversation loop controller
     update_service = None
+    apt_upgrade_state: reactive[AptUpgradeState | None] = reactive(None)
     bug_report_service = None
     redaction_service = None
     ovh_service = None
@@ -305,6 +312,11 @@ class ServonautApp(App):
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
+        self._apt_monitor = AptRuntimeMonitor.for_runtime(self.runtime_layout)
+        self._apt_checking = False
+        self._apt_restart_pending = False
+        self._apt_notices: set[AptBuildIdentity] = set()
+        self._apt_notices_pending: set[AptBuildIdentity] = set()
         self.client_kind = client_kind
         from servonaut.services.client_identity import configure_client_identity
         configure_client_identity(
@@ -421,6 +433,11 @@ class ServonautApp(App):
         # Keeps the real records aside and redacts what is listed in demo mode.
         self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
+        if sys.platform == "darwin" and self.client_kind == "desktop":
+            self.call_after_refresh(self._acknowledge_macos_startup)
+        if self._apt_monitor is not None:
+            self.set_interval(apt_runtime_poll_seconds(), self._queue_apt_upgrade_check)
+            self._queue_apt_upgrade_check()
         self._note_aws_switched_off()
         # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
         if self._initial_screen is not None:
@@ -3079,6 +3096,11 @@ class ServonautApp(App):
                 "Focus navigation", "Move to navigation; Esc returns to content",
                 self.action_focus_navigation,
             )
+            if self.apt_upgrade_state is not None and self.apt_upgrade_state.restart_version:
+                yield SystemCommand(
+                    "Restart Servonaut", "Close this window and start the installed version",
+                    self.request_apt_restart,
+                )
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
             if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
@@ -3315,8 +3337,173 @@ class ServonautApp(App):
         return _is_generic_framework_action(name, params)
 
     async def action_quit(self) -> None:
-        if not self._refuse_navigation():
+        if self._refuse_navigation():
+            return
+        requested_exit = getattr(self, "_macos_update_quit_code", None)
+        if requested_exit is None:
             await super().action_quit()
+        else:
+            self.exit(return_code=requested_exit)
+
+    async def _acknowledge_macos_startup(self) -> None:
+        from servonaut.updates.macos_install import acknowledge_startup, consume_result, sweep_startup
+
+        await asyncio.to_thread(acknowledge_startup, self.runtime_layout)
+        result = await asyncio.to_thread(consume_result, self.runtime_layout)
+        if result:
+            self.notify(result, severity="warning", markup=False)
+        self.run_worker(asyncio.to_thread(sweep_startup, self.runtime_layout), group="macos_startup", exit_on_error=False)
+
+    def can_install_macos_update(self) -> bool:
+        return (
+            sys.platform == "darwin" and self.client_kind == "desktop" and self.update_service.macos_install_offered
+        )
+
+    def request_macos_install(self, progress: Callable[[bool], None] | None = None) -> None:
+        """Wait for confirmation before preparing a normal quit and replacement."""
+        if self._update_in_progress or not self.can_install_macos_update() or self._refuse_navigation():
+            return
+        from servonaut.screens.snapshot_manager import ConfirmModal
+
+        def accepted(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._install_macos_after_confirmation(progress), group="macos_update", exit_on_error=False,
+                )
+
+        self.push_screen(ConfirmModal(
+            "Install on quit",
+            "Servonaut will close to install the update. Save your work before continuing.",
+        ), accepted)
+
+    async def _install_macos_after_confirmation(self, progress: Callable[[bool], None] | None = None) -> None:
+        from servonaut.runtime import RuntimeCapabilityError
+        from servonaut.updates.macos_install import (
+            INSTALL_QUIT_CODE, Installation, MacUpdateError, discard_quit_request, request_on_quit,
+        )
+
+        if self._refuse_navigation():
+            return
+
+        async def prepare() -> tuple[bool, str]:
+            def download():
+                installation = Installation.from_runtime(self.runtime_layout)
+                if installation is None:
+                    raise MacUpdateError("This installation needs a guided update.")
+                installation.validate_offer()
+                return self.update_service.stage_macos_desktop_update()
+
+            if progress is not None:
+                progress(True)
+            try:
+                staged = await asyncio.to_thread(download)
+            except (OSError, RuntimeCapabilityError, MacUpdateError, KeyError, ValueError):
+                return False, "Automatic installation is unavailable. Use Download and install in Updates."
+            finally:
+                if progress is not None:
+                    progress(False)
+            if self._refuse_navigation():
+                return False, ""
+            request_on_quit(self.runtime_layout, staged)
+            self._macos_update_quit_code = INSTALL_QUIT_CODE
+            try:
+                await self.action_quit()
+            finally:
+                self._macos_update_quit_code = None
+                if self.return_code != INSTALL_QUIT_CODE:
+                    discard_quit_request(self.runtime_layout)
+            return True, ""
+
+        success, message = await self._run_upgrade_once(prepare)
+        if not success and message:
+            self.notify(message, severity="warning", markup=False)
+
+    def on_app_focus(self, _event: events.AppFocus) -> None:
+        self._queue_apt_upgrade_check()
+
+    def _queue_apt_upgrade_check(self) -> None:
+        if self._apt_monitor is None or self._apt_checking or self._apt_restart_pending:
+            return
+        self._apt_checking = True
+        self.run_worker(self._check_apt_upgrade(), group="apt_upgrade", exit_on_error=False)
+
+    async def _check_apt_upgrade(self) -> None:
+        try:
+            self._show_apt_upgrade(await asyncio.to_thread(self._apt_monitor.check))
+        finally:
+            self._apt_checking = False
+
+    def _show_apt_upgrade(self, state: AptUpgradeState | None) -> None:
+        old = self.apt_upgrade_state
+        self.apt_upgrade_state = state
+        if state is None:
+            return
+        installed = state.installed
+        if state.restart_version and installed is not None:
+            if installed not in self._apt_notices and installed not in self._apt_notices_pending:
+                self._apt_notices_pending.add(installed)
+                self.run_worker(self._notify_apt_upgrade(installed), group="apt_upgrade_notice", exit_on_error=False)
+        elif state.change is AptChange.REMOVED and (old is None or old.change is not AptChange.REMOVED):
+            self.notify("The Servonaut package was removed.", severity="warning", markup=False)
+
+    async def _notify_apt_upgrade(self, installed: AptBuildIdentity) -> None:
+        from servonaut.services.apt_runtime import package_update_notice
+        from servonaut.updates.apt import refresh_apt_status
+
+        try:
+            # Join an in-flight warm-up and recheck the installation off the UI
+            # thread. An inconclusive probe leaves the notice eligible to retry.
+            source = await asyncio.to_thread(refresh_apt_status, self.runtime_layout)
+            state = self.apt_upgrade_state
+            if not source.checked or state is None or not state.restart_version or state.installed != installed:
+                return
+            self._apt_notices.add(installed)
+            self.notify(
+                package_update_notice(
+                    self.runtime_layout.product_version, installed.product_version, managed_by_apt=source.managed,
+                ),
+                severity="information", markup=False,
+            )
+        finally:
+            self._apt_notices_pending.discard(installed)
+
+    def request_apt_restart(self) -> None:
+        """Ask before ending this window and start a fresh package generation."""
+        state = self.apt_upgrade_state
+        if self._apt_restart_pending or state is None or not state.restart_version or self._refuse_navigation():
+            return
+        if isinstance(self.screen, ModalScreen):
+            self.notify("Close the current dialog before restarting Servonaut.", severity="warning", markup=False)
+            return
+        from servonaut.services.apt_runtime import restart_instruction
+        from servonaut.screens.snapshot_manager import ConfirmModal
+
+        self._apt_restart_pending = True
+
+        def accepted(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(self._restart_after_apt(state.installed), group="apt_restart", exit_on_error=False)
+            else:
+                self._apt_restart_pending = False
+
+        self.push_screen(ConfirmModal(
+            "Restart Servonaut",
+            f"{restart_instruction(self.runtime_layout.product_version, state.restart_version)}? Save your work first. "
+            "This window and its active sessions will close.",
+        ), accepted)
+
+    async def _restart_after_apt(self, target: AptBuildIdentity) -> None:
+        try:
+            if self._refuse_navigation():
+                return
+            state = await asyncio.to_thread(self._apt_monitor.check, force=True)
+            self._show_apt_upgrade(state)
+            if state is not None and state.restart_version and state.installed == target:
+                self.exit(return_code=APT_RESTART_EXIT_CODE)
+            else:
+                self.notify("The package changed. Check Settings → Updates before restarting.", severity="warning", markup=False)
+        finally:
+            self._apt_restart_pending = False
 
     def action_command_palette(self) -> None:
         if not self._refuse_navigation():
@@ -3385,7 +3572,10 @@ class ServonautApp(App):
             from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
             self.switch_screen(CloudWatchBrowserScreen())
         elif target_id == "nav_update":
-            self._run_update()
+            if self.apt_upgrade_state is not None and self.apt_upgrade_state.restart_version:
+                self.request_apt_restart()
+            else:
+                self._run_update()
         elif target_id == "nav_ovh_dns":
             from servonaut.screens.ovh_dns import OVHDNSScreen
             self.switch_screen(OVHDNSScreen())
@@ -3598,8 +3788,18 @@ class ServonautApp(App):
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""
+        from servonaut.updates.apt import is_apt_probe_candidate, refresh_apt_status
         from servonaut.updates.layout import UpdateLayout
         from servonaut.updates.launch import refresh_ready
+
+        if is_apt_probe_candidate(self.runtime_layout):
+            try:
+                apt_status = await asyncio.to_thread(refresh_apt_status, self.runtime_layout)
+            except Exception as exc:  # noqa: BLE001 — incomplete evidence falls back to download guidance
+                logger.debug("Background APT installation check failed: %s", exc)
+                apt_status = None
+            if apt_status is not None and apt_status.managed:
+                return
 
         try:
             layout = await asyncio.to_thread(UpdateLayout.detect)
@@ -3637,12 +3837,21 @@ class ServonautApp(App):
 
     async def request_update_check(self) -> UpdateCheckOutcome:
         """Report whether a requested check started, without waiting for discovery."""
+        from servonaut.updates.apt import is_apt_probe_candidate, refresh_apt_status
         from servonaut.updates.builder import queue_update_check
         from servonaut.updates.layout import UpdateLayout
         from servonaut.updates.status import read_update_status
 
         if os.environ.get("SERVONAUT_SKIP_AUTO_APPLY") == "1":
             return "skipped"
+        if is_apt_probe_candidate(self.runtime_layout):
+            try:
+                apt_status = await asyncio.to_thread(refresh_apt_status, self.runtime_layout)
+            except Exception as exc:  # noqa: BLE001 — incomplete evidence falls back
+                logger.debug("Requested APT installation check failed: %s", exc)
+                apt_status = None
+            if apt_status is not None and apt_status.managed:
+                return "skipped"
         try:
             layout = await asyncio.to_thread(UpdateLayout.detect)
             snapshot = await asyncio.to_thread(read_update_status, self.runtime_layout)
@@ -3697,6 +3906,8 @@ class ServonautApp(App):
 
     def _show_update_button(self, version: str) -> None:
         """Reveal the update button on the current screen's sidebar."""
+        if self.apt_upgrade_state is not None and self.apt_upgrade_state.change is not AptChange.UNCHANGED:
+            return
         from textual.widgets import Button
         try:
             btn = self.screen.query_one("#nav_update", Button)

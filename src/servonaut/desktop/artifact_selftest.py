@@ -43,6 +43,7 @@ from servonaut._artifact_selftest import (
     probe_boto3_resources,
     probe_textual_widgets,
 )
+from servonaut.desktop.webview_startup import private_webview_options
 
 if TYPE_CHECKING:
     from aiohttp import ClientWebSocketResponse
@@ -496,9 +497,8 @@ def _open_window(origin: str) -> None:
                 window.destroy()
 
         window.events.loaded += on_loaded
-        webview.start(
-            close_when_stalled, debug=False, http_server=False, private_mode=True
-        )
+        with private_webview_options() as options:
+            webview.start(close_when_stalled, debug=False, http_server=False, **options)
     except Exception:
         raise _SelftestFailure("window-failed") from None
     if not loaded.is_set():
