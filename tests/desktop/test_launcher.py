@@ -9,6 +9,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from servonaut.desktop import launcher
+from servonaut.desktop import launcher, webview_startup
 from servonaut.desktop.launcher import (
     DesktopLauncherError,
     DesktopLaunchRequest,
@@ -346,7 +347,10 @@ def _run_loaded_window(
                 callback()
 
     mock_webview.start.side_effect = fake_start
-    with patch.dict("sys.modules", {"webview": mock_webview}):
+    with (
+        patch.dict("sys.modules", {"webview": mock_webview}),
+        patch.object(launcher, "WindowsWebViewStartup", return_value=None),
+    ):
         assert run_desktop(request) == 0
     return mock_window
 
@@ -413,6 +417,168 @@ def test_session_start_script_passes_the_token_as_a_string_literal() -> None:
 
     assert "typeof window.startServonaut === 'function'" in script
     assert 'window.startServonaut("a\\"b</script>\\\\")' in script
+
+
+@pytest.fixture
+def windows_webview(monkeypatch, tmp_path):
+    platform = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(launcher, "sys", platform)
+    monkeypatch.setattr(webview_startup, "sys", platform)
+    exited = MagicMock()
+    monkeypatch.setattr(webview_startup, "os", SimpleNamespace(_exit=exited))
+    owner = MagicMock()
+    owner.tree = None
+    owner.bridge.claimed = False
+    owner.bridge.claim_session.return_value = "fixture-bootstrap-value"
+    origin = "http://127.0.0.1:4321"
+    owner.start.return_value = SimpleNamespace(origin=origin)
+    monkeypatch.setattr(launcher, "DesktopSessionOwner", lambda: owner)
+    webview = MagicMock()
+    monkeypatch.setitem(sys.modules, "webview", webview)
+    window = webview.create_window.return_value
+    window.get_current_url.return_value = origin + "/"
+    window.events.closed.__iadd__.return_value = window.events.closed
+    window.events.closed.is_set.return_value = False
+    callbacks = []
+    window.events.loaded.__iadd__.side_effect = callbacks.append
+    destroyed = threading.Event()
+    window.destroy.side_effect = destroyed.set
+    show_error = MagicMock()
+    monkeypatch.setattr(launcher, "show_native_error", show_error)
+    request = DesktopLaunchRequest(
+        runtime=_test_runtime(tmp_path), window_startup_timeout=0.5, window_close_timeout=1,
+    )
+    return SimpleNamespace(
+        owner=owner, start=webview.start, window=window, callbacks=callbacks,
+        destroyed=destroyed, show_error=show_error, request=request, exited=exited,
+    )
+
+
+@pytest.mark.parametrize("throws", [True, False])
+def test_windows_profile_is_owned_until_the_webview_loop_exits(windows_webview, throws):
+    view = windows_webview
+    profiles = []
+
+    def start(**options):
+        assert options["private_mode"] is True
+        profile = Path(options["storage_path"])
+        assert profile.is_dir()
+        (profile / "fixture").write_text("webview state")
+        profiles.append(profile)
+        if throws:
+            raise OSError("simulated native start exception")
+        view.window.events.closed.is_set.return_value = True
+
+    view.start.side_effect = start
+
+    assert run_desktop(view.request) == int(throws)
+    assert len(profiles) == 1 and not profiles[0].exists()
+    view.owner.close.assert_called_once()
+    assert view.show_error.call_count == int(throws)
+    view.exited.assert_not_called()
+
+
+def test_windows_silent_backend_return_without_a_window_reports_failure(windows_webview):
+    view = windows_webview
+
+    assert run_desktop(view.request) == 1
+    assert "WebView2 could not initialize" in view.show_error.call_args.args[1]
+    view.owner.close.assert_called_once()
+
+
+def test_windows_initialization_failure_closes_and_reports_without_raw_exception(windows_webview, caplog):
+    view = windows_webview
+
+    def start(**_options):
+        logging.getLogger("pywebview").error("WebView2 initialization failed with exception: fixture detail")
+        assert view.destroyed.wait(3)
+
+    view.start.side_effect = start
+
+    assert run_desktop(view.request) == 1
+    view.owner.request_shutdown.assert_called_once()
+    view.owner.close.assert_called_once()
+    assert "WebView2 could not initialize" in view.show_error.call_args.args[1]
+    assert "fixture detail" not in caplog.text
+    view.window.run_js.assert_not_called()
+    view.exited.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["no-loaded-event", "stalled-bootstrap", "rejected-bootstrap"])
+def test_windows_startup_requires_completed_bootstrap(windows_webview, mode):
+    view = windows_webview
+    injection_started = threading.Event()
+    release_injection = threading.Event()
+
+    def run_js(_script):
+        injection_started.set()
+        if mode == "stalled-bootstrap":
+            release_injection.wait(4)
+        return None
+
+    def start(**_options):
+        if mode != "no-loaded-event":
+            view.callbacks[0]()
+            assert injection_started.wait(2)
+        assert view.destroyed.wait(3)
+
+    view.window.run_js.side_effect = run_js
+    view.start.side_effect = start
+    try:
+        assert run_desktop(view.request) == 1
+    finally:
+        release_injection.set()
+    message = view.show_error.call_args.args[1]
+    expected = "could not connect" if mode == "rejected-bootstrap" else "took too long to start"
+    assert expected in message
+    assert view.window.run_js.call_count == (0 if mode == "no-loaded-event" else 1)
+    view.owner.close.assert_called_once()
+    view.exited.assert_not_called()
+
+
+def test_windows_successful_bootstrap_stops_the_startup_timer(windows_webview):
+    view = windows_webview
+    injection_finished = threading.Event()
+
+    def run_js(_script):
+        injection_finished.set()
+        return True
+
+    def start(**_options):
+        view.callbacks[0]()
+        view.callbacks[0]()
+        assert injection_finished.wait(2)
+        assert not view.destroyed.wait(2 * view.request.window_startup_timeout)
+
+    view.start.side_effect = start
+    view.window.run_js.side_effect = run_js
+
+    assert run_desktop(view.request) == 0
+    view.window.run_js.assert_called_once()
+    view.show_error.assert_not_called()
+    view.exited.assert_not_called()
+
+
+def test_windows_unresponsive_gui_has_a_bounded_fallback(monkeypatch):
+    close_started = threading.Event()
+    release_close = threading.Event()
+    exited = threading.Event()
+    reported = []
+
+    def block_close():
+        close_started.set()
+        release_close.wait(3)
+
+    monkeypatch.setattr(webview_startup, "os", SimpleNamespace(_exit=lambda _code: exited.set()))
+    try:
+        with webview_startup.WindowsWebViewStartup(
+            block_close, startup_seconds=0.05, close_seconds=0.1, on_unresponsive=reported.append,
+        ):
+            assert close_started.wait(2)
+            assert exited.wait(2)
+    finally:
+        release_close.set()
+    assert reported == [webview_startup.WEBVIEW_STARTUP_TIMEOUT]
 
 
 def test_launcher_never_exposes_a_js_api_to_the_page() -> None:
