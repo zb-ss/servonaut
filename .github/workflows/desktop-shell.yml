@@ -324,13 +324,16 @@ jobs:
           if tomllib.loads(declarations[0][0].read_text())["project"]["version"] != "0.0.1":
               raise SystemExit("The native restart fixture has the wrong wheel version")
           PY
+          before_source="${upgrade_dir}/before-source"
+          before_output="${upgrade_dir}/before-wheel.out"
+          : > "${before_output}"
           "${SELECTED_PYTHON}" -I scripts/standalone_cli/wheel_tools.py \
-            --python "${SELECTED_PYTHON}" --checkout "${upgrade_dir}/before-source" \
+            --python "${SELECTED_PYTHON}" --checkout "${before_source}" \
             --work-parent "${upgrade_dir}/before-wheel" \
-            --lock packaging/standalone_cli/requirements/wheel-build-tools.txt \
-            --policy packaging/standalone_cli/wheel-tools-policy.json \
-            --github-output "${upgrade_dir}/before-wheel.out"
-          before_wheel="$(sed -n 's/^wheel-path=//p' "${upgrade_dir}/before-wheel.out")"
+            --lock "${before_source}/packaging/standalone_cli/requirements/wheel-build-tools.txt" \
+            --policy "${before_source}/packaging/standalone_cli/wheel-tools-policy.json" \
+            --github-output "${before_output}"
+          before_wheel="$(sed -n 's/^wheel-path=//p' "${before_output}")"
           env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
             "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
             --wheel "${before_wheel}" --target "${TARGET}" --output-dir "${upgrade_dir}/before-build"

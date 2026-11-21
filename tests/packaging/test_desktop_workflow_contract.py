@@ -91,6 +91,13 @@ def test_debian_upgrade_uses_the_pr_desktop_build_for_changed_packaging(workflow
     assert "--network none" in upgrade and "--verify-pr-source" in upgrade
     assert "--source-pair" in upgrade and "--verify-pr-source --verify-restart" in upgrade
     assert "git archive HEAD" in upgrade and '--wheel "${before_wheel}"' in upgrade
+    assert 'before_source="${upgrade_dir}/before-source"' in upgrade
+    assert 'before_output="${upgrade_dir}/before-wheel.out"' in upgrade
+    assert ': > "${before_output}"' in upgrade
+    assert '--checkout "${before_source}"' in upgrade
+    assert '--lock "${before_source}/packaging/standalone_cli/requirements/wheel-build-tools.txt"' in upgrade
+    assert '--policy "${before_source}/packaging/standalone_cli/wheel-tools-policy.json"' in upgrade
+    assert '--github-output "${before_output}"' in upgrade
     assert "src/servonaut/__init__.py" in upgrade and "__version__ = '0.0.1'" in upgrade
     assert "ubuntu:22.04@sha256:" in upgrade and "ubuntu:24.04@sha256:" in upgrade
 

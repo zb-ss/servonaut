@@ -733,3 +733,17 @@ def test_wheel_tool_script_imports_without_isolated_mode() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_cli_failure_names_the_invalid_boundary(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable, "-I", str(ROOT / "scripts/standalone_cli/wheel_tools.py"),
+            "--python", sys.executable, "--checkout", str(ROOT),
+            "--work-parent", str(tmp_path.resolve()), "--lock", "relative-lock.txt",
+            "--policy", str(POLICY.resolve()),
+        ],
+        cwd=ROOT, capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 1
+    assert result.stderr.strip() == "standalone wheel preparation failed: wheel-tool lock must be a canonical regular file"
