@@ -546,6 +546,7 @@ def test_macos_replacement_is_qualified_on_both_pr_runners(workflow_content: str
     assert "github.event_name == 'pull_request'" in job
     assert "arch: x64\n            runner: macos-15-intel" in job
     assert "arch: arm64\n            runner: macos-15" in job
+    assert "--log-cli-level=INFO" in _named_step(job, "Qualify macOS replacement and cross-user admission")
     assert "test_desktop_macos_apply.py" in job
     assert "test_desktop_macos_safety.py" in job
     assert "test_desktop_macos_published.py" in job

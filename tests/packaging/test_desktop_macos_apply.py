@@ -411,9 +411,15 @@ def test_darwin_bundle_process_scan_finds_an_executable(tmp_path):
 
     bundle = tmp_path.resolve() / BUNDLE_NAME
     bundle.mkdir()
-    sleeper = bundle / "sleep"
-    shutil.copy2("/bin/sleep", sleeper)
-    with subprocess.Popen([sleeper, "10"]) as process:
+    worker = bundle / "scan-fixture"
+    # Compile a local executable so the fixture has no protected system file flags.
+    subprocess.run(
+        ["/usr/bin/clang", "-Wall", "-Wextra", "-Werror", "-x", "c", "-", "-o", worker],
+        input="#include <unistd.h>\nint main(void) { pause(); return 0; }\n",
+        text=True,
+        check=True,
+    )
+    with subprocess.Popen([worker]) as process:
         try:
             assert any(item.pid == process.pid for item in bundle_processes(bundle))
         finally:

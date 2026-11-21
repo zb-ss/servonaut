@@ -8,6 +8,7 @@ import os
 import plistlib
 import shutil
 import struct
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -186,13 +187,22 @@ def setup(tmp_path, monkeypatch):
     return InstallFixture(tmp_path.resolve(), monkeypatch)
 
 
-def test_real_helper_verifies_and_exchanges_only_under_exclusive_admission(setup, monkeypatch):
+def test_real_helper_verifies_and_exchanges_only_under_exclusive_admission(setup, monkeypatch, caplog):
+    if sys.platform == "darwin":
+        monkeypatch.setattr(setup, "rename_paths", transaction.rename_native)
+        monkeypatch.setattr(installer, "bundle_processes", native.bundle_processes)
     original = identity(setup.installed)
     helper, fd = setup.ready_helper(monkeypatch)
     try:
-        assert installer.run_helper(helper, str(fd)) == 0
+        with caplog.at_level("INFO", logger=installer.__name__):
+            assert installer.run_helper(helper, str(fd)) == 0
     finally:
         os.close(fd)
+    durations = [
+        record.args[0] for record in caplog.records
+        if record.msg.startswith("Exclusive application admission held")
+    ]
+    assert len(durations) == 1 and durations[0] >= 0
     current = identity(setup.installed)
     assert current != original and identity(setup.tx.previous) == original
     assert not setup.tx.journal_path.exists()

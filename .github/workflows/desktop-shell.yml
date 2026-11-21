@@ -89,7 +89,7 @@ jobs:
         run: python -m pip install -e ".[test,mcp]"
       - name: Qualify macOS replacement and cross-user admission
         run: |
-          python -m pytest -q -rs tests/packaging/test_desktop_macos_apply.py \
+          python -m pytest -q -rs --log-cli-level=INFO tests/packaging/test_desktop_macos_apply.py \
             tests/packaging/test_desktop_macos_safety.py
       - name: Assess an available published signed disk image
         timeout-minutes: 8
