@@ -16,6 +16,21 @@ class BindingDestinationChangedError(VaultStateError):
     """A binding names another address or port than the server has now."""
 
 
+OWN_SERVER_TARGET_PREFIX = "instance:"
+
+
+def binding_scope(vault: Mapping[str, Any], target: str, user_id: int) -> str:
+    """The scope a binding is signed for.
+
+    A binding on a server of your own belongs to you, whichever vault holds its
+    key (your personal vault or a team vault you manage), so it is signed for
+    your user scope. A shared server's binding is signed for its vault's scope.
+    """
+    if target.startswith(OWN_SERVER_TARGET_PREFIX):
+        return f"user:{int(user_id)}"
+    return str(vault["scope"])
+
+
 class VaultBindingService:
     """Bind native vault SSH items only to verified, pinned destinations."""
 
@@ -26,7 +41,7 @@ class VaultBindingService:
     def build_binding(
         self,
         *,
-        scope: str,
+        vault: Mapping[str, Any],
         target: str,
         hostname: str,
         port: int,
@@ -42,6 +57,7 @@ class VaultBindingService:
         if not 1 <= port <= 65535 or binding_revision < 1:
             raise ValueError("binding port or revision is invalid")
         identity = current_identity(self._vaults._identity_store)
+        scope = binding_scope(vault, target, identity.user_id)
         message = crypto.binding_message(
             scope, target, hostname, port, login_user, vault_id, vault_item_id,
             public_fingerprint, host_keys, binding_revision, str(identity.identity_id),
@@ -76,7 +92,6 @@ class VaultBindingService:
         binding_port = binding.get("port")
         if isinstance(binding_port, bool) or not isinstance(binding_port, int) or binding.get("hostname") != hostname or binding_port != port:
             raise BindingDestinationChangedError("credential binding destination no longer matches the server")
-        scope = str(vault["scope"])
         if not target or not str(binding.get("vault_id", "")) == str(vault["vault_id"]):
             raise VaultStateError("credential binding targets the wrong vault")
         host_keys = binding.get("host_keys")
@@ -107,7 +122,8 @@ class VaultBindingService:
             if roles.get(int(binder["user_id"]), "viewer") not in {"owner", "admin"}:
                 raise VaultStateError("credential binding signer is not a current team admin")
         message = crypto.binding_message(
-            scope, target, hostname, port, str(binding["login_user"]), str(binding["vault_id"]),
+            binding_scope(vault, target, local_identity.user_id),
+            target, hostname, port, str(binding["login_user"]), str(binding["vault_id"]),
             str(binding["vault_item_id"]), str(binding["public_fingerprint"]), host_keys,
             _positive_int(binding.get("binding_revision"), "binding.binding_revision"), binder_id,
         )
