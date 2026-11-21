@@ -1944,17 +1944,21 @@ def test_each_job_has_the_least_privilege_it_needs(workflow: str) -> None:
     assert _granted(_job(workflow, "notes")) == [("contents", "write")]
     assert _granted(_job(workflow, "refresh")) == [("contents", "read")]
     assert _granted(_job(workflow, "audit")) == [("contents", "read"), ("issues", "write")]
+    assert _granted(_job(workflow, "apt-publish")) == [("contents", "read"), ("attestations", "read")]
+    assert _granted(_job(workflow, "apt-audit")) == [("contents", "read")]
+    assert _granted(_job(workflow, "apt-report")) == [("contents", "read"), ("issues", "write")]
 
 
 def test_the_upload_credentials_reach_only_the_jobs_that_write_to_the_mirror(workflow: str) -> None:
-    for name in ("resolve", "notes", "audit"):
+    for name in ("resolve", "notes", "audit", "apt-audit", "apt-report"):
         assert "secrets." not in _job(workflow, name)
-    for name in ("mirror", "refresh"):
+    for name in ("mirror", "refresh", "apt-publish"):
         job = _job(workflow, name)
         assert "    environment: release-mirror\n" in job
         # Secrets go to steps, never to every step of a job.
         assert "secrets." not in job.split("    steps:\n", 1)[0]
-    assert workflow.count("environment:") == 2
+    assert workflow.count("environment:") == 3
+    assert "environment:" not in _job(workflow, "apt-audit")
     for step in ("Download the release", "Verify the files against their checksums", "Install the uploader"):
         assert "secrets." not in _step(workflow, step)
 
@@ -1987,7 +1991,7 @@ def test_the_manifest_code_is_the_apps_own_from_the_checkout(workflow: str) -> N
 
 def test_no_job_checks_out_a_tag_or_keeps_credentials(workflow: str) -> None:
     checkouts = re.findall(r"      - uses: actions/checkout@\S+ # v[\d.]+\n((?:        .+\n)+)", workflow)
-    assert len(checkouts) == 4
+    assert len(checkouts) == 7
     for options in checkouts:
         assert "persist-credentials: false" in options
         assert "ref:" not in options
@@ -1999,12 +2003,11 @@ def test_inputs_reach_scripts_only_through_the_environment(workflow: str) -> Non
 
 
 def test_every_job_has_a_timeout_and_runs_queue_per_tag(workflow: str) -> None:
-    for name in ("resolve", "mirror", "notes", "refresh", "audit"):
+    for name in ("resolve", "mirror", "notes", "refresh", "audit", "apt-publish", "apt-audit", "apt-report"):
         assert re.search(r"^    timeout-minutes: \d+$", _job(workflow, name), re.MULTILINE), name
-    assert (
-        "concurrency:\n  group: release-mirror-${{ github.event.workflow_run.head_branch || inputs.tag || 'audit' }}\n"
-        "  cancel-in-progress: false\n"
-    ) in workflow
+    assert "format('apt-{0}', github.run_id)" in workflow
+    assert "|| github.event.workflow_run.head_branch || inputs.tag || 'audit' }}" in workflow
+    assert "  cancel-in-progress: false\n  queue: max" in workflow
 
 
 def test_the_uploader_is_installed_from_hash_locked_requirements(workflow: str) -> None:
@@ -2119,7 +2122,7 @@ def test_a_failure_to_sign_the_manifests_does_not_hold_back_the_notes(workflow: 
 def test_the_audit_runs_daily_only_while_the_mirror_is_on(workflow: str) -> None:
     audit = _job(workflow, "audit")
     assert "vars.RELEASE_MIRROR == 'on'" in audit
-    assert "(github.event_name == 'schedule' || inputs.audit == true)" in audit
+    assert "(github.event.schedule == '41 6 * * *' || inputs.audit == true)" in audit
     assert "if: failure() && steps.audit.outcome == 'failure'" in audit
 
 
@@ -2146,7 +2149,7 @@ def test_the_manifests_are_re_signed_daily_before_the_audit(workflow: str) -> No
     audit = _job(workflow, "audit")
     condition = (
         "github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&\n"
-        "      (github.event_name == 'schedule' || inputs.audit == true)\n"
+        "      (github.event.schedule == '41 6 * * *' || inputs.audit == true)\n"
     )
     assert f"    if: >-\n      {condition}" in refresh
     # The audit also runs after a failed refresh, to report what users get.
@@ -2262,3 +2265,63 @@ def test_it_accepts_the_same_tags_as_the_workflows_it_follows(workflow: str) -> 
     for path in _upstream_files():
         assert pattern.search(path.read_text(encoding="utf-8")).group(1) == ours
     assert mirror.TAG_PATTERN.pattern == rf"^v{ours.replace('(rc[1-9][0-9]*)?', '(?:rc([1-9][0-9]*))?')}$"
+
+
+
+def test_apt_writes_and_alerts_keep_default_branch_and_mode_boundaries(workflow: str) -> None:
+    default_branch = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+    for job in ("apt-publish", "apt-audit", "apt-report"):
+        assert default_branch in _job(workflow, job)
+    production = _step(workflow, "Sign and publish the APT archive")
+    assert (
+        "inputs.dry_run != true && inputs.apt_rehearsal != true &&\n"
+        "          vars.APT_RELEASE_MIRROR == 'on'"
+    ) in production
+    rehearsal = _step(workflow, "Sign and publish a separate rehearsal archive")
+    assert "if: inputs.dry_run != true && inputs.apt_rehearsal == true" in rehearsal
+    assert '--prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in rehearsal
+    dry = _step(workflow, "Validate the APT publication plan without writing")
+    assert "secrets." not in dry
+    storage = {"R2_MIRROR_ACCESS_KEY_ID", "R2_MIRROR_SECRET_ACCESS_KEY", "R2_MIRROR_ENDPOINT", "R2_MIRROR_BUCKET"}
+    cleanup = _step(workflow, "Remove the failed rehearsal archive")
+    sweep = _step(workflow, "Remove expired rehearsal archives")
+    for step in (rehearsal, cleanup, sweep):
+        assert set(re.findall(r"secrets\.([A-Z0-9_]+)", step)) == storage
+    assert set(re.findall(r"secrets\.([A-Z0-9_]+)", production)) == storage | {
+        "APT_REPO_SIGNING_SUBKEY", "APT_REPO_SIGNING_PASSPHRASE",
+    }
+    assert "always() && inputs.apt_rehearsal == true && inputs.dry_run != true" in cleanup
+    assert "(steps.rehearse.outcome == 'failure' || steps.rehearse.outcome == 'cancelled')" in cleanup
+    assert '--prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in cleanup
+    assert "!cancelled() && github.event.schedule == '17 */6 * * *'" in sweep
+    assert "--action sweep-rehearsals" in sweep
+    disabled = _step(workflow, "Require the archive opt-in for production writes")
+    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run != true" in disabled
+    assert "inputs.apt_rehearsal != true && vars.APT_RELEASE_MIRROR != 'on'" in disabled
+    assert "exit 1" in disabled
+    mask = _step(workflow, "Mask the APT bucket's address")
+    assert "inputs.dry_run != true && (inputs.apt_rehearsal == true || vars.APT_RELEASE_MIRROR == 'on' ||" in mask
+    assert "github.event.schedule == '17 */6 * * *'" in mask
+    for name in ("Sign and publish a separate rehearsal archive", "Sign and publish the APT archive",
+                 "Remove the failed rehearsal archive", "Remove expired rehearsal archives"):
+        assert workflow.index("name: Mask the APT bucket's address") < workflow.index(f"name: {name}")
+    audit = _job(workflow, "apt-audit")
+    assert "inputs.dry_run != true && inputs.apt_rehearsal != true" in audit
+    assert "vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT" in audit and "environment:" not in audit
+    report = _job(workflow, "apt-report")
+    assert "upstream: ${{ steps.publish.outputs.upstream }}" in _job(workflow, "apt-publish")
+    assert "needs.apt-audit.result == 'failure' || needs.apt-audit.result == 'success'" in report
+    assert "needs.apt-publish.outputs.rotation == 'true'" in report
+    assert "needs.apt-publish.outputs.upstream == 'true'" in report
+    assert "needs.apt-publish.outputs.unqualified == 'true'" in report
+    assert "github.event.schedule == '17 */6 * * *' &&\n          needs.apt-publish.result == 'failure'" in report
+    assert "PUBLISH_RESULT: ${{ needs.apt-publish.result }}" in report
+    report_step = _step(workflow, "Open or comment on APT archive issues")
+    assert "UPSTREAM: ${{ needs.apt-publish.outputs.upstream }}" in report_step
+    assert (
+        "CHECK_SCHEDULED_PUBLISH: ${{ vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' }}"
+        in report_step
+    )
+    assert "APT_ALERT_REMINDER_HOURS: ${{ vars.APT_ALERT_REMINDER_HOURS || '24' }}" in report_step
+    assert "group: release-mirror-apt-alert" in report
+    assert "python3 .github/scripts/apt-report-alerts.py" in _script(workflow, "Open or comment on APT archive issues")
