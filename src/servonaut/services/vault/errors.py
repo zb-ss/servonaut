@@ -306,10 +306,7 @@ def _failure_reason(exc: BaseException) -> str:
         return _failure_reason(cause)
     if isinstance(exc, VaultUserError):
         return str(exc)
-    if isinstance(exc, ClientUpdateRequiredError) or (
-        isinstance(exc, APIError)
-        and (exc.status == 426 or exc.code == "client_update_required")
-    ):
+    if isinstance(exc, ClientUpdateRequiredError):
         return format_update_required_message(exc)
     if isinstance(exc, APIError) and exc.code == "device_not_active":
         details = exc.details if isinstance(exc.details, dict) else {}
