@@ -31,7 +31,11 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
+    "s3_get_bucket_policy",
+    "s3_get_public_object_url",
+    "s3_set_bucket_policy",
+})
 
 # Retired locally while the published server catalog still advertises them.
 # Keep the fixture truthful; remove each entry from both places when the
