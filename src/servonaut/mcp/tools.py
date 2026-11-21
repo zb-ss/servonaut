@@ -24,6 +24,7 @@ from servonaut.mcp.db_staging import (
     DEFAULT_TTL_SECONDS as DEFAULT_STAGING_TTL_SECONDS,
     DBCredentialStaging,
 )
+from servonaut.mcp.reconnect import MCPDisplayText
 from servonaut.services.accounts.headless import (
     AccountUnavailableError,
     InstanceDirectory,
@@ -1009,7 +1010,7 @@ class ServonautTools:
                     f"({fetch_error}); {label} rows come from the last successful fetch."
                 )
         self._audit.log('list_instances', args, result, True)
-        return result
+        return MCPDisplayText(result)
 
     async def run_command(
         self, instance_id: str, command: str, transport: str = "auto",
@@ -1419,7 +1420,7 @@ class ServonautTools:
         ]
         result = '\n'.join(lines)
         self._audit.log('check_status', {'instance_id': instance_id}, result, True)
-        return result
+        return MCPDisplayText(result)
 
     async def get_server_info(self, instance_id: str) -> str:
         """Get detailed server info (hostname, uptime, disk, memory)."""
@@ -1504,6 +1505,8 @@ class ServonautTools:
             output += f"\nSTDERR:\n{stderr_text}"
 
         self._audit.log('get_server_info', args, output, True, **key_extras)
+        if ssh_returncode(ssh_output) == 0:
+            return MCPDisplayText(output)
         return output
 
     async def transfer_file(self, instance_id: str, local_path: str, remote_path: str, direction: str = "download") -> str:
@@ -2601,6 +2604,8 @@ class ServonautTools:
                     'get_server_memory', {'instance_id': instance_id, 'format': format},
                     result, True,
                 )
+                if format in ("summary", "markdown"):
+                    return MCPDisplayText(result)
                 return result
         if not stored_modules and not self._has_notes_or_findings(iid, provider):
             hint = (
@@ -2708,6 +2713,8 @@ class ServonautTools:
             'get_server_memory', {'instance_id': instance_id, 'format': format},
             result, True,
         )
+        if format in ("summary", "markdown"):
+            return MCPDisplayText(result)
         return result
 
     def _notes_text(self, iid: str, provider: str) -> str:
