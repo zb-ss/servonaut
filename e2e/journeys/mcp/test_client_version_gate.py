@@ -28,6 +28,28 @@ async def _json(session, tool, arguments=None, **kwargs):
     return json.loads(await session.call(tool, arguments, **kwargs))
 
 
+async def test_vault_bound_mcp_tools_explain_the_refusal_without_connecting(mcp, journey, fake_cloud, version_gate_vault):
+    home, target, binding_path = version_gate_vault
+    fake_cloud.set_client_version_policy(mode="enforce", minimum_version=MINIMUM_VERSION)
+    async with mcp(home) as session:
+        for tool, arguments in (
+            ("run_command", {"command": "hostname"}),
+            ("get_logs", {"lines": 1}),
+            ("get_server_info", {}),
+        ):
+            text = await session.call(tool, {"instance_id": target, **arguments})
+            assert f"Update to {MINIMUM_VERSION}" in text, text
+            assert "update your source checkout and reinstall" in text
+            assert "Reconnect the MCP server after updating" in text
+        assert (await _json(session, "whoami"))["logged_in"] is True
+
+    requests = fake_cloud.requests(binding_path, method="GET")
+    assert any(req["status"] == 426 and parse_client_signal(req["client_header"])[2] == "mcp" for req in requests)
+    assert not journey.shims.calls("ssh")
+    assert not journey.shims.calls("ssh-agent")
+    assert session.protocol_errors == []
+
+
 async def test_mcp_cloud_tools_return_client_update_required_while_local_and_exempt_work(
     mcp, journey, fake_cloud, account_home,
 ):

@@ -193,6 +193,7 @@ class ServonautApp(App):
     # Reactive so every mounted Sidebar follows Vault discovery, which
     # finishes after the first screen is already on display.
     vault_available = reactive(False)
+    vault_update_required = reactive(False)
     remote_audit_service = None
     findings_service = None  # proactive-monitoring thin client (paid, gated)
     gcp_service = None
@@ -1128,6 +1129,9 @@ class ServonautApp(App):
         if relay is not None and hasattr(self, "run_worker"):
             self.run_worker(relay.stop(),
                             name="relay_logout_stop", exclusive=True)
+        if getattr(self, "vault_command_service", None) is not None:
+            self.workers.cancel_group(self, "vault_background")
+            self.vault_update_required = False
         # Config-sync session
         if getattr(self, "config_sync_service", None) is not None:
             self.config_sync_service.clear_session()
@@ -1248,10 +1252,26 @@ class ServonautApp(App):
         except Exception as e:  # noqa: BLE001 — never break boot
             logger.debug("Boot secrets-config refresh failed: %s", e)
 
+    def _start_vault_background(self) -> None:
+        # Vault availability is optional. Unexpected worker errors should
+        # leave unrelated authenticated services running.
+        self.run_worker(
+            self._run_vault_background(),
+            group="vault_background",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def resume_vault_after_update_refusal(self) -> None:
+        """Resume discovery and polling once a Vault refresh succeeds."""
+        if self.vault_update_required:
+            self._start_vault_background()
+
     async def _run_vault_background(self) -> None:
         """Discover native Vault support and process verified grant hints."""
         from httpx import TransportError
         from servonaut.services.api_client import APIError, ClientUpdateRequiredError
+        from servonaut.services.client_identity import format_update_required_message
         from servonaut.services.vault.identity_store import IdentityStoreError
         from servonaut.services.vault.crypto import VaultCryptoError
         from servonaut.services.vault.background import poll_vault
@@ -1261,6 +1281,7 @@ class ServonautApp(App):
             return
         try:
             self.vault_available = await service.discover()
+            self.vault_update_required = False
             if not self.vault_available:
                 return
             # Discovery keeps Vault navigation available to a new device, but
@@ -1270,9 +1291,13 @@ class ServonautApp(App):
             if not service.unlock_existing_identity():
                 return
             await poll_vault(service, discovered=True)
-        except ClientUpdateRequiredError:
-            # The shared update-required notice covers Vault as well.
-            return
+        except ClientUpdateRequiredError as exc:
+            self.vault_update_required = True
+            self.vault_available = False
+            self.notify(
+                format_update_required_message(exc, runtime=self.runtime_layout),
+                title="Vault", severity="warning", timeout=12, markup=False,
+            )
         except TransportError as exc:
             # An optional Vault endpoint can be temporarily unavailable while
             # the rest of an authenticated session still works. There is no
@@ -1367,16 +1392,7 @@ class ServonautApp(App):
             )
             if getattr(self, "servonaut_tools", None) is not None:
                 self.servonaut_tools.set_vault_runtime(self.vault_command_service)
-            self.run_worker(
-                self._run_vault_background(),
-                group="vault_background",
-                exclusive=True,
-                # Vault availability is optional at TUI boot.  Expected
-                # transport failures are handled in the worker; this also
-                # keeps an unexpected background failure from taking down
-                # unrelated authenticated services.
-                exit_on_error=False,
-            )
+            self._start_vault_background()
             self.remote_audit_service = RemoteAuditService(self.api_client)
             from servonaut.services.findings_service import FindingsService
             self.findings_service = FindingsService(self.api_client)
@@ -3064,8 +3080,9 @@ class ServonautApp(App):
                 continue
             if target_id.startswith("nav_hetzner") and not self.provider_available("hetzner"):
                 continue
-            if target_id in {"nav_vault", "nav_ca"} and not getattr(self, "vault_available", False):
-                continue
+            if target_id in {"nav_vault", "nav_ca"} and not self.vault_available:
+                if target_id == "nav_ca" or not self.vault_update_required:
+                    continue
             yield SystemCommand(
                 f"Go to {title}",
                 help_text,

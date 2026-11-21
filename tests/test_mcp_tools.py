@@ -1917,6 +1917,41 @@ class TestTeamKeyOnAnOwnServer:
         )
         return tools
 
+    def test_proxy_426_keeps_ordinary_credential_refusal(self, proxy_426):
+        tools = self._tools(_team_key_runtime(error=proxy_426))
+
+        result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert result == (
+            "Error: could not check which vault key this server uses, so agents "
+            "cannot act on it right now. Try again shortly."
+        )
+        assert _audit_reasons(tools) == ["credential_check_failed"]
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
+    @pytest.mark.parametrize("path", ["rules", "shared-target", "lease"])
+    def test_version_refusal_audits_each_vault_path(self, path):
+        from servonaut.services.api_client import ClientUpdateRequiredError
+
+        refusal = ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
+        runtime = _team_key_runtime(slug=None)
+        target = "i-abc123"
+        if path == "rules":
+            runtime.credential_team.side_effect = refusal
+        elif path == "shared-target":
+            target = "shared-web"
+            runtime.resolve_relay_target.side_effect = refusal
+        else:
+            runtime.resolve_ssh.side_effect = refusal
+        tools = self._tools(runtime)
+
+        result = run(tools.run_command(target, "uptime"))
+
+        assert "Update to 99.0.0" in result
+        assert _audit_reasons(tools) == ["client_update_required"]
+        assert tools._audit.log.call_args.args[3] is False
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
     def test_the_teams_rule_refuses_what_local_settings_allow(self):
         trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
         tools = self._tools(_team_key_runtime())

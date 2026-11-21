@@ -37,6 +37,8 @@ from servonaut.services.accounts.headless import (
     usable_account,
 )
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.api_client import ClientUpdateRequiredError, find_client_update_required
+from servonaut.services.client_identity import format_update_required_message, get_client_identity
 from servonaut.services.memory.notes import has_notes, strip_comments
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
@@ -770,6 +772,9 @@ class ServonautTools:
                         "Native Vault shared-target lookup failed for %s (%s)",
                         instance_id, type(exc).__name__,
                     )
+                    if update := find_client_update_required(exc):
+                        self._audit.log(tool_name, args, '', False, 'client_update_required')
+                        return None, f"Error: {self._vault_update_message(update)}"
                     self._audit.log(
                         tool_name, args, audit_result, False,
                         'shared_target_resolution_failed',
@@ -815,6 +820,9 @@ class ServonautTools:
         try:
             rules_row = await self._credential_rules_row(instance)
         except Exception as exc:  # noqa: BLE001 — refuse rather than guess the key
+            if update := find_client_update_required(exc):
+                self._audit.log(tool_name, args, '', False, 'client_update_required')
+                return None, f"Error: {self._vault_update_message(update)}"
             logger.warning(
                 "Could not check the vault key of %s (%s)",
                 instance.get('id') or instance.get('name'), type(exc).__name__,
@@ -822,6 +830,10 @@ class ServonautTools:
             self._audit.log(tool_name, args, '', False, CREDENTIAL_CHECK_FAILED_REASON)
             return None, CREDENTIAL_CHECK_FAILED
         return self._team_guard(rules_row if rules_row is not None else instance), None
+
+    @staticmethod
+    def _vault_update_message(error: ClientUpdateRequiredError) -> str:
+        return format_update_required_message(error, client_kind=get_client_identity().kind)
 
     async def _credential_rules_row(self, instance: Dict) -> Optional[Dict]:
         """The team row whose rules apply to *instance*, an own server reached
@@ -1254,7 +1266,13 @@ class ServonautTools:
           - Connection error: ``(None, True, False, None, key_source)``
           - Other SSH error:  ``(message, False, False, reason, key_source)``
         """
-        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        try:
+            conn, cleanup = await self._resolve_connection_with_vault(instance)
+        except Exception as exc:
+            if update := find_client_update_required(exc):
+                message = f"Error: {self._vault_update_message(update)}"
+                return (message, False, False, 'client_update_required', None)
+            raise
         key_source = conn.get('key_source')
         # Everything after the vault key hits disk runs INSIDE the try so the
         # finally deletes the temp key even when the command builder or a
@@ -4802,6 +4820,8 @@ class ServonautTools:
         try:
             team_conn, team_cleanup = await self._resolve_credential_chain(team)
         except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
+            if find_client_update_required(exc) is not None:
+                raise
             logger.warning(
                 "Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__,
             )
@@ -4836,6 +4856,8 @@ class ServonautTools:
             if cleanup is not None:
                 await cleanup()
             if isinstance(exc, VaultCredentialError):
+                if update := find_client_update_required(exc):
+                    raise RuntimeError(self._vault_update_message(update)) from exc
                 raise RuntimeError(str(exc)) from exc
             raise
         if hop is None:
@@ -4900,6 +4922,8 @@ class ServonautTools:
             except Exception as exc:
                 # Native bindings are authenticated credentials; never bypass
                 # an integrity/authentication failure with a local key.
+                if update := find_client_update_required(exc):
+                    raise RuntimeError(self._vault_update_message(update)) from exc
                 raise RuntimeError("Native Vault SSH credential could not be verified") from exc
             if lease is not None:
                 identity_agent = getattr(lease, 'identity_agent', None)

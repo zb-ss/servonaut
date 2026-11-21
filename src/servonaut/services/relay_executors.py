@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.api_client import ClientUpdateRequiredError, find_client_update_required
+from servonaut.services.client_identity import format_update_required_message
 from servonaut.services.shared_servers import (
     is_shared_row,
     lacks_own_key,
@@ -145,12 +147,26 @@ class RelayExecutors:
                     # RUN_COMMAND, DEPLOY, PROVISION_*, COST_REPORT, SECURITY_SCAN
                     return await self._run_command(request)
         except Exception as e:
+            if update := find_client_update_required(e):
+                return self._update_required_response(request, update)
             logger.error("Executor error for request %s: %s", request.id, e)
             return CommandResponse(
                 request_id=request.id,
                 status="error",
                 error_message=str(e),
             )
+
+    def _update_required_response(
+        self, request: CommandRequest, error: ClientUpdateRequiredError,
+    ) -> CommandResponse:
+        self._audit_refusal(
+            request, request.type.value, request.target_server_id,
+            request.payload.get('command'), 'client_update_required',
+        )
+        return CommandResponse(
+            request_id=request.id, status="rejected",
+            error_message=format_update_required_message(error, client_kind="relay"),
+        )
 
     def _check_readonly_for_ai(self, call: "ToolCall"):
         """Gate an ``ssh_exec_readonly`` call that skipped the bridge.
@@ -424,6 +440,8 @@ class RelayExecutors:
                 try:
                     instance = await resolver(request.target_server_id)
                 except Exception as exc:
+                    if update := find_client_update_required(exc):
+                        return None, self._update_required_response(request, update)
                     return None, CommandResponse(
                         request_id=request.id, status="error", error_message=str(exc),
                     )
@@ -554,6 +572,8 @@ class RelayExecutors:
         try:
             team_lease = await self._vault_lease(team)
         except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
+            if find_client_update_required(exc) is not None:
+                raise
             logger.warning("Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__)
             return None, dict(instance)
         if team_lease is None:
@@ -702,6 +722,8 @@ class RelayExecutors:
                 row = await self._team_key_rules(instance, str(fallback.get('team_slug') or ''), team_row)
         except Exception as exc:  # noqa: BLE001 - refuse rather than guess the key
             target = instance.get('id') or request.target_server_id
+            if update := find_client_update_required(exc):
+                return None, self._update_required_response(request, update)
             logger.warning(
                 "Relay %s on %s refused: its vault key could not be checked (%s)",
                 tool_name, target, type(exc).__name__,
@@ -882,6 +904,8 @@ class RelayExecutors:
         except SSHOptionRefused as exc:
             return self._option_refusal(request, instance, 'run_command', command, exc)
         except Exception as e:
+            if find_client_update_required(e) is not None:
+                raise
             return CommandResponse(
                 request_id=request.id,
                 status="error",

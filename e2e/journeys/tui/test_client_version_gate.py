@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 from textual.content import Content
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from e2e.harness import fleet
 from e2e.harness.session_seed import seed_relay_config, seed_session
@@ -56,6 +56,52 @@ async def _view_ops(t) -> None:
     rows = await t.wait_until(lambda: t.table_rows("#teams_table"), desc="teams listed")
     assert rows == [["Ops", "owner", "2"]]
     await t.click("#btn_view_team")
+
+
+@pytest.mark.parametrize("size, via_palette", [((160, 50), False), ((100, 30), True)])
+async def test_enforced_vault_remains_reachable_and_explains_update(tui, seed, fake_cloud, size, via_palette):
+    fake_cloud.configure(plan="teams", mcp_connections=0)
+    fake_cloud.set_client_version_policy(mode="enforce", minimum_version=MINIMUM_VERSION)
+    _seed(seed, fake_cloud)
+
+    async with tui(size=size) as t:
+        await t.show_navigation()
+        await t.wait_until(lambda: t.nav_reachable("nav_vault"), desc="Vault navigation after the gate refusal")
+        await t.wait_for_toast(rf"^This version of Servonaut.*Update to {MINIMUM_VERSION}")
+        assert not t.nav_reachable("nav_ca")
+        if via_palette:
+            await t.palette("Go to Vault", choose="Go to Vault")
+        else:
+            await t.nav("nav_vault")
+        await t.wait_for_screen("VaultScreen")
+        await t.wait_for_text("Update required", screen_only=True)
+        status = t.on_screen("#vault_status", Static)
+
+        def drawn_status() -> str:
+            x, y, width, height = status.region
+            lines = t.rendered_text().splitlines()[y:y + height]
+            return " ".join(" ".join(line[x:x + width].split()) for line in lines)
+
+        await t.wait_until(
+            lambda: "reinstall" in drawn_status(),
+            desc="the complete update instructions rendered in the Vault card",
+        )
+        rendered = drawn_status()
+        assert f"Update to {MINIMUM_VERSION}" in rendered
+        assert "update your source checkout and reinstall" in rendered
+        assert not t.on_screen("#vault_workspace").display
+        assert all(t.on_screen(f"#vault_{action}", Button).disabled for action in ("setup", "recover", "create"))
+        assert fake_cloud.statuses("/api/v1/vault/identity/me") == [426, 426]
+        assert all("Vault background access needs attention" not in text for _, text in t.toasts())
+
+        fake_cloud.set_client_version_policy(mode="log", minimum_version=MINIMUM_VERSION)
+        await t.press("r")
+        await t.wait_until(
+            lambda: t.app.vault_available and not t.app.vault_update_required,
+            desc="Vault discovery resumes after refresh",
+        )
+        assert t.nav_reachable("nav_ca")
+        assert not t.screen.has_class("-update-required")
 
 
 async def test_enforce_mode_blocks_cloud_and_relay_while_local_fleet_and_updates_panel_work(
