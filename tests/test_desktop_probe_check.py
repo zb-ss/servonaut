@@ -256,7 +256,7 @@ def test_check_records_native_stderr_only_on_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_host_reports_first_root_request_once() -> None:
-    import aiohttp
+    aiohttp = pytest.importorskip("aiohttp")
     from scripts.desktop_probe.host import ProbeHost
 
     seen: list[str] = []
