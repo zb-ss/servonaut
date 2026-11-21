@@ -31,8 +31,11 @@ async def _open_appearance(t) -> None:
     await t.nav("nav_settings")
     await t.wait_for_screen("SettingsScreen")
     await t.click("#navbtn_appearance")
-    card = t.on_screen("#theme_card_servonaut-light", ThemeCard)
-    await t.wait_until(lambda: t.is_reachable(card), desc="Appearance cards shown")
+    # The panel builds its cards in a worker after it opens, so they may not exist yet.
+    await t.wait_until(
+        lambda: t.is_reachable(t.on_screen("#theme_card_servonaut-light", ThemeCard)),
+        desc="Appearance cards shown",
+    )
 
 
 def _active_cards(t) -> list[str]:
