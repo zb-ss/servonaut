@@ -55,7 +55,7 @@ Servonaut has prepared other copies.
 ## Upgrading a Debian package
 
 Before upgrading from an older Debian package to the first release with
-protected upgrades (`X.Y.Z`, to be set before release), close Servonaut,
+protected upgrades (2.35.0), close Servonaut,
 including any running MCP servers and the background relay. Later upgrades
 keep the files those sessions are already using.
 
