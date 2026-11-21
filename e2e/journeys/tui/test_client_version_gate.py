@@ -167,3 +167,118 @@ async def test_log_mode_keeps_relay_and_teams_working(tui, seed, fake_cloud):
         )
         primary = str(t.on_screen("#updates_status_primary", Static).render())
         assert f"needs {MINIMUM_VERSION}" not in primary
+
+
+async def test_enforce_mode_apt_managed_desktop_shows_apt_upgrade_command(
+    tui, seed, fake_cloud, monkeypatch,
+):
+    from textual.widgets import Button, RadioSet
+
+    import servonaut.app as app_mod
+    import servonaut.runtime as runtime_mod
+    from servonaut.runtime import (
+        DistributionKind,
+        PackageManagementCapability,
+        PackageManagementKind,
+        RuntimeLayout,
+    )
+    from servonaut.screens.settings.panels import updates as updates_mod
+    from servonaut.services.client_identity import reset_client_identity_for_tests
+    from servonaut.updates import apt as apt_mod
+    from servonaut.updates import status as updates_status
+    from servonaut.updates.apt import (
+        APT_UPGRADE_COMMAND,
+        AptInstallStatus,
+        reset_apt_status_cache_for_tests,
+        seed_apt_status_cache_for_tests,
+    )
+
+    fake_cloud.configure(
+        plan="teams",
+        client_version_mode="enforce",
+        client_minimum_version=MINIMUM_VERSION,
+    )
+    _seed(seed, fake_cloud)
+
+    root = seed.home / "opt" / "servonaut"
+    desktop_runtime = RuntimeLayout(
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        product_version="2.34.0",
+        build_revision=None,
+        resource_root=root,
+        executable_root=root,
+        data_root=seed.home / ".servonaut",
+        executable=root / "servonaut-desktop",
+        python_executable=None,
+        path_console=None,
+        console_helper=None,
+        desktop_child=None,
+        package_management=PackageManagementCapability(
+            PackageManagementKind.UNSUPPORTED, (), False,
+        ),
+        is_frozen=True,
+    )
+    apt_status = AptInstallStatus(
+        managed=True,
+        suite="stable",
+        suites=("stable",),
+        dpkg_owned=True,
+        architecture="amd64",
+        checked=True,
+    )
+
+    def fake_refresh(rt, **_kw):
+        seed_apt_status_cache_for_tests(apt_status, runtime=rt, platform_name="linux")
+        return apt_status
+
+    reset_client_identity_for_tests()
+    reset_apt_status_cache_for_tests()
+    monkeypatch.setattr(runtime_mod, "detect_runtime", lambda: desktop_runtime)
+    monkeypatch.setattr(app_mod, "detect_runtime", lambda: desktop_runtime)
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    monkeypatch.setattr(apt_mod, "refresh_apt_status", fake_refresh)
+    monkeypatch.setattr(updates_mod, "refresh_apt_status", fake_refresh)
+
+    try:
+        async with tui() as t:
+            await t.wait_for_text(fleet.APP_1.name, fleet.DB_1.name, fleet.EDGE_1.name)
+            await t.wait_until(
+                lambda: _indicator_text(t) == UPDATE_REQUIRED,
+                desc="relay indicator shows update required on APT desktop install",
+            )
+
+            await _view_ops(t)
+            await t.wait_for_toast(rf"{MINIMUM_VERSION}.*--only-upgrade servonaut")
+
+            await t.nav("nav_settings")
+            await t.wait_for_screen("SettingsScreen")
+            await t.click("#navbtn_updates")
+            await t.wait_until(
+                lambda: isinstance(t.screen._current_panel(), UpdatesPanel)
+                and t.screen._current_panel()._loaded
+                and not t.screen._current_panel()._settling
+                and not t.screen._current_panel()._checking_apt,
+                desc="Updates panel loaded for APT desktop install",
+            )
+            await t.wait_for_text(
+                "installed from the Servonaut APT repository",
+                f"servonaut.dev needs {MINIMUM_VERSION} or later for team, vault and AI features.",
+                "Local features keep working. To update now, run:",
+                APT_UPGRADE_COMMAND,
+                "Release channel: stable (set in your APT source)",
+                "Servonaut does not modify APT configuration.",
+            )
+            panel = t.screen._current_panel()
+            command = panel.query_one("#updates_status_command", Static)
+            assert command.display is True
+            assert str(command.render()) == APT_UPGRADE_COMMAND
+            assert panel.query_one("#updates_btn_update", Button).display is False
+            assert panel.query_one("#updates_btn_check", Button).display is False
+            assert panel.query_one("#updates_link_download").display is False
+            assert panel.query_one("#updates_channel_radio", RadioSet).display is False
+            assert panel.query_one("#updates_channel_apt_summary", Static).display is True
+            assert panel.query_one("#save_updates", Button).disabled is True
+    finally:
+        reset_client_identity_for_tests()
+        reset_apt_status_cache_for_tests()

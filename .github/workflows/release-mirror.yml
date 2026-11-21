@@ -59,24 +59,58 @@ on:
         description: "Run the audit instead of mirroring a release"
         type: boolean
         default: false
+      apt_action:
+        description: "APT archive action"
+        type: choice
+        default: auto
+        options: [auto, publish, audit, withdraw, restore, pause, resume]
+      apt_tag:
+        description: "Exact release tag for an APT withdrawal or restoration"
+        type: string
+      apt_digest:
+        description: "Exact .deb SHA-256 for an APT withdrawal or restoration"
+        type: string
+      apt_rehearsal:
+        description: "Use a separate APT prefix and a disposable signing key"
+        type: boolean
+        default: false
   schedule:
     - cron: "41 6 * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-mirror-${{ github.event.workflow_run.head_branch || inputs.tag || 'audit' }}
+  # Owner actions can enter the APT writer queue while the daily audit runs.
+  group: release-mirror-${{ (github.event_name == 'workflow_dispatch' && inputs.apt_action != 'auto' && format('apt-{0}', github.run_id)) || github.event.workflow_run.head_branch || inputs.tag || 'audit' }}
   cancel-in-progress: false
+  queue: max
 
 env:
   DOWNLOAD_PAGE: https://servonaut.dev/download
+  APT_FINALS: ${{ vars.APT_FINALS || '2' }}
+  APT_CANDIDATES: ${{ vars.APT_CANDIDATES || '2' }}
+  APT_VALID_HOURS: ${{ vars.APT_VALID_HOURS || '48' }}
+  APT_POOL_DAYS: ${{ vars.APT_POOL_DAYS || '30' }}
+  APT_INDEX_DAYS: ${{ vars.APT_INDEX_DAYS || '7' }}
+  APT_ALERT_HOURS: ${{ vars.APT_ALERT_HOURS || '24' }}
+  APT_SPLIT_MINUTES: ${{ vars.APT_SPLIT_MINUTES || '30' }}
+  APT_ATTEMPTS: ${{ vars.APT_ATTEMPTS || '3' }}
+  APT_TIMEOUT: ${{ vars.APT_TIMEOUT || '120' }}
+  APT_MAX_BYTES: ${{ vars.APT_MAX_BYTES || '536870912' }}
+  APT_CHECKSUM_MAX_BYTES: ${{ vars.APT_CHECKSUM_MAX_BYTES || '65536' }}
+  APT_KEY_ALERT_DAYS: ${{ vars.APT_KEY_ALERT_DAYS || '90' }}
+  APT_REHEARSAL_RETENTION_HOURS: ${{ vars.APT_REHEARSAL_RETENTION_HOURS || '24' }}
+  APT_UNQUALIFIED_ALERT_HOURS: ${{ vars.APT_UNQUALIFIED_ALERT_HOURS || '24' }}
 
 jobs:
   resolve:
     name: resolve
     # Never for forks.
-    if: github.repository == 'zb-ss/servonaut' && github.event_name != 'schedule' && inputs.audit != true
+    if: >-
+      github.repository == 'zb-ss/servonaut' && github.event_name != 'schedule' &&
+      inputs.audit != true && (github.event_name != 'workflow_dispatch' || inputs.apt_action == 'auto')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -162,6 +196,7 @@ jobs:
       attestations: read
     outputs:
       desktop-deb: ${{ steps.verify.outputs.desktop-deb }}
+      apt-deb-verified: ${{ steps.apt-input.outputs.verified }}
       # Set once the plan was handed on, even when a later step fails.
       plan-artifact: ${{ steps.plan-handoff.outputs.artifact-id }}
     env:
@@ -272,6 +307,11 @@ jobs:
           python .github/scripts/release-mirror.py check-public \
             --plan "${RUNNER_TEMP}/mirror/plan.json" \
             --base "${MIRROR_PUBLIC_BASE}"
+
+      - name: Record the APT package readback
+        id: apt-input
+        if: env.DRY_RUN != 'true' && steps.verify.outputs.desktop-deb != ''
+        run: echo "verified=true" >> "${GITHUB_OUTPUT}"
 
       - name: Point the channel files at the release
         id: channels
@@ -402,7 +442,7 @@ jobs:
     name: refresh
     if: >-
       github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
-      (github.event_name == 'schedule' || inputs.audit == true)
+      (github.event.schedule == '41 6 * * *' || inputs.audit == true)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release-mirror
@@ -475,7 +515,7 @@ jobs:
     needs: refresh
     if: >-
       !cancelled() && github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
-      (github.event_name == 'schedule' || inputs.audit == true)
+      (github.event.schedule == '41 6 * * *' || inputs.audit == true)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -549,3 +589,226 @@ jobs:
           else
             gh issue create --title "${title}" --body-file "${RUNNER_TEMP}/issue.md"
           fi
+
+  # APT writers share a queue across scheduled refreshes, releases, and owner actions.
+  apt-publish:
+    name: publish APT archive
+    needs: [resolve, mirror]
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (
+        github.event.schedule == '17 */6 * * *' ||
+        (vars.APT_RELEASE_MIRROR == 'on' && needs.mirror.outputs.apt-deb-verified == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.apt_action != 'auto' &&
+          inputs.apt_action != 'audit')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: release-mirror
+    concurrency:
+      group: release-mirror-apt-writer
+      queue: max
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      production-result: ${{ steps.publish.outcome }}
+      rotation: ${{ steps.publish.outputs.rotation }}
+      upstream: ${{ steps.publish.outputs.upstream }}
+      unqualified: ${{ steps.publish.outputs.unqualified }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+      APT_ACTION: ${{ inputs.apt_action == 'auto' && 'publish' || inputs.apt_action || 'publish' }}
+      APT_TAG: ${{ inputs.apt_tag }}
+      APT_DIGEST: ${{ inputs.apt_digest }}
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+    steps:
+      - name: Require the archive opt-in for production writes
+        if: >-
+          github.event_name == 'workflow_dispatch' && inputs.dry_run != true &&
+          inputs.apt_rehearsal != true && vars.APT_RELEASE_MIRROR != 'on'
+        run: |
+          echo "::error::The APT archive is disabled. Enable it before dispatching a production write."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install APT archive tools
+        run: |
+          .github/scripts/apt-install.sh --no-install-recommends apt-utils gpg gpg-agent gpgv
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Validate the APT publication plan without writing
+        if: inputs.dry_run == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/apt-publish.py --dry-run --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Mask the APT bucket's address
+        if: >-
+          inputs.dry_run != true && (inputs.apt_rehearsal == true || vars.APT_RELEASE_MIRROR == 'on' ||
+            github.event.schedule == '17 */6 * * *')
+        env:
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MIRROR_ENDPOINT}" ]]; then exit 0; fi
+          host="${MIRROR_ENDPOINT#*://}"
+          host="${host%%/*}"
+          echo "::add-mask::${host}"
+          echo "::add-mask::${host%%.*}"
+
+      - name: Sign and publish a separate rehearsal archive
+        id: rehearse
+        if: inputs.dry_run != true && inputs.apt_rehearsal == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          python .github/scripts/apt-publish.py --rehearsal --prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Sign and publish the APT archive
+        id: publish
+        if: >-
+          inputs.dry_run != true && inputs.apt_rehearsal != true &&
+          vars.APT_RELEASE_MIRROR == 'on'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+          APT_REPO_SIGNING_SUBKEY: ${{ secrets.APT_REPO_SIGNING_SUBKEY }}
+          APT_REPO_SIGNING_PASSPHRASE: ${{ secrets.APT_REPO_SIGNING_PASSPHRASE }}
+          APT_REPO_SIGNING_SUBKEY_FINGERPRINT: ${{ vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT }}
+          APT_REPO_PUBLIC_KEYRING: ${{ vars.APT_REPO_PUBLIC_KEYRING }}
+        run: |
+          python .github/scripts/apt-publish.py --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Remove the failed rehearsal archive
+        if: >-
+          always() && inputs.apt_rehearsal == true && inputs.dry_run != true &&
+          (steps.rehearse.outcome == 'failure' || steps.rehearse.outcome == 'cancelled')
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          python .github/scripts/apt-publish.py --action cleanup-rehearsal --rehearsal \
+            --prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+      - name: Remove expired rehearsal archives
+        if: >-
+          !cancelled() && github.event.schedule == '17 */6 * * *'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          if [[ -z "${MIRROR_ENDPOINT}" || -z "${MIRROR_BUCKET}" ]]; then exit 0; fi
+          python .github/scripts/apt-publish.py --action sweep-rehearsals --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+  apt-audit:
+    name: audit the public APT archive
+    needs: apt-publish
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.APT_RELEASE_MIRROR == 'on' && inputs.dry_run != true && inputs.apt_rehearsal != true &&
+      (github.event.schedule == '17 */6 * * *' || inputs.apt_action == 'audit')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      rotation: ${{ steps.audit.outputs.rotation }}
+    env:
+      APT_REPO_SIGNING_SUBKEY_FINGERPRINT: ${{ vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+      GH_REPO: ${{ github.repository }}
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install public archive verification tools
+        run: |
+          .github/scripts/apt-install.sh --no-install-recommends gpg gpgv
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Replay the public signed archive
+        id: audit
+        run: |
+          python .github/scripts/apt-publish.py --action audit --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+  apt-report:
+    name: report APT archive alerts
+    needs: [apt-publish, apt-audit]
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (needs.apt-audit.result == 'failure' || needs.apt-audit.result == 'success' ||
+        needs.apt-publish.outputs.production-result == 'success' ||
+        needs.apt-publish.outputs.rotation == 'true' || needs.apt-publish.outputs.upstream == 'true' ||
+        needs.apt-publish.outputs.unqualified == 'true' ||
+        (vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' &&
+          needs.apt-publish.result == 'failure'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: release-mirror-apt-alert
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open or comment on APT archive issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PUBLISH_RESULT: ${{ needs.apt-publish.result }}
+          PRODUCTION_RESULT: ${{ needs.apt-publish.outputs.production-result }}
+          AUDIT_RESULT: ${{ needs.apt-audit.result }}
+          PUBLISH_ROTATION: ${{ needs.apt-publish.outputs.rotation }}
+          AUDIT_ROTATION: ${{ needs.apt-audit.outputs.rotation }}
+          UPSTREAM: ${{ needs.apt-publish.outputs.upstream }}
+          UNQUALIFIED: ${{ needs.apt-publish.outputs.unqualified }}
+          CHECK_SCHEDULED_PUBLISH: ${{ vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' }}
+          APT_ALERT_REMINDER_HOURS: ${{ vars.APT_ALERT_REMINDER_HOURS || '24' }}
+        run: |
+          python3 .github/scripts/apt-report-alerts.py

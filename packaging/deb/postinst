@@ -3,6 +3,15 @@ set -e
 
 case "$1" in
     configure)
+        case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
+            ""|*[!a-z0-9+.-]*) ;;
+            [a-z0-9]*)
+                generation_helper="/usr/libexec/${DPKG_MAINTSCRIPT_PACKAGE}/apt-generation"
+                if [ -x "$generation_helper" ]; then
+                    "$generation_helper" activate
+                fi
+                ;;
+        esac
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database -q /usr/share/applications || true
         fi

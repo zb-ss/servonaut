@@ -10,7 +10,6 @@ unlink so that user-space filesystem cache tools cannot recover it after exit.
 
 from __future__ import annotations
 
-import atexit
 import logging
 import os
 import secrets
@@ -19,6 +18,8 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Iterator
+
+from servonaut.utils.process_cleanup import register_process_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def persistent_bw_ssh_key(key_body: str, *, prefix: str = _BW_KEY_PREFIX) -> str
     global _atexit_sweeper_registered
     _live_bw_key_paths.add(tmp_path)
     if not _atexit_sweeper_registered:
-        atexit.register(_sweep_live_bw_keys)
+        register_process_cleanup(_sweep_live_bw_keys)
         _atexit_sweeper_registered = True
 
     return tmp_path

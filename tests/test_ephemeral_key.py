@@ -194,7 +194,7 @@ class TestPersistentBwSshKey:
 
         monkeypatch.setattr(ek, "_atexit_sweeper_registered", False)
         monkeypatch.setattr(ek, "_live_bw_key_paths", set())
-        with patch("atexit.register") as mock_register:
+        with patch.object(ek, "register_process_cleanup") as mock_register:
             persistent_bw_ssh_key(SAMPLE_KEY)
             persistent_bw_ssh_key(SAMPLE_KEY)
         mock_register.assert_called_once_with(ek._sweep_live_bw_keys)

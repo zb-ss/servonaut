@@ -26,6 +26,7 @@ from servonaut.services.client_identity import (
     install_update_step,
     is_apt_managed_install,
 )
+from servonaut.services.apt_runtime import AptChange, package_update_notice
 from servonaut.services.update_service import UpdateCheckResult, UpdateService
 from servonaut.services.version_policy import (
     DEFAULT_UPDATE_URL,
@@ -36,6 +37,13 @@ from servonaut.services.version_policy import (
     safe_update_url,
 )
 from servonaut.updates import status as updates_status
+from servonaut.updates.apt import (
+    APT_UPGRADE_COMMAND,
+    AptInstallStatus,
+    get_cached_apt_status,
+    is_apt_probe_candidate,
+    refresh_apt_status,
+)
 from servonaut.updates.status import (
     Channel,
     STATUS_POLL_SECONDS,
@@ -56,7 +64,7 @@ logger = logging.getLogger(__name__)
 STACK_BREAKPOINT_WIDTH = 95
 
 _RELEASES_TAG_BASE = "https://github.com/zb-ss/servonaut/releases/tag/v"
-_APT_UPGRADE_COMMAND = "sudo apt update && sudo apt install --only-upgrade servonaut"
+_APT_UPGRADE_COMMAND = APT_UPGRADE_COMMAND
 
 _CHECK_ERROR_RESULTS = frozenset({
     UpdateCheckResult.OFFLINE,
@@ -313,6 +321,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._poll_seconds = STATUS_POLL_SECONDS
         self._saving_channel = False
         self._check_baseline: UpdateStatus | None = None
+        self._apt_status: Optional[AptInstallStatus] = None
+        self._checking_apt: bool = False
 
     # ------------------------------------------------------------------
     # Composition
@@ -322,7 +332,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         """Yield version summary, live update status, and release channel."""
         with Vertical(id="updates_summary_section", classes="settings-form-section"):
             with Horizontal(id="updates_installed_row", classes="updates-row"):
-                yield Static("Installed", classes="updates-label", markup=False)
+                yield Static("Installed", id="updates_installed_label", classes="updates-label", markup=False)
                 yield Static(
                     "",
                     id="updates_installed_value",
@@ -342,6 +352,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                         "",
                         id="updates_status_secondary",
                         classes="updates-status-detail",
+                        markup=False,
+                    )
+                    yield Static(
+                        "",
+                        id="updates_status_command",
+                        classes="updates-command",
                         markup=False,
                     )
                     with Horizontal(id="updates_status_links"):
@@ -369,6 +385,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     yield Button("Postpone 24 h", id="updates_btn_postpone", variant="default")
                     yield Button("Try now", id="updates_btn_try", variant="primary")
                     yield Button("Update now", id="updates_btn_update", variant="primary")
+                    yield Button("Restart Servonaut", id="updates_btn_restart", variant="primary", classes="hidden")
 
         with Vertical(id="updates_channel_section", classes="settings-form-section"):
             yield Static("Release channel", id="updates_channel_title", classes="settings-group-title", markup=False)
@@ -383,6 +400,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     id="updates_channel_rc",
                 ),
                 id="updates_channel_radio",
+            )
+            yield Static(
+                "",
+                id="updates_channel_apt_summary",
+                classes="updates-apt-channel",
+                markup=False,
             )
             yield Static(
                 "",
@@ -405,11 +428,15 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
 
     def on_mount(self) -> None:
         super().on_mount()
+        self.query_one("#updates_status_command", Static).display = False
+        self.query_one("#updates_channel_apt_summary", Static).display = False
         if self._status is None:
             self.query_one("#updates_channel_radio", RadioSet).disabled = True
             self.query_one("#save_updates", Button).disabled = True
         if hasattr(self.app, "_update_in_progress"):
             self.watch(self.app, "_update_in_progress", self._sync_action_busy, init=False)
+        if hasattr(self.app, "apt_upgrade_state"):
+            self.watch(self.app, "apt_upgrade_state", self._render_status, init=False)
         self._status_timer = self.set_interval(self._poll_seconds, self._queue_status_refresh)
         self._sync_action_busy()
         self.call_after_refresh(self._apply_layout_to_size)
@@ -467,9 +494,42 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 pass
         return None
 
+    def _needs_apt_probe(self, runtime: Optional[RuntimeLayout]) -> bool:
+        return is_apt_probe_candidate(runtime, platform_name=sys.platform)
+
+    def _effective_apt_managed(self, install_kind: str) -> Optional[bool]:
+        if install_kind == "apt":
+            return True
+        if self._apt_status is not None and self._apt_status.checked:
+            return self._apt_status.managed
+        cached = get_cached_apt_status(self._runtime())
+        if cached is not None and cached.checked:
+            return cached.managed
+        return None
+
+    def _effective_apt_suite(self) -> tuple[Optional[str], int]:
+        apt_status = (
+            self._apt_status
+            if self._apt_status is not None and self._apt_status.checked
+            else get_cached_apt_status(self._runtime())
+        )
+        if apt_status is None or not apt_status.managed:
+            return None, 0
+        display = apt_status.suite_display
+        if not display:
+            return None, 0
+        cleaned = _terminal_safe(display).strip()
+        if not cleaned:
+            return None, 0
+        count = len(apt_status.suites) if apt_status.suites else 1
+        return cleaned, count
+
     def load(self) -> None:
         """Restore saved controls and refresh local state off the UI thread."""
         self._details_expanded = False
+        cached_apt = get_cached_apt_status(self._runtime())
+        if cached_apt is not None:
+            self._apt_status = cached_apt
         if self._status is not None:
             self._set_radio_channel(self._status.channel)
             self._snapshot_now()
@@ -495,13 +555,51 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         )
 
     async def _refresh_local_status(self, *, redraw: bool) -> None:
-        snapshot = await asyncio.to_thread(read_update_status, self._runtime())
+        runtime = self._runtime()
+        snapshot = await asyncio.to_thread(read_update_status, runtime)
         policy = self._policy or await asyncio.to_thread(self._load_cached_policy)
         if not self.is_attached or not self.display or self.screen is not self.app.screen:
             return
         changed = policy != self._policy
         self._policy = policy
+        if not self._needs_apt_probe(runtime):
+            cached_apt = get_cached_apt_status(runtime)
+            apt_changed = cached_apt != self._apt_status
+            self._apt_status = cached_apt
+            self._accept_snapshot(snapshot, redraw=redraw or changed or apt_changed)
+            return
+
+        # Render the last cached APT classification immediately alongside a
+        # loading indicator while dpkg-query and /etc/apt run off the UI thread.
+        cached_apt = get_cached_apt_status(runtime)
+        if cached_apt is not None and self._apt_status is None:
+            self._apt_status = cached_apt
+            changed = True
+        self._checking_apt = True
         self._accept_snapshot(snapshot, redraw=redraw or changed)
+        try:
+            fresh_apt = await asyncio.to_thread(refresh_apt_status, runtime)
+        except Exception as exc:  # noqa: BLE001 — incomplete evidence falls back
+            logger.debug("APT installation check failed: %s", exc)
+            fresh_apt = AptInstallStatus(managed=False, checked=False)
+        finally:
+            self._checking_apt = False
+        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+            return
+        if not fresh_apt.checked:
+            last_good = (
+                self._apt_status
+                if self._apt_status is not None and self._apt_status.checked
+                else get_cached_apt_status(runtime)
+            )
+            if last_good is not None and last_good.checked:
+                fresh_apt = last_good
+        apt_changed = fresh_apt != self._apt_status
+        self._apt_status = fresh_apt
+        if apt_changed:
+            self._render_status()
+        else:
+            self._sync_action_busy()
 
     def _accept_snapshot(self, snapshot: UpdateStatus, *, redraw: bool = False) -> None:
         previous = self._status
@@ -632,14 +730,18 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
 
         installed = _terminal_safe(status.installed_version or get_version()).strip() or "unknown"
         install_kind = status.install_kind or ""
-        install_label = describe_install_kind(install_kind)
+        apt_managed = self._effective_apt_managed(install_kind)
+        install_label = describe_install_kind(install_kind, apt_managed=apt_managed)
+        apt_state = getattr(self.app, "apt_upgrade_state", None)
 
+        self.query_one("#updates_installed_label", Static).update("Running" if apt_state is not None else "Installed")
         self.query_one("#updates_installed_value", Static).update(
             f"{installed}  ·  {install_label}"
         )
 
         primary_widget = self.query_one("#updates_status_primary", Static)
         secondary_widget = self.query_one("#updates_status_secondary", Static)
+        command_widget = self.query_one("#updates_status_command", Static)
         details_widget = self.query_one("#updates_failure_details", Static)
         links_row = self.query_one("#updates_status_links", Horizontal)
         link_notes = self.query_one("#updates_link_release_notes", LinkButton)
@@ -650,13 +752,15 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         btn_postpone = self.query_one("#updates_btn_postpone", Button)
         btn_try = self.query_one("#updates_btn_try", Button)
         btn_update = self.query_one("#updates_btn_update", Button)
+        btn_restart = self.query_one("#updates_btn_restart", Button)
         actions_box = self.query_one("#updates_status_actions", Vertical)
 
         # Reset visibility and state classes cleanly.
         for cls in ("-warning", "-error", "-accent", "-success"):
             primary_widget.remove_class(cls)
-        for btn in (btn_check, btn_postpone, btn_try, btn_update):
+        for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart):
             btn.display = False
+        btn_restart.remove_class("hidden")
         link_notes.display = False
         link_details.display = False
         link_download.display = False
@@ -665,6 +769,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
 
         primary_text = ""
         secondary_text = ""
+        command_text = ""
         required_min = self._effective_required_minimum(installed)
         pinned_version = _terminal_safe(
             getattr(status, "pinned_version", None) or ""
@@ -673,23 +778,40 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             getattr(status, "pinned_until_newer_than", None) or ""
         ).strip()
 
-        if required_min:
+        if apt_state is not None and apt_state.restart_version:
+            primary_text = package_update_notice(installed, apt_state.restart_version, managed_by_apt=apt_managed)
+            btn_restart.display = True
+            primary_widget.add_class("-accent")
+        elif apt_state is not None and apt_state.change is AptChange.REMOVED:
+            primary_text = "The Servonaut package was removed."
+            secondary_text = "This running window remains available until you close it."
+            primary_widget.add_class("-warning")
+        elif apt_state is not None and apt_state.change is AptChange.DEFERRED:
+            primary_text = "Waiting for the Servonaut package to finish configuring."
+            primary_widget.add_class("-warning")
+        elif required_min:
             # State 4 — service requires a newer version (server minimum).
-            hint = format_server_minimum_hint(install_kind, policy=self._policy)
+            hint = format_server_minimum_hint(
+                install_kind, apt_managed=apt_managed, policy=self._policy,
+            )
             primary_text = (
                 f"servonaut.dev needs {required_min} or later for team, "
                 "vault and AI features."
             )
-            secondary_text = f"Local features keep working.  Update: {hint}"
+            if _is_apt_install(install_kind, apt_managed=apt_managed):
+                secondary_text = "Local features keep working. To update now, run:"
+                command_text = hint
+            else:
+                secondary_text = f"Local features keep working.  Update: {hint}"
             primary_widget.add_class("-warning")
-            if _can_run_in_app_update(install_kind):
+            if _can_run_in_app_update(install_kind, apt_managed=apt_managed):
                 btn_update.display = True
-            if _supports_download_link(install_kind):
+            if _supports_download_link(install_kind, apt_managed=apt_managed):
                 link_download.display = True
         elif status.state == "managed_elsewhere":
             # State 5 — managed elsewhere.
-            primary_text, secondary_text, show_check, show_download, notes_ver = (
-                self._managed_elsewhere_view(status)
+            primary_text, secondary_text, command_text, show_check, show_download, notes_ver = (
+                self._managed_elsewhere_view(status, apt_managed=apt_managed)
             )
             if show_check:
                 btn_check.display = True
@@ -815,11 +937,13 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         primary_widget.update(primary_text)
         secondary_widget.update(secondary_text)
         secondary_widget.display = bool(secondary_text)
+        command_widget.update(command_text)
+        command_widget.display = bool(command_text)
         links_row.display = bool(
             link_notes.display or link_details.display or link_download.display
         )
         actions_box.display = any(
-            btn.display for btn in (btn_check, btn_postpone, btn_try, btn_update)
+            btn.display for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart)
         )
 
         self._sync_channel_controls(status)
@@ -827,14 +951,18 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._sync_action_busy()
 
     def _managed_elsewhere_view(
-        self, status: UpdateStatus,
-    ) -> tuple[str, str, bool, bool, Optional[str]]:
-        """Return ``(primary, secondary, show_check, show_download, notes_ver)``."""
+        self,
+        status: UpdateStatus,
+        *,
+        apt_managed: Optional[bool] = None,
+    ) -> tuple[str, str, str, bool, bool, Optional[str]]:
+        """Return ``(primary, secondary, command, show_check, show_download, notes_ver)``."""
         install_kind = status.install_kind or ""
-        if _is_apt_install(install_kind):
+        if _is_apt_install(install_kind, apt_managed=apt_managed):
             return (
-                "Updates are installed by apt (your system's package updates).",
-                f"To update now: {_APT_UPGRADE_COMMAND}",
+                "Updates are managed by apt.",
+                "To update now, run:",
+                _APT_UPGRADE_COMMAND,
                 False,
                 False,
                 None,
@@ -843,6 +971,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return (
                 "Running from a source checkout — automatic updates are off.",
                 "Update your checkout to get newer versions.",
+                "",
                 False,
                 False,
                 None,
@@ -851,6 +980,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return (
                 "Updates are installed with pip.",
                 "To update now: pip install --upgrade servonaut",
+                "",
                 False,
                 False,
                 None,
@@ -859,17 +989,19 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return (
                 "Updates are managed by pipx.",
                 "To update now: pipx upgrade servonaut",
+                "",
                 False,
                 False,
                 None,
             )
-        if _supports_download_link(install_kind):
+        if _supports_download_link(install_kind, apt_managed=apt_managed):
             available = _terminal_safe(
                 status.target_version or self._discovered_version or ""
             ).strip()
             if available and self._is_newer(available, status.installed_version):
                 return (
                     f"{available} is available",
+                    "",
                     "",
                     False,
                     True,
@@ -885,11 +1017,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 if self._check_error
                 else "New releases are available from servonaut.dev/download."
             )
-            return (primary, secondary, True, False, None)
+            return (primary, secondary, "", True, False, None)
 
         return (
             "Updates are managed outside Servonaut.",
             f"Download newer versions from {DEFAULT_UPDATE_URL}.",
+            "",
             False,
             False,
             None,
@@ -903,9 +1036,28 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         link.display = True
 
     def _sync_channel_controls(self, status: UpdateStatus) -> None:
-        managed = status.state == "managed_elsewhere"
+        install_kind = status.install_kind or ""
+        apt_managed = self._effective_apt_managed(install_kind)
+        is_apt = _is_apt_install(install_kind, apt_managed=apt_managed)
+        managed = status.state == "managed_elsewhere" or is_apt
+        title = self.query_one("#updates_channel_title", Static)
         radio = self.query_one("#updates_channel_radio", RadioSet)
+        apt_summary = self.query_one("#updates_channel_apt_summary", Static)
+        title.display = not is_apt
+        radio.display = not is_apt
         radio.disabled = managed or self._saving_channel
+        if is_apt:
+            suite_display, _ = self._effective_apt_suite()
+            if suite_display:
+                apt_summary.update(
+                    f"Release channel: {suite_display} (set in your APT source)"
+                )
+            else:
+                apt_summary.update("Release channel: set in your APT source")
+            apt_summary.display = True
+        else:
+            apt_summary.update("")
+            apt_summary.display = False
         try:
             save_btn = self.query_one(f"#save_{self.PANEL_ID}", Button)
             save_btn.disabled = managed or self._saving_channel
@@ -919,6 +1071,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         if status is None:
             note.update("")
             note.display = False
+            return
+        install_kind = status.install_kind or ""
+        apt_managed = self._effective_apt_managed(install_kind)
+        if _is_apt_install(install_kind, apt_managed=apt_managed):
+            note.update("Servonaut does not modify APT configuration.")
+            note.display = True
             return
         if status.state == "managed_elsewhere":
             note.update(
@@ -944,12 +1102,13 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return
         updating = bool(getattr(self.app, "_update_in_progress", False))
         checking = self._check_baseline is not None or bool(self._status and self._status.checking)
-        locked = updating or self._busy or self._status is None
+        locked = updating or self._busy or self._checking_apt or self._status is None
         for selector in (
             "#updates_btn_check",
             "#updates_btn_postpone",
             "#updates_btn_try",
             "#updates_btn_update",
+            "#updates_btn_restart",
             "#updates_link_download",
         ):
             try:
@@ -965,6 +1124,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             busy.start("Updating Servonaut…")
         elif self._status is None:
             busy.start("Reading update status…")
+        elif self._checking_apt:
+            busy.start("Checking installation status…")
         elif checking:
             busy.start("Checking for updates…")
         elif busy.is_active:
@@ -1010,6 +1171,11 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+
+    @on(Button.Pressed, "#updates_btn_restart")
+    def _on_restart_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.app.request_apt_restart()
 
     @on(Button.Pressed, "#updates_btn_check")
     def _on_check_now_pressed(self, event: Button.Pressed) -> None:

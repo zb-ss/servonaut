@@ -582,6 +582,19 @@ def test_gui_entry_dispatches_the_desktop_self_test(
     assert received == [runtime]
 
 
+def test_gui_entry_restarts_when_its_child_requests_it(tmp_path, monkeypatch):
+    entry = _load_gui_entry()
+    runtime = _layout(tmp_path, kind=DistributionKind.SOURCE, home=tmp_path / "home", is_frozen=False)
+    exec_calls = []
+    monkeypatch.setattr(entry, "detect_runtime", lambda: runtime)
+    monkeypatch.setattr(entry, "configure_rotating_log", lambda *_args, **_kwargs: tmp_path / "desktop.log")
+    monkeypatch.setattr(entry, "run_desktop", lambda request: entry.APT_RESTART_EXIT_CODE)
+    monkeypatch.setattr(entry, "exec_apt_restart", lambda executable, args: exec_calls.append((executable, args)))
+
+    entry.main(["--fixture"])
+    assert exec_calls == [(runtime.executable, [])]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the stand-in child uses a POSIX shebang")
 def test_isolated_check_runs_one_real_session_through_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -45,3 +45,10 @@ DEFAULT_MANIFEST_URLS: Final[Mapping[str, str]] = MappingProxyType(
         "preview": "https://releases.servonaut.dev/manifest/preview.json",
     }
 )
+
+# Official Servonaut APT archive invariants for classifying APT-managed Linux
+# desktop installations. Changes require a new build, like the manifest URLs.
+OFFICIAL_APT_REPOSITORY_URI: Final = "https://releases.servonaut.dev/apt/"
+OFFICIAL_APT_SUITES: Final[frozenset[str]] = frozenset({"stable", "candidate"})
+OFFICIAL_APT_COMPONENT: Final = "main"
+OFFICIAL_APT_PACKAGE: Final = "servonaut"
