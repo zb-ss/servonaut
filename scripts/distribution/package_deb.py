@@ -16,9 +16,12 @@ import tarfile
 from typing import Optional, Sequence
 
 from scripts.distribution.payload_tree import walk_payload
+from servonaut.debian_layout import HELPER_ROOT, INSTALL_ROOT, MARKER, PACKAGE_NAME, PAYLOAD, ROLES
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEB_TEMPLATE_DIR = _REPO_ROOT / "packaging" / "deb"
+_GENERATION_HELPER = Path(__file__).with_name("apt_generations.py")
+_DEBIAN_LAYOUT = _REPO_ROOT / "src" / "servonaut" / "debian_layout.py"
 
 # The desktop-file ID of the GUI launcher, which also names its icon and is
 # the program name the GUI's window announces (StartupWMClass). It does not
@@ -44,15 +47,11 @@ DEFAULT_DEPENDENCIES: tuple[str, ...] = (
     "ca-certificates",
 )
 
-REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = (
-    "servonaut-desktop",
-    "servonaut-desktop-child",
-    "servonaut",
-)
+REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = ROLES
 
 REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     *REQUIRED_PAYLOAD_BINARIES,
-    "servonaut-runtime.json",
+    MARKER,
 )
 
 # dpkg's own unpacker rejects the PAX extended headers Python's default tar
@@ -72,6 +71,16 @@ _PRODUCT_VERSION_RE = re.compile(
 
 class DebPackagingError(Exception):
     """Raised when Debian package assembly or validation fails."""
+
+
+def generation_source() -> str:
+    """Embed the shared layout so Debian can run the helper with only Python."""
+    helper = _GENERATION_HELPER.read_text(encoding="utf-8")
+    head, start, tail = helper.partition("# BEGIN DEBIAN LAYOUT IMPORT\n")
+    _, end, body = tail.partition("# END DEBIAN LAYOUT IMPORT\n")
+    if not start or not end:
+        raise DebPackagingError("Debian helper is missing its shared layout block")
+    return head + _DEBIAN_LAYOUT.read_text(encoding="utf-8") + body
 
 
 def resolve_epoch(source_epoch: Optional[int] = None) -> int:
@@ -135,6 +144,7 @@ def _build_control_tar(
     dependencies: Sequence[str],
     postinst_content: str,
     postrm_content: str,
+    prerm_content: str | None,
     md5sums_content: str,
     epoch: int,
 ) -> bytes:
@@ -178,6 +188,8 @@ def _build_control_tar(
         ("./postinst", 0o755, postinst_bytes),
         ("./postrm", 0o755, postrm_bytes),
     ]
+    if prerm_content is not None:
+        members.append(("./prerm", 0o755, prerm_content.encode("utf-8")))
 
     bio = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=bio, mtime=epoch) as gz:
@@ -229,11 +241,17 @@ def package_deb(
     """Package a multi-executable desktop onedir payload into a standard Debian (.deb) package.
 
     Payload symbolic links are packaged as links and must resolve inside the payload.
+    With the standard maintainer scripts, the staged payload becomes a retained
+    generation at configure time. Explicit maintainer script overrides retain
+    control of their original package layout.
 
     Returns:
         tuple[Path, str, int]: (deb_path, sha256_hex, byte_size)
     """
     _validate_maintainer(maintainer)
+    if not PACKAGE_NAME.fullmatch(package_name):
+        raise DebPackagingError("Invalid Debian package name")
+    with_generations = postinst_file is None and postrm_file is None
     upstream_version = debian_version(product_version)
     src_dir = Path(payload_dir).resolve()
     out_dir = Path(output_dir).resolve()
@@ -252,6 +270,9 @@ def package_deb(
 
     epoch = resolve_epoch(source_epoch)
     dep_list = tuple(dependencies) if dependencies is not None else DEFAULT_DEPENDENCIES
+    if with_generations and "python3 (>= 3.9)" not in dep_list:
+        dep_list = tuple(dependency for dependency in dep_list if dependency != "python3")
+        dep_list += ("python3 (>= 3.9)",)
 
     version_str = (
         f"{upstream_version}-{packaging_revision}"
@@ -284,6 +305,16 @@ def package_deb(
     copyright_bytes = copy_path.read_bytes()
     postinst_content = pinst_path.read_text(encoding="utf-8")
     postrm_content = prm_path.read_text(encoding="utf-8")
+    prerm_content = (
+        (_DEB_TEMPLATE_DIR / "prerm").read_text(encoding="utf-8") if with_generations else None
+    )
+    generation_program = generation_source() if with_generations else ""
+    generation_script = generation_program.encode("utf-8")
+    if postrm_file is None:
+        postrm_content = postrm_content.replace("@SERVONAUT_GENERATION_PROGRAM@", generation_program.rstrip())
+    helper_path = (HELPER_ROOT / package_name / "apt-generation").relative_to("/").as_posix()
+    install_path = (INSTALL_ROOT / package_name).relative_to("/").as_posix()
+    payload_path = f"{install_path}/{PAYLOAD}" if with_generations else install_path
 
     payload_entries = walk_payload(src_dir)
 
@@ -297,7 +328,7 @@ def package_deb(
     dirs_to_add: set[str] = {
         "./",
         "./opt",
-        f"./opt/{package_name}",
+        f"./{install_path}",
         "./usr",
         "./usr/bin",
         "./usr/share",
@@ -310,9 +341,12 @@ def package_deb(
         f"./usr/share/doc/{package_name}",
     }
 
+    if with_generations:
+        dirs_to_add.update(("./usr/libexec", f"./usr/libexec/{package_name}", f"./{payload_path}"))
+
     # Add directories from payload
     dirs_to_add.update(
-        f"./opt/{package_name}/{entry.relative_path.as_posix()}"
+        f"./{payload_path}/{entry.relative_path.as_posix()}"
         for entry in payload_entries
         if entry.kind == "directory"
     )
@@ -338,7 +372,11 @@ def package_deb(
                 if entry.kind == "directory":
                     continue
                 rel_path = entry.relative_path.as_posix()
-                tar_path = f"./opt/{package_name}/{rel_path}"
+                installed_path = (
+                    f"{install_path}/{rel_path}" if rel_path == MARKER
+                    else f"{payload_path}/{rel_path}"
+                )
+                tar_path = f"./{installed_path}"
                 ti = tarfile.TarInfo(name=tar_path)
                 ti.mtime = epoch
                 ti.uid = 0
@@ -355,7 +393,7 @@ def package_deb(
 
                 content = (src_dir / entry.relative_path).read_bytes()
                 total_uncompressed_bytes += len(content)
-                md5_entries.append((hashlib.md5(content).hexdigest(), f"opt/{package_name}/{rel_path}"))
+                md5_entries.append((hashlib.md5(content).hexdigest(), installed_path))
 
                 # Check if executable
                 is_exec = (
@@ -414,11 +452,29 @@ def package_deb(
                 f"usr/share/doc/{package_name}/copyright",
             ))
 
+            if with_generations:
+                helper = tarfile.TarInfo(name=f"./{helper_path}")
+                helper.size = len(generation_script)
+                helper.mode = 0o755
+                helper.mtime = epoch
+                helper.uname = helper.gname = "root"
+                tar.addfile(helper, io.BytesIO(generation_script))
+                total_uncompressed_bytes += len(generation_script)
+                md5_entries.append((hashlib.md5(generation_script).hexdigest(), helper_path))
+                for role in REQUIRED_PAYLOAD_BINARIES:
+                    launcher = tarfile.TarInfo(name=f"./{install_path}/{role}")
+                    launcher.type = tarfile.SYMTYPE
+                    launcher.linkname = f"/{helper_path}"
+                    launcher.mode = 0o777
+                    launcher.mtime = epoch
+                    launcher.uname = launcher.gname = "root"
+                    tar.addfile(launcher)
+
             # 6. Add symlinks in /usr/bin/
             for bin_name in ("servonaut", "servonaut-desktop"):
                 ti_sym = tarfile.TarInfo(name=f"./usr/bin/{bin_name}")
                 ti_sym.type = tarfile.SYMTYPE
-                ti_sym.linkname = f"/opt/{package_name}/{bin_name}"
+                ti_sym.linkname = f"/{install_path}/{bin_name}"
                 ti_sym.mode = 0o777
                 ti_sym.mtime = epoch
                 ti_sym.uid = 0
@@ -447,6 +503,7 @@ def package_deb(
         dependencies=dep_list,
         postinst_content=postinst_content,
         postrm_content=postrm_content,
+        prerm_content=prerm_content,
         md5sums_content=md5sums_content,
         epoch=epoch,
     )

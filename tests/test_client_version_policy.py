@@ -611,14 +611,66 @@ def test_install_specific_update_required_messages(
     assert "apt upgrade servonaut" not in msg
 
 
-def test_is_apt_managed_install_checks_servonaut_repo_files(tmp_path) -> None:
-    assert is_apt_managed_install(platform_name="linux", sources_dir=tmp_path) is False
-    assert is_apt_managed_install(platform_name="darwin", sources_dir=tmp_path) is False
-    (tmp_path / "other.list").write_text("deb https://example.com/ stable main\n", encoding="utf-8")
-    assert is_apt_managed_install(platform_name="linux", sources_dir=tmp_path) is False
-    (tmp_path / "servonaut.sources").write_text("Types: deb\n", encoding="utf-8")
-    assert is_apt_managed_install(platform_name="linux", sources_dir=tmp_path) is True
-    assert is_apt_managed_install(platform_name="darwin", sources_dir=tmp_path) is False
+def test_is_apt_managed_install_requires_cached_or_probed_two_fact_agreement(tmp_path) -> None:
+    from servonaut.updates.apt import (
+        AptDetectionConfig,
+        AptInstallStatus,
+        DpkgCommandResult,
+        seed_apt_status_cache_for_tests,
+    )
+
+    # A bare servonaut.sources filename without valid dpkg ownership and source
+    # metadata must never classify an install as APT-managed.
+    sources_d = tmp_path / "sources.list.d"
+    sources_d.mkdir()
+    (sources_d / "servonaut.sources").write_text("Types: deb\n", encoding="utf-8")
+
+    root = tmp_path / "opt" / "servonaut"
+    root.mkdir(parents=True)
+    exe = root / "servonaut-desktop"
+    exe.write_bytes(b"#!/bin/sh\n")
+    marker = root / "servonaut-runtime.json"
+    marker.write_text('{"distribution_kind": "packaged-desktop"}\n', encoding="utf-8")
+    runtime = RuntimeLayout(
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        product_version="2.34.0",
+        build_revision=None,
+        resource_root=root,
+        executable_root=root,
+        data_root=tmp_path / "data",
+        executable=exe,
+        python_executable=None,
+        path_console=None,
+        console_helper=None,
+        desktop_child=None,
+        package_management=PackageManagementCapability(PackageManagementKind.UNSUPPORTED, (), False),
+        is_frozen=True,
+    )
+    cfg = AptDetectionConfig(
+        packaged_prefixes=(tmp_path,),
+        sources_list_path=tmp_path / "sources.list",
+        sources_list_d_path=sources_d,
+        dpkg_status_path=tmp_path / "dpkg-status",
+        require_root_owned=False,
+        dpkg_runner=lambda _argv, _timeout: DpkgCommandResult(returncode=1, stdout=""),
+    )
+    assert is_apt_managed_install(runtime=runtime, platform_name="linux", allow_probe=True, config=cfg) is False
+    assert is_apt_managed_install(runtime=runtime, platform_name="darwin", allow_probe=True, config=cfg) is False
+
+    # Seeding the in-process cache makes zero-I/O checks return True on Linux
+    # packaged-desktop runtimes, while non-Linux and non-packaged runtimes stay False.
+    seed_apt_status_cache_for_tests(
+        AptInstallStatus(managed=True, suite="stable", suites=("stable",), dpkg_owned=True, checked=True),
+        runtime=runtime,
+        platform_name="linux",
+        config=cfg,
+    )
+    assert is_apt_managed_install(runtime=runtime, platform_name="linux", config=cfg) is True
+    assert is_apt_managed_install(runtime=runtime, platform_name="darwin", config=cfg) is False
+    assert is_apt_managed_install(
+        runtime=_fake_runtime(DistributionKind.PIPX, version="2.34.0"),
+        platform_name="linux",
+    ) is False
 
 
 def test_format_update_required_prefers_sanitized_server_update_hints() -> None:
@@ -1575,3 +1627,80 @@ def test_cli_subcommand_configures_runtime_identity_before_dispatch(monkeypatch)
     assert exc_info.value.code == 2
     assert len(captured_msg) == 1
     assert "pip install --upgrade servonaut" in captured_msg[0]
+
+
+def test_cli_subcommand_defers_apt_probe_until_426_and_never_probes_on_ok(
+    monkeypatch, capsys,
+) -> None:
+    import servonaut.cli.team as team_cli
+    import servonaut.main as main_mod
+    import servonaut.runtime as runtime_mod
+    from servonaut.services import client_identity as ci_mod
+    from servonaut.updates import apt as apt_mod
+    from servonaut.updates.apt import (
+        APT_UPGRADE_COMMAND,
+        AptInstallStatus,
+        seed_apt_status_cache_for_tests,
+    )
+
+    desktop_runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    monkeypatch.setattr(main_mod.sys, "platform", "linux")
+    monkeypatch.setattr(ci_mod.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_mod, "detect_runtime", lambda: desktop_runtime)
+    monkeypatch.setattr("sys.argv", ["servonaut", "team", "rules", "ops"])
+
+    probed: list[RuntimeLayout] = []
+
+    def fake_probe(runtime: RuntimeLayout, **_kwargs) -> AptInstallStatus:
+        probed.append(runtime)
+        status = AptInstallStatus(
+            managed=True,
+            suite="stable",
+            suites=("stable",),
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        )
+        seed_apt_status_cache_for_tests(status, runtime=runtime, platform_name="linux")
+        return status
+
+    monkeypatch.setattr(apt_mod, "refresh_apt_status", fake_probe)
+
+    # 1. Successful CLI invocation must perform zero APT/dpkg probes at startup.
+    ok_service = SimpleNamespace(
+        list_teams=AsyncMock(return_value=[{"slug": "ops", "name": "Ops", "id": "t1", "role": "owner"}]),
+        get_policy_with_headers=AsyncMock(return_value=({}, {})),
+        list_shared_servers=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(team_cli, "_service_factory", lambda: ok_service)
+    with pytest.raises(SystemExit) as ok_exit:
+        main_mod.main()
+    assert ok_exit.value.code == 0
+    assert probed == []
+    capsys.readouterr()
+
+    # 2. When HTTP 426 arrives, the one-shot CLI lazily probes on the 426 path and
+    #    prints the APT --only-upgrade command.
+    reset_client_identity_for_tests()
+
+    def _raise_426():
+        assert probed == []  # still not probed before 426 response arrives
+        raise ClientUpdateRequiredError(
+            code="client_update_required",
+            message="Too old",
+            status=426,
+            details={"minimum_version": "2.35.0"},
+        )
+
+    err_service = SimpleNamespace(list_teams=AsyncMock(side_effect=_raise_426))
+    monkeypatch.setattr(team_cli, "_service_factory", lambda: err_service)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code != 0
+    assert probed == [desktop_runtime]
+    assert "2.35.0" in captured.err
+    assert APT_UPGRADE_COMMAND in captured.err
+    assert "apt upgrade servonaut" not in captured.err

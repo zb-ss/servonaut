@@ -52,6 +52,25 @@ pipx-installed copy directly and skip automatic preparation and switching.
 This gives scripts the version they installed with pipx, even when
 Servonaut has prepared other copies.
 
+## Upgrading a Debian package
+
+Before upgrading from an older Debian package to the first release with
+protected upgrades (`X.Y.Z`, to be set before release), close Servonaut,
+including any running MCP servers and the background relay. Later upgrades
+keep the files those sessions are already using.
+
+After APT finishes configuring the package, **Settings → Updates** shows the
+running version and offers **Restart Servonaut**. Confirm when you are ready
+to close this window and its sessions. Reconnect any separate MCP servers
+and restart standalone relay processes when you want them to use the new
+version too.
+
+Removing the package keeps any files that open sessions still use. A later
+installation can clean up those files after the sessions exit. Purging the
+package removes the retained copies and preserves your settings. If you have
+mounted a separate filesystem at the generation directory, purge empties it
+and leaves the mount in place.
+
 ## Disk space and uninstalling
 
 Update copies live under

@@ -141,6 +141,10 @@ async def run_desktop_child(
         watchdog.stop()
         await host.stop()
 
+    if host.apt_restart_requested:
+        from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
+
+        return APT_RESTART_EXIT_CODE
     return 0
 
 

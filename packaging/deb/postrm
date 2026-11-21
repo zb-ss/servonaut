@@ -1,6 +1,41 @@
 #!/bin/sh
 set -e
 
+case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
+    ""|*[!a-z0-9+.-]*) ;;
+    [a-z0-9]*)
+        package_root="/opt/${DPKG_MAINTSCRIPT_PACKAGE}"
+        if [ -d "$package_root/generations" ] && { [ "$1" = remove ] || \
+            { [ "$1" = upgrade ] && [ -f "$package_root/servonaut" ] && \
+                [ ! -L "$package_root/servonaut" ]; }; }; then
+            # The helper can already be gone when dpkg runs postrm.
+            /usr/bin/python3 -I - "$DPKG_MAINTSCRIPT_PACKAGE" <<'SERVONAUT_GENERATION_PROGRAM' || true
+@SERVONAUT_GENERATION_PROGRAM@
+SERVONAUT_GENERATION_PROGRAM
+        fi
+        ;;
+esac
+
+if [ "$1" = purge ] && [ "$(id -u)" -eq 0 ]; then
+    case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
+        ""|*[!a-z0-9+.-]*) ;;
+        [a-z0-9]*)
+            package_root="/opt/${DPKG_MAINTSCRIPT_PACKAGE}"
+            if [ ! -L "$package_root" ]; then
+                store="$package_root/generations"
+                if [ -d "$store" ] && [ ! -L "$store" ]; then
+                    find "$store" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+                    rmdir -- "$store" 2>/dev/null || true
+                else
+                    rm -f -- "$store"
+                fi
+                rm -rf -- "$package_root/.staging-links"
+                rmdir -- "$package_root" 2>/dev/null || true
+            fi
+            ;;
+    esac
+fi
+
 case "$1" in
     remove|purge)
         if command -v update-desktop-database >/dev/null 2>&1; then

@@ -67,6 +67,15 @@ UpdatesPanel #updates_status_secondary {
     color: $text-muted;
 }
 
+UpdatesPanel #updates_status_command {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    padding: 0 1;
+    background: $panel;
+    color: $text;
+}
+
 UpdatesPanel #updates_status_links {
     width: 100%;
     height: auto;
@@ -131,6 +140,13 @@ UpdatesPanel #updates_channel_rc {
     width: 100%;
     height: auto;
     padding: 0;
+}
+
+UpdatesPanel #updates_channel_apt_summary {
+    width: 100%;
+    height: auto;
+    margin-bottom: 0;
+    color: $text;
 }
 
 UpdatesPanel #updates_channel_note,

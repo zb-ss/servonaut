@@ -51,11 +51,16 @@ fi
 apt-get update -qq
 apt-get install --yes --no-install-recommends "${deb}"
 
+payload_root="${install_root}"
+if [[ -L "${install_root}/servonaut-desktop" && -d "${install_root}/payload" ]]; then
+  payload_root="${install_root}/payload"
+fi
+
 # The launcher puts its contents directory on the library path, so resolve
 # with it there, as the running payload does.
 unresolved=$(
-  find "${install_root}" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) -print0 \
-    | LD_LIBRARY_PATH="${install_root}/_internal" xargs -0 ldd 2>/dev/null \
+  find "${payload_root}" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) -print0 \
+    | LD_LIBRARY_PATH="${payload_root}/_internal" xargs -0 ldd 2>/dev/null \
     | grep 'not found' | sort -u || true
 )
 if [[ -n "${unresolved}" ]]; then

@@ -249,6 +249,23 @@ class UpdateService:
     def check_for_update(self) -> Optional[str]:
         """Check for an update depending on the distribution channel."""
         if self._runtime.is_frozen:
+            if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+                from servonaut.updates.apt import (
+                    APT_UPGRADE_COMMAND,
+                    is_apt_probe_candidate,
+                    refresh_apt_status,
+                )
+
+                if is_apt_probe_candidate(self._runtime):
+                    apt_status = refresh_apt_status(self._runtime)
+                    if apt_status.managed:
+                        self._latest = None
+                        self._last_result = UpdateCheckResult.NOT_CONFIGURED
+                        self._update_status = (
+                            "Updates are managed by apt. "
+                            f"To update now, run: {APT_UPGRADE_COMMAND}"
+                        )
+                        return None
             return self._check_frozen_update()
 
         try:
@@ -608,6 +625,21 @@ class UpdateService:
         import asyncio
 
         if self._runtime.is_frozen:
+            if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+                from servonaut.updates.apt import (
+                    APT_UPGRADE_COMMAND,
+                    is_apt_probe_candidate,
+                    refresh_apt_status,
+                )
+
+                if is_apt_probe_candidate(self._runtime):
+                    apt_status = await asyncio.to_thread(refresh_apt_status, self._runtime)
+                    if apt_status.managed:
+                        self._update_status = (
+                            "Updates are managed by apt. "
+                            f"To update now, run: {APT_UPGRADE_COMMAND}"
+                        )
+                        return False, self._update_status
             return await self._run_frozen_upgrade()
 
         command = self.get_upgrade_command()

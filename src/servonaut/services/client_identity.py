@@ -15,7 +15,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Final, Optional
+from typing import TYPE_CHECKING, Any, Dict, Final, Optional
 
 from servonaut import __version__, get_version
 from servonaut.runtime import DistributionKind, RuntimeLayout
@@ -26,6 +26,9 @@ from servonaut.services.version_policy import (
     parse_contract_version,
     safe_update_url,
 )
+
+if TYPE_CHECKING:
+    from servonaut.updates.apt import AptDetectionConfig
 
 CLIENT_HEADER_NAME: Final = "X-Servonaut-Client"
 VALID_CLIENT_CHANNELS: Final = frozenset({"stable", "rc"})
@@ -104,6 +107,8 @@ class ClientIdentity:
 
 _IDENTITY_LOCK = threading.Lock()
 _CURRENT_IDENTITY: Optional[ClientIdentity] = None
+_CURRENT_RUNTIME: Optional[RuntimeLayout] = None
+_ALLOW_LAZY_APT_PROBE: bool = False
 
 
 def configure_client_identity(
@@ -112,6 +117,7 @@ def configure_client_identity(
     runtime: Optional[RuntimeLayout] = None,
     channel: Optional[str] = None,
     version: Optional[str] = None,
+    allow_lazy_apt_probe: Optional[bool] = None,
 ) -> ClientIdentity:
     """Set the process-wide client identity from startup facts.
 
@@ -134,9 +140,13 @@ def configure_client_identity(
     raw_install_kind = getattr(runtime, "kind", None) if runtime is not None else None
     install_kind = raw_install_kind if isinstance(raw_install_kind, DistributionKind) else None
     with _IDENTITY_LOCK:
-        global _CURRENT_IDENTITY
+        global _CURRENT_IDENTITY, _CURRENT_RUNTIME, _ALLOW_LAZY_APT_PROBE
         if install_kind is None and _CURRENT_IDENTITY is not None:
             install_kind = _CURRENT_IDENTITY.install_kind
+        if runtime is not None:
+            _CURRENT_RUNTIME = runtime
+        if allow_lazy_apt_probe is not None:
+            _ALLOW_LAZY_APT_PROBE = allow_lazy_apt_probe
         identity = ClientIdentity(
             version=resolved_version,
             channel=resolved_channel,
@@ -189,10 +199,15 @@ def client_request_headers(
 
 
 def reset_client_identity_for_tests() -> None:
-    """Clear the configured process identity (test isolation helper)."""
+    """Clear the configured process identity and APT cache (test isolation helper)."""
     with _IDENTITY_LOCK:
-        global _CURRENT_IDENTITY
+        global _CURRENT_IDENTITY, _CURRENT_RUNTIME, _ALLOW_LAZY_APT_PROBE
         _CURRENT_IDENTITY = None
+        _CURRENT_RUNTIME = None
+        _ALLOW_LAZY_APT_PROBE = False
+    apt_module = sys.modules.get("servonaut.updates.apt")
+    if apt_module is not None:
+        apt_module.reset_apt_status_cache_for_tests()
 
 
 def parse_upgrade_header(value: object) -> str:
@@ -255,7 +270,6 @@ def detect_install_kind_fast(
     return None
 
 
-_APT_SOURCES_DIR: Final = Path("/etc/apt/sources.list.d")
 _APT_UPGRADE_CMD: Final = "sudo apt update && sudo apt install --only-upgrade servonaut"
 
 
@@ -279,33 +293,35 @@ def _header_case_insensitive(headers: Any, name: str) -> Optional[str]:
 
 def is_apt_managed_install(
     *,
+    runtime: Optional[RuntimeLayout] = None,
     platform_name: Optional[str] = None,
-    sources_dir: Optional[Path] = None,
+    allow_probe: bool = False,
+    config: Optional[AptDetectionConfig] = None,
 ) -> bool:
-    """Return True only when a Servonaut APT repository list is present on Linux.
+    """Return True only when cached (or probed) dpkg + APT source facts agree.
 
-    Standalone Linux ``.deb`` and AppImage packages do not configure an APT
-    repository, so they must fall back to the download page rather than
-    suggesting an ``apt`` upgrade command that cannot find newer packages.
+    By default (``allow_probe=False``) this reads the in-memory cache populated
+    off the UI and HTTP paths, performing no filesystem or subprocess I/O.
+    Standalone Linux ``.deb`` installs, non-Linux hosts, non-packaged runtimes
+    (pipx/pip/source/frozen-cli), and incomplete evidence all return ``False``
+    so callers fall back to the standard download guidance.
     """
     plat = (platform_name if platform_name is not None else sys.platform).lower()
     if not plat.startswith("linux"):
         return False
-    directory = sources_dir if sources_dir is not None else _APT_SOURCES_DIR
-    try:
-        if not directory.is_dir():
-            return False
-        for entry in directory.iterdir():
-            lowered = entry.name.lower()
-            if (
-                lowered.startswith("servonaut")
-                and lowered.endswith((".list", ".sources"))
-                and entry.is_file()
-            ):
-                return True
-    except OSError:
+    if runtime is not None and (
+        getattr(runtime, "kind", None) is not DistributionKind.PACKAGED_DESKTOP
+        or not bool(getattr(runtime, "is_frozen", False))
+    ):
         return False
-    return False
+    if allow_probe:
+        from servonaut.updates.apt import refresh_apt_status
+
+        return refresh_apt_status(runtime=runtime, platform_name=plat, config=config).managed
+    from servonaut.updates.apt import get_cached_apt_status
+
+    cached = get_cached_apt_status(runtime=runtime, platform_name=plat, config=config)
+    return bool(cached is not None and cached.managed)
 
 
 def _sanitize_update_hints(raw: Any) -> Dict[str, str]:
@@ -323,11 +339,34 @@ def _sanitize_update_hints(raw: Any) -> Dict[str, str]:
     return cleaned
 
 
+def _resolve_apt_for_426(
+    *,
+    runtime: Optional[RuntimeLayout],
+    platform_name: str,
+    apt_managed: Optional[bool],
+    allow_lazy_probe: bool,
+) -> bool:
+    if apt_managed is not None:
+        return apt_managed
+    from servonaut.updates.apt import get_cached_apt_status
+
+    cached = get_cached_apt_status(runtime=runtime, platform_name=platform_name)
+    if cached is not None:
+        return cached.managed
+    if allow_lazy_probe and runtime is not None:
+        return is_apt_managed_install(
+            runtime=runtime, platform_name=platform_name, allow_probe=True,
+        )
+    return is_apt_managed_install(runtime=runtime, platform_name=platform_name)
+
+
 def _install_hint_key(
     install_kind: Optional[DistributionKind | str] = None,
     *,
+    runtime: Optional[RuntimeLayout] = None,
     platform_name: Optional[str] = None,
     apt_managed: Optional[bool] = None,
+    allow_lazy_probe: bool = False,
 ) -> Optional[str]:
     """Map an install kind to its server ``update_hints`` key."""
     if install_kind == "apt":
@@ -346,12 +385,12 @@ def _install_hint_key(
     if install_kind is DistributionKind.PACKAGED_DESKTOP:
         plat = (platform_name if platform_name is not None else sys.platform).lower()
         if plat.startswith("linux"):
-            has_apt = (
-                apt_managed
-                if apt_managed is not None
-                else is_apt_managed_install(platform_name=plat)
-            )
-            if has_apt:
+            if _resolve_apt_for_426(
+                runtime=runtime,
+                platform_name=plat,
+                apt_managed=apt_managed,
+                allow_lazy_probe=allow_lazy_probe,
+            ):
                 return "apt"
         return "desktop"
     if install_kind is DistributionKind.FROZEN_CLI:
@@ -362,9 +401,11 @@ def _install_hint_key(
 def install_update_step(
     install_kind: Optional[DistributionKind | str] = None,
     *,
+    runtime: Optional[RuntimeLayout] = None,
     platform_name: Optional[str] = None,
     update_url: Optional[str] = None,
     apt_managed: Optional[bool] = None,
+    allow_lazy_probe: bool = False,
 ) -> str:
     """Return the install-specific remediation step for an update-required error."""
     resolved_url = safe_update_url(update_url, fallback=DEFAULT_UPDATE_URL)
@@ -384,12 +425,12 @@ def install_update_step(
         return "run: pip install --upgrade servonaut"
     if install_kind is DistributionKind.PACKAGED_DESKTOP:
         if plat.startswith("linux"):
-            has_apt = (
-                apt_managed
-                if apt_managed is not None
-                else is_apt_managed_install(platform_name=plat)
-            )
-            if has_apt:
+            if _resolve_apt_for_426(
+                runtime=runtime,
+                platform_name=plat,
+                apt_managed=apt_managed,
+                allow_lazy_probe=allow_lazy_probe,
+            ):
                 return f"run: {_APT_UPGRADE_CMD}"
         return f"download: {resolved_url}"
     if install_kind is DistributionKind.FROZEN_CLI:
@@ -443,19 +484,28 @@ def format_update_required_message(
     merged_hints = dict(extracted_hints)
     merged_hints.update(_sanitize_update_hints(update_hints))
 
+    with _IDENTITY_LOCK:
+        captured_runtime = _CURRENT_RUNTIME
+        lazy_probe = _ALLOW_LAZY_APT_PROBE
+    effective_runtime = runtime if runtime is not None else captured_runtime
+
     hint_key = _install_hint_key(
         resolved_install,
+        runtime=effective_runtime,
         platform_name=platform_name,
         apt_managed=apt_managed,
+        allow_lazy_probe=lazy_probe,
     )
     step = (
         merged_hints[hint_key]
         if hint_key is not None and hint_key in merged_hints
         else install_update_step(
             resolved_install,
+            runtime=effective_runtime,
             platform_name=platform_name,
             update_url=resolved_url,
             apt_managed=apt_managed,
+            allow_lazy_probe=lazy_probe,
         )
     )
     if min_ver:

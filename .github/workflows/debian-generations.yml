@@ -1,0 +1,77 @@
+name: Debian payload generations
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/debian-generations.yml'
+      - 'packaging/deb/**'
+      - 'scripts/distribution/**'
+      - 'src/servonaut/debian_layout.py'
+      - 'src/servonaut/desktop/process_tree.py'
+      - 'src/servonaut/runtime.py'
+      - 'src/servonaut/services/apt_runtime.py'
+      - 'tests/distribution/test_package_deb.py'
+      - 'tests/packaging/test_apt_generations.py'
+      - 'tests/packaging/test_apt_runtime.py'
+      - 'tests/packaging/apt_upgrade/**'
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    name: Ubuntu ${{ matrix.ubuntu }} signed upgrade
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - ubuntu: "22.04"
+            image: ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
+          - ubuntu: "24.04"
+            image: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the disposable Ubuntu image
+        env:
+          APT_UPGRADE_BASE: ${{ matrix.image }}
+        run: |
+          docker build --build-arg "APT_UPGRADE_BASE=${APT_UPGRADE_BASE}" \
+            --tag servonaut-apt-upgrade tests/packaging/apt_upgrade
+
+      - name: Build fixture .debs
+        run: |
+          mkdir -p "${RUNNER_TEMP}/apt-generation-packages"
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+            --mount "type=bind,src=${RUNNER_TEMP}/apt-generation-packages,dst=/packages" \
+            --entrypoint python3 servonaut-apt-upgrade \
+            -m tests.packaging.apt_upgrade.build_lifecycle_fixtures /packages
+
+      - name: Verify retained generations across signed upgrades
+        run: |
+          docker run --rm --network none \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+            --mount "type=bind,src=${RUNNER_TEMP}/apt-generation-packages,dst=/packages,readonly" \
+            --entrypoint python3 servonaut-apt-upgrade \
+            -m tests.packaging.apt_upgrade.check_lifecycle /packages
+
+      - name: Verify fallback storage on a separate filesystem
+        if: matrix.ubuntu == '24.04'
+        run: |
+          docker run --rm --network none --tmpfs /opt/servonaut/generations:rw,exec,mode=0755,size=64m \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+            --mount "type=bind,src=${RUNNER_TEMP}/apt-generation-packages,dst=/packages,readonly" \
+            --entrypoint python3 servonaut-apt-upgrade \
+            -m tests.packaging.apt_upgrade.check_lifecycle /packages --expect-copy
+
+      - name: Verify an installed package under a symlinked /opt
+        run: |
+          docker run --rm --network none \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+            --mount "type=bind,src=${RUNNER_TEMP}/apt-generation-packages,dst=/packages,readonly" \
+            --entrypoint python3 servonaut-apt-upgrade \
+            -m tests.packaging.apt_upgrade.check_lifecycle /packages --symlink-opt

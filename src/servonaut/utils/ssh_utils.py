@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import asyncio
-import atexit
 import logging
 import os
 import signal
@@ -11,6 +10,8 @@ import tempfile
 import threading
 import weakref
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+from servonaut.utils.process_cleanup import register_process_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,7 @@ def terminate_background_processes() -> None:
     """Terminate every tracked process that is still running."""
     with _BACKGROUND_LOCK:
         processes = list(_BACKGROUND_PROCESSES)
+        _BACKGROUND_PROCESSES.clear()
     for process in processes:
         try:
             if getattr(process, "returncode", 0) is None:
@@ -206,7 +208,7 @@ def terminate_background_processes() -> None:
             pass
 
 
-atexit.register(terminate_background_processes)
+register_process_cleanup(terminate_background_processes)
 _HANGUP_CLEANUP_INSTALLED = False
 
 

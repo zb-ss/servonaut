@@ -262,6 +262,107 @@ jobs:
             --evidence-dir "${EVIDENCE_DIR}" \
             --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
+      - name: Select Debian upgrade qualification
+        id: apt-upgrade-paths
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          paths="$(git diff --name-only "${BASE_SHA}" HEAD -- \
+            packaging/deb scripts/distribution src/servonaut/debian_layout.py \
+            src/servonaut/runtime.py src/servonaut/services/apt_runtime.py \
+            src/servonaut/services/process_control.py src/servonaut/desktop/process_tree.py \
+            src/servonaut/utils/process_cleanup.py src/servonaut/utils/ephemeral_key.py \
+            src/servonaut/utils/ssh_utils.py src/servonaut/services/vault/ssh_agent.py \
+            tests/packaging/apt_upgrade .github/workflows/desktop-shell.yml)"
+          if [[ -n "${paths}" ]]; then
+            echo 'run=true' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Exercise a signed APT upgrade with the PR native build
+        if: steps.apt-upgrade-paths.outputs.run == 'true'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          upgrade_dir="${BASE_TEMP}/apt-upgrade"
+          mkdir -p "${upgrade_dir}"/{legacy,restart,before-source,before-wheel}
+          released="${upgrade_dir}/servonaut-2.34.0.deb"
+          # Pin a released legacy payload for repeatable upgrade checks.
+          curl --fail --silent --show-error --location --proto '=https' \
+            'https://github.com/zb-ss/servonaut/releases/download/v2.34.0/servonaut-desktop-preview_2.34.0_amd64.deb' \
+            --output "${released}"
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m tests.packaging.apt_upgrade.build_native_fixtures "${released}" \
+            "${PAYLOAD_DIR}" "${upgrade_dir}/legacy" \
+            --released-sha256 '2cf054f1070cf29eb31c537c4174a5881e1eeef76ad518cfaf0021e66d16ad95'
+          # Build the same PR source at an older fixture version so the
+          # process that starts before the upgrade already knows how to restart.
+          git archive HEAD | tar -xf - -C "${upgrade_dir}/before-source"
+          "${QUALIFIED_PYTHON}" - "${upgrade_dir}/before-source" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          import tomllib
+
+          source = Path(sys.argv[1])
+          declarations = (
+              (source / "pyproject.toml", r'^version = "[^"]+"$', 'version = "0.0.1"'),
+              (source / "src/servonaut/__init__.py", r"^__version__ = ['\"][^'\"]+['\"]$", "__version__ = '0.0.1'"),
+          )
+          for path, pattern, replacement in declarations:
+              text, count = re.subn(pattern, replacement, path.read_text(), flags=re.M)
+              if count != 1:
+                  raise SystemExit("Could not set the native restart fixture's product version")
+              path.write_text(text)
+          if tomllib.loads(declarations[0][0].read_text())["project"]["version"] != "0.0.1":
+              raise SystemExit("The native restart fixture has the wrong wheel version")
+          PY
+          "${SELECTED_PYTHON}" -I scripts/standalone_cli/wheel_tools.py \
+            --python "${SELECTED_PYTHON}" --checkout "${upgrade_dir}/before-source" \
+            --work-parent "${upgrade_dir}/before-wheel" \
+            --lock packaging/standalone_cli/requirements/wheel-build-tools.txt \
+            --policy packaging/standalone_cli/wheel-tools-policy.json \
+            --github-output "${upgrade_dir}/before-wheel.out"
+          before_wheel="$(sed -n 's/^wheel-path=//p' "${upgrade_dir}/before-wheel.out")"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
+            --wheel "${before_wheel}" --target "${TARGET}" --output-dir "${upgrade_dir}/before-build"
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m tests.packaging.apt_upgrade.build_native_fixtures \
+            "${upgrade_dir}/before-build/servonaut-desktop" "${PAYLOAD_DIR}" "${upgrade_dir}/restart" --source-pair
+          images=(
+            'ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6'
+            'ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289'
+          )
+          failed=()
+          for image in "${images[@]}"; do
+            echo "::group::${image%%@*} signed APT upgrade"
+            if ! docker build --build-arg "APT_UPGRADE_BASE=${image}" \
+                --tag servonaut-native-apt-upgrade tests/packaging/apt_upgrade || \
+                ! docker run --rm --init --network none --shm-size=512m \
+                  --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+                  --mount "type=bind,src=${upgrade_dir}/legacy,dst=/packages,readonly" \
+                  servonaut-native-apt-upgrade /packages/before.deb /packages/after.deb --verify-pr-source || \
+                ! docker run --rm --init --network none --shm-size=512m \
+                  --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+                  --mount "type=bind,src=${upgrade_dir}/restart,dst=/packages,readonly" \
+                  servonaut-native-apt-upgrade /packages/before.deb /packages/after.deb --verify-pr-source --verify-restart; then
+              failed+=("${image%%@*}")
+            fi
+            echo '::endgroup::'
+          done
+          if ((${#failed[@]})); then
+            echo "::error::Signed APT native upgrade failed on ${failed[*]}."
+            exit 1
+          fi
+
       # Forward qualification on the newer LTS releases: the payload built
       # above, packaged as the .deb and installed in a clean container of each
       # release with nothing but its declared Depends, must open its window

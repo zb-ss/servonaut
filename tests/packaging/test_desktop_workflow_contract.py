@@ -79,6 +79,22 @@ def test_qualification_steps_orchestration(workflow_content: str):
     assert "scripts.desktop_shell.smoke_artifact" in workflow_content
 
 
+def test_debian_upgrade_uses_the_pr_desktop_build_for_changed_packaging(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    selector = _named_step(qualify, "Select Debian upgrade qualification")
+    upgrade = _named_step(qualify, "Exercise a signed APT upgrade with the PR native build")
+    assert "runner.os == 'Linux' && github.event_name == 'pull_request'" in selector
+    assert "git diff --name-only" in selector and "packaging/deb scripts/distribution" in selector
+    assert "steps.apt-upgrade-paths.outputs.run == 'true'" in upgrade
+    assert "PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}" in upgrade
+    assert "tests.packaging.apt_upgrade.build_native_fixtures" in upgrade
+    assert "--network none" in upgrade and "--verify-pr-source" in upgrade
+    assert "--source-pair" in upgrade and "--verify-pr-source --verify-restart" in upgrade
+    assert "git archive HEAD" in upgrade and '--wheel "${before_wheel}"' in upgrade
+    assert "src/servonaut/__init__.py" in upgrade and "__version__ = '0.0.1'" in upgrade
+    assert "ubuntu:22.04@sha256:" in upgrade and "ubuntu:24.04@sha256:" in upgrade
+
+
 def test_no_runnable_executables_retained(workflow_content: str):
     """Workflow must delete executables and only upload sanitized non-executable evidence."""
     # Ensure cleanup step runs always
