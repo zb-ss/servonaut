@@ -1,0 +1,45 @@
+name: APT archive fixtures
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/apt-archive.yml'
+      - '.github/workflows/release-mirror.yml'
+      - '.github/scripts/apt*'
+      - '.github/scripts/release-mirror.py'
+      - 'scripts/distribution/**'
+      - 'tests/packaging/apt/**'
+      - 'tests/packaging/test_apt_archive.py'
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-apt:
+    name: Ubuntu ${{ matrix.ubuntu }} APT archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - ubuntu: "22.04"
+            image: ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
+          - ubuntu: "24.04"
+            image: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the APT fixture container
+        env:
+          APT_FIXTURE_BASE: ${{ matrix.image }}
+        run: |
+          docker build --build-arg "APT_FIXTURE_BASE=${APT_FIXTURE_BASE}" \
+            --tag servonaut-apt-fixture tests/packaging/apt
+
+      - name: Exercise the local signed archive
+        run: |
+          docker run --rm --network none \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+            servonaut-apt-fixture

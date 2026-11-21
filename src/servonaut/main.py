@@ -56,8 +56,25 @@ def _run_update() -> None:
     """Check for updates and run upgrade from CLI."""
     from servonaut.runtime import detect_runtime
     from servonaut.services.update_service import UpdateService
+    from servonaut.updates.apt import (
+        APT_UPGRADE_COMMAND,
+        is_apt_probe_candidate,
+        refresh_apt_status,
+    )
 
-    svc = UpdateService(detect_runtime())
+    runtime = detect_runtime()
+    if is_apt_probe_candidate(runtime):
+        apt_status = refresh_apt_status(runtime)
+        if apt_status.managed:
+            print(f"Current version: {runtime.product_version}")
+            print("Updates are managed by apt.")
+            if apt_status.suite_display:
+                print(f"Release channel: {apt_status.suite_display} (set in your APT source)")
+            print("To update now, run:")
+            print(f"  {APT_UPGRADE_COMMAND}")
+            return
+
+    svc = UpdateService(runtime)
     print(f"Current version: {svc.current_version}")
     print("Checking for updates...")
 
@@ -722,6 +739,12 @@ def _relay_run_foreground() -> None:
     from servonaut.services.client_identity import configure_client_identity
 
     configure_client_identity(kind="relay", runtime=runtime)
+    from servonaut.runtime import is_linux_packaged_desktop
+
+    if is_linux_packaged_desktop(runtime):
+        from servonaut.updates.apt import warm_apt_status_in_background
+
+        warm_apt_status_in_background(runtime)
     lock_path = runtime.data_root / "relay.lock"
     # Headless service init (same pattern as MCP server)
     config_manager = ConfigManager()
@@ -1498,8 +1521,25 @@ def main() -> None:
         sys.stdout, sys.stderr = streams
 
 
+def _restart_tui_arguments(args: argparse.Namespace) -> list[str]:
+    """Keep only options that define the next interactive TUI session."""
+    preserved = []
+    if args.config:
+        preserved.extend(["--config", str(Path(args.config).absolute())])
+    if args.demo:
+        preserved.append("--demo")
+    if args.debug:
+        preserved.append("--debug")
+    return preserved
+
+
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
+    if sys.platform == "darwin" and len(sys.argv) == 3 and sys.argv[1] == "--_macos-install-update":
+        from servonaut.runtime import detect_runtime
+        from servonaut.updates.macos_install import run_helper
+
+        raise SystemExit(run_helper(detect_runtime(), sys.argv[2]))
     if sys.argv[1:] == ["--_artifact-selftest"]:
         from servonaut.runtime import DistributionKind, detect_runtime
 
@@ -1769,9 +1809,14 @@ def _main() -> None:
         from servonaut.services.client_identity import configure_client_identity
 
         try:
-            configure_client_identity(kind="cli", runtime=detect_runtime())
+            cli_runtime = detect_runtime()
+            configure_client_identity(
+                kind="cli",
+                runtime=cli_runtime,
+                allow_lazy_apt_probe=True,
+            )
         except Exception:  # noqa: BLE001 — fall back to version-only identity
-            configure_client_identity(kind="cli")
+            configure_client_identity(kind="cli", allow_lazy_apt_probe=False)
 
     if subcommand == 'ai':
         _setup_logging(debug=args.debug)
@@ -1888,6 +1933,14 @@ def _main() -> None:
         native_log = runtime_layout.data_root / "logs" / "native_stderr.log"
         with redirect_native_stderr(native_log):
             app.run()
+    from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE, exec_apt_restart
+
+    if getattr(app, "return_code", None) == APT_RESTART_EXIT_CODE:
+        try:
+            exec_apt_restart(runtime_layout.executable, _restart_tui_arguments(args))
+        except (OSError, ValueError) as error:
+            print(f"Servonaut could not restart: {error}", file=sys.stderr)
+            raise SystemExit(1) from None
 
 if __name__ == '__main__':
     main()

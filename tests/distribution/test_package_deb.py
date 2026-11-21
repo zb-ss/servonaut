@@ -216,6 +216,7 @@ class TestDebControlMetadata:
             assert "./md5sums" in names
             assert "./postinst" in names
             assert "./postrm" in names
+            assert "./prerm" in names
 
             ctrl_file = tar.extractfile("./control")
             assert ctrl_file is not None
@@ -292,12 +293,21 @@ class TestDebDataHierarchy:
             assert members_by_name["./opt/servonaut"].mode == 0o755
             assert members_by_name["./usr/bin"].mode == 0o755
 
-            # Executable modes
-            gui_info = members_by_name["./opt/servonaut/servonaut-desktop"]
+            # The generation store is managed by the maintainer scripts.
+            assert "./opt/servonaut/generations" not in members_by_name
+            helper = members_by_name["./usr/libexec/servonaut/apt-generation"]
+            assert helper.isfile() and helper.mode == 0o755
+            for role in ("servonaut", "servonaut-desktop", "servonaut-desktop-child"):
+                launcher = members_by_name[f"./opt/servonaut/{role}"]
+                assert launcher.issym()
+                assert launcher.linkname == "/usr/libexec/servonaut/apt-generation"
+
+            # Executable modes in the package-owned staging tree.
+            gui_info = members_by_name["./opt/servonaut/payload/servonaut-desktop"]
             assert gui_info.mode == 0o755
-            child_info = members_by_name["./opt/servonaut/servonaut-desktop-child"]
+            child_info = members_by_name["./opt/servonaut/payload/servonaut-desktop-child"]
             assert child_info.mode == 0o755
-            cli_info = members_by_name["./opt/servonaut/servonaut"]
+            cli_info = members_by_name["./opt/servonaut/payload/servonaut"]
             assert cli_info.mode == 0o755
 
             # Marker mode
@@ -449,7 +459,10 @@ class TestSystemToolInteroperability:
             text=True,
             check=True,
         )
-        assert (extract_dir / "opt" / "servonaut" / "servonaut-desktop").is_file()
+        assert (extract_dir / "opt" / "servonaut" / "payload" / "servonaut-desktop").is_file()
+        assert (extract_dir / "opt" / "servonaut" / "servonaut-desktop").readlink() == Path(
+            "/usr/libexec/servonaut/apt-generation"
+        )
         assert (extract_dir / "usr" / "bin" / "servonaut").is_symlink()
         assert (extract_dir / "usr" / "bin" / "servonaut").readlink() == Path(
             "/opt/servonaut/servonaut"
@@ -617,15 +630,15 @@ class TestDebPayloadLinks:
         )
 
         members = _data_members(deb_path)
-        file_link = members["./opt/servonaut/_internal/libtest.so"]
-        dir_link = members["./opt/servonaut/_internal/lib-alias"]
+        file_link = members["./opt/servonaut/payload/_internal/libtest.so"]
+        dir_link = members["./opt/servonaut/payload/_internal/lib-alias"]
         assert file_link.issym() and file_link.linkname == "lib/libtest.so"
         assert dir_link.issym() and dir_link.linkname == "lib"
-        assert "./opt/servonaut/_internal/lib-alias/libtest.so" not in members
+        assert "./opt/servonaut/payload/_internal/lib-alias/libtest.so" not in members
 
         md5_paths = _md5sums_paths(deb_path)
-        assert "opt/servonaut/_internal/lib/libtest.so" in md5_paths
-        assert "opt/servonaut/_internal/libtest.so" not in md5_paths
+        assert "opt/servonaut/payload/_internal/lib/libtest.so" in md5_paths
+        assert "opt/servonaut/payload/_internal/libtest.so" not in md5_paths
 
     @pytest.mark.skipif(shutil.which("dpkg-deb") is None, reason="dpkg-deb tool not installed")
     def test_dpkg_deb_extracts_payload_links(self, mock_payload: Path, tmp_path: Path) -> None:
@@ -640,7 +653,7 @@ class TestDebPayloadLinks:
         extract_dir = tmp_path / "extracted"
         subprocess.run(["dpkg-deb", "-x", str(deb_path), str(extract_dir)], check=True)
 
-        alias = extract_dir / "opt" / "servonaut" / "_internal" / "lib-alias"
+        alias = extract_dir / "opt" / "servonaut" / "payload" / "_internal" / "lib-alias"
         assert alias.is_symlink()
         assert (alias / "libtest.so").read_bytes() == b"\x7fELFfakeshareddependency"
 
@@ -923,10 +936,10 @@ class TestDebArchiveFormat:
                 assert all(member.pax_headers == {} for member in tar.getmembers()), name
 
         data_members = _data_members(deb_path)
-        link = data_members["./opt/servonaut/_internal/long-link"]
+        link = data_members["./opt/servonaut/payload/_internal/long-link"]
         assert link.issym() and link.linkname == _LONG_LINK_TARGET
-        assert data_members[f"./opt/servonaut/_internal/{_NON_ASCII_NAME}"].isfile()
-        assert f"opt/servonaut/_internal/{_NON_ASCII_NAME}" in _md5sums_paths(deb_path)
+        assert data_members[f"./opt/servonaut/payload/_internal/{_NON_ASCII_NAME}"].isfile()
+        assert f"opt/servonaut/payload/_internal/{_NON_ASCII_NAME}" in _md5sums_paths(deb_path)
 
     @pytest.mark.skipif(shutil.which("dpkg-deb") is None, reason="dpkg-deb tool not installed")
     def test_dpkg_deb_lists_and_extracts_the_awkward_entries(
@@ -942,8 +955,8 @@ class TestDebArchiveFormat:
         extract_dir = tmp_path / "extracted"
         subprocess.run(["dpkg-deb", "-x", str(deb_path), str(extract_dir)], check=True)
 
-        assert f"./opt/servonaut/_internal/long-link -> {_LONG_LINK_TARGET}" in contents
-        internal = extract_dir / "opt" / "servonaut" / "_internal"
+        assert f"./opt/servonaut/payload/_internal/long-link -> {_LONG_LINK_TARGET}" in contents
+        internal = extract_dir / "opt" / "servonaut" / "payload" / "_internal"
         assert (internal / "long-link").read_bytes() == b"linked\n"
         assert (internal / _NON_ASCII_NAME).read_bytes() == b"notice\n"
 
@@ -979,6 +992,6 @@ class TestDebArchiveFormat:
         )
 
         assert result.returncode == 0, result.stderr
-        internal = root / "opt" / "servonaut" / "_internal"
+        internal = root / "opt" / "servonaut" / "payload" / "_internal"
         assert (internal / "long-link").readlink() == Path(_LONG_LINK_TARGET)
         assert (internal / _NON_ASCII_NAME).read_bytes() == b"notice\n"

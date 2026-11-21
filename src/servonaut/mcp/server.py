@@ -6,10 +6,13 @@ OS/runtime/service/web-stack questions without an SSH round-trip.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import sys
 from typing import NoReturn
+
+from servonaut.mcp.reconnect import MCPDisplayText, PIPX_GENERATION_CURRENT, PipxReconnectHint
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +297,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
     return tools
 
 
-async def _dispatch_tool(tools, name: str, arguments: dict):
+async def _dispatch_tool(tools, name: str, arguments: dict, reconnect: PipxReconnectHint | None = None):
     """Dispatch one tool call, converting any handler failure into an error
     result instead of letting it crash the server loop.
 
@@ -314,8 +317,8 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
         arguments: Keyword arguments for the handler.
 
     Returns:
-        A list with a single ``TextContent`` — the handler's result, or an
-        error string for an unknown/unavailable/throwing tool.
+        The handler's result or an error string, with a separate reconnect
+        hint where an active session can use one.
     """
     from mcp.types import TextContent
     from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
@@ -331,6 +334,8 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
     refused = refusal(name) if callable(refusal) else None
     if isinstance(refused, str) and refused:
         return [TextContent(type="text", text=refused)]
+    if reconnect is not None:
+        reconnect.refresh_if_due()
     try:
         result = await handler(**arguments)
     except Exception as exc:  # noqa: BLE001 — keep the stdio session alive
@@ -342,7 +347,14 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
         return [TextContent(
             type="text", text=f"tool '{name}' failed: {str(exc)[:500]}",
         )]
-    return [TextContent(type="text", text=result)]
+    content = [TextContent(type="text", text=result)]
+    if reconnect is not None and (name == "whoami" or isinstance(result, MCPDisplayText)):
+        message = reconnect.message(diagnostic=name in ("whoami", "check_status"))
+        if message is not None:
+            content.append(TextContent(
+                type="text", text=message, _meta={"servonaut.dev/reason": PIPX_GENERATION_CURRENT},
+            ))
+    return content
 
 
 #: What every connecting agent is told at session start. The record-findings
@@ -444,11 +456,13 @@ def create_mcp_server():
     except ImportError:
         _exit_missing_sdk()
 
+    from servonaut import get_version
     from servonaut.config.manager import ConfigManager
 
     config_manager = ConfigManager(allow_read_only=True)
     config = config_manager.get()
     tools = build_headless_tools(config_manager, audit_to_stderr=True)
+    reconnect = PipxReconnectHint.detect(get_version())
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = tools.has_ovh
@@ -484,15 +498,16 @@ def create_mcp_server():
         # name == method name; tool_schemas.py is the sole registry). Delegated
         # to _dispatch_tool so a throwing handler returns an error instead of
         # crashing the stdio loop and dropping the whole session.
-        return await _dispatch_tool(tools, name, arguments)
+        return await _dispatch_tool(tools, name, arguments, reconnect)
 
     server.servonaut_tools = tools
+    server.reconnect_hint = reconnect
     return server
 
 
 async def run_server() -> None:
     """Run the MCP server with stdio transport."""
-    from servonaut.runtime import detect_runtime
+    from servonaut.runtime import detect_runtime, is_linux_packaged_desktop
     from servonaut.services.client_identity import configure_client_identity
 
     try:
@@ -500,6 +515,13 @@ async def run_server() -> None:
     except Exception:  # noqa: BLE001 — retain a version-only identity if detection fails
         runtime = None
     configure_client_identity(kind="mcp", runtime=runtime)
+    if is_linux_packaged_desktop(runtime):
+        from servonaut.updates.apt import warm_apt_status_in_background
+
+        try:
+            warm_apt_status_in_background(runtime)
+        except Exception as exc:  # noqa: BLE001 — incomplete evidence falls back to download guidance
+            logger.debug("Could not start background APT warm-up for MCP: %s", exc)
     try:
         from mcp.server.stdio import stdio_server
     except ImportError:
@@ -533,6 +555,9 @@ async def run_server() -> None:
         ):
             await server.run(read_stream, write_stream, server.create_initialization_options())
     finally:
+        reconnect = getattr(server, "reconnect_hint", None)
+        if reconnect is not None:
+            await reconnect.close()
         runtime = getattr(server.servonaut_tools, "_vault_runtime", None)
         if runtime is not None:
             runtime.close()

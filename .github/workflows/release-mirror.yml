@@ -59,24 +59,69 @@ on:
         description: "Run the audit instead of mirroring a release"
         type: boolean
         default: false
+      apt_action:
+        description: "APT archive action"
+        type: choice
+        default: auto
+        options: [auto, publish, audit, withdraw, restore, pause, resume]
+      apt_tag:
+        description: "Exact release tag for an APT withdrawal or restoration"
+        type: string
+      apt_digest:
+        description: "Exact .deb SHA-256 for an APT withdrawal or restoration"
+        type: string
+      apt_rehearsal:
+        description: "Use a separate APT prefix and a disposable signing key"
+        type: boolean
+        default: false
+      desktop_action:
+        description: "Desktop update policy action"
+        type: choice
+        default: auto
+        options: [auto, withdraw, restore, pause, resume, initialize-controls, restore-controls]
+      desktop_identity:
+        description: "Exact product_version, packaging_revision, kind, platform, arch and sha256 as JSON"
+        type: string
   schedule:
     - cron: "41 6 * * *"
+    - cron: "17 */6 * * *"
+    - cron: "*/15 * * * *"
+    - cron: "7,37 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-mirror-${{ github.event.workflow_run.head_branch || inputs.tag || 'audit' }}
+  # Owner actions can enter the APT writer queue while the daily audit runs.
+  group: release-mirror-${{ (github.event_name == 'workflow_dispatch' && inputs.apt_action != 'auto' && format('apt-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && inputs.desktop_action != 'auto' && 'desktop-owner') || (github.event.schedule == '*/15 * * * *' && 'desktop-policy') || (github.event.schedule == '7,37 * * * *' && 'desktop-freshness') || github.event.workflow_run.head_branch || inputs.tag || 'audit' }}
   cancel-in-progress: false
+  queue: max
 
 env:
   DOWNLOAD_PAGE: https://servonaut.dev/download
+  APT_FINALS: ${{ vars.APT_FINALS || '2' }}
+  APT_CANDIDATES: ${{ vars.APT_CANDIDATES || '2' }}
+  APT_VALID_HOURS: ${{ vars.APT_VALID_HOURS || '48' }}
+  APT_POOL_DAYS: ${{ vars.APT_POOL_DAYS || '30' }}
+  APT_INDEX_DAYS: ${{ vars.APT_INDEX_DAYS || '7' }}
+  APT_ALERT_HOURS: ${{ vars.APT_ALERT_HOURS || '24' }}
+  APT_SPLIT_MINUTES: ${{ vars.APT_SPLIT_MINUTES || '30' }}
+  APT_ATTEMPTS: ${{ vars.APT_ATTEMPTS || '3' }}
+  APT_TIMEOUT: ${{ vars.APT_TIMEOUT || '120' }}
+  APT_MAX_BYTES: ${{ vars.APT_MAX_BYTES || '536870912' }}
+  APT_CHECKSUM_MAX_BYTES: ${{ vars.APT_CHECKSUM_MAX_BYTES || '65536' }}
+  APT_KEY_ALERT_DAYS: ${{ vars.APT_KEY_ALERT_DAYS || '90' }}
+  APT_REHEARSAL_RETENTION_HOURS: ${{ vars.APT_REHEARSAL_RETENTION_HOURS || '24' }}
+  APT_UNQUALIFIED_ALERT_HOURS: ${{ vars.APT_UNQUALIFIED_ALERT_HOURS || '24' }}
 
 jobs:
   resolve:
     name: resolve
     # Never for forks.
-    if: github.repository == 'zb-ss/servonaut' && github.event_name != 'schedule' && inputs.audit != true
+    if: >-
+      github.repository == 'zb-ss/servonaut' && github.event_name != 'schedule' &&
+      inputs.audit != true &&
+      (github.event_name != 'workflow_dispatch' || (inputs.apt_action == 'auto' && inputs.desktop_action == 'auto'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -157,11 +202,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release-mirror
+    concurrency:
+      group: ${{ vars.RELEASE_DESKTOP_POLICY == 'on' && 'release-mirror-desktop-writer' || format('release-mirror-mirror-{0}', github.run_id) }}
+      queue: max
     permissions:
       contents: read
       attestations: read
     outputs:
       desktop-deb: ${{ steps.verify.outputs.desktop-deb }}
+      apt-deb-verified: ${{ steps.apt-input.outputs.verified }}
       # Set once the plan was handed on, even when a later step fails.
       plan-artifact: ${{ steps.plan-handoff.outputs.artifact-id }}
     env:
@@ -273,6 +322,11 @@ jobs:
             --plan "${RUNNER_TEMP}/mirror/plan.json" \
             --base "${MIRROR_PUBLIC_BASE}"
 
+      - name: Record the APT package readback
+        id: apt-input
+        if: env.DRY_RUN != 'true' && steps.verify.outputs.desktop-deb != ''
+        run: echo "verified=true" >> "${GITHUB_OUTPUT}"
+
       - name: Point the channel files at the release
         id: channels
         env:
@@ -311,23 +365,29 @@ jobs:
           include-hidden-files: false
 
       # They follow the channel files and must pass the app's own trust
-      # policy before they are uploaded. Only this step and the refresh
-      # receive the signing key; a dry run signs and checks, but writes nothing.
+      # policy before they are uploaded. A dry run signs and checks while
+      # leaving the public objects untouched.
       - name: Sign the update manifests
         env:
           LATEST_TAG: ${{ steps.channels.outputs.github-latest-tag }}
           MANIFEST_VALIDITY_DAYS: ${{ vars.RELEASE_MANIFEST_VALIDITY_DAYS }}
           MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
+          APPLY_VALIDITY_MINUTES: ${{ vars.RELEASE_APPLY_VALIDITY_MINUTES }}
+          APPLY_REFRESH_MINUTES: ${{ vars.RELEASE_APPLY_REFRESH_MINUTES }}
           RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
           RELEASE_MANIFEST_KEY_ID: ${{ vars.RELEASE_MANIFEST_KEY_ID }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
           MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
           MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+          DESKTOP_POLICY: ${{ vars.RELEASE_DESKTOP_POLICY }}
+          R2_DESKTOP_LOCK_READ_TOKEN: ${{ vars.RELEASE_DESKTOP_POLICY == 'on' && secrets.R2_DESKTOP_LOCK_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
           dry_run_flag=()
           if [ "${DRY_RUN}" = "true" ]; then dry_run_flag=(--dry-run); fi
+          policy_flag=()
+          if [ "${DESKTOP_POLICY}" = "on" ]; then policy_flag=(--apply-policies); fi
           # The manifest code is the app's own, from this checkout.
           PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py manifests \
             --plan "${RUNNER_TEMP}/mirror/plan.json" \
@@ -335,6 +395,9 @@ jobs:
             --github-latest-tag "${LATEST_TAG}" \
             --validity-days "${MANIFEST_VALIDITY_DAYS}" \
             --refresh-days "${MANIFEST_REFRESH_DAYS}" \
+            "${policy_flag[@]}" \
+            --apply-validity-minutes "${APPLY_VALIDITY_MINUTES}" \
+            --apply-refresh-minutes "${APPLY_REFRESH_MINUTES}" \
             "${dry_run_flag[@]}"
 
   # Runs after every real mirror run that got as far as the channel files: it
@@ -402,10 +465,13 @@ jobs:
     name: refresh
     if: >-
       github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
-      (github.event_name == 'schedule' || inputs.audit == true)
+      (github.event.schedule == '41 6 * * *' || inputs.audit == true)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release-mirror
+    concurrency:
+      group: ${{ vars.RELEASE_DESKTOP_POLICY == 'on' && 'release-mirror-desktop-writer' || format('release-mirror-refresh-{0}', github.run_id) }}
+      queue: max
     permissions:
       contents: read
     outputs:
@@ -460,13 +526,199 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
           MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
           MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+          DESKTOP_POLICY: ${{ vars.RELEASE_DESKTOP_POLICY }}
+          R2_DESKTOP_LOCK_READ_TOKEN: ${{ vars.RELEASE_DESKTOP_POLICY == 'on' && secrets.R2_DESKTOP_LOCK_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
+          policy_flag=()
+          if [ "${DESKTOP_POLICY}" = "on" ]; then policy_flag=(--apply-policies); fi
           PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py refresh \
             --repo "${GH_REPO}" \
             --github-releases "${RUNNER_TEMP}/releases.json" \
             --validity-days "${MANIFEST_VALIDITY_DAYS}" \
-            --refresh-days "${MANIFEST_REFRESH_DAYS}"
+            --refresh-days "${MANIFEST_REFRESH_DAYS}" "${policy_flag[@]}"
+
+  desktop-dispatch-check:
+    name: validate desktop policy dispatch eligibility
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.desktop_action != 'auto'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Reject an ineligible desktop policy dispatch
+        if: >-
+          github.repository != 'zb-ss/servonaut' || vars.RELEASE_MIRROR != 'on' ||
+          github.ref != format('refs/heads/{0}', github.event.repository.default_branch) ||
+          inputs.apt_action != 'auto' || inputs.audit == true ||
+          (vars.RELEASE_DESKTOP_POLICY != 'on' &&
+            inputs.desktop_action != 'initialize-controls' && inputs.desktop_action != 'restore-controls') ||
+          github.actor != (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner) ||
+          github.triggering_actor != (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner)
+        run: |
+          echo "::error::Desktop policy dispatch requires the designated operator, default branch and enabled mirror. Initialize controls before switching on publishing. Run desktop actions separately from APT or audit."
+          exit 1
+
+  desktop-policy:
+    name: reconcile desktop update policy
+    needs: desktop-dispatch-check
+    if: >-
+      !cancelled() && needs.desktop-dispatch-check.result != 'failure' &&
+      github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      ((github.event.schedule == '*/15 * * * *' && vars.RELEASE_DESKTOP_POLICY == 'on') ||
+        (github.event_name == 'workflow_dispatch' && inputs.desktop_action != 'auto' &&
+          (vars.RELEASE_DESKTOP_POLICY == 'on' ||
+            inputs.desktop_action == 'initialize-controls' || inputs.desktop_action == 'restore-controls') &&
+          inputs.apt_action == 'auto' && inputs.audit != true &&
+          github.actor == (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner) &&
+          github.triggering_actor == (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-mirror
+    concurrency:
+      group: release-mirror-desktop-writer
+      queue: max
+    permissions:
+      contents: read
+    outputs:
+      controls-unavailable: ${{ steps.reconcile.outputs.controls-unavailable }}
+      checkpoint-invalid: ${{ steps.reconcile.outputs.checkpoint-invalid }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+      DESKTOP_ACTION: ${{ inputs.desktop_action != 'auto' && inputs.desktop_action || 'refresh' }}
+      DESKTOP_IDENTITY: ${{ inputs.desktop_identity }}
+      DESKTOP_DRY_RUN: ${{ inputs.dry_run }}
+      DESKTOP_POLICY: ${{ vars.RELEASE_DESKTOP_POLICY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install the publisher
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+      - name: Mask the bucket's address
+        if: inputs.dry_run != true
+        env:
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          host="${MIRROR_ENDPOINT#*://}"
+          host="${host%%/*}"
+          echo "::add-mask::${host}"
+          echo "::add-mask::${host%%.*}"
+
+      - name: Read published desktop releases
+        if: inputs.dry_run != true && vars.RELEASE_DESKTOP_POLICY == 'on'
+        # The signed denial still publishes if GitHub cannot supply a replacement.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/${GH_REPO}/releases?per_page=100" |
+            jq 'add // []' > "${RUNNER_TEMP}/desktop-releases.tmp"
+          mv "${RUNNER_TEMP}/desktop-releases.tmp" "${RUNNER_TEMP}/desktop-releases.json"
+      - name: Publish and verify the signed apply policy
+        id: reconcile
+        env:
+          MANIFEST_VALIDITY_DAYS: ${{ vars.RELEASE_MANIFEST_VALIDITY_DAYS }}
+          MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
+          APPLY_VALIDITY_MINUTES: ${{ vars.RELEASE_APPLY_VALIDITY_MINUTES }}
+          APPLY_REFRESH_MINUTES: ${{ vars.RELEASE_APPLY_REFRESH_MINUTES }}
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+          RELEASE_MANIFEST_KEY_ID: ${{ vars.RELEASE_MANIFEST_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+          R2_DESKTOP_LOCK_READ_TOKEN: ${{ secrets.R2_DESKTOP_LOCK_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "${DESKTOP_DRY_RUN}" = "true" ]; then flags+=(--dry-run); fi
+          if [ "${DESKTOP_POLICY}" = "on" ]; then flags+=(--publish-enabled); fi
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py desktop-policy \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${DESKTOP_ACTION}" --identity "${DESKTOP_IDENTITY}" \
+            --github-releases "${RUNNER_TEMP}/desktop-releases.json" \
+            --validity-days "${MANIFEST_VALIDITY_DAYS}" --refresh-days "${MANIFEST_REFRESH_DAYS}" \
+            --apply-validity-minutes "${APPLY_VALIDITY_MINUTES}" --apply-refresh-minutes "${APPLY_REFRESH_MINUTES}" \
+            "${flags[@]}"
+
+  desktop-policy-freshness:
+    name: audit desktop policy freshness
+    if: >-
+      github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
+      vars.RELEASE_DESKTOP_POLICY == 'on' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.dry_run != true &&
+      (github.event.schedule == '7,37 * * * *' || inputs.audit == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      stale: ${{ steps.freshness.outputs.stale }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install public policy verification tools
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+      - name: Check the remaining signed policy lifetime
+        id: freshness
+        env:
+          MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+          APPLY_ALERT_MINUTES: ${{ vars.RELEASE_APPLY_ALERT_MINUTES }}
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py desktop-freshness \
+            --base "${MIRROR_PUBLIC_BASE}" --alert-minutes "${APPLY_ALERT_MINUTES}"
+
+  desktop-policy-report:
+    name: report desktop apply policy alerts
+    needs: [desktop-policy, desktop-policy-freshness]
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' && inputs.dry_run != true &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (needs.desktop-policy.result == 'failure' || needs.desktop-policy.result == 'success' ||
+        needs.desktop-policy-freshness.result == 'failure' || needs.desktop-policy-freshness.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: release-mirror-desktop-alert
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or comment on desktop apply policy issues
+        env:
+          RELEASE_ALERT_PROFILE: desktop
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DESKTOP_PUBLISH_RESULT: ${{ needs.desktop-policy.result }}
+          DESKTOP_CONTROLS_UNAVAILABLE: ${{ needs.desktop-policy.outputs.controls-unavailable }}
+          DESKTOP_CHECKPOINT_INVALID: ${{ needs.desktop-policy.outputs.checkpoint-invalid }}
+          DESKTOP_ALERT_REMINDER_HOURS: ${{ vars.RELEASE_DESKTOP_ALERT_REMINDER_HOURS || '24' }}
+          DESKTOP_AUDIT_RESULT: ${{ needs.desktop-policy-freshness.result }}
+          DESKTOP_POLICY_STALE: ${{ needs.desktop-policy-freshness.outputs.stale }}
+        run: python3 .github/scripts/apt-report-alerts.py
 
   # Runs after the refresh, even a failed one, so it sees the manifests as
   # users get them; it checks them once the refresh found a signing key.
@@ -475,7 +727,7 @@ jobs:
     needs: refresh
     if: >-
       !cancelled() && github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
-      (github.event_name == 'schedule' || inputs.audit == true)
+      (github.event.schedule == '41 6 * * *' || inputs.audit == true)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -510,6 +762,7 @@ jobs:
           MANIFESTS_SIGNED: ${{ needs.refresh.outputs.signing }}
           MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
           REFRESH_RESULT: ${{ needs.refresh.result }}
+          DESKTOP_POLICY: ${{ vars.RELEASE_DESKTOP_POLICY }}
         run: |
           set -euo pipefail
           gh release list --limit 100 --exclude-drafts --json tagName,isLatest,publishedAt \
@@ -518,7 +771,10 @@ jobs:
           # desktop files on each channel.
           gh api "repos/${GH_REPO}/releases?per_page=100" > "${RUNNER_TEMP}/releases.json"
           manifests_flag=()
-          if [ "${MANIFESTS_SIGNED}" = "true" ]; then manifests_flag=(--manifests); fi
+          if [ "${MANIFESTS_SIGNED}" = "true" ]; then
+            manifests_flag=(--manifests)
+            if [ "${DESKTOP_POLICY}" = "on" ]; then manifests_flag+=(--apply-policies); fi
+          fi
           PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py audit \
             --base "${MIRROR_PUBLIC_BASE}" \
             --repo "${GH_REPO}" \
@@ -549,3 +805,227 @@ jobs:
           else
             gh issue create --title "${title}" --body-file "${RUNNER_TEMP}/issue.md"
           fi
+
+  # APT writers share a queue across scheduled refreshes, releases, and owner actions.
+  apt-publish:
+    name: publish APT archive
+    needs: [resolve, mirror]
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (
+        github.event.schedule == '17 */6 * * *' ||
+        (vars.APT_RELEASE_MIRROR == 'on' && needs.mirror.outputs.apt-deb-verified == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.desktop_action == 'auto' &&
+          inputs.apt_action != 'auto' &&
+          inputs.apt_action != 'audit')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: release-mirror
+    concurrency:
+      group: release-mirror-apt-writer
+      queue: max
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      production-result: ${{ steps.publish.outcome }}
+      rotation: ${{ steps.publish.outputs.rotation }}
+      upstream: ${{ steps.publish.outputs.upstream }}
+      unqualified: ${{ steps.publish.outputs.unqualified }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+      APT_ACTION: ${{ inputs.apt_action == 'auto' && 'publish' || inputs.apt_action || 'publish' }}
+      APT_TAG: ${{ inputs.apt_tag }}
+      APT_DIGEST: ${{ inputs.apt_digest }}
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+    steps:
+      - name: Require the archive opt-in for production writes
+        if: >-
+          github.event_name == 'workflow_dispatch' && inputs.dry_run != true &&
+          inputs.apt_rehearsal != true && vars.APT_RELEASE_MIRROR != 'on'
+        run: |
+          echo "::error::The APT archive is disabled. Enable it before dispatching a production write."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install APT archive tools
+        run: |
+          .github/scripts/apt-install.sh --no-install-recommends apt-utils gpg gpg-agent gpgv
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Validate the APT publication plan without writing
+        if: inputs.dry_run == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/apt-publish.py --dry-run --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Mask the APT bucket's address
+        if: >-
+          inputs.dry_run != true && (inputs.apt_rehearsal == true || vars.APT_RELEASE_MIRROR == 'on' ||
+            github.event.schedule == '17 */6 * * *')
+        env:
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MIRROR_ENDPOINT}" ]]; then exit 0; fi
+          host="${MIRROR_ENDPOINT#*://}"
+          host="${host%%/*}"
+          echo "::add-mask::${host}"
+          echo "::add-mask::${host%%.*}"
+
+      - name: Sign and publish a separate rehearsal archive
+        id: rehearse
+        if: inputs.dry_run != true && inputs.apt_rehearsal == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          python .github/scripts/apt-publish.py --rehearsal --prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Sign and publish the APT archive
+        id: publish
+        if: >-
+          inputs.dry_run != true && inputs.apt_rehearsal != true &&
+          vars.APT_RELEASE_MIRROR == 'on'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+          APT_REPO_SIGNING_SUBKEY: ${{ secrets.APT_REPO_SIGNING_SUBKEY }}
+          APT_REPO_SIGNING_PASSPHRASE: ${{ secrets.APT_REPO_SIGNING_PASSPHRASE }}
+          APT_REPO_SIGNING_SUBKEY_FINGERPRINT: ${{ vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT }}
+          APT_REPO_PUBLIC_KEYRING: ${{ vars.APT_REPO_PUBLIC_KEYRING }}
+        run: |
+          python .github/scripts/apt-publish.py --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}" \
+            --action "${APT_ACTION}" --tag "${APT_TAG}" --digest "${APT_DIGEST}"
+
+      - name: Remove the failed rehearsal archive
+        if: >-
+          always() && inputs.apt_rehearsal == true && inputs.dry_run != true &&
+          (steps.rehearse.outcome == 'failure' || steps.rehearse.outcome == 'cancelled')
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          python .github/scripts/apt-publish.py --action cleanup-rehearsal --rehearsal \
+            --prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+      - name: Remove expired rehearsal archives
+        if: >-
+          !cancelled() && github.event.schedule == '17 */6 * * *'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          if [[ -z "${MIRROR_ENDPOINT}" || -z "${MIRROR_BUCKET}" ]]; then exit 0; fi
+          python .github/scripts/apt-publish.py --action sweep-rehearsals --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+  apt-audit:
+    name: audit the public APT archive
+    needs: apt-publish
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.APT_RELEASE_MIRROR == 'on' && inputs.dry_run != true && inputs.apt_rehearsal != true &&
+      (github.event.schedule == '17 */6 * * *' || inputs.apt_action == 'audit')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      rotation: ${{ steps.audit.outputs.rotation }}
+    env:
+      APT_REPO_SIGNING_SUBKEY_FINGERPRINT: ${{ vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+      GH_REPO: ${{ github.repository }}
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install public archive verification tools
+        run: |
+          .github/scripts/apt-install.sh --no-install-recommends gpg gpgv
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Replay the public signed archive
+        id: audit
+        run: |
+          python .github/scripts/apt-publish.py --action audit --prefix apt \
+            --repo "${GH_REPO}" --base "${MIRROR_PUBLIC_BASE}"
+
+  apt-report:
+    name: report APT archive alerts
+    needs: [apt-publish, apt-audit]
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (needs.apt-audit.result == 'failure' || needs.apt-audit.result == 'success' ||
+        needs.apt-publish.outputs.production-result == 'success' ||
+        needs.apt-publish.outputs.rotation == 'true' || needs.apt-publish.outputs.upstream == 'true' ||
+        needs.apt-publish.outputs.unqualified == 'true' ||
+        (vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' &&
+          needs.apt-publish.result == 'failure'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: release-mirror-apt-alert
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open or comment on APT archive issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PUBLISH_RESULT: ${{ needs.apt-publish.result }}
+          PRODUCTION_RESULT: ${{ needs.apt-publish.outputs.production-result }}
+          AUDIT_RESULT: ${{ needs.apt-audit.result }}
+          PUBLISH_ROTATION: ${{ needs.apt-publish.outputs.rotation }}
+          AUDIT_ROTATION: ${{ needs.apt-audit.outputs.rotation }}
+          UPSTREAM: ${{ needs.apt-publish.outputs.upstream }}
+          UNQUALIFIED: ${{ needs.apt-publish.outputs.unqualified }}
+          CHECK_SCHEDULED_PUBLISH: ${{ vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' }}
+          APT_ALERT_REMINDER_HOURS: ${{ vars.APT_ALERT_REMINDER_HOURS || '24' }}
+        run: |
+          python3 .github/scripts/apt-report-alerts.py

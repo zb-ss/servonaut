@@ -33,6 +33,9 @@ from scripts.distribution.macos_layout import (
 from scripts.distribution.payload_tree import walk_payload
 from scripts.distribution.sign_macos import verify_signature
 from scripts.standalone_cli.artifact_types import PayloadEntry
+from servonaut.updates.macos_native import (
+    ADMISSION_VERSION, ADMISSION_VERSION_KEY, ROLLBACK_EPOCH, ROLLBACK_EPOCH_KEY, WORKER_SUFFIX,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACOS_DIR = _REPO_ROOT / "packaging" / "macos"
@@ -86,6 +89,7 @@ def assemble_app_bundle(
     icon_file: Optional[Path | str] = None,
     bundle_id: str = "dev.servonaut.desktop",
     min_os_version: str = "13.0",
+    admission_arch: str | None = None,
 ) -> Path:
     """Assemble Servonaut.app from a desktop onedir payload in the signable layout.
 
@@ -138,7 +142,8 @@ def assemble_app_bundle(
         else product_version
     )
     _write_info_plist(
-        contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version
+        contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version,
+        admission=admission_arch is not None,
     )
     for metadata in ("PkgInfo", "Info.plist"):
         (contents_dir / metadata).chmod(0o644)
@@ -151,6 +156,8 @@ def assemble_app_bundle(
 
     try:
         materialize_app_layout(src_dir, app_path, layout, copy_file=shutil.copyfile)
+        if admission_arch is not None:
+            _install_admission_wrappers(app_path, admission_arch, min_os_version)
         verify_app_layout(app_path)
     except (MacosLayoutError, FileExistsError) as error:
         raise MacosPackagingError(f"App bundle layout is invalid: {error}") from error
@@ -159,8 +166,32 @@ def assemble_app_bundle(
     return app_path
 
 
+def _install_admission_wrappers(app: Path, arch: str, minimum_os: str) -> None:
+    architectures = {"macos-x64": "x86_64", "x86_64": "x86_64",
+                     "x64": "x86_64", "macos-arm64": "arm64", "arm64": "arm64"}
+    if arch not in architectures:
+        raise MacosPackagingError("Unsupported macOS launcher architecture.")
+    directory = app / "Contents" / "MacOS"
+    with tempfile.TemporaryDirectory(dir=app.parent) as temporary:
+        bootstrap = Path(temporary) / "admission"
+        try:
+            subprocess.run(
+                ["/usr/bin/clang", "-Wall", "-Wextra", "-Werror", "-arch", architectures[arch],
+                 f"-mmacosx-version-min={minimum_os}", "-O2", "-o", bootstrap, _MACOS_DIR / "admission.c"],
+                check=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise MacosPackagingError("The macOS admission bootstrap could not be built.") from exc
+        for name in EXECUTABLES:
+            entry = directory / name
+            entry.rename(entry.with_name(f"{name}{WORKER_SUFFIX}"))
+            shutil.copyfile(bootstrap, entry)
+            entry.chmod(0o755)
+
+
 def _write_info_plist(
-    path: Path, bundle_id: str, bundle_version: str, product_version: str, min_os_version: str
+    path: Path, bundle_id: str, bundle_version: str, product_version: str, min_os_version: str,
+    *, admission: bool = False,
 ) -> None:
     plist_data = {
         "CFBundleDevelopmentRegion": "en",
@@ -182,6 +213,9 @@ def _write_info_plist(
             "Servonaut requires microphone access for local voice commands and transcription."
         ),
     }
+    if admission:
+        plist_data[ADMISSION_VERSION_KEY] = ADMISSION_VERSION
+        plist_data[ROLLBACK_EPOCH_KEY] = ROLLBACK_EPOCH
     with open(path, "wb") as fp:
         plistlib.dump(plist_data, fp, fmt=plistlib.FMT_XML)
 
@@ -543,6 +577,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 output_dir=args.output_dir,
                 product_version=args.version,
                 packaging_revision=args.revision,
+                admission_arch=args.arch if sys.platform == "darwin" and not args.dry_run else None,
             )
             if args.app_only:
                 print(f"macOS app bundle assembled: {app_path}")

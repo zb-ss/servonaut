@@ -25,6 +25,15 @@ def test_fresh_pipx_reports_up_to_date_without_creating_state(pipx_home):
     assert not status.storage_for(pipx_home).exists()
 
 
+def test_read_json_checks_a_limit_even_for_valid_json(tmp_path):
+    path = tmp_path / "state.json"
+    payload = '{"current": "example"}'
+    path.write_text(payload)
+    assert status.read_json(path, maximum_bytes=len(payload)) == {"current": "example"}
+    with pytest.raises(status.InvalidUpdateState, match="size limit"):
+        status.read_json(path, maximum_bytes=len(payload) - 1)
+
+
 def test_unmanaged_runtime_returns_its_kind(monkeypatch):
     monkeypatch.setattr(status, "locate_install", lambda: None)
     runtime = SimpleNamespace(product_version="2.34.0", kind=SimpleNamespace(value="packaged-desktop"))

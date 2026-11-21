@@ -21,6 +21,36 @@ pytest.importorskip("webview")
 from scripts.desktop_probe.config import ProbeConfig, load_config, scaled_seconds
 from scripts.desktop_probe.diagnostics import sanitize_stderr_tail
 
+_WINDOWS_FAULTS = {
+    "initialization-failed": """
+import logging
+import webview
+
+start = webview.start
+
+def fail_initialization(**options):
+    print('{"native_stage":"initialization-failed"}', flush=True)
+    logging.getLogger("pywebview").error("WebView2 initialization failed with exception: fixture")
+    return start(**options)
+
+webview.start = fail_initialization
+""",
+    "bootstrap-stalled": """
+import threading
+from webview import Window
+
+run_js = Window.run_js
+
+def stall_bootstrap(self, script):
+    if "window.startServonaut(" in script:
+        print('{"native_stage":"bootstrap-stalled"}', flush=True)
+        threading.Event().wait()
+    return run_js(self, script)
+
+Window.run_js = stall_bootstrap
+""",
+}
+
 
 def running(process: psutil.Process) -> bool:
     try:
@@ -75,11 +105,17 @@ def _read_stderr_tail(stderr_file: BinaryIO, config: ProbeConfig) -> list[str]:
     os.environ.get("SERVONAUT_DESKTOP_NATIVE_TEST") != "1",
     reason="Run python -m scripts.desktop_probe.check --native to open a window",
 )
+@pytest.mark.parametrize("fault", [None, *(_WINDOWS_FAULTS if sys.platform == "win32" else ())])
 def test_native_first_frame_and_process_tree_cleanup(
-    record_property: Callable[[str, object], None],
+    record_property: Callable[[str, object], None], fault: str | None,
 ) -> None:
     config = load_config()
-    command = [sys.executable, "-m", "scripts.desktop_probe", "--smoke"]
+    if fault is None:
+        command = [sys.executable, "-m", "scripts.desktop_probe"]
+    else:
+        inject = _WINDOWS_FAULTS[fault]
+        command = [sys.executable, "-c", inject + "\nfrom scripts.desktop_probe.__main__ import main\nmain()"]
+    command.append("--smoke")
     renderer = os.environ.get("SERVONAUT_PROBE_RENDERER")
     if renderer:
         command.extend(["--renderer", renderer])
@@ -132,15 +168,17 @@ def test_native_first_frame_and_process_tree_cleanup(
                 "first-frame",
                 "gui-starting",
                 "gui-stopped",
+                "private-storage-ready",
+                "private-storage-removed",
+                "startup-failed",
+                *_WINDOWS_FAULTS,
             }
-            record_property(
-                "native_stages",
-                [
-                    record["native_stage"]
-                    for record in records
-                    if set(record) == {"native_stage"} and record["native_stage"] in stages
-                ],
-            )
+            observed_stages = [
+                record["native_stage"]
+                for record in records
+                if set(record) == {"native_stage"} and record["native_stage"] in stages
+            ]
+            record_property("native_stages", observed_stages)
             for record in records:
                 if set(record) == {"child_errors"}:
                     record_property("child_errors", record["child_errors"])
@@ -154,13 +192,22 @@ def test_native_first_frame_and_process_tree_cleanup(
                 f" (stderr tail: {' | '.join(stderr_tail)})" if stderr_tail else ""
             )
             assert not timed_out, f"Native window did not exit before deadline{stderr_note}"
-            assert process.returncode == 0, (
-                f"Native renderer failed; check OS prerequisites{stderr_note}"
-            )
-            assert any(
-                set(record) == expected and all(value is True for value in record.values())
-                for record in records
-            )
+            if sys.platform == "win32":
+                assert "private-storage-ready" in observed_stages
+                assert "private-storage-removed" in observed_stages
+            if fault is None:
+                assert process.returncode == 0, (
+                    f"Native renderer failed; check OS prerequisites{stderr_note}"
+                )
+                assert any(
+                    set(record) == expected and all(value is True for value in record.values())
+                    for record in records
+                )
+            else:
+                assert process.returncode == 1
+                assert fault in observed_stages and "startup-failed" in observed_stages
+                assert "bootstrap-injected" not in observed_stages
+                assert "first-frame" not in observed_stages
             assert stopped_within(
                 descendants, config.shutdown_seconds, config.probe_poll_seconds
             ), "Native renderer left a running child"
@@ -210,7 +257,7 @@ time.sleep(60)
     monkeypatch.setattr(sys.modules[__name__], "load_config", lambda: config)
     monkeypatch.setattr(sys.modules[__name__], "kill_running", capture_and_kill)
     with pytest.raises(AssertionError, match="Native window did not exit") as exc_info:
-        test_native_first_frame_and_process_tree_cleanup(properties.__setitem__)
+        test_native_first_frame_and_process_tree_cleanup(properties.__setitem__, None)
     assert properties["native_stages"] == ["host-ready", "window-shown"]
     stderr_lines = properties["native_stderr"]
     assert isinstance(stderr_lines, list) and any(

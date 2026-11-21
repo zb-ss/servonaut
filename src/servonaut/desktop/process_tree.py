@@ -35,6 +35,7 @@ from servonaut.desktop.model import (
     StartRequest,
     WindowsSharedListener,
 )
+from servonaut.services.apt_runtime import inherited_apt_lease, pin_apt_command
 
 logger = logging.getLogger(__name__)
 
@@ -565,21 +566,23 @@ def spawn_desktop_child(
             raise
 
     # POSIX (Linux, macOS, etc.)
+    cmd[0] = pin_apt_command(cmd[0])
     pass_fds: tuple[int, ...] = ()
     if listener is not None:
         pass_fds = (listener.fileno(),)
 
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        pass_fds=pass_fds,
-        close_fds=True,
-        cwd=str(cwd) if cwd else None,
-        env=child_env,
-    )
+    with inherited_apt_lease(cmd[0]) as lease_fds:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            pass_fds=(*pass_fds, *lease_fds),
+            close_fds=True,
+            cwd=str(cwd) if cwd else None,
+            env=child_env,
+        )
     return PosixProcessTree(proc, listener=listener)
 
 

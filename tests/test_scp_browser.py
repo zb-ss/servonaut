@@ -214,14 +214,30 @@ async def test_picker_demo_shortcut_preserves_operational_path_and_cursor(tmp_pa
     app = _ServerWorkspaceApp(False)
     monkeypatch.setattr(RemoteTree, '_fetch_directory_async', AsyncMock(return_value=[]))
     async with app.run_test(size=(100, 30)) as pilot:
+        expected_path = '/srv' if remote else str(tmp_path)
         picker = RemotePathPickerModal(app.instances[0], source=True, root='/srv', options=OPTIONS) if remote else LocalPathPickerModal(str(tmp_path), source=True)
         await app.push_screen(picker)
-        await wait_until(lambda: not picker.is_loading())
         field = picker.query_one('#path_picker_location', Input)
         tree = picker.query_one('#path_picker_tree')
+        choose = picker.query_one('#path_picker_choose', Button)
+
+        def cursor_path() -> str | None:
+            node = tree.cursor_node
+            if node is None or node.data is None:
+                return None
+            return node.data.get('path') if remote else str(node.data.path)
+
+        # The listing and the queued root-cursor highlight settle separately.
+        await wait_until(
+            lambda: not picker.is_loading()
+            and not choose.disabled
+            and picker.selection_valid()
+            and cursor_path() == expected_path
+        )
         tree.focus()
-        await pilot.pause()
+        await wait_until(lambda: tree.has_focus and cursor_path() == expected_path)
         raw, cursor = field.value, tree.cursor_node
+        assert cursor is not None and cursor_path() == expected_path
         for key, demo in [('ctrl+shift+d', True), ('ctrl+e', False)]:
             await pilot.press(key)
             await wait_until(lambda: field.password is demo)

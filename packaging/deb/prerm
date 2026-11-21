@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    upgrade|remove)
+        case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
+            ""|*[!a-z0-9+.-]*) ;;
+            [a-z0-9]*)
+                helper="/usr/libexec/${DPKG_MAINTSCRIPT_PACKAGE}/apt-generation"
+                if [ -x "$helper" ] && [ -d "/opt/${DPKG_MAINTSCRIPT_PACKAGE}/generations" ]; then
+                    "$helper" prune || true
+                fi
+                ;;
+        esac
+        ;;
+esac

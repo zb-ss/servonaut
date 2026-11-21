@@ -21,6 +21,7 @@ on:
     branches:
       - master
       - 'feature/desktop/**'
+      - 'feat/updates/**'
     paths:
       - 'src/**'
       - 'packaging/deb/**'
@@ -61,6 +62,41 @@ jobs:
         run: python -m pip install -e ".[test,mcp]" "pyinstaller==6.22.3" "textual-serve==1.1.3"
       - name: Verify workflow and packaging contracts
         run: python -m pytest -q tests/packaging/test_desktop_*.py
+
+  macos-replacement:
+    name: macOS replacement (${{ matrix.arch }})
+    needs: contract
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+      - name: Install contract test dependencies
+        run: python -m pip install -e ".[test,mcp]"
+      - name: Qualify macOS replacement and cross-user admission
+        run: |
+          python -m pytest -q -rs --log-cli-level=INFO tests/packaging/test_desktop_macos_apply.py \
+            tests/packaging/test_desktop_macos_safety.py
+      - name: Assess an available published signed disk image
+        timeout-minutes: 8
+        continue-on-error: true
+        env:
+          SERVONAUT_CHECK_PUBLISHED_DMG: '1'
+        run: python -m pytest -q -rs tests/packaging/test_desktop_macos_published.py
 
   qualify:
     name: desktop (${{ matrix.target }})
@@ -262,6 +298,110 @@ jobs:
             --evidence-dir "${EVIDENCE_DIR}" \
             --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
+      - name: Select Debian upgrade qualification
+        id: apt-upgrade-paths
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          paths="$(git diff --name-only "${BASE_SHA}" HEAD -- \
+            packaging/deb scripts/distribution src/servonaut/debian_layout.py \
+            src/servonaut/runtime.py src/servonaut/services/apt_runtime.py \
+            src/servonaut/services/process_control.py src/servonaut/desktop/process_tree.py \
+            src/servonaut/utils/process_cleanup.py src/servonaut/utils/ephemeral_key.py \
+            src/servonaut/utils/ssh_utils.py src/servonaut/services/vault/ssh_agent.py \
+            tests/packaging/apt_upgrade .github/workflows/desktop-shell.yml)"
+          if [[ -n "${paths}" ]]; then
+            echo 'run=true' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Exercise a signed APT upgrade with the PR native build
+        if: steps.apt-upgrade-paths.outputs.run == 'true'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          upgrade_dir="${BASE_TEMP}/apt-upgrade"
+          mkdir -p "${upgrade_dir}"/{legacy,restart,before-source,before-wheel}
+          released="${upgrade_dir}/servonaut-2.34.0.deb"
+          # Pin a released legacy payload for repeatable upgrade checks.
+          curl --fail --silent --show-error --location --proto '=https' \
+            'https://github.com/zb-ss/servonaut/releases/download/v2.34.0/servonaut-desktop-preview_2.34.0_amd64.deb' \
+            --output "${released}"
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m tests.packaging.apt_upgrade.build_native_fixtures "${released}" \
+            "${PAYLOAD_DIR}" "${upgrade_dir}/legacy" \
+            --released-sha256 '2cf054f1070cf29eb31c537c4174a5881e1eeef76ad518cfaf0021e66d16ad95'
+          # Build the same PR source at an older fixture version so the
+          # process that starts before the upgrade already knows how to restart.
+          git archive HEAD | tar -xf - -C "${upgrade_dir}/before-source"
+          "${QUALIFIED_PYTHON}" - "${upgrade_dir}/before-source" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          import tomllib
+
+          source = Path(sys.argv[1])
+          declarations = (
+              (source / "pyproject.toml", r'^version = "[^"]+"$', 'version = "0.0.1"'),
+              (source / "src/servonaut/__init__.py", r"^__version__ = ['\"][^'\"]+['\"]$", "__version__ = '0.0.1'"),
+          )
+          for path, pattern, replacement in declarations:
+              text, count = re.subn(pattern, replacement, path.read_text(), flags=re.M)
+              if count != 1:
+                  raise SystemExit("Could not set the native restart fixture's product version")
+              path.write_text(text)
+          if tomllib.loads(declarations[0][0].read_text())["project"]["version"] != "0.0.1":
+              raise SystemExit("The native restart fixture has the wrong wheel version")
+          PY
+          before_source="${upgrade_dir}/before-source"
+          before_output="${upgrade_dir}/before-wheel.out"
+          : > "${before_output}"
+          "${SELECTED_PYTHON}" -I scripts/standalone_cli/wheel_tools.py \
+            --python "${SELECTED_PYTHON}" --checkout "${before_source}" \
+            --work-parent "${upgrade_dir}/before-wheel" \
+            --lock "${before_source}/packaging/standalone_cli/requirements/wheel-build-tools.txt" \
+            --policy "${before_source}/packaging/standalone_cli/wheel-tools-policy.json" \
+            --github-output "${before_output}"
+          before_wheel="$(sed -n 's/^wheel-path=//p' "${before_output}")"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
+            --wheel "${before_wheel}" --target "${TARGET}" --output-dir "${upgrade_dir}/before-build"
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m tests.packaging.apt_upgrade.build_native_fixtures \
+            "${upgrade_dir}/before-build/servonaut-desktop" "${PAYLOAD_DIR}" "${upgrade_dir}/restart" --source-pair
+          images=(
+            'ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6'
+            'ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289'
+          )
+          failed=()
+          for image in "${images[@]}"; do
+            echo "::group::${image%%@*} signed APT upgrade"
+            if ! docker build --build-arg "APT_UPGRADE_BASE=${image}" \
+                --tag servonaut-native-apt-upgrade tests/packaging/apt_upgrade || \
+                ! docker run --rm --init --network none --shm-size=512m \
+                  --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+                  --mount "type=bind,src=${upgrade_dir}/legacy,dst=/packages,readonly" \
+                  servonaut-native-apt-upgrade /packages/before.deb /packages/after.deb --verify-pr-source || \
+                ! docker run --rm --init --network none --shm-size=512m \
+                  --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/repo,readonly" \
+                  --mount "type=bind,src=${upgrade_dir}/restart,dst=/packages,readonly" \
+                  servonaut-native-apt-upgrade /packages/before.deb /packages/after.deb --verify-pr-source --verify-restart; then
+              failed+=("${image%%@*}")
+            fi
+            echo '::endgroup::'
+          done
+          if ((${#failed[@]})); then
+            echo "::error::Signed APT native upgrade failed on ${failed[*]}."
+            exit 1
+          fi
+
       # Forward qualification on the newer LTS releases: the payload built
       # above, packaged as the .deb and installed in a clean container of each
       # release with nothing but its declared Depends, must open its window
@@ -387,7 +527,8 @@ jobs:
 
           distribution scripts.distribution.sign_macos --target "${APP}" --identity - --verify
           codesign --verify --strict --deep --verbose=2 "${APP}"
-          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+          for executable in servonaut-desktop servonaut-desktop-child servonaut \
+            servonaut-desktop.runtime servonaut-desktop-child.runtime servonaut.runtime; do
             echo "Signature and entitlements of ${executable}:"
             details="$(codesign -dv "${APP}/Contents/MacOS/${executable}" 2>&1)"
             grep -E '^(Identifier|CodeDirectory|Signature)' <<< "${details}"
@@ -434,6 +575,16 @@ jobs:
             --selftest
           mv "${APP_EVIDENCE}/smoke-report-${TARGET}.json" \
             "${EVIDENCE_DIR}/app-smoke-report-${TARGET}.json"
+
+      - name: Verify admission with the signed app in Applications
+        if: runner.os == 'macOS'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.macos-app.outputs.app-dir }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m scripts.distribution.check_macos_admission "${APP_DIR}"
 
       # Opens the signed app's window as a user would, in the runner's
       # logged-in macOS session, from the executable inside the bundle. It

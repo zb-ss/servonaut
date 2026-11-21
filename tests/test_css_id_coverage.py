@@ -34,6 +34,8 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
     [
         # These stable IDs use the explicit shared selectors below; no
         # duplicate per-ID declarations are needed.
+        # settings_updates.tcss: UpdatesPanel .updates-label, including narrow layouts.
+        "updates_installed_label",
         # key_management.tcss: KeyManagementScreen .key-section
         "agent_key_section",
         "available_key_section",

@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import re
+import sys
 import socket
 from collections.abc import Callable
 from typing import Any, Final
@@ -113,6 +114,8 @@ class DesktopHost:
             self.assets = loaded_assets
 
         self.finished = asyncio.Event()
+        self.apt_restart_requested = False
+        self.macos_install_requested = False
         self._used = False
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -311,6 +314,13 @@ class DesktopHost:
             )
             self._follow_theme(ws, app)
             await self._run_bridge(ws, transport, app, app_task)
+            from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
+
+            self.apt_restart_requested = app.return_code == APT_RESTART_EXIT_CODE
+            if sys.platform == "darwin":
+                from servonaut.updates.macos_install import INSTALL_QUIT_CODE
+
+                self.macos_install_requested = app.return_code == INSTALL_QUIT_CODE
         except (TimeoutError, asyncio.TimeoutError):
             logger.error("Desktop app did not start within %ss", self.shutdown_seconds)
             await ws.close(code=1011, message=b"App startup timed out")
@@ -371,10 +381,20 @@ class DesktopHost:
             return_when=asyncio.FIRST_COMPLETED,
         )
 
+        from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
+
+        restarting = app.return_code == APT_RESTART_EXIT_CODE and app_task in pending
+        if restarting:
+            pending.remove(app_task)
         for task in pending:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.gather(*pending, return_exceptions=True)
+        if restarting:
+            # Let Textual finish its normal unmount before the host reports
+            # the restart to the native launcher.
+            await asyncio.wait_for(asyncio.shield(app_task), timeout=self.shutdown_seconds)
+            done.add(app_task)
 
         # Retrieve every outcome so none is reported as never retrieved.
         errors = [task.exception() for task in done if not task.cancelled()]

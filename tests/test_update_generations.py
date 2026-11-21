@@ -1,5 +1,6 @@
 """Test generation selection, leases, and background update decisions."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -7,17 +8,22 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from servonaut import entry
+from servonaut.mcp.reconnect import (
+    MCPDisplayText, PIPX_GENERATION_CURRENT, PipxReconnectHint, ReconnectBuild, _MAX_STATE_BYTES,
+)
 from servonaut.updates import builder, index, state
 from servonaut.updates.generations import directory_for, evacuate_unused, select_generation
 from servonaut.updates.layout import python_for
 from servonaut.updates.processes import UnknownProcess, birth
 from servonaut.updates.profile import Profile, load_profile
 from servonaut.updates.state import InstallState, Preferences
-from servonaut.updates.status import MARKER_NAME, mark_update_presented, read_update_status
+from servonaut.updates.status import MARKER_NAME, PIPX_METADATA, mark_update_presented, read_update_status
+from servonaut.utils.package_version import PackageVersion
 
 
 OLD, CURRENT, READY, UNUSED = ("1" * 32, "2" * 32, "3" * 32, "4" * 32)
@@ -47,6 +53,212 @@ def _healthy(store, record, identifier, version, when=None):
 def _pick(store, record, launcher="2.34.0", activate=True):
     return select_generation(store, record, Preferences(),
                              activate=activate, launcher_version=launcher)
+
+
+def test_mcp_reconnect_skips_pipx_when_the_launcher_bypasses_generations(store, monkeypatch):
+    store.root.mkdir(parents=True)
+    (store.root / PIPX_METADATA).write_text("{}")
+    monkeypatch.setattr(sys, "prefix", str(store.root))
+    monkeypatch.delenv("SERVONAUT_SKIP_AUTO_APPLY", raising=False)
+    assert PipxReconnectHint.detect("2.34.0") is not None
+    monkeypatch.setenv("SERVONAUT_SKIP_AUTO_APPLY", "1")
+    assert PipxReconnectHint.detect("2.34.0") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["ready", "pinned", "fallback", "older", "equal", "newer-launcher"])
+async def test_mcp_reconnect_tracks_current_healthy_pipx_route(store, change):
+    record = {"current": READY, "previous": CURRENT, "last_launcher_version": "2.34.0"}
+    _healthy(store, record, CURRENT, "2.34.0")
+    _healthy(store, record, READY, "2.35.0")
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    store.write("state.json", record)
+    await hint._refresh()
+    assert "2.35.0 is installed" in hint.message(diagnostic=True)
+
+    if change == "ready":
+        record.update(current=CURRENT, ready=READY, previous=None)
+    elif change == "pinned":
+        record["pin"] = {"version": "2.34.0", "from": "2.35.0"}
+    elif change == "fallback":
+        record["generations"][READY]["health"] = "failed"
+        record["generations"][CURRENT]["version"] = "2.34.1"
+    elif change == "older":
+        record["last_launcher_version"] = "2.33.0"
+        record["generations"][READY]["version"] = "2.33.0"
+    elif change == "equal":
+        record["generations"][READY]["version"] = "2.34"
+    else:
+        record["last_launcher_version"] = "2.36.0"
+
+    store.write("state.json", record)
+    await hint._refresh()
+    message = hint.message(diagnostic=True)
+    if change == "fallback":
+        assert "2.34.1 is installed" in message
+    else:
+        assert message is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_probe_is_coalesced_and_rate_limited(store, monkeypatch):
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    observe = Mock(return_value=ReconnectBuild(PackageVersion.parse("2.35.0")))
+    monkeypatch.setattr(hint, "_read_current_target", observe)
+    hint.refresh_if_due()
+    first = hint._probe
+    hint.refresh_if_due()
+    assert hint._probe is first
+    await first
+    hint.refresh_if_due()
+    assert hint._probe is first
+    observe.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_reuses_the_state_stamp_but_clears_a_bad_record(store, monkeypatch):
+    record = {"current": READY, "last_launcher_version": "2.34.0"}
+    _healthy(store, record, READY, "2.35.0")
+    store.write("state.json", record)
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    read_state = Mock(wraps=store.load_state)
+    monkeypatch.setattr(store, "load_state", read_state)
+
+    await hint._refresh()
+    await hint._refresh()
+    assert hint.message(diagnostic=True)
+    read_state.assert_called_once_with(maximum_bytes=_MAX_STATE_BYTES)
+    (store.directory / "state.json").write_text('{"current":')
+    await hint._refresh()
+    assert hint.message(diagnostic=False) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("directory", "oversized"))
+async def test_mcp_reconnect_does_not_open_unsafe_state_files(store, monkeypatch, kind):
+    path = store.directory / "state.json"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        with path.open("wb") as state_file:
+            state_file.truncate(_MAX_STATE_BYTES + 1)
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    read_state = Mock(wraps=store.load_state)
+    monkeypatch.setattr(store, "load_state", read_state)
+    await hint._refresh()
+    read_state.assert_not_called()
+    assert hint.message(diagnostic=True) is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_does_not_start_a_second_probe_after_deadline(store, monkeypatch):
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def blocked_probe():
+        started.set()
+        await finish.wait()
+
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    monkeypatch.setattr(hint, "_refresh", blocked_probe)
+    hint.refresh_if_due()
+    first = hint._probe
+    try:
+        await started.wait()
+        hint._next_poll = 0.0
+        hint.refresh_if_due()
+        assert hint._probe is first
+    finally:
+        finish.set()
+        await first
+        await hint.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_shutdown_logs_unexpected_probe_errors(store, monkeypatch, caplog):
+    async def failed_probe():
+        raise KeyError("broken probe")
+
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    monkeypatch.setattr(hint, "_refresh", failed_probe)
+    hint.refresh_if_due()
+    await asyncio.sleep(0)
+    assert hint._probe.done()
+    with caplog.at_level("DEBUG", logger="servonaut.mcp.reconnect"):
+        await hint.close()
+    assert "MCP reconnect probe failed during shutdown (KeyError)." in caplog.text
+
+
+def test_mcp_reconnect_notifies_once_for_each_build_revision(store):
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    hint._target = ReconnectBuild(PackageVersion.parse("2.35.0"), revision=1)
+    assert "revision 1" in hint.message(diagnostic=False)
+    hint._target = ReconnectBuild(PackageVersion.parse("2.35"), revision=1)
+    assert hint.message(diagnostic=False) is None
+    hint._target = ReconnectBuild(PackageVersion.parse("2.35.0"), revision=2)
+    assert "revision 2" in hint.message(diagnostic=False)
+    assert hint.message(diagnostic=False) is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_diagnostics_and_concurrent_notice_preserve_results(store):
+    pytest.importorskip("mcp")
+    from servonaut.mcp.server import _dispatch_tool
+
+    record = {"current": READY, "last_launcher_version": "2.34.0"}
+    _healthy(store, record, READY, "2.35.0")
+    store.write("state.json", record)
+    hint = PipxReconnectHint(store, PackageVersion.parse("2.34.0"), 60)
+    await hint._refresh()
+
+    async def inventory():
+        await asyncio.sleep(0)
+        return MCPDisplayText("Quiet inventory")
+
+    async def whoami():
+        return '{"logged_in": false}'
+
+    async def check_status(**_kwargs):
+        return MCPDisplayText("State: running")
+
+    async def api_request():
+        return '{"body": {"ok": true}}'
+
+    async def get_server_info(**_kwargs):
+        raise RuntimeError("unavailable")
+
+    tools = SimpleNamespace(
+        list_instances=inventory, whoami=whoami, check_status=check_status,
+        api_request=api_request, get_server_info=get_server_info,
+    )
+
+    async def dispatch(name):
+        return await _dispatch_tool(tools, name, {}, hint)
+
+    try:
+        assert len(await dispatch("api_request")) == 1
+        await hint._probe
+        assert len(await dispatch("get_server_info")) == 1
+        first = await dispatch("whoami")
+        assert json.loads(first[0].text) == {"logged_in": False}
+        assert first[1].meta == {"servonaut.dev/reason": PIPX_GENERATION_CURRENT}
+        assert "2.35.0 is installed" in first[1].text
+        assert (await dispatch("check_status"))[1].text == first[1].text
+
+        results = await asyncio.gather(*(dispatch("list_instances") for _ in range(4)))
+        assert all(result[0].text == "Quiet inventory" for result in results)
+        assert [result[1].text for result in results if len(result) == 2] == [first[1].text]
+        assert (await dispatch("whoami"))[1].text == first[1].text
+
+        record["generations"][READY]["version"] = "2.35"
+        store.write("state.json", record)
+        await hint._refresh()
+        assert len(await dispatch("list_instances")) == 1
+        record["generations"][READY]["version"] = "2.36.0"
+        store.write("state.json", record)
+        await hint._refresh()
+        assert "2.36.0 is installed" in (await dispatch("list_instances"))[1].text
+    finally:
+        await hint.close()
 
 
 def test_switch_does_not_wait_for_an_active_mcp_lease(store):

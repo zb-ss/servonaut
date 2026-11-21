@@ -16,6 +16,7 @@ from servonaut.updates.index import PackageIndex
 from servonaut.updates.profile import exact_pipx_request
 from servonaut.updates.state import InstallState, Preferences, lease_is_live
 from servonaut.updates.status import public_version
+from servonaut.utils.package_version import PackageVersion
 
 _PERSISTENT_EXEC_ERRORS = {errno.ENOENT, errno.EACCES, errno.ENOEXEC, errno.ELOOP, errno.ENOTDIR}
 
@@ -38,6 +39,20 @@ def _routes(store: InstallState, state: dict, first: str | None, version: str) -
         return []
     return [identifier for identifier in (first, state.get("previous"))
             if healthy(store, state, identifier)]
+
+
+def installed_generation_version(store: InstallState, state: dict) -> PackageVersion | None:
+    """Read the current or healthy fallback generation.
+
+    A manual pipx upgrade that routes directly to the anchor stays silent.
+    """
+    launcher = public_version(state.get("last_launcher_version") or state.get("launcher_version"))
+    if launcher is None:
+        return None
+    routes = _routes(store, state, state.get("current"), launcher.text)
+    if not routes:
+        return None
+    return public_version(state["generations"][routes[0]]["version"])
 
 
 def fallback_routes(store: InstallState, version: str) -> list[str]:

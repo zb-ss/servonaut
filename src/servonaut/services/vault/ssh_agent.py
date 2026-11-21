@@ -7,7 +7,6 @@ invocation which needs a Vault key.
 
 from __future__ import annotations
 
-import atexit
 import logging
 import os
 import re
@@ -291,7 +290,9 @@ class PrivateSshAgent:
     def _register_cleanup(cls) -> None:
         if cls._cleanup_registered:
             return
-        atexit.register(cls.close_all)
+        from servonaut.utils.process_cleanup import register_process_cleanup
+
+        register_process_cleanup(cls.close_all)
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous = signal.getsignal(signum)
 

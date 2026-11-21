@@ -81,8 +81,11 @@ class InstallState:
         except InvalidUpdateState:
             return Preferences(channel=default_channel(get_version()))
 
-    def load_state(self) -> dict[str, Any]:
-        state = self.read("state.json")
+    def load_state(self, *, maximum_bytes: int | None = None) -> dict[str, Any]:
+        state = (
+            self.read("state.json") if maximum_bytes is None
+            else read_json(self.directory / "state.json", maximum_bytes=maximum_bytes)
+        )
         _validate_state(state)
         return state
 
