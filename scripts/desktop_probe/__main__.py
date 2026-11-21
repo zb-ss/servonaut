@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import Future
 from importlib.metadata import version
+from pathlib import Path
+
+from servonaut.desktop.webview_startup import WindowsWebViewStartup, private_webview_options
 
 from .config import load_config
 from .host import ProbeHost
@@ -105,17 +110,36 @@ def main() -> None:
         width=config.width,
         height=config.height,
     )
+    startup = WindowsWebViewStartup(
+        window.destroy, startup_seconds=config.startup_seconds, close_seconds=config.shutdown_seconds,
+    ) if sys.platform == "win32" else None
 
-    def loaded() -> None:
+    def bootstrap() -> bool:
         stage("window-loaded")
         if window.get_current_url() != host.origin + "/":
-            window.destroy()
-            return
+            if startup is None:
+                window.destroy()
+            return False
         # run_js avoids evaluate_js's eval wrapper, preserving script-src 'self'.
-        window.run_js(host.bootstrap_script())
+        script = host.bootstrap_script()
+        result = window.run_js(f"(() => {{ {script} return true; }})()")
+        if startup is not None and result is not True and result != "true":
+            return False
         stage("bootstrap-injected")
         if args.smoke:
             threading.Thread(target=finish_smoke, daemon=True).start()
+        return True
+
+    def loaded() -> None:
+        if startup is None:
+            bootstrap()
+        else:
+            startup.start_bootstrap(bootstrap)
+
+    def closed() -> None:
+        if startup is not None:
+            startup.cancel()
+        runtime.stop()
 
     def watch_child() -> None:
         runtime.thread.join()
@@ -133,7 +157,7 @@ def main() -> None:
         window.destroy()
 
     window.events.loaded += loaded
-    window.events.closed += runtime.stop
+    window.events.closed += closed
     threading.Thread(target=watch_child, daemon=True).start()
     print(
         json.dumps(
@@ -143,12 +167,27 @@ def main() -> None:
             }
         )
     )
+    storage = None
     try:
-        stage("gui-starting")
-        webview.start(gui=args.renderer, debug=False, private_mode=True)
+        with private_webview_options() as options, startup or contextlib.nullcontext():
+            storage_path = options.get("storage_path")
+            if storage_path is not None:
+                storage = Path(storage_path)
+                if storage.is_dir():
+                    stage("private-storage-ready")
+            stage("gui-starting")
+            webview.start(gui=args.renderer, debug=False, **options)
+            if startup is not None and window.events.closed.is_set():
+                startup.cancel()
     finally:
         stage("gui-stopped")
         runtime.stop()
+    if storage is not None and not storage.exists():
+        stage("private-storage-removed")
+    if startup is not None and startup.failure is not None:
+        stage("startup-failed")
+        print(startup.failure, file=sys.stderr)
+        raise SystemExit(1)
     if args.smoke:
         print(json.dumps({"child_errors": host.child.errors}))
         print(json.dumps({"child_transport": host.child.transport_status()}))

@@ -30,6 +30,11 @@ from servonaut.desktop.process_tree import (
     ProcessTreeError,
     launch_and_handshake_desktop_child,
 )
+from servonaut.desktop.webview_startup import (
+    WEBVIEW_INIT_FAILURE,
+    WindowsWebViewStartup,
+    private_webview_options,
+)
 from servonaut.runtime import (
     DistributionKind,
     RuntimeLayout,
@@ -73,6 +78,8 @@ class DesktopLaunchRequest:
     launcher_executable: Path | None = None
     child_argv: Sequence[str] | None = None
     log_file: Path | None = None
+    window_startup_timeout: float = 45.0
+    window_close_timeout: float = 8.0
 
 
 def _bind_loopback_listener(*, platform_name: str | None = None) -> socket.socket:
@@ -287,38 +294,45 @@ def _session_start_script(token: str) -> str:
     never receive the token and would stay blank.
     """
     return (
-        "if (typeof window.startServonaut === 'function') { "
-        f"window.startServonaut({json.dumps(token)}); "
-        "}"
+        "(() => { if (typeof window.startServonaut === 'function') { "
+        f"window.startServonaut({json.dumps(token)}); return true; "
+        "} return false; })()"
     )
 
 
-def _hand_over_session(window: Any, bridge: DesktopBootstrapBridge | None) -> None:
+def _hand_over_session(
+    window: Any, bridge: DesktopBootstrapBridge | None, *, close_on_refusal: bool = True,
+) -> bool:
     """Claim the session token and pass it to the page loaded in *window*.
 
     Runs once per session: a reload of the root document gets nothing. A
     refused claim (the window no longer shows the root document) closes the
     window, like any other navigation away from it.
     """
-    if bridge is None or bridge.claimed:
-        return
+    if bridge is None:
+        return False
+    if bridge.claimed:
+        return True
     try:
         token = bridge.claim_session()
     except DesktopBridgeError as exc:
         if exc.code == SESSION_ALREADY_CLAIMED:
-            return
+            return True
         logger.error("Refusing to hand over the desktop session: %s", exc.code)
-        window.destroy()
-        return
+        if close_on_refusal:
+            window.destroy()
+        return False
 
     try:
-        window.run_js(_session_start_script(token))
+        result = window.run_js(_session_start_script(token))
+        return result is True or result == "true"
     except Exception as exc:  # noqa: BLE001
         # Only the type: a message could quote the script, token included.
         logger.error(
             "Could not hand the desktop session to the page: %s",
             type(exc).__name__,
         )
+        return False
 
 
 def run_desktop(request: DesktopLaunchRequest) -> int:
@@ -348,19 +362,29 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
 
     stop_monitor = threading.Event()
     child_exit_code: int | None = None
+    startup: WindowsWebViewStartup | None = None
+    windows = sys.platform == "win32"
 
-    def on_loaded() -> None:
+    def bootstrap() -> bool:
         current_url = get_current_url()
         valid_urls = (ready.origin, f"{ready.origin}/")
         if current_url not in valid_urls:
             logger.error("Rejecting navigation outside root origin: %s", current_url)
-            if window is not None:
+            if startup is None and window is not None:
                 window.destroy()
-            return
+            return False
 
-        _hand_over_session(window, owner.bridge)
+        return _hand_over_session(window, owner.bridge, close_on_refusal=startup is None)
+
+    def on_loaded() -> None:
+        if startup is None:
+            bootstrap()
+        else:
+            startup.start_bootstrap(bootstrap)
 
     def on_closed() -> None:
+        if startup is not None:
+            startup.cancel()
         stop_monitor.set()
         owner.request_shutdown()
         owner.close()
@@ -379,30 +403,49 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
                     break
             stop_monitor.wait(0.2)
 
-    monitor_thread = threading.Thread(target=monitor_child, daemon=True)
-    monitor_thread.start()
+    def report_unresponsive_window(reason: str) -> None:
+        # The fallback exit also closes the Windows job handle. Start cleanup
+        # before showing the error so the child doesn't wait on the dialog.
+        stop_monitor.set()
+        threading.Thread(target=owner.close, daemon=True).start()
+        _report_startup_failure(request, reason)
 
-    window = webview.create_window(
-        title=request.title,
-        url=ready.origin,
-        width=request.width,
-        height=request.height,
-    )
-    window.events.loaded += on_loaded
-    window.events.closed += on_closed
-
+    failure = None
     try:
-        webview.start(
-            gui=request.renderer,
-            debug=False,
-            http_server=False,
-            private_mode=True,
+        window = webview.create_window(
+            title=request.title,
+            url=ready.origin,
+            width=request.width,
+            height=request.height,
         )
+        if windows:
+            startup = WindowsWebViewStartup(
+                window.destroy, startup_seconds=request.window_startup_timeout,
+                close_seconds=request.window_close_timeout,
+                on_unresponsive=report_unresponsive_window,
+            )
+        window.events.loaded += on_loaded
+        window.events.closed += on_closed
+        threading.Thread(target=monitor_child, daemon=True).start()
+        with private_webview_options() as options, startup or contextlib.nullcontext():
+            webview.start(gui=request.renderer, debug=False, http_server=False, **options)
+            if startup is not None and window.events.closed.is_set():
+                startup.cancel()
+        if startup is not None:
+            failure = startup.failure
+    except Exception as exc:
+        if not windows:
+            raise
+        logger.warning("Windows desktop window setup failed (%s).", type(exc).__name__)
+        failure = WEBVIEW_INIT_FAILURE
     finally:
         stop_monitor.set()
         owner.request_shutdown()
         owner.close()
 
+    if failure is not None:
+        _report_startup_failure(request, failure)
+        return 1
     if child_exit_code is not None and child_exit_code != 0:
         return child_exit_code
     return 0
