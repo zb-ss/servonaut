@@ -545,8 +545,13 @@ def validate_desktop_process_role(
             "Desktop child and console helper must be distinct files."
         )
 
-    is_child = _paths_identify_same_file(current_executable, runtime.desktop_child)
-    is_console = _paths_identify_same_file(current_executable, runtime.console_helper)
+    role_executable = current_executable
+    if sys.platform == "darwin" and runtime.executable_root.name == "MacOS":
+        from servonaut.updates.macos_native import WORKER_SUFFIX
+
+        role_executable = current_executable.with_name(current_executable.name.removesuffix(WORKER_SUFFIX))
+    is_child = _paths_identify_same_file(role_executable, runtime.desktop_child)
+    is_console = _paths_identify_same_file(role_executable, runtime.console_helper)
 
     if is_child and is_console:
         raise RuntimeCapabilityError(

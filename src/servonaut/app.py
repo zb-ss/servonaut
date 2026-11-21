@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import subprocess
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -431,6 +432,8 @@ class ServonautApp(App):
         # Keeps the real records aside and redacts what is listed in demo mode.
         self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
+        if sys.platform == "darwin" and self.client_kind == "desktop":
+            self.call_after_refresh(self._acknowledge_macos_startup)
         if self._apt_monitor is not None:
             self.set_interval(apt_runtime_poll_seconds(), self._queue_apt_upgrade_check)
             self._queue_apt_upgrade_check()
@@ -3313,8 +3316,86 @@ class ServonautApp(App):
         return _is_generic_framework_action(name, params)
 
     async def action_quit(self) -> None:
-        if not self._refuse_navigation():
+        if self._refuse_navigation():
+            return
+        requested_exit = getattr(self, "_macos_update_quit_code", None)
+        if requested_exit is None:
             await super().action_quit()
+        else:
+            self.exit(return_code=requested_exit)
+
+    async def _acknowledge_macos_startup(self) -> None:
+        from servonaut.updates.macos_install import acknowledge_startup, consume_result, sweep_startup
+
+        await asyncio.to_thread(acknowledge_startup, self.runtime_layout)
+        result = await asyncio.to_thread(consume_result, self.runtime_layout)
+        if result:
+            self.notify(result, severity="warning", markup=False)
+        self.run_worker(asyncio.to_thread(sweep_startup, self.runtime_layout), group="macos_startup", exit_on_error=False)
+
+    def can_install_macos_update(self) -> bool:
+        return (
+            sys.platform == "darwin" and self.client_kind == "desktop" and self.update_service.macos_install_offered
+        )
+
+    def request_macos_install(self, progress: Callable[[bool], None] | None = None) -> None:
+        """Wait for confirmation before preparing a normal quit and replacement."""
+        if self._update_in_progress or not self.can_install_macos_update() or self._refuse_navigation():
+            return
+        from servonaut.screens.snapshot_manager import ConfirmModal
+
+        def accepted(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._install_macos_after_confirmation(progress), group="macos_update", exit_on_error=False,
+                )
+
+        self.push_screen(ConfirmModal(
+            "Install on quit",
+            "Servonaut will close to install the update. Save your work before continuing.",
+        ), accepted)
+
+    async def _install_macos_after_confirmation(self, progress: Callable[[bool], None] | None = None) -> None:
+        from servonaut.runtime import RuntimeCapabilityError
+        from servonaut.updates.macos_install import (
+            INSTALL_QUIT_CODE, Installation, MacUpdateError, discard_quit_request, request_on_quit,
+        )
+
+        if self._refuse_navigation():
+            return
+
+        async def prepare() -> tuple[bool, str]:
+            def download():
+                installation = Installation.from_runtime(self.runtime_layout)
+                if installation is None:
+                    raise MacUpdateError("This installation needs a guided update.")
+                installation.validate_offer()
+                return self.update_service.stage_macos_desktop_update()
+
+            if progress is not None:
+                progress(True)
+            try:
+                staged = await asyncio.to_thread(download)
+            except (OSError, RuntimeCapabilityError, MacUpdateError, KeyError, ValueError):
+                return False, "Automatic installation is unavailable. Use Download and install in Updates."
+            finally:
+                if progress is not None:
+                    progress(False)
+            if self._refuse_navigation():
+                return False, ""
+            request_on_quit(self.runtime_layout, staged)
+            self._macos_update_quit_code = INSTALL_QUIT_CODE
+            try:
+                await self.action_quit()
+            finally:
+                self._macos_update_quit_code = None
+                if self.return_code != INSTALL_QUIT_CODE:
+                    discard_quit_request(self.runtime_layout)
+            return True, ""
+
+        success, message = await self._run_upgrade_once(prepare)
+        if not success and message:
+            self.notify(message, severity="warning", markup=False)
 
     def on_app_focus(self, _event: events.AppFocus) -> None:
         self._queue_apt_upgrade_check()

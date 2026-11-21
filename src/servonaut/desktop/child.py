@@ -141,6 +141,10 @@ async def run_desktop_child(
         watchdog.stop()
         await host.stop()
 
+    if host.macos_install_requested:
+        from servonaut.updates.macos_install import INSTALL_QUIT_CODE
+
+        return INSTALL_QUIT_CODE
     if host.apt_restart_requested:
         from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
 

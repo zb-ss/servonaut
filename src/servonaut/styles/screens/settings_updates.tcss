@@ -108,6 +108,7 @@ UpdatesPanel #updates_status_actions {
     align: right top;
 }
 
+UpdatesPanel #updates_btn_macos_install,
 UpdatesPanel #updates_btn_check,
 UpdatesPanel #updates_btn_postpone,
 UpdatesPanel #updates_btn_try,

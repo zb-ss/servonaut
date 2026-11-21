@@ -21,6 +21,7 @@ on:
     branches:
       - master
       - 'feature/desktop/**'
+      - 'feat/updates/**'
     paths:
       - 'src/**'
       - 'packaging/deb/**'
@@ -61,6 +62,41 @@ jobs:
         run: python -m pip install -e ".[test,mcp]" "pyinstaller==6.22.3" "textual-serve==1.1.3"
       - name: Verify workflow and packaging contracts
         run: python -m pytest -q tests/packaging/test_desktop_*.py
+
+  macos-replacement:
+    name: macOS replacement (${{ matrix.arch }})
+    needs: contract
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+      - name: Install contract test dependencies
+        run: python -m pip install -e ".[test,mcp]"
+      - name: Qualify macOS replacement and cross-user admission
+        run: |
+          python -m pytest -q -rs tests/packaging/test_desktop_macos_apply.py \
+            tests/packaging/test_desktop_macos_safety.py
+      - name: Assess an available published signed disk image
+        timeout-minutes: 8
+        continue-on-error: true
+        env:
+          SERVONAUT_CHECK_PUBLISHED_DMG: '1'
+        run: python -m pytest -q -rs tests/packaging/test_desktop_macos_published.py
 
   qualify:
     name: desktop (${{ matrix.target }})
@@ -491,7 +527,8 @@ jobs:
 
           distribution scripts.distribution.sign_macos --target "${APP}" --identity - --verify
           codesign --verify --strict --deep --verbose=2 "${APP}"
-          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+          for executable in servonaut-desktop servonaut-desktop-child servonaut \
+            servonaut-desktop.runtime servonaut-desktop-child.runtime servonaut.runtime; do
             echo "Signature and entitlements of ${executable}:"
             details="$(codesign -dv "${APP}/Contents/MacOS/${executable}" 2>&1)"
             grep -E '^(Identifier|CodeDirectory|Signature)' <<< "${details}"
@@ -538,6 +575,16 @@ jobs:
             --selftest
           mv "${APP_EVIDENCE}/smoke-report-${TARGET}.json" \
             "${EVIDENCE_DIR}/app-smoke-report-${TARGET}.json"
+
+      - name: Verify admission with the signed app in Applications
+        if: runner.os == 'macOS'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.macos-app.outputs.app-dir }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \
+            -m scripts.distribution.check_macos_admission "${APP_DIR}"
 
       # Opens the signed app's window as a user would, in the runner's
       # logged-in macOS session, from the executable inside the bundle. It

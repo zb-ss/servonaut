@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import stat
 import urllib.error
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -18,9 +20,9 @@ from servonaut.distribution import (
 from servonaut.distribution.apply_policy import (
     DesktopApplyPolicy, DesktopArtifactIdentity, sign_apply_policy, verify_apply_policy,
 )
-from servonaut.runtime import DistributionKind
-from servonaut.services.update_service import UpdateService
-from servonaut.updates.desktop_apply import DESKTOP_STAGING_DIR, DesktopApplyDecision, StagedDesktopUpdate
+from servonaut.runtime import DistributionKind, RuntimeCapabilityError
+from servonaut.services.update_service import UpdateCheckResult, UpdateService
+from servonaut.updates.desktop_apply import DESKTOP_STAGING_DIR, DesktopApplyDecision, DesktopApplyEvidence, StagedDesktopUpdate
 
 MANIFEST_URL = "https://releases.example.test/manifest/stable.json"
 POLICY_URL = "https://releases.example.test/manifest/stable-apply.json"
@@ -71,7 +73,9 @@ class ApplyFixture:
             raise urllib.error.HTTPError(request.full_url, 404, "fixture missing", {}, None)
         if isinstance(body, Exception):
             raise body
-        return io.BytesIO(body)
+        response = io.BytesIO(body)
+        response.headers = {"Content-Length": str(len(body))}
+        return response
 
     def policy(self, sequence=10, **changes):
         document = DesktopApplyPolicy(
@@ -104,7 +108,86 @@ def test_exact_apply_fetches_both_fresh_documents_without_cache(apply):
     assert apply.staged.path.read_bytes() == PAYLOAD
     assert [url for url, _, _ in apply.calls] == [POLICY_URL, MANIFEST_URL]
     assert all("no-cache" in cache and "no-store" in cache and timeout > 0 for _, cache, timeout in apply.calls)
+
+
+def test_private_macos_stage_reuses_only_the_exact_verified_download(apply):
+    service = apply.service()
+    service._latest_manifest = apply.set_manifest(apply.manifest)
+    service._target_artifact = apply.artifact
+    apply.documents[apply.artifact.download_url] = PAYLOAD
+
+    staged = service.stage_macos_desktop_update()
+    assert staged.identity == apply.identity
+    assert staged.path == apply.staged.path.parent / f"{apply.artifact.sha256}.dmg"
+    assert stat.S_IMODE(staged.path.stat().st_mode) == 0o600
+    assert service.downloaded_path is None
+    assert service.stage_macos_desktop_update() == staged
+    assert [url for url, _, _ in apply.calls] == [POLICY_URL, apply.artifact.download_url, POLICY_URL]
+
+    staged.path.write_bytes(b"x" * len(PAYLOAD))
+    assert service.stage_macos_desktop_update() == staged
+    assert staged.path.read_bytes() == PAYLOAD
+    assert [url for url, _, _ in apply.calls] == [
+        POLICY_URL, apply.artifact.download_url, POLICY_URL, POLICY_URL, apply.artifact.download_url,
+    ]
     assert apply.check() is DesktopApplyDecision.AUTHORIZED  # same signed publication is current
+
+
+@pytest.mark.parametrize("outcome", ["allowed", "missing", "paused", "withdrawn", "unsupported-installation"])
+def test_mac_offer_needs_preflight_and_a_signed_policy_before_download(apply, monkeypatch, outcome):
+    from servonaut.updates.macos_install import Installation, MacUpdateError
+
+    service = apply.service()
+    service._latest_manifest = apply.set_manifest(apply.manifest)
+    service._target_artifact = apply.artifact
+    service._last_result = UpdateCheckResult.UPDATE_AVAILABLE
+    validated = Mock(side_effect=MacUpdateError("fixture ownership") if outcome == "unsupported-installation" else None)
+    monkeypatch.setattr(Installation, "from_runtime", lambda _: SimpleNamespace(validate_offer=validated))
+    if outcome == "missing":
+        apply.documents.pop(POLICY_URL)
+    elif outcome == "paused":
+        apply.set_policy(apply.policy(paused=True, permitted=()))
+    elif outcome == "withdrawn":
+        apply.set_policy(apply.policy(permitted=(), withdrawn=(apply.identity,)))
+
+    service._check_macos_offer(apply.manifest, apply.artifact)
+    assert service.macos_install_offered == (outcome == "allowed")
+    validated.assert_called_once()
+    if outcome == "unsupported-installation":
+        assert apply.calls == []
+    if outcome in ("missing", "paused", "withdrawn"):
+        with pytest.raises(RuntimeCapabilityError, match="Download and install"):
+            service.stage_macos_desktop_update()
+        assert all(url == POLICY_URL for url, _, _ in apply.calls)
+
+
+def test_prepared_policy_rechecks_expiry_and_replay_without_network(apply):
+    import time_machine
+
+    service = apply.service()
+    evidence = service.prepare_staged_desktop_apply(apply.staged)
+    assert isinstance(evidence, DesktopApplyEvidence)
+    assert evidence.is_current()
+    with time_machine.travel(apply.now + timedelta(hours=2), tick=False):
+        assert not evidence.is_current()
+    assert [url for url, _, _ in apply.calls] == [POLICY_URL, MANIFEST_URL]
+    apply.set_policy(apply.policy(sequence=11))
+    assert service._read_macos_policy().sequence == 11
+    assert not evidence.is_current()
+    assert [url for url, _, _ in apply.calls] == [POLICY_URL, MANIFEST_URL, POLICY_URL]
+
+
+def test_prepared_policy_does_not_follow_replaced_replay_state(apply):
+    evidence = apply.service().prepare_staged_desktop_apply(apply.staged)
+    assert isinstance(evidence, DesktopApplyEvidence)
+    state = evidence.state_dir / "stable.json"
+    relocated = state.rename(state.with_suffix(".saved"))
+    try:
+        state.symlink_to(relocated)
+    except OSError:
+        pytest.skip("the platform does not allow test symlinks")
+    assert not evidence.is_current()
+    assert [url for url, _, _ in apply.calls] == [POLICY_URL, MANIFEST_URL]
 
 
 @pytest.mark.parametrize(

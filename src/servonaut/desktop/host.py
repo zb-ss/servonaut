@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import re
+import sys
 import socket
 from collections.abc import Callable
 from typing import Any, Final
@@ -114,6 +115,7 @@ class DesktopHost:
 
         self.finished = asyncio.Event()
         self.apt_restart_requested = False
+        self.macos_install_requested = False
         self._used = False
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -315,6 +317,10 @@ class DesktopHost:
             from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
 
             self.apt_restart_requested = app.return_code == APT_RESTART_EXIT_CODE
+            if sys.platform == "darwin":
+                from servonaut.updates.macos_install import INSTALL_QUIT_CODE
+
+                self.macos_install_requested = app.return_code == INSTALL_QUIT_CODE
         except (TimeoutError, asyncio.TimeoutError):
             logger.error("Desktop app did not start within %ss", self.shutdown_seconds)
             await ws.close(code=1011, message=b"App startup timed out")

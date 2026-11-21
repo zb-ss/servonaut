@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from servonaut.desktop.launcher import DesktopLaunchRequest, run_desktop
+from servonaut.desktop.launcher import DesktopLaunchRequest, run_desktop, show_native_error
 from servonaut.runtime import (
     DesktopProcessRole,
     DistributionKind,
@@ -48,6 +48,20 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as error:
             logging.getLogger(__name__).error("Servonaut could not restart: %s", error)
             return 1
+    if sys.platform == "darwin":
+        from servonaut.updates.macos_install import (
+            GUIDANCE, INSTALL_QUIT_CODE, MacUpdateError, recover_after_quit, start_on_quit,
+        )
+
+        if exit_code == INSTALL_QUIT_CODE:
+            try:
+                start_on_quit(runtime)
+                return 0
+            except (OSError, MacUpdateError, ValueError) as exc:
+                logging.getLogger(__name__).warning("Could not prepare application replacement: %s", exc)
+                show_native_error("Servonaut update", GUIDANCE)
+                return 1
+        recover_after_quit(runtime)
     return exit_code
 
 

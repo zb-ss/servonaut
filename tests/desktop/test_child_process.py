@@ -52,6 +52,8 @@ import types
 
 
 class DesktopHost:
+    macos_install_requested = False
+
     def __init__(self, **_kwargs):
         self.finished = asyncio.Event()
         self.apt_restart_requested = False

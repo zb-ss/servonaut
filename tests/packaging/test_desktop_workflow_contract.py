@@ -523,6 +523,8 @@ def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
     # Verified as a whole and per executable; Gatekeeper rejects ad-hoc apps.
     assert 'codesign --verify --strict --deep --verbose=2 "${APP}"' in step
     assert "codesign -d --entitlements -" in step
+    for name in ("servonaut-desktop", "servonaut-desktop-child", "servonaut"):
+        assert f"{name}.runtime" in step
     assert "spctl" not in step
     # uv keeps its publisher's signature.
     assert "grep -q '^Authority=Developer ID Application'" in step
@@ -534,6 +536,27 @@ def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
     assert qualify.index("scripts.desktop_shell.smoke_artifact") < qualify.index(
         "Package and ad-hoc sign the macOS app"
     )
+
+
+def test_macos_replacement_is_qualified_on_both_pr_runners(workflow_content: str) -> None:
+    pull_request = workflow_content.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+    assert "- 'packaging/macos/**'" in pull_request
+    assert "- 'src/**'" in pull_request
+    job = _job_block(workflow_content, "macos-replacement")
+    assert "github.event_name == 'pull_request'" in job
+    assert "arch: x64\n            runner: macos-15-intel" in job
+    assert "arch: arm64\n            runner: macos-15" in job
+    assert "test_desktop_macos_apply.py" in job
+    assert "test_desktop_macos_safety.py" in job
+    assert "test_desktop_macos_published.py" in job
+    assert "continue-on-error: true" in _named_step(job, "Assess an available published signed disk image")
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Verify admission with the signed app in Applications")
+    assert "steps.macos-app.outputs.app-dir" in step
+    assert (
+        'PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \\\n'
+        '            -m scripts.distribution.check_macos_admission "${APP_DIR}"'
+    ) in step
 
 
 def test_macos_self_tests_and_opens_the_signed_app(workflow_content: str) -> None:

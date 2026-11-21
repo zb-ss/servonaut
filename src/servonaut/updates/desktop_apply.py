@@ -45,6 +45,30 @@ class StagedDesktopUpdate:
     path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class DesktopApplyEvidence:
+    policy: DesktopApplyPolicy
+    manifest: ReleaseManifest
+    trust: TrustPolicy
+    channel: ReleaseChannel
+    state_dir: Path
+
+    def is_current(self) -> bool:
+        """Check the authenticated documents and replay state without fetching."""
+        try:
+            verify_apply_policy(self.policy, self.trust, self.channel)
+            fresh = replace(self.trust, require_freshness=True, clock_skew_tolerance_seconds=0)
+            verify_manifest(self.manifest, fresh)
+            state = self.state_dir / f"{self.channel.value}.json"
+            if not stat.S_ISREG(state.lstat().st_mode):
+                return False
+            observed = _previous_sequence(state)
+            digest = hashlib.sha256(self.policy.canonical_bytes()).hexdigest()
+            return observed == (self.policy.sequence, digest)
+        except (ManifestError, OSError, ValueError, RecursionError):
+            return False
+
+
 def _previous_sequence(filename: Path) -> tuple[int, str]:
     with filename.open("rb") as handle:
         raw = handle.read(513)
@@ -106,12 +130,22 @@ def _discard(staged: StagedDesktopUpdate, staging_dir: Path) -> DesktopApplyDeci
     return DesktopApplyDecision.DENIED
 
 
-def authorize_desktop_apply(
+def read_desktop_apply_policy(
+    *, data_root: Path, fetch: Callable[[str], bytes], manifest_url: str, trust: TrustPolicy,
+    channel: ReleaseChannel, warn: Callable[[str], None],
+) -> DesktopApplyPolicy:
+    policy = DesktopApplyPolicy.from_json(fetch(policy_url_for_manifest(manifest_url)))
+    verify_apply_policy(policy, trust, channel)
+    _accept_sequence(data_root / "desktop-apply-policy", policy, warn)
+    return policy
+
+
+def prepare_desktop_apply(
     staged: StagedDesktopUpdate, *, data_root: Path, fetch: Callable[[str], bytes],
     manifest_url: str, trust: TrustPolicy, channel: ReleaseChannel,
     running_version: str, running_revision: int | None,
     status: Callable[[str], None] | None = None,
-) -> DesktopApplyDecision:
+) -> DesktopApplyEvidence | DesktopApplyDecision:
     """Authorize only a fresh, exact match in both signed public documents."""
     def warn(message: str) -> None:
         logger.warning("%s", message)
@@ -122,16 +156,17 @@ def authorize_desktop_apply(
     state_dir = data_root / "desktop-apply-policy"
     try:
         file = _staged_file(staged.path, staging_dir)
-        policy = DesktopApplyPolicy.from_json(fetch(policy_url_for_manifest(manifest_url)))
-        verify_apply_policy(policy, trust, channel)
-        _accept_sequence(state_dir, policy, warn)
+        policy = read_desktop_apply_policy(
+            data_root=data_root, fetch=fetch, manifest_url=manifest_url, trust=trust, channel=channel, warn=warn,
+        )
         if staged.identity in policy.withdrawn:
             return _discard(staged, staging_dir)
         if policy.paused or staged.identity not in policy.permitted:
             return DesktopApplyDecision.DEFERRED
 
         manifest = ReleaseManifest.from_json(fetch(manifest_url))
-        verify_manifest(manifest, replace(trust, require_freshness=True, clock_skew_tolerance_seconds=0))
+        fresh_trust = replace(trust, require_freshness=True, clock_skew_tolerance_seconds=0)
+        verify_manifest(manifest, fresh_trust)
         verify_apply_policy(policy, trust, channel)
         _accept_sequence(state_dir, policy, warn)
         for artifact in manifest.artifacts:
@@ -146,7 +181,9 @@ def authorize_desktop_apply(
                 return DesktopApplyDecision.DEFERRED
             verify_apply_policy(policy, trust, channel)
             _accept_sequence(state_dir, policy, warn)
-            return DesktopApplyDecision.AUTHORIZED if matches else _discard(staged, staging_dir)
+            if not matches:
+                return _discard(staged, staging_dir)
+            return DesktopApplyEvidence(policy, manifest, trust, channel, state_dir)
         return DesktopApplyDecision.DEFERRED
     except DesktopPolicyClockError:
         warn("Check this computer's date and time before installing the update.")

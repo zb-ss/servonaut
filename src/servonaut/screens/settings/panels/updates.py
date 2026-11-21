@@ -385,6 +385,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     yield Button("Postpone 24 h", id="updates_btn_postpone", variant="default")
                     yield Button("Try now", id="updates_btn_try", variant="primary")
                     yield Button("Update now", id="updates_btn_update", variant="primary")
+                    yield Button("Install on quit", id="updates_btn_macos_install", variant="primary", classes="hidden")
                     yield Button("Restart Servonaut", id="updates_btn_restart", variant="primary", classes="hidden")
 
         with Vertical(id="updates_channel_section", classes="settings-form-section"):
@@ -753,12 +754,15 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         btn_try = self.query_one("#updates_btn_try", Button)
         btn_update = self.query_one("#updates_btn_update", Button)
         btn_restart = self.query_one("#updates_btn_restart", Button)
+        btn_macos_install = self.query_one("#updates_btn_macos_install", Button)
+        can_install = getattr(self.app, "can_install_macos_update", None)
+        macos_update = callable(can_install) and can_install()
         actions_box = self.query_one("#updates_status_actions", Vertical)
 
         # Reset visibility and state classes cleanly.
         for cls in ("-warning", "-error", "-accent", "-success"):
             primary_widget.remove_class(cls)
-        for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart):
+        for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart, btn_macos_install):
             btn.display = False
         btn_restart.remove_class("hidden")
         link_notes.display = False
@@ -811,7 +815,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         elif status.state == "managed_elsewhere":
             # State 5 — managed elsewhere.
             primary_text, secondary_text, command_text, show_check, show_download, notes_ver = (
-                self._managed_elsewhere_view(status, apt_managed=apt_managed)
+                self._managed_elsewhere_view(status, apt_managed=apt_managed, macos_update=macos_update)
             )
             if show_check:
                 btn_check.display = True
@@ -942,8 +946,11 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         links_row.display = bool(
             link_notes.display or link_details.display or link_download.display
         )
+        if link_download.display and macos_update:
+            btn_macos_install.remove_class("hidden")
+            btn_macos_install.display = True
         actions_box.display = any(
-            btn.display for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart)
+            btn.display for btn in (btn_check, btn_postpone, btn_try, btn_update, btn_restart, btn_macos_install)
         )
 
         self._sync_channel_controls(status)
@@ -955,6 +962,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         status: UpdateStatus,
         *,
         apt_managed: Optional[bool] = None,
+        macos_update: bool = False,
     ) -> tuple[str, str, str, bool, bool, Optional[str]]:
         """Return ``(primary, secondary, command, show_check, show_download, notes_ver)``."""
         install_kind = status.install_kind or ""
@@ -998,7 +1006,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             available = _terminal_safe(
                 status.target_version or self._discovered_version or ""
             ).strip()
-            if available and self._is_newer(available, status.installed_version):
+            if available and (macos_update or self._is_newer(available, status.installed_version)):
                 return (
                     f"{available} is available",
                     "",
@@ -1109,6 +1117,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             "#updates_btn_try",
             "#updates_btn_update",
             "#updates_btn_restart",
+            "#updates_btn_macos_install",
             "#updates_link_download",
         ):
             try:
@@ -1171,6 +1180,23 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+
+    @on(Button.Pressed, "#updates_btn_macos_install")
+    def _on_macos_install_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.app.request_macos_install(self._show_macos_download)
+
+    def _show_macos_download(self, downloading: bool) -> None:
+        if not self.is_attached:
+            return
+        self._busy = downloading
+        busy = self.query_one("#updates_busy", BusyIndicator)
+        if downloading:
+            busy.start("Downloading verified update…")
+        else:
+            busy.stop()
+            self._render_status()
+        self._sync_action_busy()
 
     @on(Button.Pressed, "#updates_btn_restart")
     def _on_restart_pressed(self, event: Button.Pressed) -> None:

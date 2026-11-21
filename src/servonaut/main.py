@@ -1535,6 +1535,11 @@ def _restart_tui_arguments(args: argparse.Namespace) -> list[str]:
 
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
+    if sys.platform == "darwin" and len(sys.argv) == 3 and sys.argv[1] == "--_macos-install-update":
+        from servonaut.runtime import detect_runtime
+        from servonaut.updates.macos_install import run_helper
+
+        raise SystemExit(run_helper(detect_runtime(), sys.argv[2]))
     if sys.argv[1:] == ["--_artifact-selftest"]:
         from servonaut.runtime import DistributionKind, detect_runtime
 

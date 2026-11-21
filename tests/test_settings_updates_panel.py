@@ -1494,3 +1494,41 @@ async def test_pinned_version_with_threshold_is_neutral_and_escaped(
             assert panel.query_one("#updates_btn_postpone", Button).display is False
             assert panel.query_one("#updates_btn_try", Button).display is False
     assert guard.findings == []
+
+
+@pytest.mark.asyncio
+async def test_macos_install_does_not_quit_if_activity_appears_during_download(monkeypatch):
+    import asyncio
+    from servonaut.updates import macos_install
+
+    requests = MagicMock()
+    monkeypatch.setattr(macos_install, "request_on_quit", requests)
+    monkeypatch.setattr(macos_install.Installation, "from_runtime", lambda _: SimpleNamespace(validate_offer=MagicMock()))
+    stage = MagicMock(return_value=object())
+
+    async def controlled_download(action):
+        return action()
+
+    async def perform(action):
+        return await action()
+
+    monkeypatch.setattr(asyncio, "to_thread", controlled_download)
+    app = SimpleNamespace(
+        _refuse_navigation=MagicMock(side_effect=(False, True)),
+        _run_upgrade_once=perform, runtime_layout=object(),
+        update_service=SimpleNamespace(stage_macos_desktop_update=stage),
+        action_quit=AsyncMock(), notify=MagicMock(),
+    )
+    await ServonautApp._install_macos_after_confirmation(app)
+    stage.assert_called_once()
+    requests.assert_not_called()
+    app.action_quit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_macos_install_quit_respects_an_active_session():
+    app = SimpleNamespace(
+        _refuse_navigation=MagicMock(return_value=True), _macos_update_quit_code=76, exit=MagicMock(),
+    )
+    await ServonautApp.action_quit(app)
+    app.exit.assert_not_called()
