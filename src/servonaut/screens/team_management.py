@@ -1074,7 +1074,7 @@ class TeamManagementScreen(WorkspaceScreen):
         user-readable so we surface it verbatim with appended actionable hint.
         """
         logger.error("Member write failed (%s): %s", exc.status, exc.message)
-        if isinstance(exc, ClientUpdateRequiredError) or exc.status == 426:
+        if isinstance(exc, ClientUpdateRequiredError):
             self.notify(exc.message, severity="warning", timeout=12, markup=False)
             return
         if exc.status == 402:

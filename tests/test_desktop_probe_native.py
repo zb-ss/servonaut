@@ -6,10 +6,12 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import replace
+from typing import BinaryIO
 
 import pytest
 
@@ -17,6 +19,7 @@ psutil = pytest.importorskip("psutil")
 pytest.importorskip("webview")
 
 from scripts.desktop_probe.config import ProbeConfig, load_config, scaled_seconds
+from scripts.desktop_probe.diagnostics import sanitize_stderr_tail
 
 _WINDOWS_FAULTS = {
     "initialization-failed": """
@@ -89,6 +92,15 @@ def kill_running(processes: Iterable[psutil.Process], config: ProbeConfig) -> No
     ), "A killed probe process was still running after the shutdown budget"
 
 
+def _read_stderr_tail(stderr_file: BinaryIO, config: ProbeConfig) -> list[str]:
+    stderr_file.flush()
+    stderr_file.seek(0, os.SEEK_END)
+    size = stderr_file.tell()
+    stderr_file.seek(max(0, size - config.max_message_bytes))
+    raw = stderr_file.read(config.max_message_bytes).decode("utf-8", errors="replace")
+    return sanitize_stderr_tail(raw, max_lines=config.max_diagnostic_entries)
+
+
 @pytest.mark.skipif(
     os.environ.get("SERVONAUT_DESKTOP_NATIVE_TEST") != "1",
     reason="Run python -m scripts.desktop_probe.check --native to open a window",
@@ -107,89 +119,101 @@ def test_native_first_frame_and_process_tree_cleanup(
     renderer = os.environ.get("SERVONAUT_PROBE_RENDERER")
     if renderer:
         command.extend(["--renderer", renderer])
-    process = psutil.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    descendants: set[psutil.Process] = set()
-    try:
-        deadline = (
-            time.monotonic() + config.startup_seconds + config.shutdown_seconds * 4
+    with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+        process = psutil.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
         )
-        while process.poll() is None and time.monotonic() < deadline:
-            try:
-                descendants.update(process.children(recursive=True))
-            except psutil.NoSuchProcess:
-                break  # The launcher exited between poll() and the tree snapshot.
-            time.sleep(config.probe_poll_seconds)
-        timed_out = process.poll() is None
-        if timed_out:
-            # Native helpers can inherit stdout; stop them too before waiting
-            # for pipe EOF, or the timeout would hide the captured stages.
-            kill_running([*descendants, process], config)
-        output, _ = process.communicate(timeout=config.shutdown_seconds)
-        records = [
-            json.loads(line)
-            for line in output.decode().splitlines()
-            if line.startswith('{"')
-        ]
-        expected = {
-            "native_first_frame",
-            "host_stopped",
-            "child_exit_ok",
-            "graceful_child_stop",
-            "port_released",
-        }
-        stages = {
-            "host-ready",
-            "window-loaded",
-            "bootstrap-injected",
-            "first-frame",
-            "gui-starting",
-            "gui-stopped",
-            "private-storage-ready",
-            "private-storage-removed",
-            "startup-failed",
-            *_WINDOWS_FAULTS,
-        }
-        observed_stages = [
-            record["native_stage"]
-            for record in records
-            if set(record) == {"native_stage"} and record["native_stage"] in stages
-        ]
-        record_property("native_stages", observed_stages)
-        for record in records:
-            if set(record) == {"child_errors"}:
-                record_property("child_errors", record["child_errors"])
-            elif set(record) == {"child_transport"}:
-                record_property("child_transport", record["child_transport"])
-            elif set(record) == expected and all(
-                type(value) is bool for value in record.values()
-            ):
-                record_property("native_result", record)
-        assert not timed_out, "Native window did not exit before deadline"
-        if sys.platform == "win32":
-            assert "private-storage-ready" in observed_stages
-            assert "private-storage-removed" in observed_stages
-        if fault is None:
-            assert process.returncode == 0, "Native renderer failed; check OS prerequisites"
-            assert any(
-                set(record) == expected and all(value is True for value in record.values())
-                for record in records
+        descendants: set[psutil.Process] = set()
+        try:
+            deadline = (
+                time.monotonic() + config.startup_seconds + config.shutdown_seconds * 4
             )
-        else:
-            assert process.returncode == 1
-            assert fault in observed_stages and "startup-failed" in observed_stages
-            assert "bootstrap-injected" not in observed_stages
-            assert "first-frame" not in observed_stages
-        assert stopped_within(
-            descendants, config.shutdown_seconds, config.probe_poll_seconds
-        ), "Native renderer left a running child"
-    finally:
-        kill_running([*descendants, process], config)
-        process.wait(timeout=config.shutdown_seconds)
+            while process.poll() is None and time.monotonic() < deadline:
+                try:
+                    descendants.update(process.children(recursive=True))
+                except psutil.NoSuchProcess:
+                    break  # The launcher exited between poll() and the tree snapshot.
+                time.sleep(config.probe_poll_seconds)
+            timed_out = process.poll() is None
+            if timed_out:
+                # Native helpers can inherit stdout; stop them too before waiting
+                # for pipe EOF, or the timeout would hide the captured stages.
+                kill_running([*descendants, process], config)
+            output, _ = process.communicate(timeout=config.shutdown_seconds)
+            stderr_tail = _read_stderr_tail(stderr_file, config)
+            if stderr_tail:
+                record_property("native_stderr", stderr_tail)
+            records = [
+                json.loads(line)
+                for line in output.decode().splitlines()
+                if line.startswith('{"')
+            ]
+            expected = {
+                "native_first_frame",
+                "host_stopped",
+                "child_exit_ok",
+                "graceful_child_stop",
+                "port_released",
+            }
+            stages = {
+                "host-ready",
+                "window-shown",
+                "root-requested",
+                "before-load",
+                "window-loaded",
+                "bootstrap-injected",
+                "first-frame",
+                "gui-starting",
+                "gui-stopped",
+                "private-storage-ready",
+                "private-storage-removed",
+                "startup-failed",
+                *_WINDOWS_FAULTS,
+            }
+            observed_stages = [
+                record["native_stage"]
+                for record in records
+                if set(record) == {"native_stage"} and record["native_stage"] in stages
+            ]
+            record_property("native_stages", observed_stages)
+            for record in records:
+                if set(record) == {"child_errors"}:
+                    record_property("child_errors", record["child_errors"])
+                elif set(record) == {"child_transport"}:
+                    record_property("child_transport", record["child_transport"])
+                elif set(record) == expected and all(
+                    type(value) is bool for value in record.values()
+                ):
+                    record_property("native_result", record)
+            stderr_note = (
+                f" (stderr tail: {' | '.join(stderr_tail)})" if stderr_tail else ""
+            )
+            assert not timed_out, f"Native window did not exit before deadline{stderr_note}"
+            if sys.platform == "win32":
+                assert "private-storage-ready" in observed_stages
+                assert "private-storage-removed" in observed_stages
+            if fault is None:
+                assert process.returncode == 0, (
+                    f"Native renderer failed; check OS prerequisites{stderr_note}"
+                )
+                assert any(
+                    set(record) == expected and all(value is True for value in record.values())
+                    for record in records
+                )
+            else:
+                assert process.returncode == 1
+                assert fault in observed_stages and "startup-failed" in observed_stages
+                assert "bootstrap-injected" not in observed_stages
+                assert "first-frame" not in observed_stages
+            assert stopped_within(
+                descendants, config.shutdown_seconds, config.probe_poll_seconds
+            ), "Native renderer left a running child"
+        finally:
+            kill_running([*descendants, process], config)
+            process.wait(timeout=config.shutdown_seconds)
 
 
 def test_native_timeout_keeps_stages_and_cleans_up(
@@ -202,6 +226,8 @@ def test_native_timeout_keeps_stages_and_cleans_up(
 import subprocess, sys, time
 subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
 print('{"native_stage":"host-ready"}', flush=True)
+print('{"native_stage":"window-shown"}', flush=True)
+print('WebView2 initialization failed auth.secret-token C:\\\\Temp\\\\wv2', file=sys.stderr, flush=True)
 time.sleep(60)
 """
 
@@ -230,9 +256,17 @@ time.sleep(60)
     monkeypatch.setattr(psutil, "Popen", unresponsive_window)
     monkeypatch.setattr(sys.modules[__name__], "load_config", lambda: config)
     monkeypatch.setattr(sys.modules[__name__], "kill_running", capture_and_kill)
-    with pytest.raises(AssertionError, match="Native window did not exit"):
+    with pytest.raises(AssertionError, match="Native window did not exit") as exc_info:
         test_native_first_frame_and_process_tree_cleanup(properties.__setitem__, None)
-    assert properties["native_stages"] == ["host-ready"]
+    assert properties["native_stages"] == ["host-ready", "window-shown"]
+    stderr_lines = properties["native_stderr"]
+    assert isinstance(stderr_lines, list) and any(
+        "WebView2 initialization failed" in line for line in stderr_lines
+    )
+    assert "secret-token" not in str(stderr_lines)
+    assert "C:\\Temp\\wv2" not in str(stderr_lines)
+    assert "WebView2 initialization failed" in str(exc_info.value)
+    assert "secret-token" not in str(exc_info.value)
     assert len(set(observed)) >= 2  # The launcher and its inherited-stdout helper.
     assert not any(running(process) for process in observed)
 

@@ -27,6 +27,21 @@ pytestmark = [pytest.mark.e2e_pr]
 MINIMUM_VERSION = "99.0.0"
 
 
+def test_vault_list_reports_the_required_update_and_works_in_log_mode(fake_cloud, cli, version_gate_vault):
+    home, _, _ = version_gate_vault
+    fake_cloud.set_client_version_policy(mode="enforce", minimum_version=MINIMUM_VERSION)
+    refused = cli(home, "vault", "list")
+    assert refused.returncode != 0, refused.describe()
+    assert f"Update to {MINIMUM_VERSION}" in refused.stderr
+    assert "update your source checkout and reinstall" in refused.stderr
+    assert any(req["status"] == 426 for req in fake_cloud.requests() if "/vault" in req["path"])
+
+    fake_cloud.set_client_version_policy(mode="log", minimum_version=MINIMUM_VERSION)
+    allowed = cli(home, "vault", "list")
+    assert allowed.returncode == 0, allowed.describe()
+    assert "Fixture vault" in allowed.stdout
+
+
 def test_cli_cloud_commands_report_update_required_while_exempt_and_local_work(
     journey, fake_cloud, cli, account_home,
 ):

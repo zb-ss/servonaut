@@ -671,14 +671,14 @@ def test_api_client_426_variants_plain_empty_missing_details_and_non_utf8() -> N
     auth = SimpleNamespace(access_token="tok", refresh_token=AsyncMock(return_value=False))
     client = APIClient(auth)
 
-    # 1. Empty 426 body with NO Upgrade header -> clean fallback with empty minimum_version.
+    # A markerless HTTP 426 follows the normal error path.
     client.transport = httpx.MockTransport(lambda _req: httpx.Response(426, content=b""))
-    with pytest.raises(ClientUpdateRequiredError) as exc_empty:
+    with pytest.raises(APIError) as exc_empty:
         _run(client.get("/api/v1/teams"))
-    assert exc_empty.value.minimum_version == ""
-    assert "Update Servonaut to continue" in exc_empty.value.message
+    assert type(exc_empty.value) is APIError
+    assert exc_empty.value.message == "HTTP 426"
 
-    # 2. JSON 426 whose details omit minimum_version falls back to Upgrade header.
+    # JSON 426 whose details omit minimum_version falls back to Upgrade header.
     client.transport = httpx.MockTransport(
         lambda _req: httpx.Response(
             426,
@@ -691,7 +691,7 @@ def test_api_client_426_variants_plain_empty_missing_details_and_non_utf8() -> N
     assert exc_details.value.minimum_version == "2.36.0"
     assert "2.36.0" in exc_details.value.message
 
-    # 3. Non-UTF8 426 body + Upgrade header never leaks UnicodeDecodeError.
+    # A non-UTF8 426 body with an Upgrade header still reports its version.
     client.transport = httpx.MockTransport(
         lambda _req: httpx.Response(
             426,
@@ -933,6 +933,20 @@ def test_cli_ai_stream_surfaces_426_and_sse_update_required(capsys) -> None:
     assert rc != 0
     assert "2.34.0" in captured.err
     assert "pipx upgrade servonaut" in captured.err
+
+
+def test_proxy_426_keeps_ordinary_ai_stream_error(proxy_426, capsys) -> None:
+    from servonaut.cli.ai import _do_chat_stream
+
+    async def fail_stream(*_args, **_kwargs):
+        raise proxy_426
+        yield  # pragma: no cover
+
+    provider = SimpleNamespace(stream_chat=fail_stream)
+    rc = _run(_do_chat_stream(provider, [], SimpleNamespace(), "general", False))
+    assert rc != 0
+    assert f"Error [{proxy_426.code}]: {proxy_426.message}" in capsys.readouterr().err
+    assert map_error_to_action(proxy_426).action is not UserFacingAction.CLIENT_UPDATE_REQUIRED
 
 
 def test_sse_pre_stream_426_sends_header_and_raises_update_required() -> None:

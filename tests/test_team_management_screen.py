@@ -882,6 +882,22 @@ async def _confirm_share_all(app, pilot) -> None:
 
 class TestTeamManagementMemberWriteErrors:
     @pytest.mark.asyncio
+    async def test_proxy_426_uses_normal_invite_error(self, proxy_426):
+        team_svc = _make_team_service()
+        team_svc.invite_member = AsyncMock(side_effect=proxy_426)
+        app = _WrapperApp(auth_service=_make_auth_service(authenticated=True), team_service=team_svc)
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            notes = _capture_notifications(screen)
+            await screen._do_invite_member("eng", "member@example.com", "member")
+            assert len(notes) == 1
+            severity, message = notes[0]
+            assert severity == "error"
+            assert message.endswith(proxy_426.message) and message != proxy_426.message
+            assert "Update Servonaut" not in message
+
+    @pytest.mark.asyncio
     async def test_invite_402_owner_caller_sees_billing_cta(self):
         auth = _make_auth_service(authenticated=True)
         team_svc = _make_team_service()

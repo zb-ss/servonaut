@@ -422,7 +422,7 @@ async def _run_setup_async(args: argparse.Namespace) -> int:
     except APIError as exc:
         from servonaut.services.api_client import ClientUpdateRequiredError
 
-        if isinstance(exc, ClientUpdateRequiredError) or exc.status == 426:
+        if isinstance(exc, ClientUpdateRequiredError):
             print(exc.message, file=sys.stderr)
         else:
             print(f"Failed to save config: {exc.message} (status {exc.status})")
