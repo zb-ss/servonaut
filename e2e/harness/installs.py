@@ -603,11 +603,12 @@ class Installs:
         return f"https://localhost:{port}/simple/"
 
     def env(self, sandbox: Sandbox) -> dict[str, str]:
+        generations = sandbox.home / ".servonaut" / "updates" / "installs"
         overrides = {
             # The installed package, never the checkout's sources.
             "PYTHONPATH": str(CHILD_SITE_DIR),
             "PATH": os.pathsep.join([str(self.shim_dir), *map(str, self.path_dirs)]),
-            "SERVONAUT_E2E_SPAWN_DIRS": os.pathsep.join(self.spawn_dirs),
+            "SERVONAUT_E2E_SPAWN_DIRS": os.pathsep.join([*self.spawn_dirs, str(generations)]),
             # The overlay's links resolve into this environment's site-packages.
             "SERVONAUT_E2E_ALLOWED_DIRS": os.pathsep.join(
                 [*self.allowed_dirs, *map(str, environment_site_dirs())]
@@ -618,6 +619,7 @@ class Installs:
             "PIP_NO_INPUT": "1",
             # Only the settings above: no pip configuration from anywhere else.
             "PIP_CONFIG_FILE": os.devnull,
+            "SERVONAUT_SKIP_AUTO_APPLY": "1",
             **self.extra_env,
         }
         return self.base_env(sandbox, overrides)

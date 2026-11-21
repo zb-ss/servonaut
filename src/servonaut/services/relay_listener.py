@@ -22,6 +22,12 @@ except ImportError:
 
 from servonaut.config.schema import DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
+from servonaut.services.client_identity import (
+    client_request_headers,
+    format_update_required_from_response,
+    format_update_required_message,
+    response_is_update_required,
+)
 from servonaut.services.remediation_executor import REMEDIATION_SOURCE
 from servonaut.utils.endpoints import validate_relay_urls
 from servonaut.utils.relay_log import log_relay_event
@@ -335,6 +341,9 @@ class RelayListener:
                  on_connected=None, on_disconnected=None,
                  on_session_expired=None,
                  on_degraded=None,
+                 on_update_required: Optional[
+                     Callable[[str], Awaitable[None]]
+                 ] = None,
                  heartbeat_rejection_alert_after: int = (
                      DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
                  ),
@@ -400,11 +409,14 @@ class RelayListener:
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
         self._on_session_expired = on_session_expired
+        self._on_update_required = on_update_required
         self._connected_hook_fired = False
         # Fired exactly once per listener lifetime so we don't bombard
         # the manager with repeat session-expired callbacks if the
         # heartbeat loop runs another tick before stop() lands.
         self._session_expired_hook_fired = False
+        self._update_required_logged = False
+        self._update_required_hook_fired = False
         # Heartbeat 401/403s that a refresh did not cure while the session
         # stays valid, counted since the last accepted heartbeat. Once the
         # count reaches the threshold the relay is reported as not
@@ -582,7 +594,8 @@ class RelayListener:
           as-is. The 401-handler in :meth:`_heartbeat_loop` then decides.
         - Network-layer exceptions propagate to the caller unchanged.
         """
-        headers = dict(kwargs.pop("headers", {}) or {})
+        headers = client_request_headers(kind="relay")
+        headers.update(kwargs.pop("headers", {}) or {})
         headers["Authorization"] = f"Bearer {self._get_auth_token()}"
         # Dispatch via the verb-named attribute (``self._client.post`` /
         # ``self._client.get``) rather than ``self._client.request``
@@ -763,7 +776,7 @@ class RelayListener:
                     ("topic", topic) for topic in topics
                 ]
                 params.append(("authorization", mercure_jwt))
-                headers = {}
+                headers = client_request_headers(kind="relay")
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 
@@ -775,6 +788,9 @@ class RelayListener:
                     # httpx-sse never raises for an error status, so a
                     # rejected subscription must be caught here, before it
                     # is reported as connected or resets the backoff.
+                    # Hub responses (including HTTP 426 from a proxy or hub)
+                    # always take the normal backoff path rather than
+                    # stopping the relay.
                     response = event_source.response
                     if not response.is_success or not _is_event_stream(response):
                         raise _HubRejectedError(
@@ -810,6 +826,11 @@ class RelayListener:
             except httpx.HTTPStatusError as e:
                 # Raised by the subscriber-token fetch; hub responses are
                 # handled above.
+                if response_is_update_required(e.response):
+                    await self._handle_update_required(
+                        e.response, status=e.response.status_code,
+                    )
+                    return
                 if e.response.status_code == 401:
                     logger.error(
                         "401 from %s — the OAuth token may have expired; "
@@ -1921,6 +1942,9 @@ class RelayListener:
             resp = await self._authed_request(
                 "POST", url, json=asdict(response), timeout=10.0,
             )
+            if response_is_update_required(resp):
+                await self._handle_update_required(resp, status=resp.status_code)
+                return
             if resp.status_code >= 400:
                 logger.warning(
                     "Failed to post result: %s %s",
@@ -1967,6 +1991,9 @@ class RelayListener:
     async def _heartbeat_ended_session(self, response, handshake: bool) -> bool:
         """Act on one heartbeat response; return True once the session is over."""
         status = response.status_code
+        if response_is_update_required(response):
+            await self._handle_update_required(response, status=status)
+            return True
         if status in (401, 403):
             if self._session_is_gone():
                 # Fire the session-expired hook so the indicator stops
@@ -2100,6 +2127,32 @@ class RelayListener:
             await self._on_session_expired()
         except Exception as e:
             logger.warning("on_session_expired hook raised: %s", e)
+
+    async def _handle_update_required(
+        self, response: Any = None, *, status: int = 426,
+    ) -> None:
+        """Log once, notify owner, and stop retrying when the client is too old."""
+        message = (
+            format_update_required_from_response(response)
+            if response is not None
+            else format_update_required_message()
+        )
+        if not self._update_required_logged:
+            self._update_required_logged = True
+            logger.error("Relay stopped (HTTP %d): %s", status, message)
+            log_relay_event("update_required", status=status, detail=message)
+        await self._safe_fire_update_required(message)
+        self.stop()
+
+    async def _safe_fire_update_required(self, message: str) -> None:
+        """Fire ``on_update_required`` once per listener lifetime."""
+        if self._on_update_required is None or self._update_required_hook_fired:
+            return
+        self._update_required_hook_fired = True
+        try:
+            await self._on_update_required(message)
+        except Exception as e:
+            logger.warning("on_update_required hook raised: %s", e)
 
     def stop(self) -> None:
         """Signal the listener to stop and make :meth:`run` return promptly.

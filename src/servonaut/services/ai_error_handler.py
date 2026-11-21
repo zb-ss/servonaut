@@ -32,12 +32,15 @@ from urllib.parse import urlsplit
 
 from servonaut.services.api_client import (
     APIError,
+    ClientUpdateRequiredError,
     FeatureDisabledError,
     ForbiddenEntitlementError,
     QuotaExceededError,
     RateLimitedError,
     ValidationFailedError,
 )
+from servonaut.services.client_identity import format_update_required_message
+from servonaut.services.version_policy import safe_update_url
 from servonaut.services.ai_sse import (
     SSEStreamDead,
     SSEStreamError,
@@ -109,6 +112,7 @@ class UserFacingAction(str, Enum):
     MODAL_QUOTA_EXHAUSTED = "modal_quota_exhausted"
     MODAL_BUDGET_EXHAUSTED = "modal_budget_exhausted"
     MODAL_UPGRADE_REQUIRED = "modal_upgrade_required"
+    CLIENT_UPDATE_REQUIRED = "client_update_required"
     BANNER_FEATURE_OFF = "banner_feature_off"
     BANNER_UPSTREAM_FLAKY = "banner_upstream_flaky"
     LOG_ONLY = "log_only"
@@ -356,6 +360,18 @@ def _map_content_blocked(err: Union[APIError, SSEStreamError]) -> ErrorActionPay
     )
 
 
+def _map_client_update_required(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
+    """426 — running client version is below the server minimum."""
+    details = _details_of(err)
+    return ErrorActionPayload(
+        action=UserFacingAction.CLIENT_UPDATE_REQUIRED,
+        user_message=format_update_required_message(err),
+        code="client_update_required",
+        upgrade_url=safe_update_url(details.get("update_url")),
+        details=details,
+    )
+
+
 def _map_validation_failed(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
     """400/422 — programmer error. Generic toast + debug log of details."""
     return ErrorActionPayload(
@@ -384,6 +400,7 @@ _CODE_DISPATCH = {
     "context_too_large": _map_context_too_large,
     "content_blocked": _map_content_blocked,
     "validation_failed": _map_validation_failed,
+    "client_update_required": _map_client_update_required,
 }
 
 
@@ -419,6 +436,9 @@ def map_error_to_action(
             code="upstream_unavailable",
             details={"reason": str(err) if err else "heartbeat watchdog"},
         )
+
+    if isinstance(err, ClientUpdateRequiredError) or getattr(err, "status", None) == 426:
+        return _map_client_update_required(err)
 
     code = _code_of(err)
     mapper = _CODE_DISPATCH.get(code)

@@ -441,7 +441,7 @@ async def _do_chat_buffered(
     instead of the private ``_chat_internal`` hop. The previous code
     leaked an internal API into a tested public surface.
     """
-    from servonaut.services.api_client import APIError
+    from servonaut.services.api_client import APIError, ClientUpdateRequiredError
 
     try:
         result = await provider.chat(
@@ -452,6 +452,9 @@ async def _do_chat_buffered(
             task=task,
             allow_tools=allow_tools,
         )
+    except ClientUpdateRequiredError as exc:
+        print(exc.message, file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
     except APIError as exc:
         # T5 owns the rich UX mapping; here we degrade to a single-line
         # error so the CLI is scriptable. The error code is the most
@@ -627,6 +630,16 @@ async def _do_chat_stream(
                     file=sys.stderr,
                 )
     if stream_error is not None:
+        from servonaut.services.api_client import ClientUpdateRequiredError
+        from servonaut.services.client_identity import format_update_required_message
+
+        if (
+            isinstance(stream_error, ClientUpdateRequiredError)
+            or getattr(stream_error, "code", None) == "client_update_required"
+            or getattr(stream_error, "status", None) == 426
+        ):
+            print(f"\n{format_update_required_message(stream_error)}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR
         details = getattr(stream_error, "details", None)
         guidance = _spend_refusal_guidance(
             getattr(stream_error, "code", None),

@@ -1624,10 +1624,18 @@ def device_flow_requests(monkeypatch):
             kwargs["transport"] = httpx.MockTransport(handler)
             super().__init__(*args, **kwargs)
 
+    from servonaut.services.client_identity import (
+        configure_client_identity,
+        reset_client_identity_for_tests,
+    )
+
     monkeypatch.setattr(httpx, "AsyncClient", _RecordingClient)
     monkeypatch.setattr(auth_mod, "describe_platform", lambda: "macOS 15")
-    monkeypatch.setattr(auth_mod, "get_version", lambda: "9.9.9")
-    return requests
+    configure_client_identity(kind="cli", version="9.9.9")
+    try:
+        yield requests
+    finally:
+        reset_client_identity_for_tests()
 
 
 @pytest.mark.parametrize("client_kind", ["cli", "tui", "desktop"])

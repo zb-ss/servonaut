@@ -55,6 +55,28 @@ async def test_list_instances_names_the_team_servers(mcp, fake_cloud, account_ho
         assert host.name in result
 
 
+async def test_list_instances_reports_team_inventory_blocked_by_update(mcp, fake_cloud, account_home):
+    _team(fake_cloud)
+    fake_cloud.set_client_version_policy(mode="enforce", minimum_version="99.0.0")
+    home = account_home("mcp-shared-update-required")
+
+    async with mcp(home) as session:
+        result = await session.call("list_instances", {})
+        assert fleet.APP_1.name in result
+        assert "ops/server-1" not in result
+        assert "Some team servers could not be listed: team Ops:" in result
+        assert "Update to 99.0.0 or later" in result
+        team_requests = fake_cloud.statuses("/api/v1/teams/ops/servers")
+        assert team_requests and set(team_requests) == {426}
+
+        cached = await session.call("list_instances", {})
+        assert "Some team servers could not be listed: team Ops:" in cached
+        assert fake_cloud.statuses("/api/v1/teams/ops/servers") == team_requests
+
+        custom = await session.call("list_instances", {"account": "custom"})
+        assert "Some team servers could not be listed" not in custom
+
+
 async def test_run_command_reaches_a_team_server_by_its_reference(
     mcp, journey, fake_cloud, account_home,
 ):

@@ -1168,6 +1168,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'hetzner_enabled',
         'hetzner_require_ssh_keys',
         'history_paths',
+        'updates',  # Reason: PanelSpec id in settings registry; panel widgets styled in settings_updates.tcss
         'hp_chat_history_path',
         'hp_command_history_path',
         'hp_keyword_store_path',

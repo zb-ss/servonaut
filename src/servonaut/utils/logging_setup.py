@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -24,35 +25,51 @@ _NOISY_LOGGERS: Final = (
 )
 
 
+def warn_stderr(message: str) -> None:
+    """Send a startup warning without falling back to stdout."""
+    if sys.stderr is not None:
+        try:
+            print(message, file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            pass
+
+
 def configure_rotating_log(
     log_dir: Path,
     *,
     filename: str = "servonaut.log",
     debug: bool = False,
-) -> Path:
+    warn_on_failure: bool = True,
+) -> Path | None:
     """Route the root logger to a size-rotated file, and to stderr when debugging.
 
     Args:
         log_dir: Directory holding the log file; created when missing.
         filename: Log file name inside ``log_dir``.
         debug: If True, also log to stderr and use DEBUG level.
+        warn_on_failure: Report unavailable file logging to stderr.
 
     Returns:
-        Path to the active log file.
+        Path to the active log file, or None if it could not be opened.
     """
-    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / filename
-
-    handlers: list[logging.Handler] = [
-        logging.handlers.RotatingFileHandler(
+    handlers: list[logging.Handler] = []
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=_LOG_MAX_BYTES,
             backupCount=_LOG_BACKUP_COUNT,
             encoding="utf-8",
-        ),
-    ]
+        ))
+    except OSError:
+        log_file = None
+        if warn_on_failure:
+            warn_stderr("servonaut: Could not enable file logging.")
     if debug:
         handlers.append(logging.StreamHandler())
+    if not handlers:
+        handlers.append(logging.NullHandler())
 
     # basicConfig is a no-op if the root logger already has handlers (e.g.
     # when --mcp and --debug are both set and setup runs twice).

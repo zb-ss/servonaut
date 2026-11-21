@@ -43,6 +43,7 @@ from e2e.harness.fake_cloud import (
     routes_relay,
     routes_secrets,
     routes_vault,
+    routes_version_policy,
 )
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
@@ -121,6 +122,28 @@ class FakeCloud(LoopbackServer):
 
     def configure(self, **changes: Any) -> None:
         """Change the scenario (see ``state.Scenario`` for the keys)."""
+        self._store.configure(**changes)
+
+    def set_client_version_policy(
+        self,
+        *,
+        mode: str = "off",
+        minimum_version: Optional[str] = None,
+        upcoming: Optional[dict[str, str]] = None,
+        latest: Optional[dict[str, Optional[str]]] = None,
+        update_url: Optional[str] = None,
+        update_hints: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Configure the client-version policy and HTTP 426 enforcement gate."""
+        changes: dict[str, Any] = {
+            "client_version_mode": mode,
+            "client_minimum_version": minimum_version,
+            "client_upcoming": upcoming,
+            "client_latest": latest,
+            "client_update_hints": update_hints,
+        }
+        if update_url is not None:
+            changes["client_update_url"] = update_url
         self._store.configure(**changes)
 
     def reset(self) -> None:
@@ -336,7 +359,12 @@ class FakeCloud(LoopbackServer):
 
     def build_app(self) -> web.Application:
         app = web.Application(
-            middlewares=[self._log_middleware, self._delay_middleware, self._ssh_ca_switch_middleware]
+            middlewares=[
+                self._log_middleware,
+                self._delay_middleware,
+                self._client_version_middleware,
+                self._ssh_ca_switch_middleware,
+            ]
         )
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
@@ -355,6 +383,7 @@ class FakeCloud(LoopbackServer):
         routes_vault.add_routes(app, self._store, self.vault)
         routes_findings.add_routes(app, self._store, self.findings)
         routes_pypi.add_routes(app, self._store)
+        routes_version_policy.add_routes(app, self._store)
         routes_misc.add_routes(app, lambda: self.url)
         control.add_routes(app, self._store, self._log)
         require_unique_routes(app)
@@ -366,6 +395,15 @@ class FakeCloud(LoopbackServer):
             await asyncio.sleep(self.api_delay_seconds)
         while self._is_held(request.path):
             await asyncio.sleep(0.02)
+        return await handler(request)
+
+    @web.middleware
+    async def _client_version_middleware(
+        self, request: web.Request, handler: Any
+    ) -> web.StreamResponse:
+        refusal = routes_version_policy.check_client_version(request, self._store)
+        if refusal is not None:
+            return refusal
         return await handler(request)
 
     @web.middleware
@@ -429,8 +467,11 @@ class FakeCloud(LoopbackServer):
                 "authorization": "Bearer <redacted>" if authorization else None,
                 "bearer_ok": bearer_ok,
                 "user_agent": request.headers.get("User-Agent"),
+                "client_header": request.headers.get("X-Servonaut-Client"),
                 "status": response.status,
             }
+            if request.get(routes_version_policy.BELOW_MINIMUM):
+                entry["below_minimum"] = True
             if account is not None:
                 entry["user_id"] = account.user_id  # requests of an added user only
             self._log.add(entry)

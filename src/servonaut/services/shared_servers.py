@@ -322,6 +322,8 @@ class SharedServers:
     problems: List[str] = field(default_factory=list)
     # The slugs of the teams whose servers were read (their rows are all here).
     read: List[str] = field(default_factory=list)
+    # Problems that need the user to update before these rows can be listed.
+    update_problems: List[str] = field(default_factory=list)
 
 
 async def load_shared_servers(
@@ -337,6 +339,8 @@ async def load_shared_servers(
         Exception: the team list itself could not be read (not signed in,
             no network); the caller decides how loudly to say so.
     """
+    from servonaut.services.api_client import ClientUpdateRequiredError
+
     if teams is None:
         teams = await team_service.list_teams()
     found = SharedServers(teams=[dict(team) for team in teams or [] if isinstance(team, Mapping)])
@@ -348,7 +352,10 @@ async def load_shared_servers(
             servers = await team_service.list_shared_servers(slug)
         except Exception as exc:  # noqa: BLE001 — another team may still load
             logger.warning("Could not load shared servers for team %s: %s", slug, exc)
-            found.problems.append(f"team {team_label(team) or slug}: {exc}")
+            problem = f"team {team_label(team) or slug}: {exc}"
+            found.problems.append(problem)
+            if isinstance(exc, ClientUpdateRequiredError):
+                found.update_problems.append(problem)
             continue
         found.rows.extend(
             shared_row(server, team) for server in servers or [] if isinstance(server, Mapping)

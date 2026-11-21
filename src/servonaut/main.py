@@ -28,19 +28,23 @@ def _prune_empty_env() -> None:
     _PRUNED_ENV_NAMES = prune_empty_forwarded_env()
 
 
-def _setup_logging(debug: bool = False) -> Path:
+def _setup_logging(debug: bool = False, *, mcp: bool = False) -> Path | None:
     """Configure logging to a size-rotated file (and optionally stderr).
 
     Args:
         debug: If True, also log to stderr and use DEBUG level.
+        mcp: Suppress the optional file-log startup warning for MCP.
 
     Returns:
-        Path to the active log file.
+        Path to the active log file, if available.
     """
     from servonaut.utils.logging_setup import configure_rotating_log
 
-    log_file = configure_rotating_log(Path.home() / '.servonaut' / 'logs', debug=debug)
-    logging.getLogger(__name__).info("Servonaut started — log: %s", log_file)
+    log_file = configure_rotating_log(
+        Path.home() / '.servonaut' / 'logs', debug=debug, warn_on_failure=not mcp,
+    )
+    if log_file is not None:
+        logging.getLogger(__name__).info("Servonaut started — log: %s", log_file)
     if _PRUNED_ENV_NAMES:
         logging.getLogger(__name__).info(
             "Ignoring empty environment variables: %s", ", ".join(_PRUNED_ENV_NAMES)
@@ -598,6 +602,8 @@ def _install_desktop() -> None:
 # credentials (session expired or revoked). Distinct from the generic 1 so a
 # service manager can be told not to restart a listener that cannot sign in.
 RELAY_EXIT_SESSION_EXPIRED = 4
+# Exit status of `servonaut connect` when the server refuses this client version (426).
+RELAY_EXIT_UPDATE_REQUIRED = 5
 
 
 def _relay_session_expired_message(uses_env_token: bool) -> str:
@@ -713,6 +719,9 @@ def _relay_run_foreground() -> None:
     from servonaut.utils.relay_log import log_relay_event
 
     runtime = detect_runtime()
+    from servonaut.services.client_identity import configure_client_identity
+
+    configure_client_identity(kind="relay", runtime=runtime)
     lock_path = runtime.data_root / "relay.lock"
     # Headless service init (same pattern as MCP server)
     config_manager = ConfigManager()
@@ -919,6 +928,7 @@ def _relay_run_foreground() -> None:
             )
 
     session_expired = False
+    update_required = False
 
     async def on_session_expired() -> None:
         # The server rejected the credentials. Say so and stop, rather than
@@ -926,6 +936,14 @@ def _relay_run_foreground() -> None:
         nonlocal session_expired
         session_expired = True
         _report_relay_session_expired(uses_env_token)
+        listener.stop()
+
+    async def on_update_required(message: str) -> None:
+        # The server refused this client version (HTTP 426). Log once and stop
+        # without retrying.
+        nonlocal update_required
+        update_required = True
+        print(message, file=sys.stderr)
         listener.stop()
 
     listener = RelayListener(
@@ -937,6 +955,7 @@ def _relay_run_foreground() -> None:
         heartbeat_interval=relay_cfg.heartbeat_interval,
         heartbeat_rejection_alert_after=relay_cfg.heartbeat_rejection_alert_after,
         on_session_expired=on_session_expired,
+        on_update_required=on_update_required,
         refresh_callback=refresh_callback,
         session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
@@ -959,11 +978,18 @@ def _relay_run_foreground() -> None:
     try:
         asyncio.run(_run_relay(listener, vault_runtime, team_policy))
     finally:
+        reason = (
+            "update_required"
+            if update_required
+            else "session_expired" if session_expired else "shutdown"
+        )
         log_relay_event(
             "stopped", mode="bg",
-            reason="session_expired" if session_expired else "shutdown",
+            reason=reason,
         )
         lock.release()
+    if update_required:
+        sys.exit(RELAY_EXIT_UPDATE_REQUIRED)
     if session_expired:
         sys.exit(RELAY_EXIT_SESSION_EXPIRED)
 
@@ -1488,6 +1514,7 @@ def _main() -> None:
             raise SystemExit(run_artifact_selftest(runtime))
     _prune_empty_env()
     parser = argparse.ArgumentParser(
+        prog='servonaut',
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )
     from servonaut import get_version
@@ -1733,7 +1760,20 @@ def _main() -> None:
         # the terminal or a protocol on stdout, so they are left alone.
         protect_cli_output()
 
-    if getattr(args, 'subcommand', None) == 'ai':
+    subcommand = getattr(args, 'subcommand', None)
+    if subcommand in {
+        'ai', 'hetzner', 'secrets', 'vault', 'ca', 'ssh',
+        'servers', 'team', 'db', 'theme', 'memory', 'login', 'logout',
+    }:
+        from servonaut.runtime import detect_runtime
+        from servonaut.services.client_identity import configure_client_identity
+
+        try:
+            configure_client_identity(kind="cli", runtime=detect_runtime())
+        except Exception:  # noqa: BLE001 — fall back to version-only identity
+            configure_client_identity(kind="cli")
+
+    if subcommand == 'ai':
         _setup_logging(debug=args.debug)
         sys.exit(handle_ai_command(args))
 
@@ -1813,7 +1853,7 @@ def _main() -> None:
 
     if args.mcp:
         import asyncio
-        _setup_logging(debug=args.debug)
+        _setup_logging(debug=args.debug, mcp=True)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
         return

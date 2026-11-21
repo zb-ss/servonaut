@@ -5,8 +5,9 @@ build of the next version with a number such as `2.28.0rc1`. Trying a
 candidate lets you check the next release against your own servers and
 report problems before it reaches everyone.
 
-Candidates are opt-in. pip and pipx install one only when you ask for it,
-and a stable installation is never offered one.
+Candidates are opt-in. You can install one directly with pip or pipx. With
+pipx, you can also choose the Release candidates channel in
+**Settings → Updates**. [Updating Servonaut](updates.md)
 
 ## How a release comes together
 
@@ -119,18 +120,16 @@ installed version as it is. It still uses your configuration in
 
 ## Updates on a release candidate
 
-The update check at startup (and `servonaut --update`) depends on what you
-are running:
+Automatic updates for pipx use the channel in **Settings → Updates**.
+**Stable** offers newer stable releases. **Release candidates** offers
+the newest candidate or stable release, whichever is newer. Without a
+saved choice, stable versions default to Stable and running candidates
+default to Release candidates.
 
-| You run | You are offered |
-|---------|-----------------|
-| A stable release | Newer stable releases only — never a candidate |
-| A release candidate | The newest candidate or stable release, whichever is newer |
-
-So while you run a candidate you move on to the next candidate as it is
-published, and to the stable release once it is out. A withdrawn candidate
-is never offered. Once you are on a stable release, you are offered stable
-releases only again.
+For pip and the manual `servonaut --update` command, the update check
+follows the installed version. A stable install checks for stable
+releases and a candidate install also checks for newer candidates.
+Withdrawn candidates are excluded from offers. [Updating Servonaut](updates.md)
 
 ## Go back to the stable release
 
@@ -310,8 +309,7 @@ The check reads a small update manifest from the download mirror at
 `releases.servonaut.dev`, and acts on it only when it is signed with a release
 key built into the app and has not expired. It is a plain HTTPS request that
 carries the app's version in its `User-Agent` header and nothing about you or
-your servers. What you are offered follows the preview you run, as it does for
-pip and pipx installations:
+your servers. What you are offered follows the desktop preview you run:
 
 | You run the preview of | You are offered |
 |------------------------|-----------------|
