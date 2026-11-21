@@ -34,7 +34,7 @@ from servonaut.utils.markup import cell, literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
-from servonaut.screens.bulk_action import BulkActionModal
+from servonaut.screens.bulk_action import BulkActionModal, BulkPreset
 from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.api_client import ClientUpdateRequiredError
 from servonaut.services.client_identity import format_update_required_message
@@ -46,7 +46,9 @@ from servonaut.services.vault.display import (
 from servonaut.services.vault.errors import (
     VaultKeyInUse, VaultRecoveryNotConfirmed, loggable_failure, vault_failure_reason,
 )
+from servonaut.services.vault.duplicates import copy_state, created_time, duplicate_copies
 from servonaut.widgets.action_button import ActionButton, ActionRow
+from servonaut.widgets.filterable_selection import SortOrder
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
@@ -379,6 +381,7 @@ async def show_pending_device(app: Any, service: Any, device: Mapping[str, Any])
     app.push_screen(VaultPendingDeviceModal(device), reviewed)
 
 
+_MAX_SEVERAL_IN_USE_LINES = 3
 _NO_SHARED_SERVERS = "No shared servers in this team: share one from Team management."
 
 
@@ -2391,7 +2394,9 @@ class VaultScreen(WorkspaceScreen):
         if await self.app.push_screen_wait(confirmation):
             await self._remove_vault_key(service, item_id, servers, unchecked_targets=usage.get("unchecked_targets") or ())
 
-    async def _deletion_servers(self, service: Any, vault_id: str | None) -> list[dict[str, Any]] | None:
+    async def _deletion_servers(
+        self, service: Any, vault_id: str | None, *, notify: bool = True,
+    ) -> list[dict[str, Any]] | None:
         servers = real_fleet_rows(self.app)
         if servers is not None:
             return servers
@@ -2400,7 +2405,8 @@ class VaultScreen(WorkspaceScreen):
         except Exception:
             needed = True
         if needed:
-            self.app.notify(UNRESOLVED_MESSAGE, severity="error", markup=False)
+            if notify:
+                self.app.notify(UNRESOLVED_MESSAGE, severity="error", markup=False)
             return None
         return []
 
@@ -2451,7 +2457,13 @@ class VaultScreen(WorkspaceScreen):
             self.app.notify("No SSH keys to delete in this vault.", markup=False)
             return
         vault_id = self._selected_vault_id
-        modal = self._delete_keys_modal(keys)
+        self.run_worker(self._open_delete_keys(vault_id, keys), group="vault", exclusive=True)
+
+    async def _open_delete_keys(self, vault_id: str, keys: list[dict[str, Any]]) -> None:
+        overview, problem = await self._key_usage_overview(vault_id, keys)
+        if self.app.screen is not self or self._selected_vault_id != vault_id:
+            return
+        modal = self._delete_keys_modal(keys, overview=overview, overview_problem=problem)
 
         def chosen(item_ids: list[str] | None) -> None:
             if item_ids:
@@ -2462,14 +2474,48 @@ class VaultScreen(WorkspaceScreen):
 
         self.app.push_screen(modal, callback=chosen)
 
+    async def _key_usage_overview(
+        self, vault_id: str, keys: list[dict[str, Any]],
+    ) -> tuple[dict[str, Mapping[str, Any]] | None, str]:
+        """Read where the listed keys are used; the picker opens even when this fails."""
+        service = self._service()
+        if service is None:
+            return None, "the vault service is not available"
+        servers = await self._deletion_servers(service, vault_id, notify=False)
+        if servers is None:
+            return None, "your servers are still loading"
+        try:
+            async with self._busy("Checking where keys are used…"):
+                overview = await _invoke(
+                    service, "ssh_keys_usage_overview", vault_id=vault_id, items=keys, servers=servers,
+                )
+            if not isinstance(overview, Mapping):
+                raise TypeError("usage overview is not a mapping")
+        except Exception as exc:
+            logger.warning("Vault key usage overview failed: %s", loggable_failure(exc))
+            return None, vault_failure_reason(exc)
+        return dict(overview), ""
+
     def _delete_keys_modal(
         self, keys: list[dict[str, Any]], usages: Mapping[str, Mapping[str, Any]] | None = None,
-        failures: Sequence[str] = (),
+        failures: Sequence[str] = (), *,
+        overview: Mapping[str, Mapping[str, Any]] | None = None, overview_problem: str = "",
     ) -> BulkActionModal:
-        choices = [(str(item["item_id"]), self._bulk_key_label(item)) for item in keys]
+        reviewing = usages is not None
+        marked = None if reviewing else overview
+
+        def label_for(item: Mapping[str, Any]) -> str:
+            return self._bulk_key_label(item, copy_state(marked.get(str(item["item_id"]))) if marked is not None else None)
+
+        choices = [(str(item["item_id"]), label_for(item)) for item in keys]
         by_id = {str(item["item_id"]): item for item in keys}
         unchecked = [key for key, usage in (usages or {}).items() if usage.get("unchecked")]
-        reviewing = usages is not None
+        orders = [SortOrder("fingerprint", "Fingerprint")]
+        if any(created_time(item) is not None for item in keys):
+            orders.append(SortOrder("created", "Oldest first"))
+        if marked is not None:
+            orders.append(SortOrder("in_use", "In use first"))
+        rank = {"in_use": 0, "unknown": 1}
         return BulkActionModal(
             "Delete vault keys" if reviewing else "Select vault keys",
             "Choose SSH keys to review. Saved assignments are checked before the deletion confirmation.",
@@ -2480,16 +2526,70 @@ class VaultScreen(WorkspaceScreen):
                 "DELETE UNCHECKED",
             ) if unchecked else None,
             acknowledgement_hint="This may leave servers pointing to a missing vault key. Their authorized_keys files are unchanged.",
-            label_builder=lambda key: self._bulk_key_label(by_id[key]),
+            label_builder=lambda key: label_for(by_id[key]),
             description_builder=(lambda: self._bulk_deletion_description(keys, usages, failures)) if reviewing else None,
             selected=list(by_id) if reviewing else (),
             acknowledgement_keys=unchecked,
+            sort_orders=orders,
+            sort_keys_builder=lambda key: {
+                "name": self._key_display_name(key).casefold(),
+                "fingerprint": self._bulk_fingerprint(by_id[key]).casefold() if by_id[key].get("public_fingerprint") else None,
+                "created": created_time(by_id[key]),
+                "in_use": rank.get(copy_state(marked.get(key)), 2) if marked is not None else None,
+            },
+            preset=None if reviewing else BulkPreset(
+                "Select duplicate copies",
+                lambda: self._duplicate_copies_choice(keys, overview, overview_problem),
+            ),
         )
 
-    def _bulk_key_label(self, item: Mapping[str, Any]) -> str:
-        name = self._key_display_name(str(item["item_id"]))
-        fingerprint = self.scrub_for_display(terminal_safe(item.get("public_fingerprint") or item["item_id"]))
-        return f"{name}  {fingerprint}"
+    def _bulk_fingerprint(self, item: Mapping[str, Any]) -> str:
+        return self.scrub_for_display(terminal_safe(item.get("public_fingerprint") or item["item_id"]))
+
+    def _bulk_key_label(self, item: Mapping[str, Any], state: str | None = None) -> str:
+        label = f"{self._key_display_name(str(item['item_id']))}  {self._bulk_fingerprint(item)}"
+        if state == "in_use":
+            return label + "  in use"
+        if state == "unknown":
+            return label + "  usage not checked"
+        return label
+
+    def _duplicate_copies_choice(
+        self, keys: list[dict[str, Any]], overview: Mapping[str, Mapping[str, Any]] | None, problem: str,
+    ) -> tuple[list[str], str]:
+        if overview is None:
+            reason = f" ({problem})" if problem else ""
+            return [], (
+                f"Could not check where keys are used{reason}, so no copies were selected. "
+                "Select copies yourself: each one is checked again before it is deleted."
+            )
+        result = duplicate_copies(keys, overview)
+        if not result.fingerprints:
+            return [], "No key is stored more than once in this vault."
+        count, groups = len(result.selected), result.selected_keys
+        if count:
+            lines = [
+                f"Selected {count} extra {'copy' if count == 1 else 'copies'} of {groups} "
+                f"{'key' if groups == 1 else 'keys'}. For each key the copy in use stays, else the oldest."
+            ]
+        else:
+            lines = ["No extra copy can be selected."]
+        shown_groups = result.several_in_use[:_MAX_SEVERAL_IN_USE_LINES]
+        for group in shown_groups:
+            names = ", ".join(self._key_display_name(item_id) for item_id in group)
+            lines.append(
+                f"{names}: {len(group)} copies of the same key are in use, so all of them stay. "
+                "Give their servers one copy before deleting the others."
+            )
+        hidden_groups = len(result.several_in_use) - len(shown_groups)
+        if hidden_groups > 0:
+            lines.append(f"and {hidden_groups} more {'key' if hidden_groups == 1 else 'keys'} with several copies in use.")
+        if result.unchecked:
+            unchecked = len(result.unchecked)
+            lines.append(
+                f"{unchecked} {'copy' if unchecked == 1 else 'copies'} could not be checked and stay unselected."
+            )
+        return list(result.selected), "\n".join(lines)
 
     def _bulk_deletion_description(
         self, keys: list[dict[str, Any]], usages: Mapping[str, Mapping[str, Any]], failures: Sequence[str],

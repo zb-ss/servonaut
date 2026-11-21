@@ -59,6 +59,11 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/bulk_action.py", "on_button_pressed", "update",
+                   "Shows the preset note built by the caller from already redacted display "
+                   "names; the modal adds no raw value."),
+    AllowlistEntry("widgets/filterable_selection.py", "_update_count", "update",
+                   "Writes only the selected/total/shown counts, never a row label."),
     AllowlistEntry("screens/aws_manager.py", "_update_resource_context", "update",
                    "Reads drawn _instances copied and redacted by DemoRowsMixin before "
                    "rendering; summary/empty text is counts or fixed copy, and raw API targets "
@@ -1302,7 +1307,6 @@ _TOGGLE_HOOK_ALLOWLIST = {
         "mode, so nothing on it depends on the toggle.",
     ("screens/bw_dir_picker.py", "BwDirPickerModal"): _REOPEN,
     ("screens/bw_item_picker.py", "BwItemPickerModal"): _REOPEN,
-    ("screens/bw_key_import.py", "BwKeyImportModal"): _REOPEN,
     ("screens/command_overlay.py", "CommandOverlay"): _REOPEN,
     ("screens/db_coverage_view.py", "DbCoverageScreen"): _REOPEN,
     ("screens/db_credential_scan.py", "DbCredentialScanScreen"): _REOPEN,

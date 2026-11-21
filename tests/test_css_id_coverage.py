@@ -1053,12 +1053,12 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "share_confirm_share",
         # Bulk confirmation controls inherit the modal's Button/Input/Static
         # styling; layout is owned by #bulk_action_modal/body in DEFAULT_CSS.
-        "bulk_action_all",
-        "bulk_action_none",
         "bulk_action_cancel",
         "bulk_action_submit",
         "bulk_action_confirm_input",
         "bulk_action_prompt",
+        # Duplicate-copies button; it inherits the modal's Button styling.
+        "bulk_action_preset",
         # The removal row uses .add_row Button sizing; the busy line styles
         # itself through BusyIndicator.DEFAULT_CSS.
         "btn_remove_servers",

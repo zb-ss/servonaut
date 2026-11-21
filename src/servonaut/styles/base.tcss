@@ -320,6 +320,39 @@ Input.-invalid {
     border: round $error;
 }
 
+/* A compact input is one row with no frame, focused, invalid or not: the frame
+   above would leave it no content row. A light fill marks it as a field and a
+   stronger one shows focus; where the theme is the terminal's own palette,
+   focus shows as an underline instead. */
+Input.-textual-compact,
+Input.-textual-compact:focus,
+Input.-textual-compact.-invalid,
+Input.-textual-compact.-invalid:focus {
+    border: none !important;
+    padding: 0 1;
+}
+
+Input.-textual-compact {
+    background: $boost;
+}
+
+Input.-textual-compact:focus {
+    background: $primary 20%;
+}
+
+Input.-textual-compact:ansi,
+Input.-textual-compact:ansi:focus {
+    background: transparent;
+}
+
+Input.-textual-compact:ansi:focus {
+    text-style: underline;
+}
+
+Input.-textual-compact.-invalid {
+    color: $error;
+}
+
 /* A Select draws the same rounded frame as every other control: its closed
    box, its focused box and the open option list. Textual's own rules use a
    half-block border, whose corners stand out next to the rounded ones. The

@@ -12,6 +12,7 @@ from servonaut.screens.bw_passphrase_modal import BwPassphraseModal
 from servonaut.screens.vault_import_modal import VaultImportModal
 from servonaut.services.bw_key_import import DecryptedKey, KeyImportError, ScannedKey
 from servonaut.services.bw_session_service import BwAuthState, BwItemSummary
+from servonaut.widgets.filterable_selection import FilterableSelection
 from tests._async_bounds import wait_until
 
 
@@ -47,7 +48,7 @@ def test_modal_is_optional_metadata_result() -> None:
     bases = [str(base) for base in getattr(VaultImportModal, "__orig_bases__", [])]
 
     assert any("ImportSummary" in base or "dict" in base for base in bases)
-    assert {binding.key for binding in VaultImportModal.BINDINGS} == {"escape"}
+    assert "escape" in {binding.key for binding in VaultImportModal.BINDINGS}
 
 
 def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(tmp_path: Path) -> None:
@@ -59,7 +60,7 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
         ScannedKey(path=tmp_path / "id_ed25519", filename="id_ed25519", encrypted=False)
     ]
     modal._local_private_key = AsyncMock(return_value=bytearray(b"fixture-private"))
-    modal._list = MagicMock(return_value=_List([0]))
+    modal._picker = MagicMock(return_value=_List([0]))
     harness = _Harness(modal)
     try:
         asyncio.run(modal._import_selected())
@@ -102,7 +103,7 @@ def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path
     modal._bw_items = [
         BwItemSummary(id="item-uuid-1", name="Production key", type=5, has_ssh_key=True)
     ]
-    modal._list = MagicMock(return_value=_List([0]))
+    modal._picker = MagicMock(return_value=_List([0]))
     harness = _Harness(modal)
 
     async def immediate_thread(function, *args, **kwargs):
@@ -174,8 +175,8 @@ def test_local_symlink_provenance_is_escaped_and_demo_redacted(tmp_path: Path) -
         harness.close()
 
     options = modal._show_options.call_args.args[0]
-    assert "redacted" in str(options[0].prompt)
-    assert "/private/path" not in str(options[0].prompt)
+    assert "redacted" in str(options[0].label)
+    assert "/private/path" not in str(options[0].label)
 
 
 def test_import_in_progress_cannot_switch_source(tmp_path: Path) -> None:
@@ -395,7 +396,7 @@ def test_bitwarden_unreadable_material_keeps_fixed_tui_notice_and_wipes_buffer(t
     modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
     modal._source = "bitwarden"
     modal._bw_items = [BwItemSummary(id="item-1", name="web-1", type=5, has_ssh_key=True)]
-    modal._list = MagicMock(return_value=_List([0]))
+    modal._picker = MagicMock(return_value=_List([0]))
     harness = _Harness(modal)
     try:
         asyncio.run(modal._import_selected())
@@ -536,10 +537,10 @@ def test_local_row_already_in_vault_is_disabled_and_named(tmp_path: Path) -> Non
     finally:
         harness.close()
     options, message = modal._show_options.call_args.args
-    assert options[0].disabled and options[0].initial_state is False
+    assert options[0].disabled and options[0].selected is False
     assert not options[1].disabled
-    assert "already in this vault as" in str(options[0].prompt)
-    assert "as key [1]" in str(options[0].prompt)
+    assert "already in this vault as" in str(options[0].label)
+    assert "as key [1]" in options[0].search_text
     assert message.endswith("1 already in this vault.")
 
 
@@ -553,7 +554,7 @@ def test_local_row_without_stored_name_says_only_already_in_vault(tmp_path: Path
         modal._show_local_options()
     finally:
         harness.close()
-    prompt = str(modal._show_options.call_args.args[0][0].prompt)
+    prompt = str(modal._show_options.call_args.args[0][0].label)
     assert "already in this vault" in prompt and " as " not in prompt
 
 
@@ -573,7 +574,7 @@ def test_bitwarden_row_already_in_vault_is_disabled(tmp_path: Path) -> None:
         harness.close()
     options, _message = modal._show_options.call_args.args
     assert options[0].disabled and not options[1].disabled
-    assert "already in this vault as stored-key" in str(options[0].prompt)
+    assert "already in this vault as stored-key" in str(options[0].label)
 
 
 def test_failed_vault_listing_names_the_reason_and_logs_it(tmp_path: Path, caplog) -> None:
@@ -596,7 +597,7 @@ def test_failed_vault_listing_names_the_reason_and_logs_it(tmp_path: Path, caplo
 
 def test_failed_vault_listing_blocks_the_import(tmp_path: Path) -> None:
     modal, service = _local_modal(tmp_path, None, stored_keys=AsyncMock(side_effect=RuntimeError("boom")))
-    modal._list = MagicMock(return_value=_List([0]))
+    modal._picker = MagicMock(return_value=_List([0]))
     harness = _Harness(modal)
     harness.modal._existing_ok = False
     try:
@@ -623,7 +624,7 @@ def test_duplicate_found_at_import_time_counts_as_duplicate_and_wipes_buffer(tmp
     )
     modal, service = _local_modal(tmp_path, None, import_keys=AsyncMock(side_effect=exc))
     modal._local_private_key = AsyncMock(return_value=private)
-    modal._list = MagicMock(return_value=_List([0]))
+    modal._picker = MagicMock(return_value=_List([0]))
     harness = _Harness(modal)
     modal._source = "ssh"
     try:
@@ -723,3 +724,354 @@ async def test_the_key_list_keeps_rows_on_a_short_terminal(tmp_path: Path) -> No
         assert confirm.region.height > 0 and confirm.region.bottom <= 30
         await pilot.pause()
 
+
+
+# --- filterable list ----------------------------------------------------------
+
+_STORED_FP = "SHA256:stored-fixture"
+
+
+class _Redactor:
+    """Demo-mode stand-in that hides every real key name."""
+
+    def scrub_stream(self, text: str) -> str:
+        return text.replace("alpha_key", "hidden-1").replace("beta_key", "hidden-2")
+
+
+def _picker_host(tmp_path: Path, source: str, *, stored: dict | None = None, listing_fails: bool = False):
+    from textual.app import App
+
+    local = [
+        ScannedKey(path=tmp_path / "alpha_key", filename="alpha_key", encrypted=False, fingerprint="SHA256:aaa111"),
+        ScannedKey(path=tmp_path / "beta_key", filename="beta_key", encrypted=False, fingerprint="SHA256:bbb222"),
+        ScannedKey(path=tmp_path / "stored_copy", filename="stored_copy", encrypted=False, fingerprint=_STORED_FP),
+        ScannedKey(path=tmp_path / "gamma_key", filename="gamma_key", encrypted=False, fingerprint="SHA256:ccc333"),
+    ]
+    items = [
+        BwItemSummary(id="bw-1", name="alpha_key", type=5, has_ssh_key=True, fingerprint="SHA256:aaa111"),
+        BwItemSummary(id="bw-2", name="beta_key", type=5, has_ssh_key=True, fingerprint="SHA256:bbb222"),
+        BwItemSummary(id="bw-3", name="stored_copy", type=5, has_ssh_key=True, fingerprint=_STORED_FP),
+        BwItemSummary(id="bw-4", name="gamma_key", type=5, has_ssh_key=True, fingerprint="SHA256:ccc333"),
+    ]
+    service = _service(stored if stored is not None else {_STORED_FP: {"item_id": "i-1", "name": "stored-key"}})
+    if listing_fails:
+        service.stored_keys = AsyncMock(side_effect=RuntimeError("boom"))
+    session = MagicMock()
+    session.list_items = AsyncMock(return_value=items)
+    redactor = _Redactor()
+
+    class Host(App):
+        demo_mode = False
+        redaction_service = redactor
+
+        async def push_screen_wait(self, _screen):
+            return True
+
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(service, "vault-1", tmp_path, session_service=session))
+
+    async def immediate_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    patches = (
+        patch("servonaut.screens.vault_import_modal.scan_directory", return_value=local),
+        patch("servonaut.screens.vault_import_modal.asyncio.to_thread", new=immediate_thread),
+    )
+    return Host(), patches, service
+
+
+async def _open_picker(app, pilot, source: str):
+    from textual.widgets import SelectionList
+
+    await wait_until(lambda: isinstance(app.screen, VaultImportModal))
+    await pilot.click("#vault_import_local" if source == "local" else "#vault_import_bitwarden")
+    modal = app.screen
+    listing = modal.query_one("#vault_import_list", SelectionList)
+    await wait_until(lambda: listing.option_count == 4 and not modal._loading)
+    return modal, listing
+
+
+async def _press(app, pilot, selector: str) -> None:
+    """Click a button once its previous press effect has ended (a busy button ignores clicks)."""
+    button = app.screen.query_one(selector)
+    await wait_until(lambda: not button.has_class("-active"))
+    await pilot.click(selector)
+
+
+def _shown(listing) -> list[int]:
+    return [listing.get_option_at_index(i).value for i in range(listing.option_count)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_search_filters_by_name_and_fingerprint(tmp_path: Path, source: str) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, source)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, source)
+            search = modal.query_one("#vault_import_search")
+            search.focus()
+            await pilot.press(*"BETA")
+            await wait_until(lambda: _shown(listing) == [1])
+            search.value = ""
+            await wait_until(lambda: len(_shown(listing)) == 4)
+            search.value = "ccc333"
+            await wait_until(lambda: _shown(listing) == [3])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_select_all_skips_the_stored_row_under_filter_and_sort(tmp_path: Path, source: str) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, source)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, source)
+            picker = modal.query_one(FilterableSelection)
+            await _press(app, pilot, "#vault_import_none")
+            await wait_until(lambda: picker.selected == [])
+            await _press(app, pilot, "#vault_import_all")
+            await wait_until(lambda: picker.selected == [0, 1, 3])
+            assert 2 not in listing.selected
+            assert "already in this vault as" in str(listing.get_option_at_index(_shown(listing).index(2)).prompt)
+
+            modal.query_one("#vault_import_search").value = "stored"
+            await wait_until(lambda: _shown(listing) == [2])
+            await _press(app, pilot, "#vault_import_all")
+            # Only a disabled row is shown, so the press changes nothing; showing
+            # every row again exposes the final state.
+            modal.query_one("#vault_import_search").value = ""
+            await wait_until(lambda: picker.shown == picker.total)
+            assert picker.selected == [0, 1, 3]
+            assert listing.get_option_at_index(_shown(listing).index(2)).disabled
+
+            await _press(app, pilot, "#vault_import_sort")
+            await wait_until(lambda: str(modal.query_one("#vault_import_sort").label).endswith("Name"))
+            assert 2 not in picker.selected and listing.get_option_at_index(_shown(listing).index(2)).disabled
+            assert "already in this vault as" in str(listing.get_option_at_index(_shown(listing).index(2)).prompt)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_hidden_selection_is_imported_in_list_order(tmp_path: Path, source: str) -> None:
+    app, patches, service = _picker_host(tmp_path, source)
+    service.import_keys = AsyncMock(side_effect=lambda **kw: {"item_id": "x", "name": "n", "public_fingerprint": kw.get("path", "") + kw.get("source_ref", "")})
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, source)
+            picker = modal.query_one(FilterableSelection)
+            await _press(app, pilot, "#vault_import_none")
+            await wait_until(lambda: picker.selected == [])
+            modal.query_one("#vault_import_search").value = "gamma"
+            await wait_until(lambda: _shown(listing) == [3])
+            await _press(app, pilot, "#vault_import_all")
+            await wait_until(lambda: picker.selected == [3])
+            modal.query_one("#vault_import_search").value = "alpha"
+            await wait_until(lambda: _shown(listing) == [0])
+            await _press(app, pilot, "#vault_import_all")
+            await wait_until(lambda: picker.selected == [0, 3])
+            modal.query_one("#vault_import_search").value = "beta"
+            await wait_until(lambda: _shown(listing) == [1])
+            assert picker.selected == [0, 3]
+            if source == "local":
+                modal._local_private_key = AsyncMock(side_effect=lambda key: bytearray(b"x"))
+            else:
+                modal._resolver = MagicMock()
+                modal._resolver.resolve_ssh_key.return_value = "x"
+            await pilot.click("#vault_import_confirm")
+            await wait_until(lambda: service.import_keys.await_count == 2)
+    refs = [
+        (kw.get("path") or "").rsplit("/", 1)[-1] or kw.get("source_ref")
+        for kw in (call.kwargs for call in service.import_keys.await_args_list)
+    ]
+    assert refs == (["alpha_key", "gamma_key"] if source == "local" else ["bw-1", "bw-4"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_failed_vault_listing_blocks_import_in_the_dialog(tmp_path: Path, source: str) -> None:
+    from textual.widgets import Static
+
+    app, patches, _service_double = _picker_host(tmp_path, source, listing_fails=True)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, _listing = await _open_picker(app, pilot, source)
+            assert modal.query_one("#vault_import_confirm").disabled
+            assert "import is blocked" in str(modal.query_one("#vault_import_status", Static).render())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_demo_toggle_keeps_selection_filter_and_hides_real_names(tmp_path: Path, source: str) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, source)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, source)
+            picker = modal.query_one(FilterableSelection)
+            await _press(app, pilot, "#vault_import_none")
+            modal.query_one("#vault_import_search").value = "e"
+            await wait_until(lambda: len(_shown(listing)) == 4)
+            await _press(app, pilot, "#vault_import_all")
+            await wait_until(lambda: picker.selected == [0, 1, 3])
+            await _press(app, pilot, "#vault_import_none")
+            picker.select_values([1])
+            await wait_until(lambda: picker.selected == [1])
+
+            app.demo_mode = True
+            modal.refresh_after_demo_toggle()
+            await wait_until(lambda: "hidden-2" in str(listing.get_option_at_index(_shown(listing).index(1)).prompt))
+            assert picker.selected == [1]
+            assert modal.query_one("#vault_import_search").value == "e"
+            assert "beta_key" not in str(listing.get_option_at_index(_shown(listing).index(1)).prompt)
+
+            modal.query_one("#vault_import_search").value = "beta_key"
+            await wait_until(lambda: _shown(listing) == [])
+            modal.query_one("#vault_import_search").value = "hidden-2"
+            await wait_until(lambda: _shown(listing) == [1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_markup_in_a_name_is_shown_literally(tmp_path: Path, source: str) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, source)
+    hostile = "[bold]x[/bold]"
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, source)
+            if source == "local":
+                modal._local_keys[0] = ScannedKey(path=tmp_path / "k", filename=hostile, encrypted=False, fingerprint="SHA256:aaa111")
+                modal._show_local_options()
+            else:
+                modal._bw_items[0] = BwItemSummary(id="bw-1", name=hostile, type=5, has_ssh_key=True, fingerprint="SHA256:aaa111")
+                modal._show_bitwarden_options()
+            await wait_until(lambda: hostile in listing.get_option_at_index(0).prompt.plain)
+
+
+@pytest.mark.asyncio
+async def test_escape_does_not_close_while_loading_or_importing(tmp_path: Path) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, "local")
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, _listing = await _open_picker(app, pilot, "local")
+            for flag, text in (("_loading", "Still loading"), ("_importing", "still running")):
+                setattr(modal, flag, True)
+                await pilot.press("escape")
+                await wait_until(lambda: text in str(modal.query_one("#vault_import_status").render()))
+                assert app.screen is modal
+                setattr(modal, flag, False)
+            await pilot.press("escape")
+            await wait_until(lambda: not isinstance(app.screen, VaultImportModal))
+
+
+@pytest.mark.asyncio
+async def test_ctrl_f_focuses_the_search_box(tmp_path: Path) -> None:
+    app, patches, _service_double = _picker_host(tmp_path, "local")
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, listing = await _open_picker(app, pilot, "local")
+            listing.focus()
+            await pilot.press("ctrl+f")
+            await wait_until(lambda: app.focused is modal.query_one("#vault_import_search"))
+
+
+def _many_host(tmp_path: Path, count: int = 12):
+    """A host whose local files and Bitwarden items are ``key-1`` .. ``key-N``."""
+    from textual.app import App
+
+    local = [
+        ScannedKey(
+            path=tmp_path / f"key-{n}", filename=f"key-{n}", encrypted=False,
+            key_type="ssh-ed25519", fingerprint=f"SHA256:fp{n}",
+        )
+        for n in range(1, count + 1)
+    ]
+    items = [
+        BwItemSummary(id=f"bw-{n}", name=f"key-{n}", type=5, has_ssh_key=True, fingerprint=f"SHA256:fp{n}")
+        for n in range(1, count + 1)
+    ]
+    session = MagicMock()
+    session.list_items = AsyncMock(return_value=items)
+    service = _service()
+
+    class Host(App):
+        async def push_screen_wait(self, _screen):
+            return True
+
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(service, "vault-1", tmp_path, session_service=session))
+
+    async def immediate_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    patches = (
+        patch("servonaut.screens.vault_import_modal.scan_directory", return_value=local),
+        patch("servonaut.screens.vault_import_modal.asyncio.to_thread", new=immediate_thread),
+    )
+    return Host(), patches
+
+
+async def _open_many(app, pilot, source: str, count: int):
+    await wait_until(lambda: isinstance(app.screen, VaultImportModal))
+    await pilot.click("#vault_import_local" if source == "local" else "#vault_import_bitwarden")
+    modal = app.screen
+    picker = modal.query_one(FilterableSelection)
+    await wait_until(lambda: picker.total == count and not modal._loading)
+    return modal, picker
+
+
+@pytest.mark.asyncio
+async def test_import_button_counts_selected_keys_hidden_by_the_filter(tmp_path: Path) -> None:
+    from textual.widgets import Button
+
+    app, patches = _many_host(tmp_path)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, picker = await _open_many(app, pilot, "local", 12)
+            button = modal.query_one("#vault_import_confirm", Button)
+            assert button.label.plain == "Import selected (12)"
+            modal.query_one("#vault_import_search").value = "key-7"
+            await wait_until(lambda: picker.shown == 1)
+            assert button.label.plain == "Import selected (12)"
+            await _press(app, pilot, "#vault_import_none")
+            await wait_until(lambda: button.label.plain == "Import selected (11)")
+            modal.query_one("#vault_import_search").value = ""
+            await _press(app, pilot, "#vault_import_none")
+            await wait_until(lambda: button.disabled and button.label.plain == "Import selected (0)")
+
+
+@pytest.mark.asyncio
+async def test_changing_the_source_clears_the_search_text(tmp_path: Path) -> None:
+    app, patches = _many_host(tmp_path)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, picker = await _open_many(app, pilot, "local", 12)
+            search = modal.query_one("#vault_import_search")
+            search.value = "key-7"
+            await wait_until(lambda: picker.shown == 1)
+            await _press(app, pilot, "#vault_import_bitwarden")
+            await wait_until(lambda: modal._source == "bitwarden" and not modal._loading and picker.shown == 12)
+            assert search.value == "" and picker.query_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["local", "bitwarden"])
+async def test_the_fingerprint_algorithm_prefix_does_not_match_every_row(tmp_path: Path, source: str) -> None:
+    app, patches = _many_host(tmp_path, 40)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, picker = await _open_many(app, pilot, source, 40)
+            search = modal.query_one("#vault_import_search")
+            search.value = "25"
+            await wait_until(lambda: picker.shown == 1)
+            assert picker.listing.get_option_at_index(0).value == 24
+            search.value = "sha"
+            await wait_until(lambda: picker.shown == 0)
+
+
+@pytest.mark.asyncio
+async def test_the_key_type_is_not_searchable_when_the_row_does_not_show_it(tmp_path: Path) -> None:
+    app, patches = _many_host(tmp_path, 3)
+    with patches[0], patches[1]:
+        async with app.run_test(size=(160, 50)) as pilot:
+            modal, picker = await _open_many(app, pilot, "local", 3)
+            modal.query_one("#vault_import_search").value = "ed25519"
+            await wait_until(lambda: picker.shown == 0)

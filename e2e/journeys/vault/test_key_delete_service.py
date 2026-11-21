@@ -186,7 +186,8 @@ async def test_bulk_delete_reviews_usage_in_one_request_and_keeps_the_bound_key(
 
     service._remote_executor.assert_not_called()
     assert _binding_reads(fake_cloud) == []
-    assert len(fake_cloud.requests(method="POST", path=f"/api/v1/vaults/{vault_id}/items/usage")) == 1
+    # One usage request fills the list when the dialog opens, one more reviews the choice.
+    assert len(fake_cloud.requests(method="POST", path=f"/api/v1/vaults/{vault_id}/items/usage")) == 2
 
 
 @pytest.mark.asyncio

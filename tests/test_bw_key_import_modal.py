@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests._async_bounds import wait_until
 from tests._key_fixtures import openssh_armor
 from servonaut.screens.bw_key_import import BwKeyImportModal
 from servonaut.services.bw_errors import BwCreateError
@@ -482,3 +483,328 @@ async def test_pilot_scan_populates_selection_list_centered(tmp_path):
 
     # Vault fingerprints came from the whole vault, not the Servonaut folder.
     svc.list_items.assert_awaited_once_with(folder_id=None, ssh_only=True)
+
+
+# ---------------------------------------------------------------------------
+# Filterable picker integration
+# ---------------------------------------------------------------------------
+
+_DUP_FP = "SHA256:dupdupdupdupdupdupdupdupdupdupdupdupdupdupd"
+
+
+def _vault_item():
+    return BwItemSummary(
+        id="i1", name="old", type=5, has_ssh_key=True, fingerprint=_DUP_FP,
+    )
+
+
+def _host_app(tmp_path, svc):
+    from textual.app import App
+
+    from servonaut.styles import CSS_FILES
+
+    class _Host(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
+            self.push_screen(BwKeyImportModal(tmp_path, session_service=svc))
+
+    return _Host()
+
+
+async def _ready(app, pilot):
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    def _loaded() -> bool:
+        screen = app.screen
+        return (
+            isinstance(screen, BwKeyImportModal)
+            and screen._scan_complete
+            and screen.query_one(FilterableSelection).total > 0
+        )
+
+    await wait_until(_loaded)
+
+
+async def _wait_shown(app, pilot, count):
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    await wait_until(lambda: app.screen.query_one(FilterableSelection).shown == count)
+
+
+@pytest.mark.asyncio
+async def test_pilot_filter_by_name_and_fingerprint(tmp_path):
+    from textual.widgets import Input
+
+    keys = _keys(tmp_path)
+    svc = _svc(list_items=AsyncMock(return_value=[_vault_item()]))
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            box = app.screen.query_one("#bw_import_search", Input)
+            box.value = "ID_RSA"
+            await _wait_shown(app, pilot, 1)
+            box.value = "SHA256:aaaa"
+            await _wait_shown(app, pilot, 1)
+            box.value = ""
+            await _wait_shown(app, pilot, 4)
+
+
+@pytest.mark.asyncio
+async def test_pilot_select_all_skips_disabled_and_hidden_kept(tmp_path):
+    from textual.widgets import Button, Input
+
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    keys = _keys(tmp_path)
+    svc = _svc(list_items=AsyncMock(return_value=[_vault_item()]))
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            picker = app.screen.query_one(FilterableSelection)
+            assert picker.selected == [0]
+            box = app.screen.query_one("#bw_import_search", Input)
+            box.value = "id_"
+            await _wait_shown(app, pilot, 2)
+            app.screen.query_one("#bw_import_all", Button).press()
+            await wait_until(lambda: picker.selected == [0, 1])
+            # Encrypted row joins; the unencrypted one stays; no disabled row.
+            assert picker.selected == [0, 1]
+            box.value = "broken"
+            await _wait_shown(app, pilot, 1)
+            app.screen.query_one("#bw_import_all", Button).press()
+            # Only a disabled row is shown, so the press changes nothing; clearing
+            # the filter afterwards shows every row's final state.
+            box.value = ""
+            await _wait_shown(app, pilot, 4)
+            assert picker.selected == [0, 1]
+            # Hidden selections are still what the modal would import.
+            assert app.screen._selected_indices() == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_pilot_failed_listing_blocks_import(tmp_path):
+    from textual.widgets import Button
+
+    keys = _keys(tmp_path)
+    svc = _svc(list_items=AsyncMock(side_effect=RuntimeError("boom")))
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await _ready(app, pilot)
+            assert app.screen._existing_ok is False
+            app.screen.query_one("#bw_import_btn", Button).press()
+            await wait_until(
+                lambda: any("import is blocked" in n.message for n in app._notifications)
+            )
+            svc.create_ssh_key_item.assert_not_awaited()
+            status = str(app.screen.query_one("#bw_import_status").render())
+            assert "import is blocked" in status
+
+
+@pytest.mark.asyncio
+async def test_pilot_markup_filename_shown_literally(tmp_path):
+    from textual.widgets import SelectionList
+
+    tricky = ScannedKey(
+        path=tmp_path / "x", filename="[bold]key[/bold]", encrypted=False,
+        key_type="ed25519",
+        fingerprint="SHA256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    )
+    svc = _svc()
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=[tricky]):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            listing = app.screen.query_one("#bw_import_list", SelectionList)
+            prompt = listing.get_option_at_index(0).prompt
+            assert "[bold]key[/bold]" in str(getattr(prompt, "plain", prompt))
+
+
+@pytest.mark.asyncio
+async def test_pilot_escape_cancels_but_not_while_importing(tmp_path):
+    keys = _keys(tmp_path)
+    svc = _svc()
+    results = []
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await _ready(app, pilot)
+            modal = app.screen
+            modal.dismiss = lambda value=None: results.append(value)
+            modal._importing = True
+            await pilot.press("escape")
+            await wait_until(
+                lambda: any("Import in progress" in n.message for n in app._notifications)
+            )
+            assert results == []
+            modal._importing = False
+            await pilot.press("escape")
+            await wait_until(lambda: results == [None])
+
+
+@pytest.mark.asyncio
+async def test_pilot_list_has_room_at_100x30(tmp_path):
+    from textual.widgets import SelectionList
+
+    keys = [
+        ScannedKey(
+            path=tmp_path / f"k{i}", filename=f"key_{i:02d}", encrypted=False,
+            key_type="ed25519", fingerprint=f"SHA256:{i:02d}" + "x" * 41,
+        )
+        for i in range(20)
+    ]
+    svc = _svc()
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _ready(app, pilot)
+            listing = app.screen.query_one("#bw_import_list", SelectionList)
+            assert listing.size.height >= 6
+
+
+@pytest.mark.asyncio
+async def test_pilot_demo_toggle_redraws_and_keeps_state(tmp_path):
+    from textual.widgets import Input, SelectionList
+
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    class _Redactor:
+        def scrub_stream(self, text):
+            return text.replace("id_rsa", "hidden-key")
+
+    keys = _keys(tmp_path)
+    svc = _svc(list_items=AsyncMock(return_value=[_vault_item()]))
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        app.redaction_service = _Redactor()
+        app.demo_mode = False
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            modal = app.screen
+            picker = modal.query_one(FilterableSelection)
+            listing = modal.query_one("#bw_import_list", SelectionList)
+            picker.select_values([1])
+            box = modal.query_one("#bw_import_search", Input)
+            # Only the encrypted row matches, before and after the toggle.
+            box.value = "encrypted"
+            await _wait_shown(app, pilot, 1)
+            selected_before = picker.selected
+
+            def _prompts():
+                return " ".join(
+                    listing.get_option_at_index(i).prompt.plain
+                    for i in range(listing.option_count)
+                )
+
+            assert "id_rsa" in _prompts()
+            app.demo_mode = True
+            modal.refresh_after_demo_toggle()
+            await wait_until(lambda: "hidden-key" in _prompts())
+            assert "id_rsa" not in _prompts()
+            assert picker.selected == selected_before
+            assert box.value == "encrypted"
+
+            # The real name no longer matches; the shown one does.
+            box.value = "id_rsa"
+            await _wait_shown(app, pilot, 0)
+            box.value = "hidden-key"
+            await _wait_shown(app, pilot, 1)
+
+
+def _numbered_keys(tmp_path, count):
+    return [
+        ScannedKey(
+            path=tmp_path / f"key-{n}", filename=f"key-{n}", encrypted=False,
+            key_type="rsa", fingerprint=f"SHA256:fp{n}",
+        )
+        for n in range(1, count + 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pilot_control_sequences_in_file_origin_strings_are_neutralised(tmp_path):
+    from textual.widgets import SelectionList
+
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    hostile = "a\x1b]0;title\x07b\x1b[31mc"
+    keys = [
+        ScannedKey(
+            path=tmp_path / "x", filename=hostile, encrypted=False, key_type="ed25519",
+            fingerprint="SHA256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            resolved_target=f"/t/{hostile}",
+        ),
+        ScannedKey(
+            path=tmp_path / "y", filename="bad", encrypted=False, key_type=None,
+            fingerprint=None, error=f"unreadable {hostile}",
+        ),
+    ]
+    svc = _svc()
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await _ready(app, pilot)
+            modal = app.screen
+            listing = modal.query_one("#bw_import_list", SelectionList)
+            picker = modal.query_one(FilterableSelection)
+
+            def has_control(text: str) -> bool:
+                return any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text)
+
+            for index in range(listing.option_count):
+                prompt = listing.get_option_at_index(index).prompt
+                assert not has_control(str(getattr(prompt, "plain", prompt)))
+            assert [row.search_text for row in picker._rows if has_control(row.search_text)] == []
+            assert not has_control(modal._display_name(hostile))
+            modal._set_status(f"status {hostile}")
+            assert not has_control(str(modal.query_one("#bw_import_status").render()))
+            assert "abc" in picker._rows[0].search_text.replace("]0;title", "").replace("[31m", "")
+
+
+@pytest.mark.asyncio
+async def test_pilot_import_button_counts_selected_keys_hidden_by_the_filter(tmp_path):
+    from textual.widgets import Button, Input
+
+    from servonaut.widgets.filterable_selection import FilterableSelection
+
+    keys = _numbered_keys(tmp_path, 12)
+    svc = _svc()
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            button = app.screen.query_one("#bw_import_btn", Button)
+            picker = app.screen.query_one(FilterableSelection)
+            await wait_until(lambda: button.label.plain == "Import (12)")
+            app.screen.query_one("#bw_import_search", Input).value = "key-7"
+            await _wait_shown(app, pilot, 1)
+            assert button.label.plain == "Import (12)"
+            picker.deselect_visible()
+            await wait_until(lambda: button.label.plain == "Import (11)")
+            app.screen.query_one("#bw_import_search", Input).value = ""
+            await _wait_shown(app, pilot, 12)
+            app.screen.query_one("#bw_import_none", Button).press()
+            await wait_until(lambda: button.label.plain == "Import (0)" and button.disabled)
+
+
+@pytest.mark.asyncio
+async def test_pilot_fingerprint_prefix_and_hidden_key_type_do_not_match_every_row(tmp_path):
+    from textual.widgets import Input
+
+    keys = _numbered_keys(tmp_path, 40)
+    svc = _svc()
+    with patch("servonaut.screens.bw_key_import.scan_directory", return_value=keys):
+        app = _host_app(tmp_path, svc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _ready(app, pilot)
+            box = app.screen.query_one("#bw_import_search", Input)
+            box.value = "25"
+            await _wait_shown(app, pilot, 1)
+            box.value = "sha"
+            await _wait_shown(app, pilot, 0)

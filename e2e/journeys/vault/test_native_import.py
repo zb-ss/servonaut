@@ -12,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from textual.app import App
-from textual.widgets import Button, DataTable, SelectionList, Static
+from textual.widgets import Button, DataTable, Input, SelectionList, Static
 
 from e2e.harness.waits import wait_for_async
 from servonaut.screens.vault import VaultScreen
@@ -23,6 +23,7 @@ from servonaut.services.bw_key_import import OPENSSH_PEM_HEADER
 from servonaut.services.vault.command_service import VaultCommandService
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.identity_store import IdentityStore, LocalDevice, LocalIdentity
+from servonaut.widgets.filterable_selection import FilterableSelection
 
 
 pytestmark = [pytest.mark.e2e_pr]
@@ -208,6 +209,24 @@ async def test_import_dialog_marks_a_key_the_vault_holds_and_imports_only_the_ne
         assert stored.value not in listing.selected
         assert "already in this vault" not in str(other.prompt)
         assert list(listing.selected) == [other.value]
+        picker = modal.query_one(FilterableSelection)
+        search = modal.query_one("#vault_import_search", Input)
+        # Filter down to the new key's file, select every shown row, then clear the filter.
+        search.value = "new_key"
+        await wait_for_async(lambda: listing.option_count == 1, desc="one row shown for the filter")
+        modal.query_one("#vault_import_all", Button).press()
+        await wait_for_async(
+            lambda: picker.selected == [other.value], desc="the shown row selected",
+        )
+        search.value = ""
+        await wait_for_async(lambda: listing.option_count == 2, desc="both rows shown again")
+        assert stored.value not in picker.selected
+        shown_stored = next(
+            listing.get_option_at_index(i) for i in range(listing.option_count)
+            if listing.get_option_at_index(i).value == stored.value
+        )
+        assert shown_stored.disabled is True
+        assert "already in this vault as stored-key" in str(shown_stored.prompt)
         listing.focus()
         listing.highlighted = stored.value  # option value is its index
         await pilot.press("space")
