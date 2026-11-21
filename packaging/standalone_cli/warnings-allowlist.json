@@ -22574,6 +22574,72 @@
       {
         "classification": {
           "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "63832eec075d6a96ff6e5b9f1d37675747ca7c82a35758e9a9ca729fd7ab5ca4",
+        "importers": [
+          {
+            "module": "pty",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.debian_layout",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.bw_ssh_config_service",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.vault.ca_pins",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          }
+        ],
+        "module": "fcntl",
+        "reason": "Reviewed PyInstaller missing-module for fcntl.",
+        "target_facts": {
+          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
+          "target": "windows-x64",
+          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": true,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -23117,66 +23183,6 @@
         ],
         "module": "trio.testing",
         "reason": "Reviewed PyInstaller missing-module for trio.testing.",
-        "target_facts": {
-          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
-          "target": "windows-x64",
-          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "77c92238ab5ce869087ee7c0614475b0d6ac5c4332219bbfad27536e30ff2096",
-        "importers": [
-          {
-            "module": "pty",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.bw_ssh_config_service",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.vault.ca_pins",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.updates.status",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          }
-        ],
-        "module": "fcntl",
-        "reason": "Reviewed PyInstaller missing-module for fcntl.",
         "target_facts": {
           "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
           "target": "windows-x64",
