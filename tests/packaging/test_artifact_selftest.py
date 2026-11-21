@@ -534,3 +534,20 @@ def test_the_boto3_probe_builds_a_resource_without_any_request(monkeypatch: pyte
     monkeypatch.setattr(botocore.endpoint.Endpoint, "make_request", blocked)
 
     selftest.probe_boto3_resources()
+
+
+def test_frozen_widget_probe_fails_if_a_lazy_module_was_omitted(monkeypatch):
+    from textual import widgets
+
+    missing = "._markdown_viewer"
+    original = widgets.import_module
+
+    def import_widget(name, package):
+        if name == missing:
+            raise ModuleNotFoundError(name)
+        return original(name, package)
+
+    monkeypatch.setattr(widgets, "_WIDGETS_LAZY_LOADING_CACHE", {})
+    monkeypatch.setattr(widgets, "import_module", import_widget)
+    with pytest.raises(selftest._SelftestFailure, match="textual-widget-import"):
+        selftest.probe_textual_widgets()
