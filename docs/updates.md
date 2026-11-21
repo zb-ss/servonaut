@@ -52,6 +52,58 @@ pipx-installed copy directly and skip automatic preparation and switching.
 This gives scripts the version they installed with pipx, even when
 Servonaut has prepared other copies.
 
+## Upgrading a Debian package
+
+Before upgrading from an older Debian package to the first release with
+protected upgrades (`X.Y.Z`, to be set before release), close Servonaut,
+including any running MCP servers and the background relay. Later upgrades
+keep the files those sessions are already using.
+
+After APT finishes configuring the package, **Settings → Updates** shows the
+running version and offers **Restart Servonaut**. Confirm when you are ready
+to close this window and its sessions. Reconnect any separate MCP servers
+and restart standalone relay processes when you want them to use the new
+version too.
+
+Removing the package keeps any files that open sessions still use. A later
+installation can clean up those files after the sessions exit. Purging the
+package removes the retained copies and preserves your settings. If you have
+mounted a separate filesystem at the generation directory, purge empties it
+and leaves the mount in place.
+
+## macOS desktop updates
+
+When Settings → Updates offers **Install on quit**, save your work and
+confirm. Servonaut closes the window, checks the signed update again and
+reopens the desktop app after installation. If the replacement cannot
+start, Servonaut restores the previous version after its processes stop.
+
+Close any separate Servonaut terminal, relay or MCP sessions that use the
+same app before installing. If your installed app has no **Install on quit**
+option, use the disk image for that upgrade. Before your first **Install on
+quit** update, close sessions left over from earlier installations. Opening
+an older session during that first replacement can interfere with it.
+
+Servonaut can install into a supported copy you own in **Applications** or
+in your private **Applications** folder. If Servonaut cannot verify the
+update or obtain exclusive access to that copy, use **Download and install**
+in Settings. Open the disk image and drag Servonaut to Applications after
+all sessions using that copy have closed.
+
+The rollback copy takes about as much space as one extra Servonaut
+application. It stays available after a healthy start and is retired after
+a later verified update or after 14 days on a subsequent launch. Set
+`SERVONAUT_MACOS_ROLLBACK_RETENTION_DAYS` to a positive number of days in
+the desktop launcher's environment to change that retention. A later launch
+also removes old updater files and unused automatic downloads a day or more
+old.
+
+Dragging Servonaut to the Trash can leave `Servonaut.app.previous` and the
+hidden `.servonaut-desktop-update` folder beside the application. Automatic
+downloads can also remain in `~/.servonaut/desktop-update-stage/`. Close all
+Servonaut sessions before removing those update files. Your settings are in
+the rest of `~/.servonaut/`.
+
 ## Disk space and uninstalling
 
 Update copies live under

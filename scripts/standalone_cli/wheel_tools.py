@@ -1058,8 +1058,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.github_output,
             )
         )
-    except WheelToolError:
-        print("standalone wheel preparation failed", file=sys.stderr)
+    except WheelToolError as error:
+        print(f"standalone wheel preparation failed: {error}", file=sys.stderr)
         return 1
     print("standalone wheel prepared")
     return 0

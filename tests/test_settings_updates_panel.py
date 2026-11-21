@@ -43,6 +43,7 @@ from servonaut.services.client_identity import (
 )
 from servonaut.services.update_service import UpdateCheckResult
 from servonaut.services.version_policy import DEFAULT_UPDATE_URL, VersionPolicy
+from servonaut.updates import layout as _updates_layout  # noqa: F401 — bind locate_install before monkeypatches
 from servonaut.updates import status as updates_status
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.link_button import LinkButton
@@ -199,7 +200,7 @@ async def _wait_updates_panel(app: _UpdatesHost, pilot: Any) -> UpdatesPanel:
     await wait_until(lambda: isinstance(app.screen._current_panel(), UpdatesPanel))
     panel = app.screen._current_panel()
     assert isinstance(panel, UpdatesPanel)
-    await wait_until(lambda: panel._loaded and not panel._settling)
+    await wait_until(lambda: panel._loaded and not panel._settling and not panel._checking_apt)
     await pilot.pause()
     return panel
 
@@ -496,14 +497,15 @@ async def test_state_4_server_minimum_shows_required_copy_and_update_now(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kind, platform_name, apt_managed, expected_installed, expected_primary, expected_secondary",
+    "kind, platform_name, apt_managed, expected_installed, expected_primary, expected_secondary, expected_command",
     [
         (
             DistributionKind.PACKAGED_DESKTOP,
             "linux",
             True,
             "installed from the Servonaut APT repository",
-            "Updates are installed by apt",
+            "Updates are managed by apt.",
+            "To update now, run:",
             "sudo apt update && sudo apt install --only-upgrade servonaut",
         ),
         (
@@ -513,6 +515,7 @@ async def test_state_4_server_minimum_shows_required_copy_and_update_now(
             "source checkout",
             "source checkout",
             "Update your checkout",
+            "",
         ),
         (
             DistributionKind.PIP,
@@ -521,6 +524,7 @@ async def test_state_4_server_minimum_shows_required_copy_and_update_now(
             "installed with pip",
             "Updates are installed with pip.",
             "pip install --upgrade servonaut",
+            "",
         ),
     ],
 )
@@ -533,13 +537,24 @@ async def test_state_5_managed_elsewhere_variants(
     expected_installed: str,
     expected_primary: str,
     expected_secondary: str,
+    expected_command: str,
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import AptInstallStatus
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
     monkeypatch.setattr(updates_mod.sys, "platform", platform_name)
     monkeypatch.setattr(
-        updates_mod, "is_apt_managed_install", lambda **_kw: apt_managed,
+        updates_mod,
+        "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(
+            managed=apt_managed,
+            suite="stable" if apt_managed else None,
+            suites=("stable",) if apt_managed else (),
+            dpkg_owned=apt_managed,
+            architecture="amd64" if apt_managed else None,
+            checked=True,
+        ),
     )
     app = _UpdatesHost(tmp_path, runtime=_fake_runtime(kind, version="2.34.0"))
     async with app.run_test(size=(160, 50)) as pilot:
@@ -547,12 +562,384 @@ async def test_state_5_managed_elsewhere_variants(
         installed_text = str(panel.query_one("#updates_installed_value", Static).render())
         primary_text = str(panel.query_one("#updates_status_primary", Static).render())
         secondary_text = str(panel.query_one("#updates_status_secondary", Static).render())
+        command_widget = panel.query_one("#updates_status_command", Static)
         assert expected_installed in installed_text
         assert expected_primary in primary_text
         assert expected_secondary in secondary_text
         assert "apt upgrade servonaut" not in secondary_text
-        assert panel.query_one("#updates_channel_radio", RadioSet).disabled is True
+        if expected_command:
+            assert command_widget.display is True
+            assert str(command_widget.render()) == expected_command
+            assert "`" not in str(command_widget.render())
+            assert panel.query_one("#updates_channel_radio", RadioSet).display is False
+            assert panel.query_one("#updates_channel_apt_summary", Static).display is True
+        else:
+            assert command_widget.display is False
+            assert panel.query_one("#updates_channel_radio", RadioSet).display is True
+            assert panel.query_one("#updates_channel_radio", RadioSet).disabled is True
         assert panel.query_one("#save_updates", Button).disabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suite", ["stable", "candidate"])
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_apt_managed_desktop_shows_channel_summary_copyable_command_and_fits_100x30(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str, size: tuple[int, int],
+) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import APT_UPGRADE_COMMAND, AptInstallStatus
+
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        updates_mod,
+        "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(
+            managed=True,
+            suite=suite,
+            suites=(suite,),
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        ),
+    )
+    runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=size) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        assert "2.34.0  ·  installed from the Servonaut APT repository" == str(
+            panel.query_one("#updates_installed_value", Static).render()
+        )
+        assert "Updates are managed by apt." == str(
+            panel.query_one("#updates_status_primary", Static).render()
+        )
+        secondary = str(panel.query_one("#updates_status_secondary", Static).render())
+        assert secondary == "To update now, run:"
+        assert "APT suite" not in secondary
+
+        command_widget = panel.query_one("#updates_status_command", Static)
+        assert command_widget.display is True
+        assert str(command_widget.render()) == APT_UPGRADE_COMMAND
+        assert "`" not in str(command_widget.render())
+        # Copyable command fits on one single line without mid-command wrapping even at 100x30.
+        assert command_widget.region.height == 1
+
+        for selector in (
+            "#updates_btn_check",
+            "#updates_btn_postpone",
+            "#updates_btn_try",
+            "#updates_btn_update",
+        ):
+            assert panel.query_one(selector, Button).display is False
+        assert panel.query_one("#updates_status_actions", Vertical).display is False
+        assert panel.query_one("#updates_link_download", LinkButton).display is False
+        assert panel.query_one("#updates_link_release_notes", LinkButton).display is False
+
+        # Radio set replaced by one-line channel summary; note stays visible without scrolling at 100x30.
+        assert panel.query_one("#updates_channel_title", Static).display is False
+        assert panel.query_one("#updates_channel_radio", RadioSet).display is False
+        summary = panel.query_one("#updates_channel_apt_summary", Static)
+        assert summary.display is True
+        assert str(summary.render()) == f"Release channel: {suite} (set in your APT source)"
+        note = panel.query_one("#updates_channel_note", Static)
+        assert note.display is True
+        assert str(note.render()) == "Servonaut does not modify APT configuration."
+        assert panel.query_one("#save_updates", Button).disabled is True
+
+        panel_body = panel.query_one(".panel-body", VerticalScroll)
+        assert panel_body.content_region.contains_region(summary.region)
+        assert panel_body.content_region.contains_region(note.region)
+
+
+@pytest.mark.asyncio
+async def test_apt_probe_runs_off_ui_thread_showing_cached_status_and_busy_indicator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import (
+        APT_UPGRADE_COMMAND,
+        AptInstallStatus,
+        seed_apt_status_cache_for_tests,
+    )
+
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    # Seed a prior cached status (e.g. from startup) so the panel renders it
+    # immediately alongside a loading indicator while re-checking off the UI thread.
+    seed_apt_status_cache_for_tests(
+        AptInstallStatus(
+            managed=True,
+            suite="stable",
+            suites=("stable",),
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        ),
+        runtime=runtime,
+        platform_name="linux",
+    )
+
+    ui_thread = threading.get_ident()
+    probe_threads: list[int] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh(_rt: Any, **_kw: Any) -> AptInstallStatus:
+        probe_threads.append(threading.get_ident())
+        started.set()
+        release.wait(timeout=5.0)
+        return AptInstallStatus(
+            managed=True,
+            suite="candidate",
+            suites=("candidate",),
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        )
+
+    monkeypatch.setattr(updates_mod, "refresh_apt_status", slow_refresh)
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    try:
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            await wait_until(lambda: isinstance(app.screen, SettingsScreen))
+            await wait_until(lambda: isinstance(app.screen._current_panel(), UpdatesPanel))
+            panel = app.screen._current_panel()
+            assert isinstance(panel, UpdatesPanel)
+
+            # Wait until the worker is blocked in slow_refresh.
+            await wait_until(lambda: started.is_set() and panel._checking_apt)
+            busy = panel.query_one("#updates_busy", BusyIndicator)
+            await wait_until(lambda: busy.is_active)
+            # Cached result is already visible while the fresh check is in flight.
+            assert "Updates are managed by apt." == str(
+                panel.query_one("#updates_status_primary", Static).render()
+            )
+            assert "Release channel: stable (set in your APT source)" == str(
+                panel.query_one("#updates_channel_apt_summary", Static).render()
+            )
+            assert probe_threads and all(tid != ui_thread for tid in probe_threads)
+
+            release.set()
+            await wait_until(lambda: not panel._checking_apt and not busy.is_active)
+            assert "Release channel: candidate (set in your APT source)" == str(
+                panel.query_one("#updates_channel_apt_summary", Static).render()
+            )
+            assert str(panel.query_one("#updates_status_command", Static).render()) == APT_UPGRADE_COMMAND
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_apt_panel_wires_real_refresh_apt_status_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise UpdatesPanel against the real refresh_apt_status pipeline (temp files + fake dpkg)."""
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates import apt as apt_mod
+    from servonaut.updates.apt import APT_UPGRADE_COMMAND, AptDetectionConfig, DpkgCommandResult
+
+    root = tmp_path / "opt" / "servonaut"
+    root.mkdir(parents=True)
+    exe = root / "servonaut-desktop"
+    exe.write_bytes(b"#!/bin/sh\n")
+    marker = root / "servonaut-runtime.json"
+    marker.write_text('{"distribution_kind": "packaged-desktop"}\n', encoding="utf-8")
+    keyring = tmp_path / "keyrings" / "servonaut.gpg"
+    keyring.parent.mkdir(parents=True)
+    keyring.write_bytes(b"key-bytes")
+    sources_d = tmp_path / "etc" / "apt" / "sources.list.d"
+    sources_d.mkdir(parents=True)
+    (sources_d / "servonaut.sources").write_text(
+        "Types: deb\n"
+        "URIs: https://releases.servonaut.dev/apt/\n"
+        "Suites: stable\n"
+        "Components: main\n"
+        "Architectures: amd64\n"
+        f"Signed-By: {keyring}\n",
+        encoding="utf-8",
+    )
+    dpkg_status = tmp_path / "var" / "lib" / "dpkg" / "status"
+    dpkg_status.parent.mkdir(parents=True)
+    dpkg_status.write_text("Package: servonaut\n", encoding="utf-8")
+
+    def fake_runner(argv: Any, _timeout: float) -> DpkgCommandResult:
+        if "-W" in argv:
+            return DpkgCommandResult(returncode=0, stdout="ii\tamd64\t2.34.0-1\n")
+        return DpkgCommandResult(
+            returncode=0,
+            stdout=f"servonaut: {exe.resolve()}\nservonaut: {marker.resolve()}\n",
+        )
+
+    cfg = AptDetectionConfig(
+        packaged_prefixes=(tmp_path,),
+        sources_list_path=tmp_path / "etc" / "apt" / "sources.list",
+        sources_list_d_path=sources_d,
+        dpkg_status_path=dpkg_status,
+        require_root_owned=False,
+        dpkg_runner=fake_runner,
+    )
+    real_refresh = apt_mod.refresh_apt_status
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        updates_mod,
+        "refresh_apt_status",
+        lambda rt, **_kw: real_refresh(rt, platform_name="linux", config=cfg),
+    )
+
+    runtime = RuntimeLayout(
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        product_version="2.34.0",
+        build_revision=None,
+        resource_root=root,
+        executable_root=root,
+        data_root=tmp_path / "data",
+        executable=exe,
+        python_executable=None,
+        path_console=None,
+        console_helper=None,
+        desktop_child=None,
+        package_management=PackageManagementCapability(PackageManagementKind.UNSUPPORTED, (), False),
+        is_frozen=True,
+    )
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        assert str(panel.query_one("#updates_status_primary", Static).render()) == "Updates are managed by apt."
+        assert str(panel.query_one("#updates_status_command", Static).render()) == APT_UPGRADE_COMMAND
+        assert str(panel.query_one("#updates_channel_apt_summary", Static).render()) == (
+            "Release channel: stable (set in your APT source)"
+        )
+        assert str(panel.query_one("#updates_channel_note", Static).render()) == (
+            "Servonaut does not modify APT configuration."
+        )
+
+
+@pytest.mark.asyncio
+async def test_apt_transient_refresh_failure_preserves_cached_suite_in_channel_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import (
+        APT_UPGRADE_COMMAND,
+        AptInstallStatus,
+        seed_apt_status_cache_for_tests,
+    )
+
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    cached_good = AptInstallStatus(
+        managed=True,
+        suite="stable",
+        suites=("stable",),
+        dpkg_owned=True,
+        architecture="amd64",
+        checked=True,
+    )
+    seed_apt_status_cache_for_tests(cached_good, runtime=runtime, platform_name="linux")
+
+    # Simulate a transient failure (unchecked negative) on refresh while the cache
+    # still holds the last good APT suite.
+    monkeypatch.setattr(
+        updates_mod,
+        "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(managed=False, checked=False),
+    )
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        assert str(panel.query_one("#updates_status_primary", Static).render()) == "Updates are managed by apt."
+        assert str(panel.query_one("#updates_status_command", Static).render()) == APT_UPGRADE_COMMAND
+        assert str(panel.query_one("#updates_channel_apt_summary", Static).render()) == (
+            "Release channel: stable (set in your APT source)"
+        )
+        # Also verify _effective_apt_suite directly if _apt_status itself is unchecked.
+        panel._apt_status = AptInstallStatus(managed=False, checked=False)
+        panel._render_status()
+        assert str(panel.query_one("#updates_channel_apt_summary", Static).render()) == (
+            "Release channel: stable (set in your APT source)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_apt_managed_server_minimum_426_shows_apt_command_and_hides_update_and_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import APT_UPGRADE_COMMAND, AptInstallStatus
+
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        updates_mod,
+        "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(
+            managed=True,
+            suite="stable",
+            suites=("stable",),
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        ),
+    )
+    runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    policy = VersionPolicy(mode="enforce", minimum_version="2.35.0")
+    policy_client = SimpleNamespace(
+        cached=MagicMock(return_value=policy),
+        fetch=AsyncMock(return_value=policy),
+    )
+    app = _UpdatesHost(tmp_path, runtime=runtime, policy_client=policy_client)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        primary = str(panel.query_one("#updates_status_primary", Static).render())
+        secondary = str(panel.query_one("#updates_status_secondary", Static).render())
+        command = panel.query_one("#updates_status_command", Static)
+        assert "servonaut.dev needs 2.35.0 or later for team, vault and AI features." == primary
+        assert "Local features keep working. To update now, run:" == secondary
+        assert command.display is True
+        assert str(command.render()) == APT_UPGRADE_COMMAND
+        assert panel.query_one("#updates_btn_update", Button).display is False
+        assert panel.query_one("#updates_btn_check", Button).display is False
+        assert panel.query_one("#updates_link_download", LinkButton).display is False
+        assert panel.query_one("#updates_channel_radio", RadioSet).display is False
+        assert panel.query_one("#updates_channel_apt_summary", Static).display is True
+        assert panel.query_one("#save_updates", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_standalone_linux_deb_without_apt_source_falls_back_to_download_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import AptInstallStatus
+
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        updates_mod,
+        "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(
+            managed=False,
+            dpkg_owned=True,
+            architecture="amd64",
+            checked=True,
+        ),
+    )
+    runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        assert "2.34.0  ·  Linux desktop app" == str(
+            panel.query_one("#updates_installed_value", Static).render()
+        )
+        assert "Up to date" in str(panel.query_one("#updates_status_primary", Static).render())
+        assert "servonaut.dev/download" in str(
+            panel.query_one("#updates_status_secondary", Static).render()
+        )
+        assert panel.query_one("#updates_btn_check", Button).display is True
 
 
 @pytest.mark.asyncio
@@ -561,7 +948,7 @@ async def test_state_5_macos_desktop_shows_download_and_install_link(
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     service = SimpleNamespace(
@@ -753,7 +1140,7 @@ async def test_check_now_skipped_outcome_shows_markup_safe_toast(
     import servonaut.screens.settings.panels.updates as updates_mod
 
     monkeypatch.setenv("SERVONAUT_SKIP_AUTO_APPLY", "1")
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     app = _UpdatesHost(tmp_path, runtime=runtime)
@@ -920,7 +1307,7 @@ async def test_frozen_desktop_keeps_direct_service_download_path(
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     frozen_upgrade = AsyncMock(return_value=(True, "Downloaded verified installer."))
@@ -1107,3 +1494,41 @@ async def test_pinned_version_with_threshold_is_neutral_and_escaped(
             assert panel.query_one("#updates_btn_postpone", Button).display is False
             assert panel.query_one("#updates_btn_try", Button).display is False
     assert guard.findings == []
+
+
+@pytest.mark.asyncio
+async def test_macos_install_does_not_quit_if_activity_appears_during_download(monkeypatch):
+    import asyncio
+    from servonaut.updates import macos_install
+
+    requests = MagicMock()
+    monkeypatch.setattr(macos_install, "request_on_quit", requests)
+    monkeypatch.setattr(macos_install.Installation, "from_runtime", lambda _: SimpleNamespace(validate_offer=MagicMock()))
+    stage = MagicMock(return_value=object())
+
+    async def controlled_download(action):
+        return action()
+
+    async def perform(action):
+        return await action()
+
+    monkeypatch.setattr(asyncio, "to_thread", controlled_download)
+    app = SimpleNamespace(
+        _refuse_navigation=MagicMock(side_effect=(False, True)),
+        _run_upgrade_once=perform, runtime_layout=object(),
+        update_service=SimpleNamespace(stage_macos_desktop_update=stage),
+        action_quit=AsyncMock(), notify=MagicMock(),
+    )
+    await ServonautApp._install_macos_after_confirmation(app)
+    stage.assert_called_once()
+    requests.assert_not_called()
+    app.action_quit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_macos_install_quit_respects_an_active_session():
+    app = SimpleNamespace(
+        _refuse_navigation=MagicMock(return_value=True), _macos_update_quit_code=76, exit=MagicMock(),
+    )
+    await ServonautApp.action_quit(app)
+    app.exit.assert_not_called()

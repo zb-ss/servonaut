@@ -17,6 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+from servonaut.services.apt_runtime import inherited_apt_lease, pin_apt_command
+
 _PROCESS_QUERY_LIMITED_INFORMATION: Final = 0x1000
 _PROCESS_TERMINATE: Final = 0x0001
 _STILL_ACTIVE: Final = 259
@@ -76,7 +78,12 @@ def spawn_detached(argv: Sequence[str], *, cwd: Path) -> subprocess.Popen[bytes]
     caller's working directory busy (unmountable or undeletable).
     """
     command = _validate_argv(argv)
-    return subprocess.Popen(command, cwd=cwd, **detached_popen_kwargs(sys.platform))
+    command[0] = pin_apt_command(command[0])
+    with inherited_apt_lease(command[0]) as lease_fds:
+        kwargs = detached_popen_kwargs(sys.platform)
+        if lease_fds:
+            kwargs["pass_fds"] = lease_fds
+        return subprocess.Popen(command, cwd=cwd, **kwargs)
 
 
 def is_process_alive(pid: int | None) -> bool:

@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -148,6 +149,7 @@ class FakeBucket:
         self.objects: dict[str, dict[str, Any]] = {}
         self.puts: list[dict[str, Any]] = []
         self.fail_puts: list[ClientError] = []
+        self.immutable_prefix: str | None = None
 
     def put_object(self, *, Bucket: str, Key: str, Body: Any, ContentType: str, CacheControl: str,
                    Metadata: dict[str, str] | None = None, ContentMD5: str | None = None,
@@ -159,6 +161,8 @@ class FakeBucket:
         if ContentMD5 is not None and ContentMD5 != base64.b64encode(hashlib.md5(data).digest()).decode():
             raise _error(400, "BadDigest")
         existing = self.objects.get(Key)
+        if existing is not None and self.immutable_prefix and Key.startswith(self.immutable_prefix):
+            raise _error(409, "ObjectLockedByBucketPolicy")
         if IfNoneMatch == "*" and existing is not None:
             raise _error(412, "PreconditionFailed")
         if IfMatch is not None and (existing is None or existing["etag"] != IfMatch):
@@ -178,6 +182,14 @@ class FakeBucket:
             raise _error(404, "NoSuchKey")
         stored = self.objects[Key]
         return {"Body": io.BytesIO(stored["data"]), "ETag": stored["etag"]}
+
+    def delete_object(self, *, Bucket: str, Key: str) -> None:
+        if self.immutable_prefix and Key.startswith(self.immutable_prefix):
+            raise _error(409, "ObjectLockedByBucketPolicy")
+        self.objects.pop(Key, None)
+
+    def list_objects_v2(self, *, Bucket: str, Prefix: str) -> dict[str, Any]:
+        return {"Contents": [{"Key": key} for key in sorted(self.objects) if key.startswith(Prefix)]}
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +897,7 @@ def test_mirroring_a_release_again_replaces_a_junk_manifest(
     """The recovery the refresh names for a manifest it cannot renew works."""
     _with_signing(monkeypatch)
     bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
     junk = json.dumps({"product_version": "99.0.0"}).encode()
     for key in (STABLE_JSON, PREVIEW_JSON):
         bucket.objects[key] = {"data": junk, "etag": f'"{key}"', "type": "t", "cache": "c", "meta": {}}
@@ -1471,7 +1484,7 @@ def test_an_update_manifest_cached_longer_than_five_minutes_fails_the_audit(tmp_
 
     assert problems == [
         f"manifest/preview.json: {BASE}/manifest/preview.json is served with Cache-Control 'public, max-age=14400', "
-        "not 'public, max-age=300'"
+        "not 'public, max-age=300' or 'no-store, max-age=0'"
     ]
 
 
@@ -1700,6 +1713,18 @@ def _with_signing(monkeypatch: pytest.MonkeyPatch, policy_for: Any = POLICY_FOR)
     monkeypatch.setenv("RELEASE_MANIFEST_SIGNING_KEY", _pem(KEY))
     monkeypatch.setenv("RELEASE_MANIFEST_KEY_ID", KEY_ID)
     monkeypatch.setattr(mirror, "app_trust_policy", policy_for)
+    monkeypatch.setattr(mirror, "require_desktop_retention", lambda *_: None)
+
+
+def _seed_desktop_controls(bucket: FakeBucket) -> None:
+    bucket.immutable_prefix = mirror.DESKTOP_CHECKPOINT_ROOT
+    mirror.recover_desktop_controls(bucket, "b", "", "initialize-controls", SIGNER, NOW)
+
+
+def _stored_checkpoint_key(bucket: FakeBucket, sequence: int) -> str:
+    keys = [key for key in bucket.objects if key.startswith(f"{mirror.DESKTOP_CHECKPOINT_ROOT}{sequence:016d}-")]
+    assert len(keys) == 1
+    return keys[0]
 
 
 def _manifests_args(tmp_path: Path, plan: dict[str, Any], latest: str = "v1.2.3", *extra: str) -> list[str]:
@@ -1726,13 +1751,16 @@ def test_the_manifests_command_signs_checks_and_writes_both_manifests(
 ) -> None:
     _with_signing(monkeypatch)
     bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
     monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
     _, plan = _plan(tmp_path, macos=True)
 
     code = mirror.main(_manifests_args(tmp_path, plan, "v1.2.3", "--validity-days", "10", "--refresh-days", "3"))
 
     assert code == 0
-    assert sorted(bucket.objects) == [PREVIEW_JSON, STABLE_JSON]
+    assert sorted(set(bucket.objects) - {mirror.DESKTOP_CONTROLS_KEY, _stored_checkpoint_key(bucket, 1)}) == [
+        PREVIEW_JSON, STABLE_JSON,
+    ]
     for key, channel in ((STABLE_JSON, "stable"), (PREVIEW_JSON, "preview")):
         stored = ReleaseManifest.from_json(bucket.objects[key]["data"])
         verify_manifest(stored, POLICY_FOR(channel))
@@ -1745,12 +1773,13 @@ def test_the_manifests_command_signs_checks_and_writes_both_manifests(
 def test_a_candidate_updates_only_the_preview_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _with_signing(monkeypatch)
     bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
     monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
     _, plan = _plan(tmp_path, "v1.3.0rc1", prerelease=True, macos=True)
 
     assert mirror.main(_manifests_args(tmp_path, plan, "v1.2.3")) == 0
 
-    assert list(bucket.objects) == [PREVIEW_JSON]
+    assert set(bucket.objects) == {mirror.DESKTOP_CONTROLS_KEY, _stored_checkpoint_key(bucket, 1), PREVIEW_JSON}
     assert ReleaseManifest.from_json(bucket.objects[PREVIEW_JSON]["data"]).channel == ReleaseChannel.PREVIEW
 
 
@@ -1813,6 +1842,7 @@ def test_the_refresh_command_renews_each_manifest_and_reports_the_one_it_cannot(
     bucket, github, _ = _stored(tmp_path, key=PREVIEW_JSON)
     forged = _update_manifest(tmp_path, signer=(Ed25519PrivateKey.generate(), KEY_ID))[2]
     bucket.objects[STABLE_JSON] = {"data": _body(forged), "etag": '"s"', "type": "application/json", "cache": "c", "meta": {}}
+    _seed_desktop_controls(bucket)
     monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
     monkeypatch.setattr(mirror, "fetch", github)
     (tmp_path / "releases.json").write_text(json.dumps([_github_release("v1.2.3")]))
@@ -1944,23 +1974,30 @@ def test_each_job_has_the_least_privilege_it_needs(workflow: str) -> None:
     assert _granted(_job(workflow, "notes")) == [("contents", "write")]
     assert _granted(_job(workflow, "refresh")) == [("contents", "read")]
     assert _granted(_job(workflow, "audit")) == [("contents", "read"), ("issues", "write")]
+    assert _granted(_job(workflow, "apt-publish")) == [("contents", "read"), ("attestations", "read")]
+    assert _granted(_job(workflow, "apt-audit")) == [("contents", "read")]
+    assert _granted(_job(workflow, "apt-report")) == [("contents", "read"), ("issues", "write")]
 
 
 def test_the_upload_credentials_reach_only_the_jobs_that_write_to_the_mirror(workflow: str) -> None:
-    for name in ("resolve", "notes", "audit"):
+    for name in ("resolve", "notes", "audit", "apt-audit", "apt-report", "desktop-policy-report"):
         assert "secrets." not in _job(workflow, name)
-    for name in ("mirror", "refresh"):
+    for name in ("mirror", "refresh", "apt-publish", "desktop-policy"):
         job = _job(workflow, name)
         assert "    environment: release-mirror\n" in job
         # Secrets go to steps, never to every step of a job.
         assert "secrets." not in job.split("    steps:\n", 1)[0]
-    assert workflow.count("environment:") == 2
+    assert workflow.count("environment:") == 4
+    assert "environment:" not in _job(workflow, "apt-audit")
     for step in ("Download the release", "Verify the files against their checksums", "Install the uploader"):
         assert "secrets." not in _step(workflow, step)
 
 
 def test_only_the_signing_steps_receive_the_manifest_signing_key(workflow: str) -> None:
-    signing_steps = ("Sign the update manifests", "Re-sign the update manifests before they expire")
+    signing_steps = (
+        "Sign the update manifests", "Re-sign the update manifests before they expire",
+        "Publish and verify the signed apply policy",
+    )
     assert workflow.count("secrets.RELEASE_MANIFEST_SIGNING_KEY") == len(signing_steps)
     for name in signing_steps:
         step = _step(workflow, name)
@@ -1976,18 +2013,21 @@ def test_only_the_signing_steps_receive_the_manifest_signing_key(workflow: str) 
 
 
 def test_the_manifest_code_is_the_apps_own_from_the_checkout(workflow: str) -> None:
-    commands = re.findall(r"^(.*)python \.github/scripts/release-mirror\.py (manifests|refresh|audit)\b", workflow, re.MULTILINE)
-    assert sorted(command for _, command in commands) == ["audit", "manifests", "refresh"]
+    commands = re.findall(
+        r"^(.*)python \.github/scripts/release-mirror\.py (manifests|refresh|audit|desktop-policy)\b",
+        workflow, re.MULTILINE,
+    )
+    assert sorted(command for _, command in commands) == ["audit", "desktop-policy", "manifests", "refresh"]
     for prefix, _ in commands:
         assert prefix.strip() == 'PYTHONPATH="${GITHUB_WORKSPACE}/src"'
     # Each of those jobs installs the signature library from the locked file.
-    for name in ("mirror", "refresh", "audit"):
+    for name in ("mirror", "refresh", "audit", "desktop-policy"):
         assert "-r .github/requirements/release-mirror.txt" in _job(workflow, name)
 
 
 def test_no_job_checks_out_a_tag_or_keeps_credentials(workflow: str) -> None:
     checkouts = re.findall(r"      - uses: actions/checkout@\S+ # v[\d.]+\n((?:        .+\n)+)", workflow)
-    assert len(checkouts) == 4
+    assert len(checkouts) == 10
     for options in checkouts:
         assert "persist-credentials: false" in options
         assert "ref:" not in options
@@ -1999,12 +2039,11 @@ def test_inputs_reach_scripts_only_through_the_environment(workflow: str) -> Non
 
 
 def test_every_job_has_a_timeout_and_runs_queue_per_tag(workflow: str) -> None:
-    for name in ("resolve", "mirror", "notes", "refresh", "audit"):
+    for name in ("resolve", "mirror", "notes", "refresh", "audit", "apt-publish", "apt-audit", "apt-report"):
         assert re.search(r"^    timeout-minutes: \d+$", _job(workflow, name), re.MULTILINE), name
-    assert (
-        "concurrency:\n  group: release-mirror-${{ github.event.workflow_run.head_branch || inputs.tag || 'audit' }}\n"
-        "  cancel-in-progress: false\n"
-    ) in workflow
+    assert "format('apt-{0}', github.run_id)" in workflow
+    assert "|| github.event.workflow_run.head_branch || inputs.tag || 'audit' }}" in workflow
+    assert "  cancel-in-progress: false\n  queue: max" in workflow
 
 
 def test_the_uploader_is_installed_from_hash_locked_requirements(workflow: str) -> None:
@@ -2119,7 +2158,7 @@ def test_a_failure_to_sign_the_manifests_does_not_hold_back_the_notes(workflow: 
 def test_the_audit_runs_daily_only_while_the_mirror_is_on(workflow: str) -> None:
     audit = _job(workflow, "audit")
     assert "vars.RELEASE_MIRROR == 'on'" in audit
-    assert "(github.event_name == 'schedule' || inputs.audit == true)" in audit
+    assert "(github.event.schedule == '41 6 * * *' || inputs.audit == true)" in audit
     assert "if: failure() && steps.audit.outcome == 'failure'" in audit
 
 
@@ -2146,7 +2185,7 @@ def test_the_manifests_are_re_signed_daily_before_the_audit(workflow: str) -> No
     audit = _job(workflow, "audit")
     condition = (
         "github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&\n"
-        "      (github.event_name == 'schedule' || inputs.audit == true)\n"
+        "      (github.event.schedule == '41 6 * * *' || inputs.audit == true)\n"
     )
     assert f"    if: >-\n      {condition}" in refresh
     # The audit also runs after a failed refresh, to report what users get.
@@ -2157,7 +2196,9 @@ def test_the_manifests_are_re_signed_daily_before_the_audit(workflow: str) -> No
     assert "          MANIFESTS_SIGNED: ${{ needs.refresh.outputs.signing }}\n" in step
     assert "          REFRESH_RESULT: ${{ needs.refresh.result }}\n" in step
     script = _script(workflow, "Compare the mirror with GitHub")
-    assert 'if [ "${MANIFESTS_SIGNED}" = "true" ]; then manifests_flag=(--manifests); fi' in script
+    assert 'if [ "${MANIFESTS_SIGNED}" = "true" ]; then' in script
+    assert 'manifests_flag=(--manifests)' in script
+    assert 'if [ "${DESKTOP_POLICY}" = "on" ]; then manifests_flag+=(--apply-policies); fi' in script
     assert '--refresh-result "${REFRESH_RESULT}"' in script
 
 
@@ -2262,3 +2303,917 @@ def test_it_accepts_the_same_tags_as_the_workflows_it_follows(workflow: str) -> 
     for path in _upstream_files():
         assert pattern.search(path.read_text(encoding="utf-8")).group(1) == ours
     assert mirror.TAG_PATTERN.pattern == rf"^v{ours.replace('(rc[1-9][0-9]*)?', '(?:rc([1-9][0-9]*))?')}$"
+
+
+
+def test_apt_writes_and_alerts_keep_default_branch_and_mode_boundaries(workflow: str) -> None:
+    default_branch = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+    for job in ("apt-publish", "apt-audit", "apt-report"):
+        assert default_branch in _job(workflow, job)
+    production = _step(workflow, "Sign and publish the APT archive")
+    assert (
+        "inputs.dry_run != true && inputs.apt_rehearsal != true &&\n"
+        "          vars.APT_RELEASE_MIRROR == 'on'"
+    ) in production
+    rehearsal = _step(workflow, "Sign and publish a separate rehearsal archive")
+    assert "if: inputs.dry_run != true && inputs.apt_rehearsal == true" in rehearsal
+    assert '--prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in rehearsal
+    dry = _step(workflow, "Validate the APT publication plan without writing")
+    assert "secrets." not in dry
+    storage = {"R2_MIRROR_ACCESS_KEY_ID", "R2_MIRROR_SECRET_ACCESS_KEY", "R2_MIRROR_ENDPOINT", "R2_MIRROR_BUCKET"}
+    cleanup = _step(workflow, "Remove the failed rehearsal archive")
+    sweep = _step(workflow, "Remove expired rehearsal archives")
+    for step in (rehearsal, cleanup, sweep):
+        assert set(re.findall(r"secrets\.([A-Z0-9_]+)", step)) == storage
+    assert set(re.findall(r"secrets\.([A-Z0-9_]+)", production)) == storage | {
+        "APT_REPO_SIGNING_SUBKEY", "APT_REPO_SIGNING_PASSPHRASE",
+    }
+    assert "always() && inputs.apt_rehearsal == true && inputs.dry_run != true" in cleanup
+    assert "(steps.rehearse.outcome == 'failure' || steps.rehearse.outcome == 'cancelled')" in cleanup
+    assert '--prefix "apt-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in cleanup
+    assert "!cancelled() && github.event.schedule == '17 */6 * * *'" in sweep
+    assert "--action sweep-rehearsals" in sweep
+    disabled = _step(workflow, "Require the archive opt-in for production writes")
+    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run != true" in disabled
+    assert "inputs.apt_rehearsal != true && vars.APT_RELEASE_MIRROR != 'on'" in disabled
+    assert "exit 1" in disabled
+    mask = _step(workflow, "Mask the APT bucket's address")
+    assert "inputs.dry_run != true && (inputs.apt_rehearsal == true || vars.APT_RELEASE_MIRROR == 'on' ||" in mask
+    assert "github.event.schedule == '17 */6 * * *'" in mask
+    for name in ("Sign and publish a separate rehearsal archive", "Sign and publish the APT archive",
+                 "Remove the failed rehearsal archive", "Remove expired rehearsal archives"):
+        assert workflow.index("name: Mask the APT bucket's address") < workflow.index(f"name: {name}")
+    audit = _job(workflow, "apt-audit")
+    assert "inputs.dry_run != true && inputs.apt_rehearsal != true" in audit
+    assert "vars.APT_REPO_SIGNING_SUBKEY_FINGERPRINT" in audit and "environment:" not in audit
+    report = _job(workflow, "apt-report")
+    assert "upstream: ${{ steps.publish.outputs.upstream }}" in _job(workflow, "apt-publish")
+    assert "needs.apt-audit.result == 'failure' || needs.apt-audit.result == 'success'" in report
+    assert "needs.apt-publish.outputs.rotation == 'true'" in report
+    assert "needs.apt-publish.outputs.upstream == 'true'" in report
+    assert "needs.apt-publish.outputs.unqualified == 'true'" in report
+    assert "github.event.schedule == '17 */6 * * *' &&\n          needs.apt-publish.result == 'failure'" in report
+    assert "PUBLISH_RESULT: ${{ needs.apt-publish.result }}" in report
+    report_step = _step(workflow, "Open or comment on APT archive issues")
+    assert "UPSTREAM: ${{ needs.apt-publish.outputs.upstream }}" in report_step
+    assert (
+        "CHECK_SCHEDULED_PUBLISH: ${{ vars.APT_RELEASE_MIRROR == 'on' && github.event.schedule == '17 */6 * * *' }}"
+        in report_step
+    )
+    assert "APT_ALERT_REMINDER_HOURS: ${{ vars.APT_ALERT_REMINDER_HOURS || '24' }}" in report_step
+    assert "group: release-mirror-apt-alert" in report
+    assert "python3 .github/scripts/apt-report-alerts.py" in _script(workflow, "Open or comment on APT archive issues")
+
+
+# Desktop apply policy and explicit manifest withdrawal.
+
+
+def _desktop_policy_args(tmp_path, releases, action="refresh", identity=None, *, enabled=True):
+    (tmp_path / "desktop-releases.json").write_text(json.dumps(releases), encoding="utf-8")
+    args = ["desktop-policy", "--action", action, "--base", BASE, "--repo", REPO,
+            "--github-releases", str(tmp_path / "desktop-releases.json")]
+    if enabled:
+        args.append("--publish-enabled")
+    if identity is not None:
+        args += ["--identity", json.dumps(mirror.asdict(identity))]
+    return args
+
+
+def _policy_fixture_fetcher(bucket, files):
+    def fetch(url):
+        key = url.removeprefix(BASE + "/")
+        if key in bucket.objects:
+            data = bucket.objects[key]
+            return 200, {"cache-control": data["cache"]}, iter([data["data"]])
+        return _fetcher(files)(url)
+
+    return fetch
+
+
+def _release_metadata(plan):
+    return {
+        **_github_release(plan["tag"]),
+        "assets": [{"name": asset["name"], "size": asset["size"]} for asset in plan["assets"]],
+    }
+
+
+def test_policy_renewal_is_uncached_and_monotonic(tmp_path):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _, _, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    key = mirror.apply_key(STABLE_JSON)
+    interval = mirror.apply_intervals("", "")
+    assert interval == (timedelta(hours=1), timedelta(minutes=15))
+
+    def publish(now, controls=mirror.DesktopControls()):
+        return mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, controls,
+                                           SIGNER, now, interval, POLICY_FOR)
+
+    publish(NOW)
+    first = DesktopApplyPolicy.from_json(bucket.objects[key]["data"])
+    etag = bucket.objects[key]["etag"]
+    assert "not due" in publish(NOW + timedelta(minutes=14))
+    assert bucket.objects[key]["etag"] == etag
+    publish(NOW, mirror.DesktopControls(paused=True))
+    paused = DesktopApplyPolicy.from_json(bucket.objects[key]["data"])
+    assert paused.sequence > first.sequence and paused.paused and not paused.permitted
+    assert bucket.puts[-1]["IfMatch"] == etag
+    publish(NOW + timedelta(minutes=15), mirror.DesktopControls(paused=True))
+    renewed = DesktopApplyPolicy.from_json(bucket.objects[key]["data"])
+    assert renewed.sequence > paused.sequence
+    assert bucket.objects[key]["cache"] == mirror.UNCACHED
+    verify = _policy_fixture_fetcher(bucket, {})
+    assert mirror.public_apply_policy(f"{BASE}/{key}", "stable", NOW + timedelta(minutes=15), verify, POLICY_FOR) == renewed
+    bucket.objects[key]["cache"] = mirror.SHORT_LIVED
+    with pytest.raises(mirror.MirrorError, match="no-store"):
+        mirror.public_apply_policy(f"{BASE}/{key}", "stable", NOW + timedelta(minutes=15), verify, POLICY_FOR)
+
+
+def test_policy_renews_before_a_configured_window_can_expire_between_runs(tmp_path):
+    _, _, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    key = mirror.apply_key(STABLE_JSON)
+    intervals = mirror.apply_intervals("20", "17")
+    mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                               SIGNER, NOW, intervals, POLICY_FOR)
+    etag = bucket.objects[key]["etag"]
+    mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                               SIGNER, NOW + timedelta(minutes=15), intervals, POLICY_FOR)
+    assert bucket.objects[key]["etag"] != etag
+    with pytest.raises(mirror.MirrorError, match="scheduling intervals"):
+        mirror.apply_intervals("10", "5")
+
+
+def test_owner_exact_withdrawal_survives_a_stale_release_rerun(tmp_path, monkeypatch):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _with_signing(monkeypatch)
+    directory, plan, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, _github_sums(directory, plan)))
+    manifest_args = _manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")
+    assert mirror.main(manifest_args) == 0
+    identities = mirror.desktop_identities(manifest)
+    withdrawn = next(item for item in identities if item.platform == "darwin" and item.arch == "arm64")
+    near_match = replace(withdrawn, sha256="a" * 64)
+    releases = [_release_metadata(plan)]
+
+    before_bad_request = dict(bucket.objects)
+    assert mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", near_match)) == 1
+    assert mirror.main(_desktop_policy_args(
+        tmp_path, releases, "withdraw", replace(withdrawn, packaging_revision=withdrawn.packaging_revision + 1),
+    )) == 1
+    assert mirror.main(_desktop_policy_args(
+        tmp_path, releases, "withdraw", replace(withdrawn, product_version="1.2.99"),
+    )) == 1
+    assert bucket.objects == before_bad_request
+    unchanged = ReleaseManifest.from_json(bucket.objects[STABLE_JSON]["data"])
+    assert set(mirror.desktop_identities(unchanged)) == set(identities)
+    assert mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", withdrawn)) == 0
+    assert mirror.main(manifest_args) == 0  # the older plan still contains the withdrawn artifact
+    assert mirror.main([
+        "refresh", "--apply-policies", "--repo", REPO, "--github-releases", str(tmp_path / "desktop-releases.json"),
+    ]) == 0
+    for key, channel in ((STABLE_JSON, "stable"), (PREVIEW_JSON, "preview")):
+        filtered = ReleaseManifest.from_json(bucket.objects[key]["data"])
+        verify_manifest(filtered, POLICY_FOR(channel))
+        assert set(mirror.desktop_identities(filtered)) == set(identities) - {withdrawn}
+        policy = DesktopApplyPolicy.from_json(bucket.objects[mirror.apply_key(key)]["data"])
+        assert set(policy.permitted) == set(identities) - {withdrawn}
+        assert set(policy.withdrawn) == {withdrawn}
+        assert policy.channel.value == channel
+
+
+@pytest.mark.parametrize("fallback", ["older-release", "none", "bad-digest"])
+def test_all_withdrawn_owner_action_only_uses_an_eligible_verified_replacement(tmp_path, monkeypatch, fallback):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _with_signing(monkeypatch)
+    newest_dir, newest_plan, newest = _update_manifest(tmp_path, "v1.2.4")
+    old_dir, old_plan, _ = _update_manifest(tmp_path, "v1.2.3")
+    store = FakeBucket()
+    _seed_desktop_controls(store)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (store, "b"))
+    files = _github_sums(newest_dir, newest_plan)
+    releases = [_release_metadata(newest_plan)]
+    if fallback != "none":
+        releases.append(_release_metadata(old_plan))
+        files.update(_github_sums(old_dir, old_plan))
+        files.update(_served(old_dir, old_plan))
+    if fallback == "bad-digest":
+        for asset in old_plan["assets"]:
+            if asset["kind"] in mirror.DESKTOP_KINDS:
+                url = mirror.public_url(BASE, "", old_plan["tag"], asset["name"])
+                files[url] = (200, asset["content_type"], b"x" * asset["size"])
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(store, files))
+    manifest_args = _manifests_args(tmp_path, newest_plan, "v1.2.4", "--apply-policies")
+    assert mirror.main(manifest_args) == 0
+    identities = mirror.desktop_identities(newest)
+    for identity in identities[:-1]:
+        assert mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", identity)) == 0
+
+    code = mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", identities[-1]))
+    assert code == (1 if fallback == "bad-digest" else 0)
+    for key in (STABLE_JSON, PREVIEW_JSON):
+        policy = DesktopApplyPolicy.from_json(store.objects[mirror.apply_key(key)]["data"])
+        assert set(policy.withdrawn) == set(identities)
+        assert set(policy.permitted).isdisjoint(identities)
+        if fallback == "older-release":
+            selected = ReleaseManifest.from_json(store.objects[key]["data"])
+            assert selected.product_version == "1.2.3" and policy.permitted
+        else:
+            assert key not in store.objects and not policy.permitted
+
+    if fallback != "bad-digest":
+        assert mirror.main(manifest_args) == 0  # no resurrection after a withdrawal and rerun
+        assert mirror.main(_desktop_policy_args(tmp_path, releases)) == 0
+
+
+@pytest.mark.parametrize("withdraw_all", [False, True])
+def test_readonly_audit_understands_intentional_withdrawals(tmp_path, monkeypatch, withdraw_all):
+    _with_signing(monkeypatch)
+    directory, plan, manifest = _update_manifest(tmp_path)
+    store = FakeBucket()
+    _seed_desktop_controls(store)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (store, "b"))
+    files = _served(directory, plan)
+    files.update(_github_sums(directory, plan))
+    channel_file = json.dumps(mirror.manifest_for(plan, BASE, REPO, "")).encode()
+    for key in (mirror.LATEST_KEY, mirror.PRE_KEY):
+        files[f"{BASE}/{key}"] = (200, "application/json", channel_file)
+    fetcher = _policy_fixture_fetcher(store, files)
+    monkeypatch.setattr(mirror, "fetch", fetcher)
+    assert mirror.main(_manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")) == 0
+    releases = [_release_metadata(plan)]
+    identities = mirror.desktop_identities(manifest)
+    for identity in identities if withdraw_all else identities[:1]:
+        assert mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", identity)) == 0
+
+    assert mirror.audit(
+        BASE, REPO, "v1.2.3", plan["published_at"], datetime.now(timezone.utc), fetcher,
+        manifests=True, policy_for=POLICY_FOR, releases=releases, apply_policies=True,
+    ) == []
+
+
+def test_desktop_owner_dispatch_and_manifests_share_the_serial_writer(workflow):
+    for name in ("mirror", "refresh"):
+        job = _job(workflow, name)
+        assert "vars.RELEASE_DESKTOP_POLICY == 'on' && 'release-mirror-desktop-writer'" in job
+        assert f"format('release-mirror-{name}-{{0}}', github.run_id)" in job
+        assert "queue: max" in job
+    assert "group: release-mirror-desktop-writer\n      queue: max" in _job(workflow, "desktop-policy")
+    writer = _job(workflow, "desktop-policy")
+    assert "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)" in writer
+    assert "github.actor == (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner)" in writer
+    assert "github.triggering_actor == (vars.RELEASE_MIRROR_OPERATOR || github.repository_owner)" in writer
+    assert "github.event.schedule == '*/15 * * * *'" in writer
+    assert "needs.desktop-policy.result == 'failure'" in _job(workflow, "desktop-policy-report")
+    assert "--identity \"${DESKTOP_IDENTITY}\"" in _script(workflow, "Publish and verify the signed apply policy")
+
+
+def test_off_state_skips_publication_and_withholds_the_lock_token(workflow):
+    writer = " ".join(_job(workflow, "desktop-policy").split())
+    assert "(github.event.schedule == '*/15 * * * *' && vars.RELEASE_DESKTOP_POLICY == 'on')" in writer
+    assert (
+        "inputs.desktop_action != 'auto' && (vars.RELEASE_DESKTOP_POLICY == 'on' || "
+        "inputs.desktop_action == 'initialize-controls' || inputs.desktop_action == 'restore-controls')"
+    ) in writer
+    dispatch = " ".join(_job(workflow, "desktop-dispatch-check").split())
+    assert (
+        "(vars.RELEASE_DESKTOP_POLICY != 'on' && inputs.desktop_action != 'initialize-controls' && "
+        "inputs.desktop_action != 'restore-controls')"
+    ) in dispatch
+    for job, step in (
+        ("mirror", "Sign the update manifests"),
+        ("refresh", "Re-sign the update manifests before they expire"),
+    ):
+        assert (
+            "R2_DESKTOP_LOCK_READ_TOKEN: ${{ vars.RELEASE_DESKTOP_POLICY == 'on' && "
+            "secrets.R2_DESKTOP_LOCK_READ_TOKEN || '' }}"
+        ) in _step(_job(workflow, job), step)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "rollback"])
+def test_lost_or_rolled_back_controls_can_only_be_restored_from_protected_checkpoint(
+    tmp_path, monkeypatch, capsys, damage,
+):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _with_signing(monkeypatch)
+    directory, plan, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, _github_sums(directory, plan)))
+    manifest_args = _manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")
+    assert mirror.main(manifest_args) == 0
+    control_key = mirror.DESKTOP_CONTROLS_KEY
+    old_controls = dict(bucket.objects[control_key])
+    old_manifest = dict(bucket.objects[STABLE_JSON])
+    identity = mirror.desktop_identities(manifest)[0]
+    releases = [_release_metadata(plan)]
+    assert mirror.main(_desktop_policy_args(tmp_path, releases, "withdraw", identity)) == 0
+    checkpoint = _stored_checkpoint_key(bucket, 2)
+    with pytest.raises(ClientError, match="ObjectLockedByBucketPolicy"):
+        bucket.delete_object(Bucket="b", Key=checkpoint)
+    bucket.objects[STABLE_JSON] = old_manifest
+    if damage == "missing":
+        bucket.delete_object(Bucket="b", Key=control_key)
+    elif damage == "corrupt":
+        bucket.objects[control_key] = {**old_controls, "data": b"{"}
+    else:
+        bucket.objects[control_key] = old_controls
+
+    untouched = dict(bucket.objects)
+    assert mirror.main(manifest_args) == 1
+    assert mirror.main(_desktop_policy_args(tmp_path, releases)) == 1
+    assert mirror.main([
+        "refresh", "--apply-policies", "--repo", REPO, "--github-releases", str(tmp_path / "desktop-releases.json"),
+    ]) == 1
+    assert bucket.objects == untouched
+    assert "protected checkpoint" in capsys.readouterr().err
+
+    assert mirror.main(_desktop_policy_args(tmp_path, releases, "restore-controls")) == 0
+    assert bucket.objects[control_key]["data"] == bucket.objects[checkpoint]["data"]
+    for manifest_key, _ in mirror.UPDATE_MANIFESTS.values():
+        policy = DesktopApplyPolicy.from_json(bucket.objects[mirror.apply_key(manifest_key)]["data"])
+        assert identity in policy.withdrawn
+        assert identity not in policy.permitted
+        assert identity not in mirror.desktop_identities(
+            ReleaseManifest.from_json(bucket.objects[manifest_key]["data"]),
+        )
+
+
+def test_controls_signature_required_even_when_every_other_field_matches(
+    tmp_path, monkeypatch,
+):
+    _with_signing(monkeypatch)
+    _, plan, _ = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    active = bucket.objects[mirror.DESKTOP_CONTROLS_KEY]
+    forged = json.loads(active["data"])
+    forged["signatures"][0]["signature"] = base64.b64encode(b"\x00" * 64).decode()
+    active["data"] = json.dumps(forged).encode()
+    # The signed backup remains authentic and has precisely the same payload.
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    assert mirror.main(_manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")) == 1
+    assert STABLE_JSON not in bucket.objects
+
+
+def test_previous_apply_policy_must_authenticate_before_renewal(tmp_path):
+    _, _, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    key = mirror.apply_key(STABLE_JSON)
+    interval = mirror.apply_intervals("", "")
+    mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                                SIGNER, NOW, interval, POLICY_FOR)
+    stored = bucket.objects[key]
+    data = json.loads(stored["data"])
+    data["signatures"][0]["signature"] = base64.b64encode(b"\x00" * 64).decode()
+    stored["data"] = json.dumps(data).encode()
+    with pytest.raises(mirror.MirrorError, match="could not be authenticated"):
+        mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                                    SIGNER, NOW + timedelta(minutes=16), interval, POLICY_FOR)
+
+
+def test_desktop_policy_dry_run_opens_no_signer_or_bucket(tmp_path, monkeypatch):
+    monkeypatch.setattr(mirror, "bucket_client", _no_bucket)
+    monkeypatch.setattr(mirror, "manifest_signer", _no_bucket)
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause") + ["--dry-run"]) == 0
+
+
+@pytest.mark.parametrize("operation", ["manifests", "refresh", "initialize-controls"])
+def test_missing_indefinite_retention_prevents_every_signed_write(tmp_path, monkeypatch, operation):
+    _with_signing(monkeypatch)
+    _, plan, _ = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    bucket.immutable_prefix = mirror.DESKTOP_CHECKPOINT_ROOT
+    if operation != "initialize-controls":
+        _seed_desktop_controls(bucket)
+    before = dict(bucket.objects)
+    bucket.puts.clear()
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b-example"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+
+    from types import SimpleNamespace
+
+    def read_configuration():
+        return json.dumps({
+            "success": True,
+            "result": {"rules": [{"enabled": True, "prefix": mirror.DESKTOP_CHECKPOINT_ROOT,
+                                   "condition": {"type": "Age", "maxAgeSeconds": 604800}}]},
+        }).encode()
+
+    connection = SimpleNamespace(
+        request=lambda *args, **kwargs: None,
+        getresponse=lambda: SimpleNamespace(status=200, read=lambda _: read_configuration()),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(mirror.http.client, "HTTPSConnection", lambda *args, **kwargs: connection)
+    monkeypatch.setenv("MIRROR_ENDPOINT", "https://" + "a" * 32 + ".r2.cloudflarestorage.com")
+    monkeypatch.setenv("R2_DESKTOP_LOCK_READ_TOKEN", "fixture")
+    original = _retention_check
+    monkeypatch.setattr(mirror, "require_desktop_retention", original)
+    if operation == "manifests":
+        args = _manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")
+    else:
+        args = _desktop_policy_args(tmp_path, [], operation)
+        if operation == "refresh":
+            args = ["refresh", "--apply-policies", "--repo", REPO, "--github-releases", str(tmp_path / "desktop-releases.json")]
+    assert mirror.main(args) == 1
+    assert not bucket.puts
+    assert bucket.objects == before
+
+
+_retention_check = mirror.require_desktop_retention
+
+
+def test_owner_bootstrap_requires_data_plane_lock_and_keeps_one_checkpoint_per_change(tmp_path, monkeypatch):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    setup = _desktop_policy_args(tmp_path, [], "initialize-controls")
+    assert mirror.main(setup) == 1
+    first = _stored_checkpoint_key(bucket, 1)
+    assert mirror.DESKTOP_CONTROLS_KEY not in bucket.objects
+    assert set(bucket.objects) == {first}
+
+    restore_while_off = _desktop_policy_args(tmp_path, [], "restore-controls", enabled=False)
+    assert mirror.main(restore_while_off) == 1
+    assert set(bucket.objects) == {first}
+    bucket.immutable_prefix = mirror.DESKTOP_CHECKPOINT_ROOT
+    assert mirror.main(restore_while_off) == 0
+    assert set(bucket.objects) == {first, mirror.DESKTOP_CONTROLS_KEY}
+    assert mirror.main(setup) == 1
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 0
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "refresh")) == 0
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 0
+    assert [key for key in sorted(bucket.objects) if key.startswith(mirror.DESKTOP_CHECKPOINT_ROOT)] == [
+        first, _stored_checkpoint_key(bucket, 2),
+    ]
+
+
+@pytest.mark.parametrize("mode", ["withdrawn", "missing-permission"])
+def test_desktop_audit_checks_policy_against_the_published_manifest(tmp_path, mode):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    directory, plan, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    manifest = ReleaseManifest.from_json(mirror.published_manifest(manifest, "stable", NOW, POLICY_FOR))
+    identities = mirror.desktop_identities(manifest)
+    now = NOW
+    policy = DesktopApplyPolicy(
+        ReleaseChannel.STABLE, 4, now.isoformat(), (now + timedelta(minutes=45)).isoformat(),
+        mode == "withdrawn", () if mode == "withdrawn" else identities[1:],
+        identities[:1] if mode == "withdrawn" else (),
+    )
+    files = _github_sums(directory, plan)
+    files[f"{BASE}/{STABLE_JSON}"] = (200, "application/json", _body(manifest))
+    problems = mirror.update_manifest_problems(
+        BASE, REPO, STABLE_JSON, "stable", (mirror.LATEST_KEY, None), now,
+        mirror.DEFAULT_REFRESH_DAYS, _policy_fixture_fetcher(bucket, files), policy_for=POLICY_FOR,
+        desktop_policy=policy,
+    )
+    if mode == "withdrawn":
+        assert any("withdrawn" in problem for problem in problems)
+    else:
+        assert any("does not match the manifest" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("remaining,stale", [(35, "false"), (24, "true"), (-2, "true")])
+def test_freshness_observes_threshold_outside_the_writer_schedule(tmp_path, monkeypatch, remaining, stale):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy, sign_apply_policy
+
+    _with_signing(monkeypatch)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    bucket = FakeBucket()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=remaining)
+    for key, channel in mirror.UPDATE_MANIFESTS.values():
+        policy = sign_apply_policy(DesktopApplyPolicy(
+            ReleaseChannel(channel), 1, (expires - timedelta(minutes=60)).isoformat(),
+            expires.isoformat(), True, (),
+        ), *SIGNER)
+        bucket.put_object(Bucket="b", Key=mirror.apply_key(key), Body=json.dumps(policy.to_dict()).encode(),
+                          ContentType=mirror.JSON_TYPE, CacheControl=mirror.UNCACHED)
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    assert mirror.main(["desktop-freshness", "--base", BASE, "--alert-minutes", "25"]) == 0
+    assert (tmp_path / "github-output").read_text() == f"stale={stale}\n"
+
+
+def test_desktop_policy_workflow_rejects_silent_skips_and_limits_permissions(workflow):
+    assert "    - cron: \"*/15 * * * *\"" in workflow
+    assert "inputs.desktop_action != 'auto' && 'desktop-owner'" in workflow
+    assert _granted(_job(workflow, "desktop-policy")) == [("contents", "read")]
+    assert _granted(_job(workflow, "desktop-policy-report")) == [("contents", "read"), ("issues", "write")]
+    assert _granted(_job(workflow, "desktop-policy-freshness")) == [("contents", "read")]
+    writer = _job(workflow, "desktop-policy")
+    assert "vars.RELEASE_MIRROR == 'on'" in writer
+    assert 'if [ "${DESKTOP_DRY_RUN}" = "true" ]; then flags+=(--dry-run); fi' in writer
+    assert "Mask the bucket's address" in writer
+    assert writer.count("R2_DESKTOP_LOCK_READ_TOKEN:") == 1
+    assert not re.search(r"secrets\.", _job(workflow, "desktop-policy-report"))
+    guard = _job(workflow, "desktop-dispatch-check")
+    assert "vars.RELEASE_MIRROR != 'on'" in guard
+    assert "github.actor !=" in guard and "github.triggering_actor !=" in guard
+    assert "exit 1" in guard
+    assert "7,37 * * * *" in _job(workflow, "desktop-policy-freshness")
+    for name in ("Sign the update manifests", "Re-sign the update manifests before they expire"):
+        assert 'if [ "${DESKTOP_POLICY}" = "on" ]; then policy_flag=(--apply-policies); fi' in _script(workflow, name)
+    assert "python3 .github/scripts/apt-report-alerts.py" in _job(workflow, "desktop-policy-report")
+
+
+def test_recovery_uses_checkpoint_when_control_commit_was_interrupted(tmp_path, monkeypatch):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+
+    original = bucket.put_object
+
+    def lose_primary(**kwargs):
+        if kwargs["Key"] == mirror.DESKTOP_CONTROLS_KEY:
+            raise _error(412, "PreconditionFailed")
+        return original(**kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(bucket, "put_object", lose_primary)
+        assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 1
+    assert _stored_checkpoint_key(bucket, 2) in bucket.objects
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "refresh")) == 1
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "restore-controls")) == 0
+    controls, _ = mirror.read_desktop_controls(bucket, "b", "")
+    assert controls.sequence == 2 and controls.paused
+
+
+def test_desktop_public_readback_must_match_the_just_signed_policy(tmp_path, monkeypatch):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "refresh")) == 0
+    before = {
+        channel: DesktopApplyPolicy.from_json(bucket.objects[mirror.apply_key(key)]["data"])
+        for key, channel in mirror.UPDATE_MANIFESTS.values()
+    }
+    monkeypatch.setattr(mirror, "public_apply_policy", lambda url, channel, *args: before[channel])
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 1
+
+
+def test_owner_policy_change_without_signer_fails_visibly(tmp_path, monkeypatch):
+    _without_signing(monkeypatch)
+    monkeypatch.setattr(mirror, "bucket_client", _no_bucket)
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 1
+
+
+def test_refresh_does_not_resign_a_replayed_manifest_with_a_withdrawn_artifact(
+    tmp_path, monkeypatch,
+):
+    _with_signing(monkeypatch)
+    directory, plan, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, _github_sums(directory, plan)))
+    assert mirror.main(_manifests_args(tmp_path, plan, "v1.2.3", "--apply-policies")) == 0
+    raw = dict(bucket.objects[STABLE_JSON])
+    # The older signature is still authentic but expired, so normal refresh
+    # would otherwise verify the release checksums and re-sign this manifest.
+    raw["data"] = _body(manifest)
+    identity = mirror.desktop_identities(manifest)[0]
+    assert mirror.main(_desktop_policy_args(tmp_path, [_release_metadata(plan)], "withdraw", identity)) == 0
+    bucket.objects[STABLE_JSON] = raw
+    assert mirror.main([
+        "refresh", "--apply-policies", "--repo", REPO, "--github-releases", str(tmp_path / "desktop-releases.json"),
+    ]) == 1
+    assert bucket.objects[STABLE_JSON] == raw
+
+
+def _load_alert_reporter(monkeypatch):
+    spec = importlib.util.spec_from_file_location("release_alerts", SCRIPT.with_name("apt-report-alerts.py"))
+    reporter = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, reporter)
+    spec.loader.exec_module(reporter)
+    return reporter
+
+
+def test_desktop_alerts_preserve_per_kind_transitions(monkeypatch):
+    reporter = _load_alert_reporter(monkeypatch)
+    active = reporter.observed_desktop({
+        "DESKTOP_PUBLISH_RESULT": "failure", "DESKTOP_CONTROLS_UNAVAILABLE": "true",
+        "DESKTOP_AUDIT_RESULT": "success", "DESKTOP_POLICY_STALE": "true",
+    })
+    assert active == {
+        "desktop-publish": True, "desktop-controls": True, "desktop-audit": False, "desktop-stale": True,
+    }
+    cleared = reporter.observed_desktop({
+        "DESKTOP_PUBLISH_RESULT": "success", "DESKTOP_AUDIT_RESULT": "success", "DESKTOP_POLICY_STALE": "false",
+    })
+    assert cleared == dict.fromkeys(active, False)
+    previous = reporter.IssueState(1, True, True, NOW)
+    reminder = timedelta(hours=24)
+    assert reporter.decision(previous, True, NOW + timedelta(hours=23), reminder) == ""
+    assert reporter.decision(previous, True, NOW + reminder, reminder) == "comment"
+    assert reporter.decision(previous, False, NOW, reminder) == "comment"
+    assert reporter.marker("desktop-stale", False) == "<!-- desktop-policy:desktop-stale:clear -->"
+    assert reporter.observed_desktop({}) == {}
+
+
+def test_bucket_lock_rule_must_be_enabled_indefinite_and_on_the_exact_log():
+    root = mirror.DESKTOP_CHECKPOINT_ROOT
+    rule = {"enabled": True, "prefix": root, "condition": {"type": "Indefinite"}}
+
+    def matches(record, prefix=""):
+        return mirror._matching_desktop_retention({"success": True, "result": {"rules": [record]}}, prefix)
+
+    assert matches(rule)
+    assert matches({**rule, "prefix": f"_fixture/{root}"}, "_fixture/")
+    assert not matches(rule, "_fixture/")
+    assert not matches({**rule, "enabled": False})
+    assert not matches({**rule, "condition": {"type": "Date", "date": "2027-01-01T00:00:00Z"}})
+    assert not matches({**rule, "prefix": root + "one-file.json"})
+
+
+def test_a_fresh_policy_is_backdated_with_strict_one_hour_lifetime(tmp_path):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy
+
+    _, _, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    key = mirror.apply_key(STABLE_JSON)
+    interval = mirror.apply_intervals("", "")
+    mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                                SIGNER, NOW, interval, POLICY_FOR)
+    policy = DesktopApplyPolicy.from_json(bucket.objects[key]["data"])
+    assert NOW - timedelta(minutes=1) <= parse_timestamp(policy.issued_at) < NOW
+    assert parse_timestamp(policy.expires_at) - parse_timestamp(policy.issued_at) == timedelta(hours=1)
+    with pytest.raises(mirror.MirrorError, match="at most one hour"):
+        mirror.apply_intervals("61", "")
+
+
+def test_desktop_rollout_default_preserves_ordinary_signed_manifest_writes(tmp_path, monkeypatch):
+    _with_signing(monkeypatch)
+    directory, plan, old = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    identity = mirror.desktop_identities(old)[0]
+    mirror.publish_desktop_controls(bucket, "b", "", "withdraw", identity, SIGNER, NOW)
+    before = dict(bucket.objects)
+    get_object = bucket.get_object
+
+    def only_ordinary_reads(**kwargs):
+        key = kwargs["Key"]
+        assert key in (STABLE_JSON, PREVIEW_JSON)
+        return get_object(**kwargs)
+
+    monkeypatch.setattr(bucket, "get_object", only_ordinary_reads)
+    monkeypatch.setattr(bucket, "list_objects_v2", _no_bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "require_desktop_retention", _no_bucket)
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, _github_sums(directory, plan)))
+    assert mirror.main(_manifests_args(tmp_path, plan)) == 0
+    assert set(bucket.objects) == set(before) | {STABLE_JSON, PREVIEW_JSON}
+    assert all(bucket.objects[key] == obj for key, obj in before.items())
+    for key, channel in mirror.UPDATE_MANIFESTS.values():
+        current = ReleaseManifest.from_json(bucket.objects[key]["data"])
+        verify_manifest(current, POLICY_FOR(channel))
+        assert set(mirror.desktop_identities(current)) == set(mirror.desktop_identities(old))
+        bucket.objects[key] = {**bucket.objects[key], "data": _body(old)}
+    release_list = tmp_path / "git-releases.json"
+    release_list.write_text(json.dumps([_release_metadata(plan)]))
+    assert mirror.main(["refresh", "--repo", REPO, "--github-releases", str(release_list)]) == 0
+    for key, channel in mirror.UPDATE_MANIFESTS.values():
+        current = ReleaseManifest.from_json(bucket.objects[key]["data"])
+        verify_manifest(current, POLICY_FOR(channel))
+        assert identity in mirror.desktop_identities(current)
+        assert mirror.apply_key(key) not in bucket.objects
+
+
+def test_policy_activation_requires_explicit_bootstrap_before_publishing(tmp_path, monkeypatch):
+    _with_signing(monkeypatch)
+    directory, plan, _ = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    bucket.immutable_prefix = mirror.DESKTOP_CHECKPOINT_ROOT
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, _github_sums(directory, plan)))
+    releases = [_release_metadata(plan)]
+    ordinary = _manifests_args(tmp_path, plan)
+    assert mirror.main(ordinary) == 0
+    ordinary_only = dict(bucket.objects)
+    assert mirror.main([*ordinary, "--apply-policies"]) == 1
+    assert mirror.main(_desktop_policy_args(tmp_path, releases)) == 1
+    assert bucket.objects == ordinary_only
+
+    assert mirror.main(_desktop_policy_args(tmp_path, releases, "initialize-controls", enabled=False)) == 0
+    initialized = dict(bucket.objects)
+    for action in ("refresh", "pause"):
+        assert mirror.main(_desktop_policy_args(tmp_path, releases, action, enabled=False)) == 1
+    assert bucket.objects == initialized
+    assert all(mirror.apply_key(key) not in bucket.objects for key, _ in mirror.UPDATE_MANIFESTS.values())
+    for key, obj in ordinary_only.items():
+        assert bucket.objects[key] == obj
+    assert mirror.main([*ordinary, "--apply-policies"]) == 0
+    assert all(mirror.apply_key(key) in bucket.objects for key, _ in mirror.UPDATE_MANIFESTS.values())
+
+
+@pytest.mark.parametrize("bad_entry", ["near", "far", "wrong-signed-sequence"])
+def test_invalid_locked_checkpoint_is_ignored_and_alerted_through_recovery(
+    tmp_path, monkeypatch, capsys, bad_entry,
+):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "job.outputs"))
+    if bad_entry == "wrong-signed-sequence":
+        body = bucket.objects[_stored_checkpoint_key(bucket, 1)]["data"]
+    else:
+        body = b'{"unsigned":true}\n'
+    forged_key = mirror.desktop_checkpoint_key("", 2 if bad_entry == "near" else 9000, body)
+    bucket.put_object(Bucket="b", Key=forged_key, Body=body, ContentType=mirror.JSON_TYPE, CacheControl=mirror.UNCACHED)
+    assert mirror.main(_desktop_policy_args(tmp_path, [])) == 0
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "pause")) == 0
+    bucket.delete_object(Bucket="b", Key=mirror.DESKTOP_CONTROLS_KEY)
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "restore-controls")) == 0
+    assert mirror.read_desktop_controls(bucket, "b", "")[0] == mirror.DesktopControls(paused=True, sequence=2)
+    assert bucket.objects[forged_key]["data"] == body
+    assert "checkpoint-invalid=true" in (tmp_path / "job.outputs").read_text()
+    assert "Ignored an invalid desktop controls checkpoint" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("damage", ["different-signed-payload", "missing", "rule-removed"])
+def test_live_control_requires_matching_locked_checkpoint(monkeypatch, damage):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    if damage == "different-signed-payload":
+        conflicting = mirror._encode_desktop_controls(mirror.DesktopControls(paused=True), SIGNER, NOW)
+        bucket.objects[mirror.DESKTOP_CONTROLS_KEY]["data"] = conflicting
+        message = "disagree with the protected checkpoint"
+    elif damage == "missing":
+        bucket.objects.pop(_stored_checkpoint_key(bucket, 1))
+        message = "checkpoint is missing"
+    else:
+        bucket.immutable_prefix = None
+        message = "indefinite R2 Bucket Lock rule"
+    with pytest.raises(mirror.DesktopControlsError, match=message):
+        mirror.read_desktop_controls(bucket, "b", "")
+
+
+@pytest.mark.parametrize("when", ["first-read", "after-signing"])
+def test_live_controls_are_rechecked_before_policy_publication(tmp_path, monkeypatch, when):
+    from servonaut.distribution import apply_policy
+
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    original_get = bucket.get_object
+    raced = False
+
+    def change_controls():
+        nonlocal raced
+        if not raced:
+            raced = True
+            mirror.publish_desktop_controls(bucket, "b", "", "pause", None, SIGNER, NOW)
+
+    def read_policy(**kwargs):
+        if kwargs["Key"] == mirror.apply_key(STABLE_JSON):
+            change_controls()
+        return original_get(**kwargs)
+
+    def sign_policy(*args, **kwargs):
+        signed = real_sign(*args, **kwargs)
+        change_controls()
+        return signed
+
+    if when == "first-read":
+        monkeypatch.setattr(bucket, "get_object", read_policy)
+    else:
+        real_sign = apply_policy.sign_apply_policy
+        monkeypatch.setattr(apply_policy, "sign_apply_policy", sign_policy)
+    assert mirror.main(_desktop_policy_args(tmp_path, [])) == 1
+    assert raced
+    assert mirror.apply_key(STABLE_JSON) not in bucket.objects
+
+
+@pytest.mark.parametrize("reason", ["missing-token", "http-error"])
+def test_retention_requires_configured_readonly_token_and_http_success(monkeypatch, reason):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("MIRROR_ENDPOINT", "https://" + "a" * 32 + ".r2.cloudflarestorage.com")
+    if reason == "missing-token":
+        monkeypatch.delenv("R2_DESKTOP_LOCK_READ_TOKEN", raising=False)
+        monkeypatch.setattr(mirror.http.client, "HTTPSConnection", _no_bucket)
+        with pytest.raises(mirror.DesktopControlsError, match="Configure the read-only"):
+            mirror.require_desktop_retention("fixture-bucket", "")
+    else:
+        monkeypatch.setenv("R2_DESKTOP_LOCK_READ_TOKEN", "fixture")
+        response = SimpleNamespace(status=403, read=lambda _: json.dumps({
+            "success": True,
+            "result": {"rules": [{"enabled": True, "prefix": mirror.DESKTOP_CHECKPOINT_ROOT,
+                                   "condition": {"type": "Indefinite"}}]},
+        }).encode())
+        connection = SimpleNamespace(request=lambda *args, **kwargs: None, getresponse=lambda: response, close=lambda: None)
+        monkeypatch.setattr(mirror.http.client, "HTTPSConnection", lambda *args, **kwargs: connection)
+        with pytest.raises(mirror.DesktopControlsError, match="HTTP 403"):
+            mirror.require_desktop_retention("fixture-bucket", "")
+
+
+@pytest.mark.parametrize("existing", ["controls", "public-policy", "protected-log"])
+def test_initialize_controls_refuses_each_form_of_preserved_state(tmp_path, monkeypatch, existing):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    if existing == "controls":
+        bucket.objects.pop(_stored_checkpoint_key(bucket, 1))
+    else:
+        primary = dict(bucket.objects.pop(mirror.DESKTOP_CONTROLS_KEY))
+        if existing == "public-policy":
+            bucket.objects.pop(_stored_checkpoint_key(bucket, 1))
+            bucket.objects[mirror.apply_key(STABLE_JSON)] = primary
+    before = dict(bucket.objects)
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    assert mirror.main(_desktop_policy_args(tmp_path, [], "initialize-controls", enabled=False)) == 1
+    assert bucket.objects == before
+
+
+def test_checkpoint_append_is_conditional_even_with_bucket_lock(monkeypatch):
+    _with_signing(monkeypatch)
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    key = _stored_checkpoint_key(bucket, 1)
+    writes = [put for put in bucket.puts if put["Key"] == key]
+    assert len(writes) == 2
+    assert all(put["IfNoneMatch"] == "*" and not put["IfMatch"] for put in writes)
+    first = dict(bucket.objects[key])
+    with pytest.raises(mirror.DesktopControlsError, match="already exists"):
+        mirror._write_desktop_checkpoint(bucket, "b", "", mirror.DesktopControls(), None, SIGNER, NOW)
+    assert bucket.objects[key] == first
+
+
+def test_mirror_only_withdrawal_requires_bytes_to_match_claimed_digest(tmp_path, monkeypatch):
+    _with_signing(monkeypatch)
+    directory, plan, manifest = _update_manifest(tmp_path)
+    match = manifest.artifacts[0]
+    identity = mirror.desktop_identities(manifest)[0]
+    bucket = FakeBucket()
+    _seed_desktop_controls(bucket)
+    key = f"{plan['tag']}/{match.filename}"
+    body = (directory / match.filename).read_bytes()
+    bucket.put_object(Bucket="b", Key=key, Body=b"x" * len(body), ContentType="application/octet-stream",
+                      CacheControl=mirror.IMMUTABLE, Metadata={"sha256": identity.sha256})
+    monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    request = _desktop_policy_args(tmp_path, [], "withdraw", identity)
+    before = dict(bucket.objects)
+    assert mirror.main(request) == 1
+    assert bucket.objects == before
+    bucket.objects[key]["data"] = body
+    assert mirror.main(request) == 0
+    assert mirror.read_desktop_controls(bucket, "b", "")[0].withdrawn == {identity}
+
+
+def test_desktop_alert_output_wiring_and_secret_boundaries(workflow):
+    reporter = _job(workflow, "desktop-policy-report")
+    assert "      !cancelled() && github.repository" in reporter
+    assert "needs.desktop-policy.result == 'success'" in reporter
+    assert "needs.desktop-policy-freshness.result == 'success'" in reporter
+    assert "DESKTOP_POLICY_STALE: ${{ needs.desktop-policy-freshness.outputs.stale }}" in reporter
+    assert "DESKTOP_CHECKPOINT_INVALID: ${{ needs.desktop-policy.outputs.checkpoint-invalid }}" in reporter
+    assert "DESKTOP_ALERT_REMINDER_HOURS: ${{ vars.RELEASE_DESKTOP_ALERT_REMINDER_HOURS || '24' }}" in reporter
+    freshness = _job(workflow, "desktop-policy-freshness")
+    assert "vars.RELEASE_DESKTOP_POLICY == 'on'" in freshness
+    assert '    - cron: "7,37 * * * *"' in workflow
+    assert "stale: ${{ steps.freshness.outputs.stale }}" in freshness
+    assert "secrets." not in freshness and "R2_DESKTOP_LOCK_READ_TOKEN" not in freshness
+    mask = _step(_job(workflow, "desktop-policy"), "Mask the bucket's address")
+    assert "if: inputs.dry_run != true" in mask
+    assert 'echo "::add-mask::${host}"' in mask
+    assert 'echo "::add-mask::${host%%.*}"' in mask
+
+
+def test_desktop_alert_reminder_is_configurable_and_invalid_checkpoint_stays_visible(monkeypatch):
+    reporter = _load_alert_reporter(monkeypatch)
+    assert reporter.observed_desktop({
+        "DESKTOP_PUBLISH_RESULT": "success", "DESKTOP_CHECKPOINT_INVALID": "true",
+    }) == {"desktop-publish": False, "desktop-controls": True}
+    monkeypatch.setenv("RELEASE_ALERT_PROFILE", "desktop")
+    monkeypatch.setenv("GH_REPO", REPO)
+    monkeypatch.setenv("APT_TIMEOUT", "12")
+    monkeypatch.setenv("DESKTOP_ALERT_REMINDER_HOURS", "6")
+    monkeypatch.setattr(reporter, "observed_desktop", lambda _: {})
+    calls = []
+    monkeypatch.setattr(reporter, "GitHub", lambda *args, **kwargs: calls.append((args, kwargs)))
+    assert reporter.main() == 0
+    assert calls == [((REPO, 12.0, timedelta(hours=6)), {"label": "desktop-update-alert"})]

@@ -6,6 +6,7 @@ OS/runtime/service/web-stack questions without an SSH round-trip.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import sys
@@ -488,7 +489,7 @@ def create_mcp_server():
 
 async def run_server() -> None:
     """Run the MCP server with stdio transport."""
-    from servonaut.runtime import detect_runtime
+    from servonaut.runtime import detect_runtime, is_linux_packaged_desktop
     from servonaut.services.client_identity import configure_client_identity
 
     try:
@@ -496,6 +497,13 @@ async def run_server() -> None:
     except Exception:  # noqa: BLE001 — retain a version-only identity if detection fails
         runtime = None
     configure_client_identity(kind="mcp", runtime=runtime)
+    if is_linux_packaged_desktop(runtime):
+        from servonaut.updates.apt import warm_apt_status_in_background
+
+        try:
+            warm_apt_status_in_background(runtime)
+        except Exception as exc:  # noqa: BLE001 — incomplete evidence falls back to download guidance
+            logger.debug("Could not start background APT warm-up for MCP: %s", exc)
     try:
         from mcp.server.stdio import stdio_server
     except ImportError:

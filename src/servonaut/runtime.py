@@ -221,6 +221,9 @@ class RuntimeLayout:
             return [str(self._python()), "-m", "servonaut.main", "--mcp"]
         if self.kind is DistributionKind.FROZEN_CLI:
             return [str(self.executable), "--mcp"]
+        apt_launcher = _apt_console_launcher(self)
+        if apt_launcher is not None:
+            return [str(apt_launcher), "--mcp"]
         return [str(self._console_helper()), "--mcp"]
 
     def desktop_child_argv(self, *args: str) -> list[str]:
@@ -264,6 +267,16 @@ def resolve_runtime(evidence: RuntimeEvidence) -> RuntimeLayout:
     if evidence.pipx_contains_servonaut:
         return _managed_layout(evidence, DistributionKind.PIPX)
     return _managed_layout(evidence, DistributionKind.PIP)
+
+
+def is_linux_packaged_desktop(runtime: RuntimeLayout | None, *, platform_name: str | None = None) -> bool:
+    """Whether a runtime can use Linux desktop package integration."""
+    platform = (platform_name if platform_name is not None else sys.platform).lower()
+    return (
+        platform.startswith("linux")
+        and getattr(runtime, "kind", None) is DistributionKind.PACKAGED_DESKTOP
+        and bool(getattr(runtime, "is_frozen", False))
+    )
 
 
 def detect_runtime() -> RuntimeLayout:
@@ -373,6 +386,14 @@ def validate_launch_argv(
     # POSIX execute bits do not carry that meaning there.
     if selected_platform != "nt" and not os.access(command, os.X_OK):
         raise RuntimeCapabilityError("Launch command is not executable.")
+    if runtime is not None and command == _apt_console_launcher(runtime):
+        from servonaut.services.apt_runtime import validate_stable_apt_launcher
+
+        try:
+            validate_stable_apt_launcher(command)
+        except (OSError, ValueError) as error:
+            raise RuntimeCapabilityError("The installed Servonaut launcher is invalid.") from error
+        return list(values)
     confinement_root = executable_root
     if runtime is not None and runtime.is_frozen:
         confinement_root = runtime.executable_root
@@ -381,6 +402,18 @@ def validate_launch_argv(
     if runtime is not None:
         _validate_console_launch_role(command, runtime)
     return list(values)
+
+
+def _apt_console_launcher(runtime: RuntimeLayout) -> Path | None:
+    if (
+        runtime.kind is not DistributionKind.PACKAGED_DESKTOP
+        or not runtime.is_frozen
+        or runtime.console_helper != runtime.executable_root / "servonaut"
+    ):
+        return None
+    from servonaut.services.apt_runtime import stable_apt_launcher
+
+    return stable_apt_launcher(runtime.executable, "servonaut")
 
 
 def _validate_command_confinement(command: Path, executable_root: Path) -> None:
@@ -512,8 +545,13 @@ def validate_desktop_process_role(
             "Desktop child and console helper must be distinct files."
         )
 
-    is_child = _paths_identify_same_file(current_executable, runtime.desktop_child)
-    is_console = _paths_identify_same_file(current_executable, runtime.console_helper)
+    role_executable = current_executable
+    if sys.platform == "darwin" and runtime.executable_root.name == "MacOS":
+        from servonaut.updates.macos_native import WORKER_SUFFIX
+
+        role_executable = current_executable.with_name(current_executable.name.removesuffix(WORKER_SUFFIX))
+    is_child = _paths_identify_same_file(role_executable, runtime.desktop_child)
+    is_console = _paths_identify_same_file(role_executable, runtime.console_helper)
 
     if is_child and is_console:
         raise RuntimeCapabilityError(

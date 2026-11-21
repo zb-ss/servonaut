@@ -67,6 +67,15 @@ UpdatesPanel #updates_status_secondary {
     color: $text-muted;
 }
 
+UpdatesPanel #updates_status_command {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    padding: 0 1;
+    background: $panel;
+    color: $text;
+}
+
 UpdatesPanel #updates_status_links {
     width: 100%;
     height: auto;
@@ -99,10 +108,12 @@ UpdatesPanel #updates_status_actions {
     align: right top;
 }
 
+UpdatesPanel #updates_btn_macos_install,
 UpdatesPanel #updates_btn_check,
 UpdatesPanel #updates_btn_postpone,
 UpdatesPanel #updates_btn_try,
-UpdatesPanel #updates_btn_update {
+UpdatesPanel #updates_btn_update,
+UpdatesPanel #updates_btn_restart {
     width: auto;
     min-width: 14;
     margin: 0;
@@ -131,6 +142,13 @@ UpdatesPanel #updates_channel_rc {
     width: 100%;
     height: auto;
     padding: 0;
+}
+
+UpdatesPanel #updates_channel_apt_summary {
+    width: 100%;
+    height: auto;
+    margin-bottom: 0;
+    color: $text;
 }
 
 UpdatesPanel #updates_channel_note,

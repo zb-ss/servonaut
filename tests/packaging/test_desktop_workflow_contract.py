@@ -79,6 +79,29 @@ def test_qualification_steps_orchestration(workflow_content: str):
     assert "scripts.desktop_shell.smoke_artifact" in workflow_content
 
 
+def test_debian_upgrade_uses_the_pr_desktop_build_for_changed_packaging(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    selector = _named_step(qualify, "Select Debian upgrade qualification")
+    upgrade = _named_step(qualify, "Exercise a signed APT upgrade with the PR native build")
+    assert "runner.os == 'Linux' && github.event_name == 'pull_request'" in selector
+    assert "git diff --name-only" in selector and "packaging/deb scripts/distribution" in selector
+    assert "steps.apt-upgrade-paths.outputs.run == 'true'" in upgrade
+    assert "PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}" in upgrade
+    assert "tests.packaging.apt_upgrade.build_native_fixtures" in upgrade
+    assert "--network none" in upgrade and "--verify-pr-source" in upgrade
+    assert "--source-pair" in upgrade and "--verify-pr-source --verify-restart" in upgrade
+    assert "git archive HEAD" in upgrade and '--wheel "${before_wheel}"' in upgrade
+    assert 'before_source="${upgrade_dir}/before-source"' in upgrade
+    assert 'before_output="${upgrade_dir}/before-wheel.out"' in upgrade
+    assert ': > "${before_output}"' in upgrade
+    assert '--checkout "${before_source}"' in upgrade
+    assert '--lock "${before_source}/packaging/standalone_cli/requirements/wheel-build-tools.txt"' in upgrade
+    assert '--policy "${before_source}/packaging/standalone_cli/wheel-tools-policy.json"' in upgrade
+    assert '--github-output "${before_output}"' in upgrade
+    assert "src/servonaut/__init__.py" in upgrade and "__version__ = '0.0.1'" in upgrade
+    assert "ubuntu:22.04@sha256:" in upgrade and "ubuntu:24.04@sha256:" in upgrade
+
+
 def test_no_runnable_executables_retained(workflow_content: str):
     """Workflow must delete executables and only upload sanitized non-executable evidence."""
     # Ensure cleanup step runs always
@@ -500,6 +523,8 @@ def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
     # Verified as a whole and per executable; Gatekeeper rejects ad-hoc apps.
     assert 'codesign --verify --strict --deep --verbose=2 "${APP}"' in step
     assert "codesign -d --entitlements -" in step
+    for name in ("servonaut-desktop", "servonaut-desktop-child", "servonaut"):
+        assert f"{name}.runtime" in step
     assert "spctl" not in step
     # uv keeps its publisher's signature.
     assert "grep -q '^Authority=Developer ID Application'" in step
@@ -511,6 +536,28 @@ def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
     assert qualify.index("scripts.desktop_shell.smoke_artifact") < qualify.index(
         "Package and ad-hoc sign the macOS app"
     )
+
+
+def test_macos_replacement_is_qualified_on_both_pr_runners(workflow_content: str) -> None:
+    pull_request = workflow_content.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+    assert "- 'packaging/macos/**'" in pull_request
+    assert "- 'src/**'" in pull_request
+    job = _job_block(workflow_content, "macos-replacement")
+    assert "github.event_name == 'pull_request'" in job
+    assert "arch: x64\n            runner: macos-15-intel" in job
+    assert "arch: arm64\n            runner: macos-15" in job
+    assert "--log-cli-level=INFO" in _named_step(job, "Qualify macOS replacement and cross-user admission")
+    assert "test_desktop_macos_apply.py" in job
+    assert "test_desktop_macos_safety.py" in job
+    assert "test_desktop_macos_published.py" in job
+    assert "continue-on-error: true" in _named_step(job, "Assess an available published signed disk image")
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Verify admission with the signed app in Applications")
+    assert "steps.macos-app.outputs.app-dir" in step
+    assert (
+        'PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" \\\n'
+        '            -m scripts.distribution.check_macos_admission "${APP_DIR}"'
+    ) in step
 
 
 def test_macos_self_tests_and_opens_the_signed_app(workflow_content: str) -> None:

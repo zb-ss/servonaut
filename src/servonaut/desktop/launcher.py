@@ -372,7 +372,10 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
                 code = owner.tree.poll()
                 if code is not None:
                     child_exit_code = code
-                    logger.warning("Child process exited with code %s", code)
+                    from servonaut.services.apt_runtime import APT_RESTART_EXIT_CODE
+
+                    if code != APT_RESTART_EXIT_CODE:
+                        logger.warning("Child process exited with code %s", code)
                     if window is not None:
                         with contextlib.suppress(Exception):
                             window.destroy()
