@@ -1423,9 +1423,10 @@ class ServonautTools:
 
     async def get_server_info(self, instance_id: str) -> str:
         """Get detailed server info (hostname, uptime, disk, memory)."""
+        args = {'instance_id': instance_id}
         allowed, reason = self._guard.check_tool('get_server_info')
         if not allowed:
-            self._audit.log('get_server_info', {'instance_id': instance_id}, '', False, reason)
+            self._audit.log('get_server_info', args, '', False, reason)
             return f"Blocked: {reason}"
 
         command = "hostname && uptime && df -h && free -m"
@@ -1433,13 +1434,16 @@ class ServonautTools:
         # the standard-mode allowlist. We call run_command directly but need to
         # temporarily allow compound commands in dangerous-equivalent mode.
         # Instead, execute via SSH directly to avoid double guard checking.
-        instance, error = await self._lookup_instance(
-            'get_server_info', {'instance_id': instance_id}, instance_id,
-        )
+        instance, error = await self._lookup_instance('get_server_info', args, instance_id)
         if error is not None:
             return error
 
-        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        try:
+            conn, cleanup = await self._resolve_connection_with_vault(instance)
+        except Exception as exc:
+            if find_client_update_required(exc) is not None:
+                self._audit.log('get_server_info', args, '', False, 'client_update_required')
+            raise
         key_extras = (
             {'key_source': conn['key_source']} if conn.get('key_source') else {}
         )
@@ -1460,7 +1464,7 @@ class ServonautTools:
             # code; key_extras carries key_source so vault-key-backed failures
             # stay traceable in mcp_audit.jsonl (mirrors run_command).
             self._audit.log(
-                'get_server_info', {'instance_id': instance_id}, '', False,
+                'get_server_info', args, '', False,
                 'command_timeout', **key_extras,
             )
             return (
@@ -1469,7 +1473,7 @@ class ServonautTools:
             )
         except Exception as e:
             self._audit.log(
-                'get_server_info', {'instance_id': instance_id}, '', False,
+                'get_server_info', args, '', False,
                 self._ssh_failure_reason(e), **key_extras,
             )
             return f"Error: {e}"
@@ -1483,13 +1487,13 @@ class ServonautTools:
         if host_key_problem is not None:
             message = f"Error: {host_key_problem.agent_message}"
             self._audit.log(
-                'get_server_info', {'instance_id': instance_id}, message, False,
+                'get_server_info', args, message, False,
                 host_key_problem.reason_code, **key_extras,
             )
             return message
         if self._is_ssh_authentication_failure(stderr_text):
             self._audit.log(
-                'get_server_info', {'instance_id': instance_id}, '', False,
+                'get_server_info', args, '', False,
                 'ssh_auth_failed', **key_extras,
             )
             return (
@@ -1499,32 +1503,30 @@ class ServonautTools:
         if stderr:
             output += f"\nSTDERR:\n{stderr_text}"
 
-        self._audit.log(
-            'get_server_info', {'instance_id': instance_id}, output, True,
-            **key_extras,
-        )
+        self._audit.log('get_server_info', args, output, True, **key_extras)
         return output
 
     async def transfer_file(self, instance_id: str, local_path: str, remote_path: str, direction: str = "download") -> str:
         """Transfer file via SCP."""
+        args = {
+            'instance_id': instance_id, 'local_path': local_path,
+            'remote_path': remote_path, 'direction': direction,
+        }
         allowed, reason = self._guard.check_tool('transfer_file')
         if not allowed:
-            self._audit.log('transfer_file', {
-                'instance_id': instance_id, 'local_path': local_path,
-                'remote_path': remote_path, 'direction': direction,
-            }, '', False, reason)
+            self._audit.log('transfer_file', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        instance, error = await self._lookup_instance(
-            'transfer_file', {
-                'instance_id': instance_id, 'local_path': local_path,
-                'remote_path': remote_path, 'direction': direction,
-            }, instance_id,
-        )
+        instance, error = await self._lookup_instance('transfer_file', args, instance_id)
         if error is not None:
             return error
 
-        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        try:
+            conn, cleanup = await self._resolve_connection_with_vault(instance)
+        except Exception as exc:
+            if find_client_update_required(exc) is not None:
+                self._audit.log('transfer_file', args, '', False, 'client_update_required')
+            raise
         # Everything after the vault key hits disk runs INSIDE the try so the
         # finally deletes the temp key even when a conn read, the proxy-jump
         # lookup, or the command builder raises (matches
@@ -1582,17 +1584,11 @@ class ServonautTools:
                 )
                 key_extras = {'key_source': 'ssh_agent'}
         except SSHOptionRefused as exc:
-            self._audit.log('transfer_file', {
-                'instance_id': instance_id, 'local_path': local_path,
-                'remote_path': remote_path, 'direction': direction,
-            }, '', False, 'team_option_refused')
+            self._audit.log('transfer_file', args, '', False, 'team_option_refused')
             return f"Error: {exc}"
         except ValueError as exc:
             # The remote path cannot be sent safely by this scp client.
-            self._audit.log('transfer_file', {
-                'instance_id': instance_id, 'local_path': local_path,
-                'remote_path': remote_path, 'direction': direction,
-            }, '', False, f"validation: {exc}")
+            self._audit.log('transfer_file', args, '', False, f"validation: {exc}")
             return f"Error: {exc}"
         finally:
             if cleanup is not None:
@@ -1616,10 +1612,7 @@ class ServonautTools:
             elif stderr:
                 result += f"\n{stderr}"
 
-        self._audit.log('transfer_file', {
-            'instance_id': instance_id, 'local_path': local_path,
-            'remote_path': remote_path, 'direction': direction,
-        }, result, returncode == 0, **key_extras)
+        self._audit.log('transfer_file', args, result, returncode == 0, **key_extras)
         return result
 
     def _provider_refusal(
@@ -6277,7 +6270,9 @@ class ServonautTools:
 
     @staticmethod
     def _ssh_failure_reason(error: Exception) -> str:
-        """The audit reason for an ssh failure: a refused team option has its own."""
+        """Keep typed refusals distinct from ordinary SSH failures in the audit log."""
+        if find_client_update_required(error) is not None:
+            return 'client_update_required'
         if isinstance(error, SSHOptionRefused):
             return 'team_option_refused'
         return f"ssh_error: {error}"
@@ -6502,6 +6497,7 @@ class ServonautTools:
         host_key_notes: List[str] = []
         # Servers whose connection a team's SSH option refused.
         refused_option_hosts: List[str] = []
+        update_notes: set[str] = set()
 
         async def _probe(inst: Dict) -> Dict:
             name = inst.get('name') or inst.get('id') or '?'
@@ -6521,6 +6517,9 @@ class ServonautTools:
                 refused_option_hosts.append(str(name))
                 return {'name': name, 'error': str(e)[:80]}
             except Exception as e:  # noqa: BLE001 — one bad host must not fail all
+                if update := find_client_update_required(e):
+                    update_notes.add(self._vault_update_message(update))
+                    return {'name': name, 'error': 'client_update_required'}
                 return {'name': name, 'error': str(e)[:80]}
             finally:
                 if extras.get('key_source'):
@@ -6536,7 +6535,11 @@ class ServonautTools:
         )
         if refused_option_hosts:
             agg_extras['team_option_refused'] = sorted(refused_option_hosts)
-        self._audit.log('fleet_health_snapshot', args, result, True, **agg_extras)
+        if update_notes:
+            result += "\n\n" + "\n".join(sorted(update_notes))
+            self._audit.log('fleet_health_snapshot', args, result, False, 'client_update_required', **agg_extras)
+        else:
+            self._audit.log('fleet_health_snapshot', args, result, True, **agg_extras)
         return result
 
     async def enrich_ips(self, ips: str) -> str:
@@ -6935,7 +6938,9 @@ class ServonautTools:
             stdout, _ = await self._exec_ssh(
                 instance, self._REMOTEIP_PROBE_CMD, timeout=15,
             )
-        except Exception:  # noqa: BLE001 — best-effort; unknown on failure
+        except Exception as exc:  # noqa: BLE001 — best-effort; unknown on ordinary failure
+            if find_client_update_required(exc) is not None:
+                raise
             return None
         return bool(stdout.strip())
 
@@ -6988,11 +6993,22 @@ class ServonautTools:
             return f"Error walking ingress path: {e}"
 
         remoteip = None
+        update_message = None
         if check_remoteip:
-            remoteip = await self._detect_mod_remoteip(instance)
+            try:
+                remoteip = await self._detect_mod_remoteip(instance)
+            except Exception as exc:
+                update = find_client_update_required(exc)
+                if update is None:
+                    raise
+                update_message = self._vault_update_message(update)
 
         result = format_ingress_path(topo, remoteip, verbose=verbose)
-        self._audit.log('describe_ingress_path', args, result, True)
+        if update_message is not None:
+            result += f"\n\n{update_message}"
+            self._audit.log('describe_ingress_path', args, result, False, 'client_update_required')
+        else:
+            self._audit.log('describe_ingress_path', args, result, True)
         return result
 
     # ------------------------------------------------------------------
@@ -7530,10 +7546,8 @@ class ServonautTools:
         ``(token, DBCandidate)`` (plaintext held only in the staging store
         — *staging* when given, else ``self._db_staging`` — keyed by token)
         and ``err`` is ``None`` or a
-        ``(kind, message)`` tuple (``kind`` ∈ ``{"ssh_error",
-        "local_read"}``). Only surfaces an error for an EXPLICIT source
-        failure — an ``auto`` ssh miss falls through to the local branch,
-        matching the original behaviour.
+        ``(kind, message)`` tuple. An ordinary ``auto`` SSH miss falls
+        through to the local branch. A typed refusal stops the scan.
         """
         from servonaut.services.db_credential_scanner import DBCredentialScanner
         scanner = DBCredentialScanner()
@@ -7551,6 +7565,8 @@ class ServonautTools:
                 # Never a quiet "nothing found": the member must learn why, and how to allow it.
                 return [], ("team_option_refused", str(e))
             except Exception as e:  # noqa: BLE001
+                if update := find_client_update_required(e):
+                    return [], ('client_update_required', self._vault_update_message(update))
                 if src == "ssh":
                     return [], ("ssh_error", str(e))
         if not candidates and src in ("auto", "local") and search_path:
@@ -7615,6 +7631,9 @@ class ServonautTools:
         )
         if err is not None:
             kind, msg = err
+            if kind == "client_update_required":
+                self._audit.log('db_setup_scan', args, '', False, kind, **key_extras)
+                return f"Error: {msg}"
             reason = kind if kind == "team_option_refused" else f"{kind}: {msg}"
             self._audit.log('db_setup_scan', args, '', False, reason, **key_extras)
             if kind in ("ssh_error", "team_option_refused"):
@@ -7703,7 +7722,8 @@ class ServonautTools:
         )
         if err is not None:
             kind, msg = err
-            self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}")
+            reason = kind if kind == "client_update_required" else f"{kind}: {msg}"
+            self._audit.log('db_setup_scan', args, '', False, reason)
             return {"error": f"{kind}: {msg}", "instance": instance_id,
                     "candidates": []}
 

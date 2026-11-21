@@ -58,6 +58,26 @@ async def _view_ops(t) -> None:
     await t.click("#btn_view_team")
 
 
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_unavailable_vault_warning_matches_the_sidebar(tui, seed, fake_cloud, monkeypatch, size):
+    from servonaut.services.api_client import APIError
+    from servonaut.services.vault.command_service import VaultCommandService
+
+    async def unavailable(_service):
+        raise APIError(code="service_unavailable", message="Vault unavailable", status=503)
+
+    fake_cloud.configure(plan="teams", mcp_connections=1)
+    _seed(seed, fake_cloud)
+    monkeypatch.setattr(VaultCommandService, "discover", unavailable)
+
+    async with tui(size=size) as t:
+        await t.wait_for_toast(r"^Vault is unavailable\. Restart Servonaut to retry\.$")
+        await t.wait_for_text("Vault is unavailable.", "Restart Servonaut")
+        await t.show_navigation()
+        assert not t.nav_reachable("nav_vault")
+        assert not t.nav_reachable("nav_ca")
+
+
 @pytest.mark.parametrize("size, via_palette", [((160, 50), False), ((100, 30), True)])
 async def test_enforced_vault_remains_reachable_and_explains_update(tui, seed, fake_cloud, size, via_palette):
     fake_cloud.configure(plan="teams", mcp_connections=0)

@@ -11,6 +11,7 @@ import pytest
 from servonaut.app import ServonautApp
 from servonaut.services.api_client import ClientUpdateRequiredError
 from servonaut.services.vault.crypto import IntegrityError
+from servonaut.services.vault.identity_store import IdentityStoreError
 
 
 class _UnavailableVault:
@@ -74,6 +75,21 @@ async def test_proxy_426_follows_ordinary_vault_startup_warning(proxy_426) -> No
 
     assert app.vault_available is False
     assert app.vault_update_required is False
+    assert app.notify.call_args.args == ("Vault is unavailable. Restart Servonaut to retry.",)
+
+
+@pytest.mark.asyncio
+async def test_after_discovery_a_background_failure_can_point_to_vault() -> None:
+    app = ServonautApp()
+    app.vault_command_service = Mock(
+        discover=AsyncMock(return_value=True),
+        unlock_existing_identity=Mock(side_effect=IdentityStoreError("Test identity is locked")),
+    )
+    app.notify = Mock()
+
+    await app._run_vault_background()
+
+    assert app.vault_available is True
     assert app.notify.call_args.args == ("Vault background access needs attention. Open Vault to review it.",)
 
 

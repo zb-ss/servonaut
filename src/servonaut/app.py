@@ -1308,8 +1308,12 @@ class ServonautApp(App):
         except (APIError, IdentityStoreError, VaultCryptoError) as exc:
             # A locked store or unverified server state must never grant keys.
             logger.warning("Vault background processing stopped: %s", type(exc).__name__)
+            if self.vault_available or self.vault_update_required:
+                message = "Vault background access needs attention. Open Vault to review it."
+            else:
+                message = "Vault is unavailable. Restart Servonaut to retry."
             self.notify(
-                "Vault background access needs attention. Open Vault to review it.",
+                message,
                 severity="warning", markup=False,
             )
 

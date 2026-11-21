@@ -1952,6 +1952,61 @@ class TestTeamKeyOnAnOwnServer:
         assert tools._audit.log.call_args.args[3] is False
         tools._ssh_service.build_ssh_command.assert_not_called()
 
+    @pytest.mark.parametrize(("name", "arguments"), [
+        ("get_server_info", {}),
+        ("transfer_file", {"local_path": "download.txt", "remote_path": "/tmp/sample.txt"}),
+        ("docker_ps", {}),
+        ("disk_usage", {}),
+        ("service_state", {}),
+        ("fleet_health_snapshot", {}),
+        ("describe_ingress_path", {}),
+        ("db_setup_scan", {}),
+    ])
+    def test_version_refusal_audits_ssh_tools(self, monkeypatch, name, arguments):
+        from servonaut.mcp.server import _dispatch_tool
+        from servonaut.services import ingress_path_service
+        from servonaut.services.api_client import ClientUpdateRequiredError
+
+        runtime = _team_key_runtime(slug=None)
+        runtime.resolve_ssh.side_effect = ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
+        tools = make_tools(
+            guard_level=GuardLevel.DANGEROUS, vault_runtime=runtime, instances=SAMPLE_INSTANCES[:1],
+        )
+        if name == "describe_ingress_path":
+            monkeypatch.setattr(ingress_path_service.IngressPathService, "describe", AsyncMock())
+            monkeypatch.setattr(ingress_path_service, "format_ingress_path", lambda *_args, **_kwargs: "Topology")
+        if name != "fleet_health_snapshot":
+            arguments = {"instance_id": "i-abc123", **arguments}
+
+        (result,) = run(_dispatch_tool(tools, name, arguments))
+
+        assert "Update to 99.0.0" in result.text
+        if name == "describe_ingress_path":
+            assert result.text.startswith("Topology")
+        assert _audit_reasons(tools) == ["client_update_required"]
+        assert tools._audit.log.call_count == 1
+        assert tools._audit.log.call_args.args[0] == name
+        assert tools._audit.log.call_args.args[3] is False
+        runtime.resolve_ssh.assert_awaited_once()
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        tools._scp_service.execute_transfer.assert_not_awaited()
+
+    def test_version_refusal_audits_structured_db_scan(self):
+        from servonaut.services.api_client import ClientUpdateRequiredError
+
+        runtime = _team_key_runtime(slug=None)
+        runtime.resolve_ssh.side_effect = ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
+        tools = self._tools(runtime)
+
+        result = run(tools.db_scan_stage("i-abc123"))
+
+        assert "Update to 99.0.0" in result["error"]
+        assert result["candidates"] == []
+        assert _audit_reasons(tools) == ["client_update_required"]
+        assert tools._audit.log.call_args.args[0] == "db_setup_scan"
+        assert tools._audit.log.call_args.args[3] is False
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
     def test_the_teams_rule_refuses_what_local_settings_allow(self):
         trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
         tools = self._tools(_team_key_runtime())
