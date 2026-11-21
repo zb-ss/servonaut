@@ -61,6 +61,7 @@ class Results:
                     "browser_errors",
                     "native_result",
                     "native_stages",
+                    "native_stderr",
                 }
                 and value
                 and self.tests.get(report.nodeid) == "failed"

@@ -555,7 +555,8 @@ async def test_many_notifications_show_newest_and_allow_reading_earlier_alerts(
                 [events.MouseScrollUp], widget=rack,
                 offset=(rack.size.width * 3 // 4, rack.size.height // 2),
             )
-            await pilot.pause()
+            # Wheel scrolling defers scroll_to until after a refresh.
+            await wait_until(lambda: rack.scroll_y < before)
             assert rack.scroll_y < before
         assert rack.scrollable_content_region.contains_region(toasts[0].region)
         assert toasts[0].render().plain.endswith("Example operation 1 completed.")
@@ -618,15 +619,26 @@ async def test_long_titled_notification_scrolls_and_dismisses_without_moving_dia
     results: list[bool] = []
     async with app.run_test(size=size, notifications=True) as pilot:
         app.push_screen(screen, results.append)
-        await pilot.pause()
+        await wait_until(lambda: (
+            app.screen is screen
+            and screen.is_mounted
+            and not screen._layout_required
+            and screen.query_one(DialogFrame).region.width > 0
+        ))
         frame = screen.query_one(DialogFrame)
         original_frame = frame.region
         buttons = list(screen.query_one(DialogActions).query(Button))
         original_regions = [button.region for button in buttons]
         message = "\n".join(f"Example detail {index + 1}." for index in range(12))
         app.notify(message, title="Operation failed", severity="error", timeout=60)
-        await pilot.pause()
         rack = screen.query_one("ToastRack")
+        # ToastRack schedules scroll_end via call_later -> call_after_refresh;
+        # a single pause can finish while scroll_y is still at 0.
+        await wait_until(lambda: (
+            len(rack.query("Toast")) == 1
+            and rack.max_scroll_y > 0
+            and rack.scroll_y == rack.max_scroll_y
+        ))
         toast = rack.query("Toast").first()
         assert rack.scroll_y == rack.max_scroll_y > 0
         for event, target, expected in (
@@ -639,8 +651,14 @@ async def test_long_titled_notification_scrolls_and_dismisses_without_moving_dia
                     [event], widget=rack,
                     offset=(rack.size.width * 3 // 4, rack.size.height // 2),
                 )
-                await pilot.pause()
+                # Wheel scrolling defers scroll_to until after a refresh.
+                await wait_until(lambda: rack.scroll_y != before)
                 assert rack.scroll_y != before
+            await wait_until(lambda: (
+                not screen._layout_required
+                and not screen._scroll_required
+                and not screen._dirty_widgets
+            ))
             y = (
                 toast.content_region.bottom - 1
                 if target else toast.content_region.y
@@ -655,13 +673,13 @@ async def test_long_titled_notification_scrolls_and_dismisses_without_moving_dia
             assert_actions_visible(screen)
             assert screen.focused is screen.query_one("#confirm_input")
         assert await pilot.click(offset=point)
-        await pilot.pause()
+        await wait_until(lambda: not rack.query("Toast"))
         assert not rack.query("Toast")
         assert frame.region == original_frame
         assert [button.region for button in buttons] == original_regions
         assert results == []
         await pilot.press("escape")
-        await pilot.pause()
+        await wait_until(lambda: results == [False] and app.screen is not screen)
         assert results == [False]
 
 

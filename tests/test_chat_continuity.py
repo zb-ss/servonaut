@@ -11,6 +11,7 @@ import pytest
 from textual.app import ComposeResult
 from textual.command import CommandList
 from textual.geometry import Region
+from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, TextArea
 from textual.widgets.text_area import Selection
 
@@ -47,7 +48,12 @@ async def test_unmigrated_compact_bar_keeps_mouse_restore_and_end_visible(size: 
         editor = panel.query_one("#chat-input", TextArea)
         editor.load_text("Keep this draft")
         await pilot.press("f2")
-        await pilot.pause()
+        await wait_until(lambda: (
+            panel._collapsed
+            and panel.region.height == 1
+            and not app.screen._layout_required
+            and not app.screen._dirty_widgets
+        ))
         assert panel._collapsed and panel.region.height == 1
         header = app.screen.query_one(SafeHeader)
         footer = app.screen.query_one(Footer)
@@ -75,6 +81,38 @@ async def test_unmigrated_compact_bar_keeps_mouse_restore_and_end_visible(size: 
         await pilot.press("f2")
         await _click(pilot, "#btn-chat-end")
         await wait_until(lambda: not panel.is_attached)
+
+
+def _painted_top_row(screen: WorkspaceScreen, content: Widget) -> str:
+    return screen._compositor.render_strips()[content.region.y].crop(
+        content.region.x, content.region.right,
+    ).text
+
+
+def _workspace_layout_settled(
+    app: _WorkspaceApp, screen: WorkspaceScreen, row: Widget, content: Widget,
+) -> bool:
+    if not (
+        app.screen is screen
+        and screen.is_mounted
+        and row.content_region.width > 0
+        and content.region.width > 0
+        and content.region.height > 0
+    ):
+        return False
+    _, narrow = screen._reflow_thresholds()
+    available = screen._available_content_width(row, None)
+    if available is None or screen.has_class("-content-narrow") != (available < narrow):
+        return False
+    return (
+        screen._message_queue.empty()
+        and app._message_queue.empty()
+        and not screen._layout_required
+        and not screen._scroll_required
+        and not screen._repaint_required
+        and not screen._dirty_widgets
+        and not screen._callbacks
+    )
 
 
 @pytest.mark.asyncio
@@ -105,14 +143,16 @@ async def test_actual_workspace_collapse_restores_content_without_losing_the_tur
         else:
             screen = KeyManagementScreen()
         await app.switch_screen(screen)
-        await pilot.pause()
         assert isinstance(screen, WorkspaceScreen)
         row = screen.query_one("#main-layout")
         content = screen.query_one(".workspace-content")
+        # WorkspaceScreen applies -content-narrow after its resize refresh; wait
+        # for that layout and its queued repaint messages to settle first.
+        await wait_until(lambda: _workspace_layout_settled(app, screen, row, content))
+        await pilot.pause()
+        await wait_until(lambda: _workspace_layout_settled(app, screen, row, content))
         original_region = content.region
-        original_top_row = screen._compositor.render_strips()[content.region.y].crop(
-            content.region.x, content.region.right,
-        ).text
+        original_top_row = _painted_top_row(screen, content)
         panel = await _open_chat(app, pilot, "f2")
         session = panel._session = ChatSession()
         editor = panel.query_one("#chat-input", TextArea)
@@ -122,11 +162,17 @@ async def test_actual_workspace_collapse_restores_content_without_losing_the_tur
         panel.run_worker(held_turn(), group="ai_chat")
         await wait_until(started.is_set)
         await pilot.press("f2")
-        await pilot.pause()
-        # Compare actual compositor paint, not only the content widget's own rows.
-        painted_top_row = screen._compositor.render_strips()[content.region.y].crop(
-            content.region.x, content.region.right,
-        ).text
+        # Wait for collapse, reflow, and compositor repaint before comparing pixels.
+        await wait_until(lambda: (
+            panel.parent is row
+            and panel._collapsed
+            and not panel.display
+            and content.display
+            and content.region == original_region
+            and _workspace_layout_settled(app, screen, row, content)
+            and _painted_top_row(screen, content) == original_top_row
+        ))
+        painted_top_row = _painted_top_row(screen, content)
         assert painted_top_row == original_top_row
         assert content.display and content.region == original_region
         assert panel.parent is row and panel._collapsed and not panel.display
@@ -136,6 +182,17 @@ async def test_actual_workspace_collapse_restores_content_without_losing_the_tur
         assert content.region.bottom <= screen.query_one(Footer).region.y
         restore = screen.query_one("#workspace_chat", Button)
         end = screen.query_one("#workspace_chat_end", Button)
+        await wait_until(lambda: (
+            restore.label.plain == "Restore chat"
+            and all(
+                button.visible
+                and not button.disabled
+                and button.region.width > 0
+                and button.region.height > 0
+                and app.get_widget_at(*button.region.center)[0] is button
+                for button in (restore, end)
+            )
+        ))
         assert restore.label.plain == "Restore chat"
         for button in (restore, end):
             assert button.visible and not button.disabled
@@ -311,10 +368,18 @@ async def test_end_remains_available_while_hidden_and_cancels_turn(
         panel.run_worker(held_turn(), group="ai_chat")
         await wait_until(started.is_set)
         await pilot.press("f2")
-        await pilot.pause()
-        assert not panel.display and not cancelled.is_set()
         restore = screen.query_one("#workspace_chat", Button)
         end = screen.query_one("#workspace_chat_end", Button)
+        await wait_until(lambda: (
+            not panel.display
+            and restore.label.plain == "Restore chat"
+            and end.visible
+            and not end.disabled
+            and end.region.width > 0
+            and end.region.height > 0
+            and app.get_widget_at(*end.region.center)[0] is end
+        ))
+        assert not panel.display and not cancelled.is_set()
         assert restore.label.plain == "Restore chat"
         assert end.visible and not end.disabled
         assert app.get_widget_at(*end.region.center)[0] is end
@@ -331,7 +396,7 @@ async def test_end_remains_available_while_hidden_and_cancels_turn(
             await wait_until(lambda: app.screen is screen)
         await wait_until(lambda: not panel.is_attached and cancelled.is_set())
         assert not screen.query(ChatPanel)
-        await pilot.pause()
+        await wait_until(lambda: restore.label.plain == "Open chat")
         assert restore.label.plain == "Open chat"
 
 
