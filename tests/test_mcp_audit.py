@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from servonaut.mcp.audit import AuditTrail
+from servonaut.mcp.audit import AuditTrail, record_outcomes
 
 
 @pytest.fixture
@@ -20,6 +20,25 @@ def audit(audit_file):
 
 
 class TestAuditLog:
+    @pytest.mark.parametrize("blocked_at", ["startup", "append"])
+    def test_unwritable_stdio_audit_warns_once_and_keeps_outcomes(
+        self, tmp_path, capsys, blocked_at,
+    ):
+        path = tmp_path / "audit.jsonl"
+        if blocked_at == "startup":
+            path.mkdir()
+        audit = AuditTrail(str(path), warn_to_stderr=True)
+        if blocked_at == "append":
+            path.unlink()
+            path.mkdir()
+        with record_outcomes() as outcomes:
+            audit.log("first", {}, "result", True)
+            audit.log("second", {}, "", False, "blocked")
+        assert [outcome.allowed for outcome in outcomes] == [True, False]
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert output.err.count("MCP audit log is unavailable") == 1
+
     def test_creates_file_on_log(self, audit, audit_file):
         audit.log("list_instances", {}, "result", True)
         assert Path(audit_file).exists()

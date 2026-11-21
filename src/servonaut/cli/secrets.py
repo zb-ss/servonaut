@@ -420,7 +420,12 @@ async def _run_setup_async(args: argparse.Namespace) -> int:
     try:
         body = await api.put_user_secrets_config("bitwarden", config)
     except APIError as exc:
-        print(f"Failed to save config: {exc.message} (status {exc.status})")
+        from servonaut.services.api_client import ClientUpdateRequiredError
+
+        if isinstance(exc, ClientUpdateRequiredError) or exc.status == 426:
+            print(exc.message, file=sys.stderr)
+        else:
+            print(f"Failed to save config: {exc.message} (status {exc.status})")
         return _EXIT_GENERIC_ERROR
 
     # Refresh the local cache so the provider is active immediately. Use

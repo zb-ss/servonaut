@@ -54,16 +54,23 @@ class PackageVersion:
         if match is None:
             return None
         label = match.group("pre_label")
-        return cls(
-            text=text,
-            release=tuple(int(part) for part in match.group("release").split(".")),
-            pre=(
+        try:
+            release = tuple(int(part) for part in match.group("release").split("."))
+            pre = (
                 (_PRE_RELEASE_ORDER[label], int(match.group("pre_number")))
                 if label
                 else None
-            ),
-            post=_optional_int(match.group("post")),
-            dev=_optional_int(match.group("dev")),
+            )
+            post = _optional_int(match.group("post"))
+            dev = _optional_int(match.group("dev"))
+        except ValueError:
+            return None
+        return cls(
+            text=text,
+            release=release,
+            pre=pre,
+            post=post,
+            dev=dev,
         )
 
     @classmethod

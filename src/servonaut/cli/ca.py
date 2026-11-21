@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
-from servonaut.services.api_client import APIError
+from servonaut.services.api_client import APIError, ClientUpdateRequiredError
 from servonaut.services.vault.display import flatten_rows, terminal_safe
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, is_feature_disabled, vault_failure_reason
 
@@ -232,6 +232,9 @@ async def _handle(args: argparse.Namespace) -> int:
         else:
             raise ValueError(f"Unknown CA command: {args.ca_command}")
         _print(value, bool(args.json))
+    except ClientUpdateRequiredError as exc:
+        print(exc.message, file=sys.stderr)
+        return _EXIT_ERROR
     except APIError as exc:
         if is_feature_disabled(exc, "ssh_ca"):
             return _report_ca_switched_off(args)

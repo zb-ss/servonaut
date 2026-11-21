@@ -7,13 +7,20 @@ import logging
 import os
 import re
 import time
-from importlib.metadata import version as pkg_version
 from typing import Any, AsyncIterator, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
     from servonaut.services.vault.identity_store import DeviceSigner
 
+from servonaut.services.client_identity import (
+    _header_case_insensitive,
+    _sanitize_update_hints,
+    client_request_headers,
+    format_update_required_message,
+    parse_upgrade_header,
+)
+from servonaut.services.version_policy import normalize_public_version, safe_update_url
 from servonaut.utils.endpoints import (
     API_URL_ENV,
     EndpointOverrideError,
@@ -172,6 +179,66 @@ class DeviceSignatureExpiredError(APIError):
     """403 device signature timestamp is outside the server's skew window."""
 
 
+class ClientUpdateRequiredError(APIError):
+    """426 client_update_required — running client is below the minimum version."""
+
+    def __init__(
+        self,
+        *,
+        code: str = "client_update_required",
+        message: str = "",
+        status: int = 426,
+        details: Optional[Dict[str, Any]] = None,
+        response_headers: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self.server_message = message
+        super().__init__(
+            code=code,
+            message=message,
+            status=status,
+            details=details,
+            response_headers=response_headers,
+        )
+        formatted = format_update_required_message(self)
+        self.message = formatted
+        self.args = (formatted,)
+
+    @property
+    def is_retryable(self) -> bool:
+        return False
+
+    @property
+    def minimum_version(self) -> str:
+        raw = (self.details or {}).get("minimum_version")
+        parsed = normalize_public_version(raw)
+        if parsed:
+            return parsed
+        return parse_upgrade_header(
+            _header_case_insensitive(self.response_headers, "upgrade")
+        )
+
+    @property
+    def latest_version(self) -> str:
+        return normalize_public_version((self.details or {}).get("latest_version")) or ""
+
+    @property
+    def client_version(self) -> str:
+        return normalize_public_version((self.details or {}).get("client_version")) or ""
+
+    @property
+    def channel(self) -> str:
+        raw = (self.details or {}).get("channel")
+        return str(raw) if isinstance(raw, str) else ""
+
+    @property
+    def update_url(self) -> str:
+        return safe_update_url((self.details or {}).get("update_url"))
+
+    @property
+    def update_hints(self) -> Dict[str, str]:
+        return _sanitize_update_hints((self.details or {}).get("update_hints"))
+
+
 class EndpointConfigError(APIError, EndpointOverrideError):
     """``SERVONAUT_API_URL`` holds a URL the client refuses to use.
 
@@ -218,6 +285,7 @@ _CODE_TO_EXC: Dict[str, Type[APIError]] = {
     "payment_required": PaymentRequiredError,
     "forbidden": ForbiddenError,
     "device_signature_expired": DeviceSignatureExpiredError,
+    "client_update_required": ClientUpdateRequiredError,
 }
 
 
@@ -246,11 +314,8 @@ class APIClient(APIClientInterface):
     def _get_headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
+            **client_request_headers(),
         }
-        try:
-            headers["User-Agent"] = f"servonaut-cli/{pkg_version('servonaut')}"
-        except Exception:
-            headers["User-Agent"] = "servonaut-cli"
         token = self._auth.access_token
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -306,13 +371,28 @@ class APIClient(APIClientInterface):
             # Non-JSON error body. An HTML error page (LB/proxy 502/503,
             # maintenance page) is noise to a CLI user — summarise it
             # instead of printing 500 chars of markup.
-            text = (response.text or "").strip()
+            try:
+                text = (response.text or "").strip()
+            except Exception:
+                raw_bytes = getattr(response, "content", None) or b""
+                text = (
+                    raw_bytes.decode("utf-8", errors="replace").strip()
+                    if isinstance(raw_bytes, (bytes, bytearray))
+                    else ""
+                )
             if "text/html" in content_type or text[:15].lower().startswith(
                 ("<!doctype", "<html")
             ):
                 message = f"HTTP {status} — service returned an error page"
             else:
                 message = text[:200] or f"HTTP {status}"
+            if status == 426:
+                return ClientUpdateRequiredError(
+                    code="client_update_required",
+                    message=message,
+                    status=426,
+                    response_headers=headers_dict,
+                )
             return APIError(
                 code="unknown",
                 message=message,
@@ -320,9 +400,18 @@ class APIClient(APIClientInterface):
                 response_headers=headers_dict,
             )
 
-        exc_class = _CODE_TO_EXC.get(code, APIError)
+        exc_class = (
+            ClientUpdateRequiredError
+            if status == 426
+            else _CODE_TO_EXC.get(code, APIError)
+        )
+        effective_code = (
+            "client_update_required"
+            if exc_class is ClientUpdateRequiredError and code == "unknown"
+            else code
+        )
         return exc_class(
-            code=code,
+            code=effective_code,
             message=message,
             status=status,
             details=details,

@@ -85,8 +85,12 @@ def _find_team(teams: Any, wanted: str) -> Optional[Dict[str, Any]]:
 
 async def _team_servers(team_service: Any, slug: str) -> List[Mapping[str, Any]]:
     """The team's shared servers, which name its per-server levels; [] if unreadable."""
+    from servonaut.services.api_client import ClientUpdateRequiredError
+
     try:
         servers = await team_service.list_shared_servers(slug)
+    except ClientUpdateRequiredError:
+        raise
     except Exception as exc:  # noqa: BLE001 — the rules still show, only unnamed
         logger.info("Shared servers of team %s not read (%s)", slug, type(exc).__name__)
         print(
@@ -99,6 +103,7 @@ async def _team_servers(team_service: Any, slug: str) -> List[Mapping[str, Any]]
 
 async def _rules_view(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     """The team's agent rules as :func:`agent_rules_view` data; None after saying why not."""
+    from servonaut.services.api_client import ClientUpdateRequiredError
     from servonaut.services.shared_servers import team_id_text
     from servonaut.services.team_policy import team_policy_store
     from servonaut.services.team_policy_refresh import TeamPolicyRefresher
@@ -110,6 +115,9 @@ async def _rules_view(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
         return None
     try:
         teams = await team_service.list_teams()
+    except ClientUpdateRequiredError as exc:
+        print(exc.message, file=sys.stderr)
+        return None
     except Exception as exc:  # noqa: BLE001 — offline, signed out on the server, no team plan
         print(f"Your teams could not be read ({type(exc).__name__}).", file=sys.stderr)
         return None
@@ -121,7 +129,11 @@ async def _rules_view(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     refresher = TeamPolicyRefresher(team_policy_store(), lambda: team_service)
     refresher.load()
     await refresher.refresh([team])
-    servers = await _team_servers(team_service, slug)
+    try:
+        servers = await _team_servers(team_service, slug)
+    except ClientUpdateRequiredError as exc:
+        print(exc.message, file=sys.stderr)
+        return None
     status = refresher.store.status(slug, team_id_text(team) or None)
     return agent_rules_view(slug, status, servers, team.get("role"))
 

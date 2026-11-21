@@ -29,6 +29,11 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
+from servonaut.services.client_identity import (
+    client_request_headers,
+    format_update_required_from_response,
+    response_is_update_required,
+)
 from servonaut.utils.endpoints import MCP_URL_ENV, endpoint_or_default
 
 if sys.version_info >= (3, 11):
@@ -94,7 +99,10 @@ async def call_hosted_tool(
         method="tools/call",
         params=types.CallToolRequestParams(name=name, arguments=arguments),
     ))
-    headers = {"Authorization": f"Bearer {access_token}"}
+    headers = {
+        **client_request_headers(),
+        "Authorization": f"Bearer {access_token}",
+    }
     deadline = anyio.current_time() + timeout
     try:
         outcome = await _call_over_streamable_http(base, headers, request, timeout)
@@ -126,6 +134,11 @@ class _PostStatuses:
     async def record(self, response: httpx.Response) -> None:
         if response.request.method == "POST":
             self.statuses.append(response.status_code)
+        if response.status_code == 426:
+            try:
+                await response.aread()
+            except Exception:  # noqa: BLE001 — keep headers available even if stream closed
+                pass
 
     def endpoint_missing(self) -> bool:
         """Whether ``initialize`` was refused as a server without the endpoint does."""
@@ -243,6 +256,12 @@ def _classify(exc: BaseException) -> HostedCallError:
             if status == 401:
                 return HostedCallError(
                     "unauthorized", "The hosted MCP server refused the session token.",
+                    status=status,
+                )
+            if response_is_update_required(leaf.response):
+                return HostedCallError(
+                    "client_update_required",
+                    format_update_required_from_response(leaf.response),
                     status=status,
                 )
             if status == 429:

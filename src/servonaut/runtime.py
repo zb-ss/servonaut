@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
@@ -192,10 +192,13 @@ class RuntimeLayout:
     release_channel: str = _DEFAULT_MARKER_CHANNEL
     # Always set from a packaged build marker; None only for unmarked layouts.
     packaging_revision: int | None = None
+    generation_launcher: Path | None = None
 
     def current_app_argv(self, *args: str) -> list[str]:
         """Return a fresh argv that launches the current command surface."""
         command_args = _validate_launch_args(args)
+        if self.generation_launcher is not None:
+            return [str(self.generation_launcher), *command_args]
         if self.kind in {
             DistributionKind.SOURCE,
             DistributionKind.PIP,
@@ -265,7 +268,17 @@ def resolve_runtime(evidence: RuntimeEvidence) -> RuntimeLayout:
 
 def detect_runtime() -> RuntimeLayout:
     """Collect process facts and resolve the current runtime layout."""
-    return resolve_runtime(collect_runtime_evidence())
+    layout = resolve_runtime(collect_runtime_evidence())
+    if layout.kind is DistributionKind.PIP:
+        from servonaut.updates.layout import UpdateLayout
+
+        updater = UpdateLayout.detect()
+        if updater is not None and updater.generation is not None:
+            return replace(
+                layout, kind=DistributionKind.PIPX, path_console=updater.launcher,
+                generation_launcher=updater.launcher, package_management=_unsupported_capability(),
+            )
+    return layout
 
 
 def data_root_for_home(home: Path) -> Path:

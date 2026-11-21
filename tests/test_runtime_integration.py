@@ -210,17 +210,33 @@ async def test_update_runs_alone_without_cancelling_other_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
+    from threading import Event
 
     from textual.widgets import Button
     from textual.worker import WorkerState
 
+    from servonaut.updates.layout import UpdateLayout
+
+    loop = asyncio.get_running_loop()
+    detection_started = asyncio.Event()
+    release_detection = Event()
+    upgrade_started = asyncio.Event()
     finish_upgrade = asyncio.Event()
     upgrades: list[None] = []
 
+    def slow_detect():
+        loop.call_soon_threadsafe(detection_started.set)
+        assert release_detection.wait(timeout=10)
+        return None
+
     async def slow_upgrade(_self):
         upgrades.append(None)
+        upgrade_started.set()
         await finish_upgrade.wait()
         return True, "Updated [1/1] packages."
+
+    async def completed_download():
+        return True, "Installer downloaded."
 
     monkeypatch.setattr(
         "servonaut.services.update_service.UpdateService.run_upgrade", slow_upgrade
@@ -229,24 +245,71 @@ async def test_update_runs_alone_without_cancelling_other_workers(
     async with app.run_test(headless=True, size=(120, 40)) as pilot:
         await pilot.pause()
         unrelated = app.run_worker(asyncio.sleep(30), name="unrelated")
+        monkeypatch.setattr(UpdateLayout, "detect", slow_detect)
+        app._legacy_generation_update = False
         app._latest_version = "99.0.0"
         app._show_update_button("99.0.0")
         button = app.screen.query_one("#nav_update", Button)
 
-        app._run_update()
-        app._run_update()
-        await pilot.pause()
+        try:
+            app._run_update()
+            disabled_on_return = button.disabled
+            app._run_update()
+            await asyncio.wait_for(detection_started.wait(), timeout=10)
 
-        assert unrelated.state is WorkerState.RUNNING
+            assert disabled_on_return and button.disabled
+            assert not upgrades
+            app._show_update_button("99.0.0")
+            assert button.disabled
+            assert await app._run_upgrade_once(completed_download) == (True, "Installer downloaded.")
+            assert button.disabled
+            assert unrelated.state is WorkerState.RUNNING
+
+            release_detection.set()
+            await asyncio.wait_for(upgrade_started.wait(), timeout=10)
+            assert button.disabled
+            assert len(upgrades) == 1
+            finish_upgrade.set()
+            update = next(worker for worker in app.workers if worker.name == "update")
+            await app.workers.wait_for_complete([update])
+            assert not button.disabled
+            assert app._update_in_progress is False
+        finally:
+            release_detection.set()
+            finish_upgrade.set()
+            unrelated.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("open_updates", [True, False], ids=["settings", "up-to-date"])
+async def test_sidebar_update_reenables_when_no_upgrade_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, open_updates: bool,
+) -> None:
+    from textual.widgets import Button
+
+    from servonaut.updates.layout import UpdateLayout
+
+    app = _isolated_app(tmp_path, monkeypatch)
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        route_to_settings = MagicMock()
+        monkeypatch.setattr(app, "open_settings_screen", route_to_settings)
+        monkeypatch.setattr(UpdateLayout, "detect", lambda: object() if open_updates else None)
+        app._legacy_generation_update = False
+        app._latest_version = "99.0.0" if open_updates else None
+        app._show_update_button("99.0.0")
+        button = app.screen.query_one("#nav_update", Button)
+
+        app._run_update()
         assert button.disabled
-        assert len(upgrades) == 1
-        finish_upgrade.set()
         update = next(worker for worker in app.workers if worker.name == "update")
         await app.workers.wait_for_complete([update])
-        await pilot.pause()
+
         assert not button.disabled
-        assert app._update_in_progress is False
-        unrelated.cancel()
+        if open_updates:
+            route_to_settings.assert_called_once_with("updates")
+        else:
+            route_to_settings.assert_not_called()
 
 
 def test_background_launch_uses_runtime_argv_and_a_real_benign_child(

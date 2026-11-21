@@ -13,7 +13,16 @@ from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import AsyncIterator, Callable, Dict, List, Optional, Set
 
-from servonaut import get_version
+from servonaut.services.client_identity import (
+    client_request_headers,
+    get_client_identity,
+    response_is_update_required,
+)
+from servonaut.services.version_policy import (
+    VersionPolicy,
+    load_cached_version_policy,
+    save_cached_version_policy,
+)
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_or_default
 from servonaut.utils.platform_utils import describe_platform
 
@@ -52,8 +61,13 @@ def _api_base() -> str:
 
 
 def _device_flow_headers(client_kind: str) -> Dict[str, str]:
-    """The User-Agent a device-flow request carries, e.g. ``servonaut-tui/2.28.0 (macOS 15)``."""
-    return {"User-Agent": f"servonaut-{client_kind}/{get_version()} ({describe_platform()})"}
+    """Headers a device-flow request carries, e.g. ``servonaut-tui/2.28.0 (macOS 15)``."""
+    header_kind = "desktop" if client_kind == "desktop" else "cli"
+    identity = get_client_identity(kind=header_kind)
+    return client_request_headers(
+        kind=header_kind,
+        user_agent=f"servonaut-{client_kind}/{identity.version} ({describe_platform()})",
+    )
 
 
 def _check_client_kind(client_kind: str) -> None:
@@ -365,7 +379,10 @@ class AuthService(AuthServiceInterface):
             return None
         if self._token and self._token.user_id is not None:
             return self._token.user_id
-        headers = {"Authorization": f"Bearer {self._token.access_token}"}
+        headers = {
+            **client_request_headers(),
+            "Authorization": f"Bearer {self._token.access_token}",
+        }
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
@@ -541,11 +558,46 @@ class AuthService(AuthServiceInterface):
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
                     f"{_api_base()}/api/v1/teams",
-                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                    headers={
+                        **client_request_headers(),
+                        "Authorization": f"Bearer {self._token.access_token}",
+                    },
                 )
         except Exception as e:
             logger.warning("list_teams error: %s", e)
             return []
+        if response_is_update_required(response):
+            from servonaut.services.api_client import ClientUpdateRequiredError
+
+            headers_dict = {
+                str(k).lower(): str(v) for k, v in getattr(response, "headers", {}).items()
+            }
+            details = None
+            raw_message = ""
+            try:
+                body = response.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                err_obj = body.get("error")
+                if isinstance(err_obj, dict):
+                    raw_message = str(err_obj.get("message") or "")
+                    if isinstance(err_obj.get("details"), dict):
+                        details = err_obj["details"]
+                elif isinstance(err_obj, str):
+                    raw_message = str(body.get("message") or "")
+                    details = {
+                        k: v for k, v in body.items() if k not in ("error", "message")
+                    } or None
+            err = ClientUpdateRequiredError(
+                code="client_update_required",
+                message=raw_message,
+                status=response.status_code,
+                details=details,
+                response_headers=headers_dict,
+            )
+            logger.warning("list_teams refused (426): %s", err.message)
+            raise err
         if response.status_code == 401:
             if retry_after_refresh and await self.refresh_token():
                 return await self._fetch_teams(retry_after_refresh=False)
@@ -991,6 +1043,7 @@ class AuthService(AuthServiceInterface):
         ) as client:
             return await client.post(
                 refresh_url,
+                headers=client_request_headers(),
                 json={
                     "client_id": CLIENT_ID,
                     "refresh_token": refresh_token,
@@ -1165,6 +1218,7 @@ class AuthService(AuthServiceInterface):
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
                         revoke_url,
+                        headers=client_request_headers(),
                         json={
                             "client_id": CLIENT_ID,
                             "token": self._token.access_token,
@@ -1225,7 +1279,10 @@ class AuthService(AuthServiceInterface):
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
                     f"{_api_base()}/api/entitlements",
-                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                    headers={
+                        **client_request_headers(),
+                        "Authorization": f"Bearer {self._token.access_token}",
+                    },
                 )
                 if response.status_code == 200:
                     ents = response.json()
@@ -1292,6 +1349,31 @@ class AuthService(AuthServiceInterface):
                 self._token.user_id = int(ents["user_id"])
             except (TypeError, ValueError):
                 pass
+        raw_policy = ents.get("client_version_policy")
+        if isinstance(raw_policy, dict):
+            try:
+                policy = VersionPolicy.from_dict(raw_policy, fetched_at=time.time())
+            except (ValueError, TypeError, RecursionError) as exc:
+                logger.debug("Ignoring malformed client_version_policy: %s", exc)
+                policy = None
+            if policy is not None:
+                save_cached_version_policy(policy)
+
+    def cached_version_policy(self) -> Optional[VersionPolicy]:
+        """Return the client version policy from entitlements or disk cache."""
+        if self._token and isinstance(self._token.entitlements, dict):
+            raw_policy = self._token.entitlements.get("client_version_policy")
+            if isinstance(raw_policy, dict):
+                try:
+                    policy = VersionPolicy.from_dict(
+                        raw_policy,
+                        fetched_at=self._token.entitlements_fetched_at or 0.0,
+                    )
+                except (ValueError, TypeError, RecursionError):
+                    policy = None
+                if policy is not None:
+                    return policy
+        return load_cached_version_policy()
 
     @classmethod
     def _extract_bool_feature(cls, ents: Optional[dict], key: str) -> Optional[bool]:

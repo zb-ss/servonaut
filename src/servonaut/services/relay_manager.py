@@ -86,6 +86,7 @@ class RelayState(enum.Enum):
     ERROR = "error"                  # listener task raised or exited unexpectedly
     STOPPED = "stopped"              # explicitly stopped (app exit, manual)
     SESSION_EXPIRED = "session_expired"  # backend rejected the OAuth bearer; sign in again
+    UPDATE_REQUIRED = "update_required"  # client below minimum version; update to reconnect
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,8 @@ class RelayManager:
         self._state: RelayState = RelayState.DISABLED
         # Why the last start() ended in ERROR, for the relay status screen.
         self._last_error: str | None = None
+        # Formatted guidance from a 426 client_update_required refusal.
+        self._update_required_message: str | None = None
         # Optional reference to the running Textual app; used to resolve
         # ``providers_configured`` for the wire-format v1.0 handshake.
         self._app = app
@@ -168,6 +171,15 @@ class RelayManager:
         Messages name config keys and variables, never URLs.
         """
         return self._last_error if self._state is RelayState.ERROR else None
+
+    @property
+    def update_required_message(self) -> str | None:
+        """Install-specific update message when stopped by HTTP 426."""
+        return (
+            self._update_required_message
+            if self._state is RelayState.UPDATE_REQUIRED
+            else None
+        )
 
     @property
     def is_running(self) -> bool:
@@ -658,6 +670,19 @@ class RelayManager:
             # gather.
             self._set_state(RelayState.SESSION_EXPIRED)
 
+    async def _handle_update_required(self, message: str) -> None:
+        """Backend refused the relay as below the minimum client version (426)."""
+        if self._state is RelayState.UPDATE_REQUIRED:
+            return
+        self._update_required_message = message
+        log_relay_event("update_required", mode="tui", detail=message)
+        try:
+            await self.stop()
+        except Exception:
+            logger.exception("Failed to stop relay after update required")
+        finally:
+            self._set_state(RelayState.UPDATE_REQUIRED)
+
     def _set_state(self, new_state: RelayState) -> None:
         if new_state is self._state:
             return
@@ -728,6 +753,7 @@ class RelayManager:
             # Wired here rather than through the listener-factory hooks, so
             # a custom factory keeps the three-hook signature.
             on_degraded=self._handle_degraded,
+            on_update_required=self._handle_update_required,
             heartbeat_rejection_alert_after=cfg.heartbeat_rejection_alert_after,
             # The listener owns its own httpx.AsyncClient (needs to —
             # the SSE subscription holds it open). Hand it the refresh

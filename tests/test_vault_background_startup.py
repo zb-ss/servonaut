@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import httpx
 
 from servonaut.app import ServonautApp
+from servonaut.services.api_client import ClientUpdateRequiredError
 from servonaut.services.vault.crypto import IntegrityError
 
 
@@ -19,6 +20,11 @@ class _UnavailableVault:
 class _IntegrityFailureVault:
     async def discover(self) -> bool:
         raise IntegrityError("server signature did not verify")
+
+
+class _UpdateRequiredVault:
+    async def discover(self) -> bool:
+        raise ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
 
 
 def test_vault_startup_ignores_only_typed_transport_failure() -> None:
@@ -42,3 +48,12 @@ def test_vault_startup_surfaces_integrity_failure() -> None:
     app.notify.assert_called_once()
     assert app.notify.call_args.kwargs["severity"] == "warning"
 
+
+def test_vault_startup_leaves_update_required_to_shared_notice() -> None:
+    app = ServonautApp()
+    app.vault_command_service = _UpdateRequiredVault()
+    app.notify = Mock()
+
+    asyncio.run(app._run_vault_background())
+
+    app.notify.assert_not_called()

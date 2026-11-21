@@ -521,6 +521,11 @@ and review the new SVGs.
 
 ## End-to-end tests
 
+For CI and automated tests, set `SERVONAUT_SKIP_AUTO_APPLY=1` to run the
+pipx-installed environment directly and skip automatic staging and activation.
+Installation journeys set the flag by default and opt in when they exercise
+the updater against the local test index.
+
 The `e2e/` directory holds end-to-end journeys. They start the real TUI, CLI
 and MCP server and use them the way a person or an MCP client would: keys and
 clicks in the TUI, commands on the command line, tool calls over stdio. They

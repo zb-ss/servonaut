@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
+from servonaut.utils.logging_setup import warn_stderr
+
 logger = logging.getLogger(__name__)
 
 #: Rotate when the live file passes this byte size.
@@ -73,10 +75,28 @@ def record_outcomes() -> Iterator[List[AuditOutcome]]:
 
 
 class AuditTrail:
-    def __init__(self, audit_path: str) -> None:
+    def __init__(self, audit_path: str, *, warn_to_stderr: bool = False) -> None:
         self._path = Path(audit_path).expanduser()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._warn_to_stderr = warn_to_stderr
+        self._warned_unavailable = False
         self._writes_since_check = 0
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if warn_to_stderr:
+                flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
+                descriptor = os.open(self._path, flags, 0o600)
+                os.close(descriptor)
+        except (OSError, ValueError) as error:
+            if not warn_to_stderr:
+                raise
+            self._warn_unavailable(error)
+
+    def _warn_unavailable(self, error: Exception) -> None:
+        if not self._warn_to_stderr:
+            logger.error("Failed to write audit log: %s", error)
+        elif not self._warned_unavailable:
+            self._warned_unavailable = True
+            warn_stderr("servonaut: MCP audit log is unavailable. Tool activity may go unrecorded.")
 
     def log(
         self,
@@ -129,8 +149,8 @@ class AuditTrail:
         try:
             with open(self._path, 'a') as f:
                 f.write(json.dumps(entry) + '\n')
-        except Exception as e:
-            logger.error("Failed to write audit log: %s", e)
+        except (OSError, TypeError, ValueError, RecursionError) as error:
+            self._warn_unavailable(error)
             return
 
         self._writes_since_check += 1

@@ -19,6 +19,50 @@ from servonaut.config.schema import (
 
 
 class TestConfigManager:
+    @pytest.mark.parametrize("version", [1, CONFIG_VERSION])
+    def test_read_only_startup_keeps_loaded_settings(self, tmp_path, monkeypatch, version):
+        from servonaut.config import manager as config_module
+
+        path = tmp_path / "config.json"
+        payload = json.dumps({"version": version, "default_username": "local-user",
+                              "ai_chunk_size": 4000})
+        path.write_text(payload)
+
+        def unwritable(*_args):
+            raise PermissionError("fixture storage is read-only")
+
+        monkeypatch.setattr(config_module, "_ensure_config_dir", unwritable)
+        monkeypatch.setattr(config_module, "_write_json_secure", unwritable)
+        manager = ConfigManager(config_path=path, allow_read_only=True)
+        config = manager.get()
+        assert config.default_username == "local-user"
+        assert config.ai_chunk_size == AppConfig().ai_chunk_size
+        assert path.read_text() == payload
+        with pytest.raises(PermissionError):
+            manager.save(config)
+
+    def test_read_only_startup_can_read_unmoved_legacy_config(self, tmp_path, monkeypatch):
+        from servonaut.config import manager as config_module
+
+        config_dir = tmp_path / "config"
+        legacy_dir = tmp_path / "previous"
+        legacy_dir.mkdir()
+        legacy_config = legacy_dir / "config.json"
+        payload = json.dumps({"version": CONFIG_VERSION, "default_username": "legacy-user"})
+        legacy_config.write_text(payload)
+
+        def unwritable(*_args):
+            raise PermissionError("fixture storage is read-only")
+
+        monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+        monkeypatch.setattr(config_module, "CONFIG_PATH", config_dir / "config.json")
+        monkeypatch.setattr(config_module, "_LEGACY_EC2SSH_DIR", legacy_dir)
+        monkeypatch.setattr(config_module, "_ensure_config_dir", unwritable)
+        monkeypatch.setattr(config_module, "_write_json_secure", unwritable)
+        assert ConfigManager(allow_read_only=True).get().default_username == "legacy-user"
+        assert legacy_config.read_text() == payload
+        assert not config_dir.exists()
+
 
     def test_live_monitoring_settings_round_trip(self, tmp_path):
         manager = ConfigManager(config_path=tmp_path / "config.json")

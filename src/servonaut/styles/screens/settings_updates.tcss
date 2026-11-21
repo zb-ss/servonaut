@@ -1,0 +1,202 @@
+/* ===================================================================
+   SETTINGS › UPDATES
+   Version status, update actions, and release channel selection.
+   Wide view shows label, status copy, and action side by side;
+   narrow view (-content-narrow / -narrow) stacks them cleanly.
+   =================================================================== */
+
+UpdatesPanel #updates_summary_section {
+    height: auto;
+    margin-bottom: 1;
+}
+
+UpdatesPanel #updates_installed_row,
+UpdatesPanel #updates_status_row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+UpdatesPanel .updates-label {
+    width: 16;
+    height: auto;
+    padding-right: 1;
+    color: $text-muted;
+}
+
+UpdatesPanel #updates_installed_value {
+    width: 1fr;
+    height: auto;
+    color: $text;
+}
+
+UpdatesPanel #updates_status_body {
+    width: 1fr;
+    height: auto;
+}
+
+UpdatesPanel #updates_status_primary {
+    width: 100%;
+    height: auto;
+    color: $text;
+}
+
+UpdatesPanel #updates_status_primary.-success {
+    color: $text-success;
+}
+
+UpdatesPanel #updates_status_primary.-accent {
+    color: $text-accent;
+    text-style: bold;
+}
+
+UpdatesPanel #updates_status_primary.-warning {
+    color: $text-warning;
+    text-style: bold;
+}
+
+UpdatesPanel #updates_status_primary.-error {
+    color: $text-error;
+    text-style: bold;
+}
+
+UpdatesPanel #updates_status_secondary {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    color: $text-muted;
+}
+
+UpdatesPanel #updates_status_links {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+UpdatesPanel #updates_link_release_notes,
+UpdatesPanel #updates_link_details,
+UpdatesPanel #updates_link_download {
+    margin-right: 2;
+}
+
+UpdatesPanel #updates_failure_details {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    padding: 0 1;
+    border-left: thick $error;
+    color: $text-muted;
+}
+
+UpdatesPanel #updates_busy {
+    margin-top: 1;
+}
+
+UpdatesPanel #updates_status_actions {
+    width: auto;
+    height: auto;
+    margin-left: 2;
+    align: right top;
+}
+
+UpdatesPanel #updates_btn_check,
+UpdatesPanel #updates_btn_postpone,
+UpdatesPanel #updates_btn_try,
+UpdatesPanel #updates_btn_update {
+    width: auto;
+    min-width: 14;
+    margin: 0;
+}
+
+UpdatesPanel #updates_channel_section {
+    height: auto;
+    border-top: solid $border-blurred;
+    padding-top: 1;
+}
+
+UpdatesPanel #updates_channel_title {
+    margin: 0 0 1 0;
+}
+
+UpdatesPanel #updates_channel_radio {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    background: transparent;
+}
+
+UpdatesPanel #updates_channel_stable,
+UpdatesPanel #updates_channel_rc {
+    width: 100%;
+    height: auto;
+    padding: 0;
+}
+
+UpdatesPanel #updates_channel_note,
+UpdatesPanel #updates_auto_note {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+/* Narrow view (100x30): stack labels, status copy, and action buttons. */
+SettingsScreen.-content-narrow UpdatesPanel #updates_installed_row,
+SettingsScreen.-content-narrow UpdatesPanel #updates_status_row,
+UpdatesPanel.-narrow #updates_installed_row,
+UpdatesPanel.-narrow #updates_status_row {
+    layout: vertical;
+}
+
+SettingsScreen.-content-narrow UpdatesPanel .updates-label,
+UpdatesPanel.-narrow .updates-label {
+    width: 100%;
+    padding-right: 0;
+}
+
+SettingsScreen.-content-narrow UpdatesPanel #updates_installed_value,
+SettingsScreen.-content-narrow UpdatesPanel #updates_status_body,
+UpdatesPanel.-narrow #updates_installed_value,
+UpdatesPanel.-narrow #updates_status_body {
+    width: 100%;
+}
+
+SettingsScreen.-content-narrow UpdatesPanel #updates_status_actions,
+UpdatesPanel.-narrow #updates_status_actions {
+    width: 100%;
+    margin-left: 0;
+    margin-top: 1;
+    align: left middle;
+}
+
+SettingsScreen.-content-narrow UpdatesPanel #updates_status_links,
+UpdatesPanel.-narrow #updates_status_links {
+    layout: vertical;
+}
+
+/* Short terminals (100x30): tighten vertical spacing so Release channel stays reachable. */
+SettingsScreen.-short UpdatesPanel #updates_summary_section,
+UpdatesPanel.-narrow #updates_summary_section {
+    margin-bottom: 0;
+}
+
+SettingsScreen.-short UpdatesPanel #updates_installed_row,
+UpdatesPanel.-narrow #updates_installed_row {
+    margin-bottom: 0;
+}
+
+SettingsScreen.-short UpdatesPanel #updates_channel_section,
+UpdatesPanel.-narrow #updates_channel_section {
+    padding-top: 0;
+}
+
+SettingsScreen.-short UpdatesPanel #updates_channel_title,
+UpdatesPanel.-narrow #updates_channel_title {
+    margin: 0;
+}
+
+SettingsScreen.-short UpdatesPanel #updates_channel_radio,
+UpdatesPanel.-narrow #updates_channel_radio {
+    margin: 0;
+}

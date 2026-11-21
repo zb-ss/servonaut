@@ -363,7 +363,7 @@ class ConfigManager:
         config_manager.update(cache_ttl_seconds=600)
     """
 
-    def __init__(self, config_path: Optional[Path] = None) -> None:
+    def __init__(self, config_path: Optional[Path] = None, *, allow_read_only: bool = False) -> None:
         """Initialize the configuration manager.
 
         Args:
@@ -371,15 +371,30 @@ class ConfigManager:
                 ``~/.servonaut/config.json`` (the TUI's ``--config`` flag).
                 Its local backups are kept in a ``backups`` directory beside
                 it; every other runtime file keeps its usual location.
+            allow_read_only: Keep readable settings when startup writes fail.
         """
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
         self.team_options_recorded = 0
         self._left_alone = False
-        _migrate_legacy_paths()
-        _ensure_config_dir()
-        load_secrets_env()
+        self._allow_read_only = allow_read_only
         self._config_path = Path(config_path).expanduser() if config_path else CONFIG_PATH
+        self._prepare_config_path(use_default=config_path is None)
+        load_secrets_env()
+
+    def _prepare_config_path(self, *, use_default: bool) -> None:
+        try:
+            _migrate_legacy_paths()
+            _ensure_config_dir()
+        except OSError:
+            if not self._allow_read_only:
+                raise
+            if use_default and not self._config_path.exists():
+                for previous in (_LEGACY_EC2SSH_DIR / self._config_path.name, _LEGACY_CONFIG):
+                    if previous.is_file():
+                        self._config_path = previous
+                        break
+            logger.warning("Configuration storage is unwritable. Continuing with readable settings.")
 
     def load(self) -> AppConfig:
         """Load configuration from disk.
@@ -419,12 +434,12 @@ class ConfigManager:
                 '~/.ec2-ssh/keywords.json',
             ):
                 self._config.keyword_store_path = '~/.servonaut/keywords.json'
-                self.save(self._config)
+                self._save_startup_changes(self._config)
 
             # Upgrade ai_chunk_size from old default (4000) to new default (100000)
             if self._config.ai_chunk_size == 4000:
                 self._config.ai_chunk_size = 100000
-                self.save(self._config)
+                self._save_startup_changes(self._config)
 
             # A config this release left as it was (a version it cannot
             # upgrade) is not rewritten for this either; its options are
@@ -476,9 +491,23 @@ class ConfigManager:
         logger.info("Migrating config from v%s to v%d...", from_version, CONFIG_VERSION)
         self._create_upgrade_backup(from_version)
         # Save migrated config immediately with 0o600 permissions.
-        _write_json_secure(self._config_path, migrated)
-        logger.info("Migration complete")
+        try:
+            _write_json_secure(self._config_path, migrated)
+        except OSError:
+            if not self._allow_read_only:
+                raise
+            logger.warning("Could not save the migrated configuration. Using it for this session.")
+        else:
+            logger.info("Migration complete")
         return migrated
+
+    def _save_startup_changes(self, config: AppConfig) -> None:
+        try:
+            self.save(config)
+        except OSError:
+            if not self._allow_read_only:
+                raise
+            logger.warning("Could not save the startup settings changes. Using them for this session.")
 
     def record_saved_team_options(self) -> int:
         """Run the one-time step now (after a sign-in); returns how many options it recorded.

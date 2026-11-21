@@ -180,6 +180,12 @@ Once the problem is fixed, run the script again, or install directly:
 pipx install servonaut
 ```
 
+## An Update Is Pending or servonaut.dev Requires a Newer Version
+
+Check **Settings → Updates** for the offered version, postponement, or
+manual pin. If a hosted feature requires a newer client, use the update
+instructions for your installation. [Updating Servonaut](updates.md)
+
 ## Installed a Release Candidate by Mistake
 
 A version such as `2.28.0rc1` is a release candidate, a preview of the next

@@ -368,8 +368,10 @@ def test_settings_hetzner(screen_snapshot, size: str) -> None:
 
 # The other Settings panels, at the narrow size, where each label sits above
 # its field. Left out: panels whose content depends on the machine running
-# the tests (whether the Bitwarden CLI or the voice packages are installed).
-_MACHINE_DEPENDENT_PANELS = {"bw_ssh", "voice"}
+# the tests (whether the Bitwarden CLI or the voice packages are installed,
+# or how Servonaut itself was installed — Updates is covered with pinned
+# install states in test_settings_updates.py).
+_MACHINE_DEPENDENT_PANELS = {"bw_ssh", "voice", "updates"}
 _NARROW_PANELS = [
     spec.id
     for spec in PANELS

@@ -12,7 +12,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from servonaut.services.api_client import APIError
+from servonaut.services.api_client import APIError, ClientUpdateRequiredError
+from servonaut.services.client_identity import format_update_required_message
 
 from .display import strip_terminal_controls, terminal_safe
 
@@ -305,6 +306,11 @@ def _failure_reason(exc: BaseException) -> str:
         return _failure_reason(cause)
     if isinstance(exc, VaultUserError):
         return str(exc)
+    if isinstance(exc, ClientUpdateRequiredError) or (
+        isinstance(exc, APIError)
+        and (exc.status == 426 or exc.code == "client_update_required")
+    ):
+        return format_update_required_message(exc)
     if isinstance(exc, APIError) and exc.code == "device_not_active":
         details = exc.details if isinstance(exc.details, dict) else {}
         reason = _INACTIVE_DEVICE_REASONS.get(str(details.get("status")))
