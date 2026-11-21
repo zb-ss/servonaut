@@ -1376,6 +1376,31 @@ class VaultCommandService:
     ) -> dict[str, Any]:
         return self._usage_from(vault_id, item_id, item, await self._own_binding_states(servers, fresh=fresh))
 
+    async def ssh_keys_usage_overview(
+        self, *, vault_id: str, items: Sequence[Mapping[str, Any]], servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Where the listed SSH keys are used, from item rows the caller already holds, for a picker.
+
+        Unlike :meth:`ssh_keys_usage` this reads no item and no vault name per
+        key: one usage request per batch when the service offers it, else each
+        own server's binding once (remembered reads are reused). A key the
+        service omits has no entry. Deleting still reviews each chosen key
+        with :meth:`ssh_keys_usage`.
+
+        Raises:
+            BindingReadsPaused: the service refused the binding reads.
+            Exception: any failed read; the caller treats usage as unknown.
+        """
+        checks = await self._key_checks(vault_id)
+        rows = [(row["item_id"], row) for row in items if isinstance(row.get("item_id"), str)]
+        if not rows:
+            return {}
+        if checks.usage_endpoint:
+            found = await self._service_usages(vault_id, [item_id for item_id, _ in rows], servers)
+            return {item_id: usage for item_id, _ in rows if (usage := _lookup(found, item_id)) is not None}
+        states = await self._own_binding_states(servers)
+        return {item_id: self._usage_from(vault_id, item_id, row, states) for item_id, row in rows}
+
     async def ssh_keys_usage(
         self, *, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
     ) -> dict[str, dict[str, Any]]:
