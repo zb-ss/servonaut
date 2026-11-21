@@ -2344,7 +2344,10 @@ def _valid_binding(vault: VaultCloud, body: dict[str, Any], device: _Device, tar
         return False
     encoded_keys = b"".join(struct.pack(">I", len(key.encode())) + key.encode() for key in sorted(keys))
     list_field = struct.pack(">I", len(keys)) + encoded_keys
-    message = _lp("svn-binding-v1", stored_vault["scope"], target, str(body["hostname"]), port,
+    # Like the service: a binding on the caller's own server is signed for their user
+    # scope, whichever vault holds the key; a shared server's for its vault's scope.
+    scope = f"user:{device.user_id}" if target.startswith("instance:") else stored_vault["scope"]
+    message = _lp("svn-binding-v1", scope, target, str(body["hostname"]), port,
                   str(body["login_user"]), str(body["vault_id"]), str(body["vault_item_id"]),
                   str(body["public_fingerprint"]), list_field, revision, identity["identity_id"])
     return _verify(_decode(identity["sig_public_key"], KEY_BYTES), message, signature)

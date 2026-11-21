@@ -1511,6 +1511,9 @@ class ObjectStorageServiceInterface(ABC):
         key: str,
         local_path: str,
         region: str = "",
+        *,
+        content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         """Upload a local file to *bucket* at *key*.
 
@@ -1520,6 +1523,8 @@ class ObjectStorageServiceInterface(ABC):
             local_path: Absolute path to the local file.
             region: Region the bucket lives in.  Empty → the configured
                 region, with a redirect when it is wrong.
+            content_type: Optional Content-Type header.
+            cache_control: Optional Cache-Control header.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -1571,6 +1576,9 @@ class ObjectStorageServiceInterface(ABC):
         dst_bucket: str,
         dst_key: str,
         region: str = "",
+        *,
+        content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         """Server-side copy of an object.
 
@@ -1581,6 +1589,8 @@ class ObjectStorageServiceInterface(ABC):
             dst_key: Destination object key.
             region: Region *dst_bucket* lives in — a cross-region copy is
                 driven from the destination side.
+            content_type: Optional replacement for the source Content-Type.
+            cache_control: Optional replacement for the source Cache-Control.
 
         Raises:
             ValueError: If any argument fails validation.

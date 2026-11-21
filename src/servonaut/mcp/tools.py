@@ -7,11 +7,13 @@ import hashlib
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
 import time
 from collections import deque
+from pathlib import PurePosixPath
 from typing import Any, Deque, Dict, List, Mapping, Optional
 
 from servonaut.config.accounts import PROVIDER_TITLES, primary_label
@@ -40,6 +42,7 @@ from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.store import RecordLockTimeout
 from servonaut.services.memory.team_fold import absorbed_share_ids
 from servonaut.services.ovh_billing_service import usage_figures
+from servonaut.services.s3_bucket_policy import public_scope
 from servonaut.services.memory.shared_view import (
     merge_shared,
     share_candidates,
@@ -102,6 +105,15 @@ _API_REQUEST_MAX_PER_WINDOW = 30
 
 # Supported object-storage providers — single source of truth for validation.
 _S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
+_S3_CONTENT_TYPES = {
+    ".deb": "application/vnd.debian.binary-package",
+    ".json": "application/json",
+}
+
+
+def _s3_content_type(name: str) -> str | None:
+    suffix = PurePosixPath(name).suffix.lower()
+    return _S3_CONTENT_TYPES.get(suffix) or mimetypes.guess_type(name)[0]
 
 # Short-lived per-(provider, instance_id) memo of Bitwarden ssh-ref lookups
 # (positive AND negative results). Fleet-wide tools resolve connections once
@@ -5898,10 +5910,107 @@ class ServonautTools:
         self._audit.log('s3_delete_bucket', payload, result, True)
         return result
 
+    def _s3_policy_result(
+        self, name: str, payload: dict, document: dict | None, **details: Any,
+    ) -> str:
+        scope = public_scope(document)
+        if payload.get("public_read") is False and any(
+            row["effect"] == "Allow" for row in scope["public_scope"]
+        ):
+            details["message"] = (
+                "The bucket still grants anonymous access through other policy statements. "
+                "See public_scope for affected actions and object prefixes."
+            )
+        result = json.dumps({"bucket": payload["bucket"], **details, **scope})
+        self._audit.log(name, payload, result, True, public_scope=scope["public_scope"])
+        return result
+
+    async def s3_get_bucket_policy(
+        self, provider: str, bucket: str, region: str = '', account: str = '',
+    ) -> str:
+        """Inspect the bucket policy and its anonymous scope."""
+        name = 's3_get_bucket_policy'
+        payload = {'provider': provider, 'bucket': bucket, 'region': region}
+        svc, err = self._validate_s3_provider(provider, name, payload, account)
+        if err is not None:
+            return err
+        allowed, reason = self._guard.check_tool(name)
+        if not allowed:
+            self._audit.log(name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+        try:
+            policy = await svc.get_bucket_policy(bucket, region)
+            return self._s3_policy_result(name, payload, policy, policy=policy)
+        except ValueError as exc:
+            self._audit.log(name, payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(name, payload, '', False, f"api_error: {type(exc).__name__}")
+            return f"Error reading the {provider} S3 bucket policy. Check bucket access and region."
+
+    async def s3_set_bucket_policy(
+        self, provider: str, bucket: str, region: str = '', account: str = '',
+        policy_json: str | None = None, public_read: bool | None = None,
+        allow_public_write: bool = False,
+    ) -> str:
+        """Replace a policy or toggle the managed public-read grant."""
+        name = 's3_set_bucket_policy'
+        payload = {
+            'provider': provider, 'bucket': bucket, 'region': region,
+            'replacement_policy': policy_json is not None, 'public_read': public_read,
+            'allow_public_write': allow_public_write,
+        }
+        svc, err = self._validate_s3_provider(provider, name, payload, account)
+        if err is not None:
+            return err
+        allowed, reason = self._guard.check_tool(name)
+        if not allowed:
+            self._audit.log(name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+        try:
+            policy = await svc.set_bucket_policy(
+                bucket, region, policy_json=policy_json, public_read=public_read,
+                allow_public_write=allow_public_write,
+            )
+            return self._s3_policy_result(name, payload, policy, policy_present=policy is not None)
+        except ValueError as exc:
+            self._audit.log(name, payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(name, payload, '', False, f"api_error: {type(exc).__name__}")
+            return f"Error changing the {provider} S3 bucket policy. Check permissions and public-access settings."
+
+    async def s3_get_public_object_url(
+        self, provider: str, bucket: str, key: str, region: str = '', account: str = '',
+    ) -> str:
+        """Return the unsigned URL for an object that allows public access."""
+        name = 's3_get_public_object_url'
+        payload = {'provider': provider, 'bucket': bucket, 'key': key, 'region': region}
+        svc, err = self._validate_s3_provider(provider, name, payload, account)
+        if err is not None:
+            return err
+        allowed, reason = self._guard.check_tool(name)
+        if not allowed:
+            self._audit.log(name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+        try:
+            url = await svc.public_object_url(bucket, key, region)
+        except ValueError as exc:
+            self._audit.log(name, payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(name, payload, '', False, f"api_error: {exc}")
+            return f"Error forming the public object URL for {provider} S3: {exc}"
+        result = json.dumps({"bucket": bucket, "key": key, "url": url})
+        self._audit.log(name, payload, result, True)
+        return result
+
     async def s3_upload_object(
         self, provider: str, bucket: str, key: str, local_path: str,
         region: str = '',
         account: str = '',
+        content_type: str | None = None,
+        cache_control: str | None = None,
     ) -> str:
         """Upload a local file to an S3 bucket."""
         payload: Dict[str, Any] = {
@@ -5920,7 +6029,13 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.upload_object(bucket, key, local_path, region)
+            if content_type is None:
+                content_type = _s3_content_type(key) or _s3_content_type(local_path)
+            payload.update(content_type=content_type, cache_control=cache_control)
+            await svc.upload_object(
+                bucket, key, local_path, region,
+                content_type=content_type, cache_control=cache_control,
+            )
         except ValueError as exc:
             self._audit.log('s3_upload_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -5980,6 +6095,8 @@ class ServonautTools:
         dst_key: str,
         region: str = '',
         account: str = '',
+        content_type: str | None = None,
+        cache_control: str | None = None,
     ) -> str:
         """Server-side copy of an S3 object within the same provider."""
         payload: Dict[str, Any] = {
@@ -5998,7 +6115,13 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.copy_object(src_bucket, src_key, dst_bucket, dst_key, region)
+            if content_type is None:
+                content_type = _s3_content_type(dst_key)
+            payload.update(content_type=content_type, cache_control=cache_control)
+            await svc.copy_object(
+                src_bucket, src_key, dst_bucket, dst_key, region,
+                content_type=content_type, cache_control=cache_control,
+            )
         except ValueError as exc:
             self._audit.log('s3_copy_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"

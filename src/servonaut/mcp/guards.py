@@ -464,7 +464,7 @@ class CommandGuard:
             'aws_list_regions', 'aws_list_amis', 'aws_list_instance_types',
             'aws_list_key_pairs', 'aws_list_subnets', 'aws_list_security_groups',
             # S3 — read tools (provider-parameterised).
-            's3_list_buckets', 's3_list_objects',
+            's3_list_buckets', 's3_list_objects', 's3_get_bucket_policy', 's3_get_public_object_url',
             # Incident-response read-only probes. web_traffic_summary and
             # fleet_health_snapshot run SSH info-gathering commands — same
             # read-only posture as get_server_info (also readonly). enrich_ips
@@ -555,7 +555,7 @@ class CommandGuard:
             # S3 — every mutation + presigned URL (URL is a bearer secret).
             's3_create_bucket', 's3_delete_bucket', 's3_upload_object',
             's3_delete_object', 's3_copy_object', 's3_move_object',
-            's3_generate_presigned_url',
+            's3_generate_presigned_url', 's3_set_bucket_policy',
         }
 
         if self._level == GuardLevel.READONLY:

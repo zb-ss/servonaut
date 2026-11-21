@@ -45,6 +45,25 @@ _STORAGE_ACCOUNT = (
     "Account label of the provider whose object storage to use; omit for "
     "that provider's default account."
 )
+_S3_BUCKET_FIELDS = {
+    "provider": {"type": "string", "enum": ["aws", "hetzner", "ovh"]},
+    "bucket": {"type": "string", "description": "Bucket name."},
+    "region": {
+        "type": "string",
+        "description": "Bucket region. Omit for automatic resolution or a fixed endpoint.",
+    },
+    "account": _account(_STORAGE_ACCOUNT),
+}
+_S3_CONTENT_FIELDS = {
+    "content_type": {
+        "type": "string",
+        "description": "Content-Type override. By default, infer from the file extension.",
+    },
+    "cache_control": {
+        "type": "string",
+        "description": "Cache-Control override, for example 'public, max-age=300'.",
+    },
+}
 _SERVER_ACCOUNT = (
     "Account label the server is in; omit to use the account whose "
     "inventory lists it (else the default account)."
@@ -1911,6 +1930,57 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": False,
     },
+    "s3_get_bucket_policy": {
+        "description": "Read an S3 bucket policy and summarize its anonymous actions and object scope.",
+        "schema": {
+            "type": "object",
+            "properties": dict(_S3_BUCKET_FIELDS),
+            "required": ["provider", "bucket"],
+        },
+        "chat_exposed": True,
+    },
+    "s3_set_bucket_policy": {
+        "description": (
+            "Change an S3 bucket policy. ALWAYS confirm with the user before calling, "
+            "including the provider, bucket, actions and object scope. Supply a full "
+            "policy_json replacement or toggle the managed public GetObject grant "
+            "with public_read. The toggle preserves other statements. Anonymous "
+            "mutations and wildcard Allow actions require allow_public_write=true."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_S3_BUCKET_FIELDS,
+                "policy_json": {"type": "string", "description": "Complete replacement policy as JSON."},
+                "public_read": {
+                    "type": "boolean",
+                    "description": "Add or remove the managed public GetObject grant for all keys.",
+                },
+                "allow_public_write": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Permit broad or anonymous write grants after explicit user confirmation.",
+                },
+            },
+            "required": ["provider", "bucket"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_get_public_object_url": {
+        "description": (
+            "Return the unsigned HTTPS URL for a public object. "
+            "This does not change access or check that the object is publicly readable."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_S3_BUCKET_FIELDS,
+                "key": {"type": "string", "description": "Object key."},
+            },
+            "required": ["provider", "bucket", "key"],
+        },
+        "chat_exposed": True,
+    },
     "s3_upload_object": {
         "description": (
             "Upload a local file to an S3 bucket. local_path must resolve "
@@ -1920,6 +1990,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "schema": {
             "type": "object",
             "properties": {
+                **_S3_CONTENT_FIELDS,
                 "provider": {
                     "type": "string",
                     "enum": ["aws", "hetzner", "ovh"],
@@ -2002,6 +2073,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "schema": {
             "type": "object",
             "properties": {
+                **_S3_CONTENT_FIELDS,
                 "provider": {
                     "type": "string",
                     "enum": ["aws", "hetzner", "ovh"],

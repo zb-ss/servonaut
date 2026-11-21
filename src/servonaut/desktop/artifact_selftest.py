@@ -41,9 +41,12 @@ from servonaut._artifact_selftest import (
     _write_result,
     isolated_home,
     probe_boto3_resources,
+    probe_textual_widgets,
 )
 
 if TYPE_CHECKING:
+    from aiohttp import ClientWebSocketResponse
+
     from servonaut.desktop.launcher import DesktopSessionOwner
     from servonaut.desktop.voice.packaged_manifest import BundledFile
     from servonaut.runtime import RuntimeLayout
@@ -91,6 +94,7 @@ def _run_isolated_check(initial_runtime: object, check: str) -> dict[str, object
         with isolated_home() as home:
             runtime = _packaged_runtime(home, initial_runtime)
             _import_desktop_stack()
+            probe_textual_widgets()
             # The window lists AWS instances through boto3 resources at start.
             probe_boto3_resources()
             resources = _verify_resources(runtime)
@@ -425,6 +429,7 @@ async def _authenticated_session(origin: str, token: str) -> dict[str, bool]:
             origin=origin,
             max_msg_size=MAX_MESSAGE_BYTES,
         ) as websocket:
+            await websocket.send_json(["resize", {"width": 136, "height": 45}])
             await websocket.send_json(["ping", _PING_PAYLOAD])
             while not (rendered and answered):
                 message = await websocket.receive()
@@ -437,7 +442,25 @@ async def _authenticated_session(origin: str, token: str) -> dict[str, bool]:
                     ]
                 else:
                     raise _SelftestFailure("host-session")
+            await websocket.send_json(["stdin", "?"])
+            await _require_help_rendered(websocket)
     return {"session_rendered": rendered, "session_answered": answered}
+
+
+async def _require_help_rendered(websocket: ClientWebSocketResponse) -> None:
+    import aiohttp
+
+    hint = b"Choose a topic or scroll the manual"
+    tail = b""
+    while True:
+        message = await websocket.receive()
+        if message.type is aiohttp.WSMsgType.BINARY:
+            output = tail + message.data
+            if hint in output:
+                return
+            tail = output[-(len(hint) - 1):]
+        elif message.type is not aiohttp.WSMsgType.TEXT:
+            raise _SelftestFailure("host-help")
 
 
 def _wait_for_child_exit(owner: DesktopSessionOwner) -> bool:

@@ -72,11 +72,10 @@ async def test_long_relay_diagnostics_keep_actions_and_full_values(size, monkeyp
         assert document.max_scroll_y > 0
         document.focus()
         await pilot.press("end")
-        await pilot.pause()
-        assert "final-diagnostic" in _painted(app, document)
+        # Scrolling to the end can take several frames; wait for the painted text.
+        await wait_until(lambda: "final-diagnostic" in _painted(app, document))
         await pilot.click("#btn_relay_close")
-        await pilot.pause()
-        assert app.screen is origin
+        await wait_until(lambda: app.screen is origin)
         app.relay_manager.restart.assert_not_awaited()
         app.relay_manager.stop.assert_not_awaited()
 

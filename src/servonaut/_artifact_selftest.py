@@ -398,6 +398,7 @@ async def _run_tui(runtime: object, config_path: Path) -> dict[str, bool]:
     from servonaut.screens.settings.base import SettingsPanel
     from servonaut.screens.settings import SettingsScreen
     from servonaut.widgets.sidebar import Sidebar
+    from textual.css.query import NoMatches
     from textual.widgets import Button, Input
 
     app = ServonautApp(config_path=config_path, runtime_layout=runtime)
@@ -411,6 +412,16 @@ async def _run_tui(runtime: object, config_path: Path) -> dict[str, bool]:
         if sidebar is None:
             raise _SelftestFailure("tui-sidebar")
         result["sidebar"] = True
+        await pilot.press("?")
+        await pilot.pause()
+        try:
+            app.screen.query_one("#help_content")
+        except NoMatches:
+            raise _SelftestFailure("tui-help") from None
+        await pilot.press("escape")
+        await pilot.pause()
+        if not isinstance(app.screen, InstanceListScreen):
+            raise _SelftestFailure("tui-help")
         from servonaut.widgets.sidebar_section import SidebarSection
 
         tools = sidebar.query_one("#section_tools", SidebarSection)
@@ -466,8 +477,20 @@ def _run_tui_lifecycle(runtime: object, config_path: Path) -> dict[str, bool]:
         asyncio.set_event_loop(None)
 
 
+def probe_textual_widgets() -> None:
+    """Resolve every public widget through Textual's actual lazy import path."""
+    try:
+        from textual import widgets
+
+        for name in widgets.__all__:
+            getattr(widgets, name)
+    except (ImportError, AttributeError):
+        raise _SelftestFailure("textual-widget-import") from None
+
+
 def _run_diagnostics() -> dict[str, bool]:
     _require_metadata()
+    probe_textual_widgets()
     _probe_sdks()
     _probe_crypto()
     _probe_ca_bundle()
