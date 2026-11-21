@@ -49,6 +49,7 @@ from servonaut.runtime import (
     RuntimeLayout,
     detect_runtime,
 )
+from servonaut.updates.desktop_apply import DesktopApplyDecision, StagedDesktopUpdate, authorize_desktop_apply
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 from servonaut.utils.package_version import PackageVersion
 
@@ -361,19 +362,39 @@ class UpdateService:
         self._update_status = f"Could not check for updates: {exc}"
         return None
 
-    def _fetch_manifest(self, url: str) -> bytes:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": f"servonaut/{self._current}",
-            },
-        )
+    def _fetch_manifest(self, url: str, *, uncached: bool = False) -> bytes:
+        headers = {"Accept": "application/json", "User-Agent": f"servonaut/{self._current}"}
+        if uncached:
+            headers["Cache-Control"] = "no-cache, no-store, max-age=0"
+            headers["Pragma"] = "no-cache"
+        request = urllib.request.Request(url, headers=headers)
         deadline = time.monotonic() + self._manifest_deadline_seconds
         with self._opener.open(request, timeout=_MANIFEST_SOCKET_TIMEOUT_SECONDS) as response:
             return b"".join(
                 _read_limited(response, max_bytes=_MAX_MANIFEST_BYTES, deadline=deadline)
             )
+
+    def authorize_staged_desktop_apply(self, staged: StagedDesktopUpdate) -> DesktopApplyDecision:
+        """Check both signed documents before a staged desktop replacement."""
+        if self._runtime.kind is not DistributionKind.PACKAGED_DESKTOP or self._trust_policy is None:
+            return DesktopApplyDecision.DEFERRED
+        try:
+            manifest_url = self._resolve_manifest_url()
+            if manifest_url is None:
+                return DesktopApplyDecision.DEFERRED
+            return authorize_desktop_apply(
+                staged, data_root=self._runtime.data_root,
+                fetch=lambda url: self._fetch_manifest(url, uncached=True),
+                manifest_url=manifest_url, trust=self._trust_policy,
+                channel=ReleaseChannel(self._runtime.release_channel),
+                running_version=self._current, running_revision=self._current_revision,
+                status=self._record_desktop_apply_warning,
+            )
+        except _TRANSFER_ERRORS:
+            return DesktopApplyDecision.DEFERRED
+
+    def _record_desktop_apply_warning(self, message: str) -> None:
+        self._update_status = message
 
     def _select_update(self, manifest: ReleaseManifest) -> Optional[str]:
         """Accept a verified manifest when it is newer and has an artifact for this host."""

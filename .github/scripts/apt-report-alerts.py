@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record APT alert transitions without replacing the incident history."""
+"""Record release alert transitions without replacing the incident history."""
 
 from __future__ import annotations
 
@@ -18,8 +18,16 @@ KINDS = {
     "upstream": "APT admitted package evidence",
     "unqualified": "APT release qualification",
 }
+DESKTOP_KINDS = {
+    "desktop-controls": "Desktop update policy controls",
+    "desktop-publish": "Desktop update policy publication",
+    "desktop-audit": "Desktop update policy audit",
+    "desktop-stale": "Desktop update policy is near expiry",
+
+}
 BOT = "github-actions[bot]"
 ALERT_LABEL = "apt-archive-alert"
+DESKTOP_ALERT_LABEL = "desktop-update-alert"
 
 
 @dataclass(frozen=True)
@@ -31,7 +39,8 @@ class IssueState:
 
 
 def marker(kind: str, active: bool) -> str:
-    return f"<!-- apt-archive:{kind}:{'active' if active else 'clear'} -->"
+    family = "desktop-policy" if kind.startswith("desktop-") else "apt-archive"
+    return f"<!-- {family}:{kind}:{'active' if active else 'clear'} -->"
 
 
 def decision(
@@ -64,11 +73,32 @@ def observed(env: dict[str, str]) -> dict[str, bool]:
     return result
 
 
+def observed_desktop(env: dict[str, str]) -> dict[str, bool]:
+    result = {}
+    publish = env.get("DESKTOP_PUBLISH_RESULT")
+    audit = env.get("DESKTOP_AUDIT_RESULT")
+    controls = env.get("DESKTOP_CONTROLS_UNAVAILABLE") == "true" or env.get("DESKTOP_CHECKPOINT_INVALID") == "true"
+    stale = env.get("DESKTOP_POLICY_STALE")
+    if publish in ("success", "failure"):
+        result["desktop-publish"] = publish == "failure"
+    if controls or publish == "success":
+        result["desktop-controls"] = controls
+    if audit in ("success", "failure"):
+        result["desktop-audit"] = audit == "failure"
+    if stale in ("true", "false"):
+        result["desktop-stale"] = stale == "true"
+    return result
+
+
 class GitHub:
-    def __init__(self, repo: str, timeout: float, reminder_interval: timedelta) -> None:
+    def __init__(
+        self, repo: str, timeout: float, reminder_interval: timedelta, *, label: str = ALERT_LABEL,
+    ) -> None:
         self.repo = repo
         self.timeout = timeout
         self.reminder_interval = reminder_interval
+        self.label = label
+        self.kinds = DESKTOP_KINDS if label == DESKTOP_ALERT_LABEL else KINDS
 
     def run(self, *args: str) -> str:
         return subprocess.run(
@@ -80,12 +110,12 @@ class GitHub:
         # alerts whose last reported condition still controls deduplication.
         pages = json.loads(self.run(
             "api", "--paginate", "--slurp",
-            f"repos/{self.repo}/issues?state=all&labels={ALERT_LABEL}&per_page=100",
+            f"repos/{self.repo}/issues?state=all&labels={self.label}&per_page=100",
         ))
         return [issue for page in pages for issue in page if "pull_request" not in issue]
 
     def state(self, kind: str, candidates: list[dict]) -> IssueState | None:
-        title = KINDS[kind]
+        title = self.kinds[kind]
         opening = marker(kind, True)
         eligible = [
             issue for issue in candidates if issue["title"] == title
@@ -122,30 +152,42 @@ class GitHub:
         action = decision(previous, active, now, self.reminder_interval)
         if not action:
             return
-        with tempfile.TemporaryDirectory(prefix="apt-alert-") as directory:
+        with tempfile.TemporaryDirectory(prefix="release-alert-") as directory:
             path = Path(directory) / "body.md"
             state = "Condition active" if active else "Condition cleared"
             path.write_text(f"{marker(kind, active)}\n{state}.\n\nRun: {run_url}\n", encoding="utf-8")
             if action == "create":
-                self.run(
-                    "label", "create", ALERT_LABEL, "--repo", self.repo, "--force",
-                    "--description", "Automated APT archive alerts", "--color", "d93f0b",
+                description = (
+                    "Automated desktop update policy alerts" if self.label == DESKTOP_ALERT_LABEL
+                    else "Automated APT archive alerts"
                 )
                 self.run(
-                    "issue", "create", "--repo", self.repo, "--title", KINDS[kind],
-                    "--label", ALERT_LABEL, "--body-file", str(path),
+                    "label", "create", self.label, "--repo", self.repo, "--force",
+                    "--description", description, "--color", "d93f0b",
+                )
+                self.run(
+                    "issue", "create", "--repo", self.repo, "--title", self.kinds[kind],
+                    "--label", self.label, "--body-file", str(path),
                 )
             elif previous is not None:
                 self.run("issue", "comment", str(previous.number), "--repo", self.repo, "--body-file", str(path))
 
 
 def main() -> int:
-    hours = int(os.environ["APT_ALERT_REMINDER_HOURS"])
-    if hours <= 0:
-        raise ValueError("APT alert reminder interval must be positive.")
-    github = GitHub(os.environ["GH_REPO"], float(os.environ["APT_TIMEOUT"]), timedelta(hours=hours))
+    desktop = os.environ.get("RELEASE_ALERT_PROFILE") == "desktop"
+    if desktop:
+        hours = int(os.environ.get("DESKTOP_ALERT_REMINDER_HOURS") or "24")
+        if hours <= 0:
+            raise ValueError("Desktop alert reminder interval must be positive.")
+        observations = observed_desktop(dict(os.environ))
+    else:
+        hours = int(os.environ["APT_ALERT_REMINDER_HOURS"])
+        if hours <= 0:
+            raise ValueError("APT alert reminder interval must be positive.")
+        observations = observed(dict(os.environ))
+    options = {"label": DESKTOP_ALERT_LABEL} if desktop else {}
+    github = GitHub(os.environ["GH_REPO"], float(os.environ["APT_TIMEOUT"]), timedelta(hours=hours), **options)
     now = datetime.now(timezone.utc)
-    observations = observed(dict(os.environ))
     if observations:
         issues = github.issues()
         for kind, active in observations.items():
