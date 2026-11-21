@@ -297,6 +297,10 @@ VaultScreen.-identity-pending #vault_workspace {
     min-height: 0;
 }
 
+VaultScreen.-update-required #vault_workspace {
+    display: none;
+}
+
 VaultScreen.-identity-pending #vault_action_scroll {
     width: 100%;
     height: auto;

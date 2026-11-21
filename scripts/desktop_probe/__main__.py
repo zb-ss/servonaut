@@ -14,6 +14,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future
 from importlib.metadata import version
 
@@ -24,7 +25,8 @@ from .host import ProbeHost
 class HostThread:
     """Own the asyncio server independently of the native GUI's main thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_root_request: Callable[[], None] | None = None) -> None:
+        self._on_root_request = on_root_request
         self.ready: Future[ProbeHost] = Future()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.error: BaseException | None = None
@@ -40,7 +42,7 @@ class HostThread:
 
     async def _serve(self) -> None:
         self.loop = asyncio.get_running_loop()
-        host = ProbeHost()
+        host = ProbeHost(on_root_request=self._on_root_request)
         try:
             await host.start()
             self.ready.set_result(host)
@@ -88,14 +90,17 @@ def main() -> None:
     args = parser.parse_args()
     import webview
 
+    stage_lock = threading.Lock()
+
     def stage(name: str) -> None:
         if args.smoke:
-            print(json.dumps({"native_stage": name}), flush=True)
+            with stage_lock:
+                print(json.dumps({"native_stage": name}), flush=True)
 
     config = load_config()
     rendered = threading.Event()
 
-    runtime = HostThread()
+    runtime = HostThread(on_root_request=lambda: stage("root-requested"))
     runtime.thread.start()
     host = runtime.ready.result(config.startup_seconds)
     stage("host-ready")
@@ -132,6 +137,8 @@ def main() -> None:
             rendered.wait(config.probe_poll_seconds)
         window.destroy()
 
+    window.events.shown += lambda: stage("window-shown")
+    window.events.before_load += lambda: stage("before-load")
     window.events.loaded += loaded
     window.events.closed += runtime.stop
     threading.Thread(target=watch_child, daemon=True).start()

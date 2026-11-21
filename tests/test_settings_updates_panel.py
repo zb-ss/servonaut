@@ -43,10 +43,11 @@ from servonaut.services.client_identity import (
 )
 from servonaut.services.update_service import UpdateCheckResult
 from servonaut.services.version_policy import DEFAULT_UPDATE_URL, VersionPolicy
+from servonaut.updates import layout as updates_layout
 from servonaut.updates import status as updates_status
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.link_button import LinkButton
-from tests._async_bounds import wait_until
+from tests._async_bounds import wait_for_click_target, wait_until
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +205,18 @@ async def _wait_updates_panel(app: _UpdatesHost, pilot: Any) -> UpdatesPanel:
     return panel
 
 
+async def _click(app: _UpdatesHost, pilot: Any, selector: str) -> None:
+    """Wait until a control has laid out and is hittable before clicking it."""
+    target = await wait_for_click_target(app, selector)
+    assert await pilot.click(target)
+
+
+def _disable_pipx_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub pipx detection on both modules using the real 1-arg signature."""
+    monkeypatch.setattr(updates_status, "locate_install", lambda _prefix=None: None)
+    monkeypatch.setattr(updates_layout, "locate_install", lambda _prefix=None: None)
+
+
 # ---------------------------------------------------------------------------
 # Pure helper tests
 # ---------------------------------------------------------------------------
@@ -351,8 +364,10 @@ async def test_state_2_ready_old_sessions_release_notes_and_one_shot_postpone(
         notes_link = panel.query_one("#updates_link_release_notes", LinkButton)
         assert notes_link.display is True
         assert "What's new in 2.35.0" in str(notes_link.label)
-        assert await pilot.click("#updates_link_release_notes")
-        await pilot.pause()
+        await _click(app, pilot, "#updates_link_release_notes")
+        await wait_until(
+            lambda: app.opened_urls == ["https://github.com/zb-ss/servonaut/releases/tag/v2.35.0"]
+        )
         assert app.opened_urls == ["https://github.com/zb-ss/servonaut/releases/tag/v2.35.0"]
 
         # Real 1-arg mark_update_presented called once and persisted presented_at.
@@ -364,7 +379,7 @@ async def test_state_2_ready_old_sessions_release_notes_and_one_shot_postpone(
 
         postpone_btn = panel.query_one("#updates_btn_postpone", Button)
         assert postpone_btn.display is True
-        assert await pilot.click("#updates_btn_postpone")
+        await _click(app, pilot, "#updates_btn_postpone")
         await wait_until(lambda: not panel._busy and not postpone_btn.display)
 
         # Persisted in real state.json, button gone, postponed copy shown.
@@ -437,15 +452,15 @@ async def test_state_3_rolled_back_details_escaped_and_try_now(
             assert details_link.display is True
             assert details_box.display is False
 
-            assert await pilot.click("#updates_link_details")
-            await pilot.pause()
+            await _click(app, pilot, "#updates_link_details")
+            await wait_until(lambda: details_box.display is True)
             assert details_box.display is True
             rendered_details = str(details_box.render())
             assert "[bold red]bad-tag[/bold red]" in rendered_details
             assert "\x1b" not in rendered_details
             assert "Hide details" in str(details_link.label)
 
-            assert await pilot.click("#updates_btn_try")
+            await _click(app, pilot, "#updates_btn_try")
             await wait_until(lambda: run_upgrade.await_count == 1 and not panel._busy)
             assert any("Updated v2.34.0" in msg for msg, _ in app.notifications)
     assert guard.findings == []
@@ -485,7 +500,7 @@ async def test_state_4_server_minimum_shows_required_copy_and_update_now(
         assert "servonaut.dev needs 2.35.0 or later for team, vault and AI features." == primary
         assert "Local features keep working.  Update: pipx upgrade servonaut" == secondary
         assert panel.query_one("#updates_btn_update", Button).display is True
-        assert await pilot.click("#updates_btn_update")
+        await _click(app, pilot, "#updates_btn_update")
         await wait_until(lambda: run_upgrade.await_count == 1 and not panel._busy)
 
 
@@ -536,7 +551,7 @@ async def test_state_5_managed_elsewhere_variants(
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    _disable_pipx_install(monkeypatch)
     monkeypatch.setattr(updates_mod.sys, "platform", platform_name)
     monkeypatch.setattr(
         updates_mod, "is_apt_managed_install", lambda **_kw: apt_managed,
@@ -561,7 +576,7 @@ async def test_state_5_macos_desktop_shows_download_and_install_link(
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    _disable_pipx_install(monkeypatch)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     service = SimpleNamespace(
@@ -579,14 +594,14 @@ async def test_state_5_macos_desktop_shows_download_and_install_link(
         assert "macOS app" in str(panel.query_one("#updates_installed_value", Static).render())
         assert panel.query_one("#updates_btn_check", Button).display is True
 
-        assert await pilot.click("#updates_btn_check")
+        await _click(app, pilot, "#updates_btn_check")
         await wait_until(lambda: not panel._busy and panel._discovered_version == "2.35.0")
 
         assert "2.35.0 is available" in str(panel.query_one("#updates_status_primary", Static).render())
         download_link = panel.query_one("#updates_link_download", LinkButton)
         assert download_link.display is True
-        assert await pilot.click("#updates_link_download")
-        await pilot.pause()
+        await _click(app, pilot, "#updates_link_download")
+        await wait_until(lambda: app.opened_urls == [DEFAULT_UPDATE_URL])
         assert app.opened_urls == [DEFAULT_UPDATE_URL]
 
 
@@ -610,7 +625,7 @@ async def test_channel_radio_dirty_discard_and_save_persists_to_preferences(
         assert not panel.has_unsaved_changes()
 
         # Select Release candidates -> dirty.
-        assert await pilot.click("#updates_channel_rc")
+        await _click(app, pilot, "#updates_channel_rc")
         await wait_until(lambda: panel.has_unsaved_changes())
         assert "unsaved" in str(panel.query_one("#dirty_updates", Static).render())
 
@@ -620,9 +635,9 @@ async def test_channel_radio_dirty_discard_and_save_persists_to_preferences(
         assert panel.current_values() == {"channel": "stable"}
 
         # Select Release candidates again and Save through the dock.
-        assert await pilot.click("#updates_channel_rc")
+        await _click(app, pilot, "#updates_channel_rc")
         await wait_until(lambda: panel.has_unsaved_changes())
-        assert await pilot.click("#save_updates")
+        await _click(app, pilot, "#save_updates")
         await wait_until(lambda: not panel.has_unsaved_changes())
 
         prefs = json.loads((directory / "preferences.json").read_text(encoding="utf-8"))
@@ -647,7 +662,7 @@ async def test_switching_rc_to_stable_on_prerelease_shows_no_downgrade_note(
         note = panel.query_one("#updates_channel_note", Static)
         assert note.display is False
 
-        assert await pilot.click("#updates_channel_stable")
+        await _click(app, pilot, "#updates_channel_stable")
         await wait_until(lambda: note.display)
         assert "no downgrade" in str(note.render()).lower()
 
@@ -670,7 +685,7 @@ async def test_check_now_shows_busy_indicator_and_updates_on_completion(
     def slow_queue_check(store: Any, installed_version: str) -> str:
         queued.append((store.root, installed_version))
         started.set()
-        release.wait(timeout=5.0)
+        release.wait(timeout=10.0)
         with store.gate():
             store.write("state.json", {"status": "up_to_date", "checked_at": time.time()})
         return "queued"
@@ -692,24 +707,27 @@ async def test_check_now_shows_busy_indicator_and_updates_on_completion(
     )
     app = _UpdatesHost(tmp_path, update_service=service, policy_client=policy_client)
     async with app.run_test(size=(160, 50)) as pilot:
-        panel = await _wait_updates_panel(app, pilot)
-        busy = panel.query_one("#updates_busy", BusyIndicator)
-        check_btn = panel.query_one("#updates_btn_check", Button)
-        assert not busy.is_active
+        try:
+            panel = await _wait_updates_panel(app, pilot)
+            busy = panel.query_one("#updates_busy", BusyIndicator)
+            check_btn = panel.query_one("#updates_btn_check", Button)
+            assert not busy.is_active
 
-        assert await pilot.click("#updates_btn_check")
-        await wait_until(lambda: started.is_set() and busy.is_active)
-        assert busy.has_class("-active")
-        assert check_btn.disabled is True
+            await _click(app, pilot, "#updates_btn_check")
+            await wait_until(lambda: started.is_set() and busy.is_active)
+            assert busy.has_class("-active")
+            assert check_btn.disabled is True
 
-        release.set()
-        await wait_until(lambda: not busy.is_active and not panel._busy)
-        assert check_btn.disabled is False
-        assert "checked just now" in str(panel.query_one("#updates_status_primary", Static).render())
-        assert queued == [(pipx_env.resolve(), "2.34.0")]
-        legacy_check.assert_not_called()
-        policy_client.fetch.assert_awaited_once_with(force_refresh=True)
-        assert app.notifications == []
+            release.set()
+            await wait_until(lambda: not busy.is_active and not panel._busy)
+            assert check_btn.disabled is False
+            assert "checked just now" in str(panel.query_one("#updates_status_primary", Static).render())
+            assert queued == [(pipx_env.resolve(), "2.34.0")]
+            legacy_check.assert_not_called()
+            policy_client.fetch.assert_awaited_once_with(force_refresh=True)
+            assert app.notifications == []
+        finally:
+            release.set()
 
 
 @pytest.mark.asyncio
@@ -734,7 +752,7 @@ async def test_check_now_non_queued_outcomes_show_markup_safe_toast(
     app = _UpdatesHost(tmp_path)
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
-        assert await pilot.click("#updates_btn_check")
+        await _click(app, pilot, "#updates_btn_check")
         await wait_until(lambda: not panel._busy and len(app.notifications) == 1)
 
         msg, kwargs = app.notifications[-1]
@@ -753,13 +771,13 @@ async def test_check_now_skipped_outcome_shows_markup_safe_toast(
     import servonaut.screens.settings.panels.updates as updates_mod
 
     monkeypatch.setenv("SERVONAUT_SKIP_AUTO_APPLY", "1")
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    _disable_pipx_install(monkeypatch)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     app = _UpdatesHost(tmp_path, runtime=runtime)
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
-        assert await pilot.click("#updates_btn_check")
+        await _click(app, pilot, "#updates_btn_check")
         await wait_until(lambda: not panel._busy and len(app.notifications) == 1)
 
         msg, kwargs = app.notifications[-1]
@@ -816,7 +834,7 @@ async def test_generation_install_try_now_routes_via_app_and_never_calls_legacy_
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
         assert panel.query_one("#updates_btn_try", Button).display is True
-        assert await pilot.click("#updates_btn_try")
+        await _click(app, pilot, "#updates_btn_try")
         await wait_until(lambda: len(invoked) == 1 and not panel._busy)
 
         expected_launcher = str(console_for(anchor.resolve()))
@@ -864,7 +882,7 @@ async def test_generation_install_update_now_routes_via_app_and_never_calls_lega
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
         assert panel.query_one("#updates_btn_update", Button).display is True
-        assert await pilot.click("#updates_btn_update")
+        await _click(app, pilot, "#updates_btn_update")
         await wait_until(lambda: len(invoked) == 1 and not panel._busy)
 
         expected_launcher = str(console_for(anchor.resolve()))
@@ -905,7 +923,7 @@ async def test_generation_install_check_now_queues_check_and_re_reads_status(
     app = _UpdatesHost(tmp_path, update_service=service)
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
-        assert await pilot.click("#updates_btn_check")
+        await _click(app, pilot, "#updates_btn_check")
         await wait_until(
             lambda: not panel._busy
             and "2.35.0 is ready" in str(panel.query_one("#updates_status_primary", Static).render())
@@ -920,7 +938,7 @@ async def test_frozen_desktop_keeps_direct_service_download_path(
 ) -> None:
     import servonaut.screens.settings.panels.updates as updates_mod
 
-    monkeypatch.setattr(updates_status, "locate_install", lambda: None)
+    _disable_pipx_install(monkeypatch)
     monkeypatch.setattr(updates_mod.sys, "platform", "darwin")
     runtime = _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version="2.34.0")
     frozen_upgrade = AsyncMock(return_value=(True, "Downloaded verified installer."))
@@ -938,9 +956,9 @@ async def test_frozen_desktop_keeps_direct_service_download_path(
     monkeypatch.setattr(app, "run_requested_upgrade", app_runner)
     async with app.run_test(size=(160, 50)) as pilot:
         panel = await _wait_updates_panel(app, pilot)
-        assert await pilot.click("#updates_btn_check")
+        await _click(app, pilot, "#updates_btn_check")
         await wait_until(lambda: not panel._busy and panel._discovered_version == "2.35.0")
-        assert await pilot.click("#updates_link_download")
+        await _click(app, pilot, "#updates_link_download")
         await wait_until(lambda: frozen_upgrade.await_count == 1 and not panel._busy)
         app_runner.assert_not_awaited()
         assert any("Downloaded verified installer." in msg for msg, _ in app.notifications)
@@ -978,6 +996,7 @@ async def test_layout_wide_side_by_side_and_narrow_stacked_with_no_clipping(
     narrow_app = _UpdatesHost(tmp_path)
     async with narrow_app.run_test(size=(100, 30)) as pilot:
         panel = await _wait_updates_panel(narrow_app, pilot)
+        await wait_until(lambda: panel.has_class("-narrow") and not narrow_app.screen._layout_required)
         assert panel.has_class("-narrow")
         installed_row = panel.query_one("#updates_installed_row")
         installed_label = installed_row.query_one(".updates-label")

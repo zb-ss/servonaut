@@ -25,6 +25,22 @@ from servonaut.services import ssh_host_keys
 from servonaut.services import team_policy, team_policy_keys  # noqa: E402
 
 
+@pytest.fixture(params=["empty", "html", "websocket", "other-code"])
+def proxy_426(request):
+    """Parse a 426 whose response has no Servonaut version-floor signal."""
+    import httpx
+
+    from servonaut.services.api_client import APIClient
+
+    fields = {
+        "empty": {},
+        "html": {"headers": {"Content-Type": "text/html"}, "text": "<html>Proxy error</html>"},
+        "websocket": {"headers": {"Upgrade": "websocket"}},
+        "other-code": {"json": {"error": {"code": "forbidden", "message": "Request refused"}}},
+    }[request.param]
+    return APIClient(None)._parse_error(httpx.Response(426, **fields))
+
+
 @pytest.fixture(scope="session")
 def _session_known_hosts(tmp_path_factory: pytest.TempPathFactory):
     return tmp_path_factory.mktemp("servonaut-data") / ssh_host_keys.KNOWN_HOSTS_FILENAME

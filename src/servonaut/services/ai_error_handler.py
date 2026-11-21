@@ -437,7 +437,7 @@ def map_error_to_action(
             details={"reason": str(err) if err else "heartbeat watchdog"},
         )
 
-    if isinstance(err, ClientUpdateRequiredError) or getattr(err, "status", None) == 426:
+    if isinstance(err, ClientUpdateRequiredError):
         return _map_client_update_required(err)
 
     code = _code_of(err)

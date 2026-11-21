@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("mcp")
 
 from servonaut.mcp.server import _dispatch_tool
+from servonaut.services.api_client import ClientUpdateRequiredError
 
 
 def _run(coro):
@@ -35,6 +36,19 @@ class TestDispatchHardening:
         assert len(out) == 1
         assert out[0].text.startswith("tool 'whoami' failed:")
         assert "backend unreachable" in out[0].text
+
+    def test_wrapped_native_credential_update_uses_mcp_instructions(self):
+        async def failed_lease():
+            try:
+                raise ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
+            except ClientUpdateRequiredError as error:
+                raise RuntimeError("native credential unavailable") from error
+
+        tools = SimpleNamespace(get_server_info=failed_lease)
+        out = _run(_dispatch_tool(tools, "get_server_info", {}))
+        assert "Update to 99.0.0" in out[0].text
+        assert "Reconnect the MCP server after updating" in out[0].text
+        assert "native credential unavailable" not in out[0].text
 
     def test_error_text_is_bounded(self):
         tools = SimpleNamespace(whoami=AsyncMock(side_effect=RuntimeError("x" * 5000)))

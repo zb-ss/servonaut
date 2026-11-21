@@ -423,6 +423,8 @@ class Sidebar(Widget):
         # Vault discovery usually answers after this sidebar is up, so follow
         # the app's flag instead of reading it once.
         self.watch(self.app, "vault_available", self._show_vault_navigation)
+        if hasattr(self.app, "vault_update_required"):
+            self.watch(self.app, "vault_update_required", self._show_vault_navigation)
         if not auth or not auth.has_feature("team_workspaces"):
             self._hide_button("nav_teams")
 
@@ -463,10 +465,14 @@ class Sidebar(Widget):
         except NoMatches:
             pass
 
-    def _show_vault_navigation(self, available: object) -> None:
+    def _show_vault_navigation(self, _changed: object) -> None:
+        available = bool(getattr(self.app, "vault_available", False))
+        update_required = bool(getattr(self.app, "vault_update_required", False))
         for button_id in ("nav_vault", "nav_ca"):
             try:
-                self.query_one(f"#{button_id}", Button).display = bool(available)
+                self.query_one(f"#{button_id}", Button).display = available or (
+                    button_id == "nav_vault" and update_required
+                )
             except NoMatches:
                 pass
         self.call_after_refresh(self._sync_navigation_focusable)
