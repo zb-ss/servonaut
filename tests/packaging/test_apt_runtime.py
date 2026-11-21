@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import select
@@ -8,7 +9,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -222,6 +224,84 @@ def test_restart_argument_allowlist_keeps_only_interactive_session_options(tmp_p
         restore_backup=1, update=True, mcp_install="claude",
     )
     assert _restart_tui_arguments(args) == ["--config", str(tmp_path / "fixture.json"), "--demo", "--debug"]
+
+
+def test_tui_restart_call_site_drops_already_consumed_arguments(tmp_path, monkeypatch):
+    from servonaut import app as application, main, runtime
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "servonaut", "--demo", "--debug", "--config=fixture.json",
+        "--ai-provider", "ollama", "--no-tools",
+    ])
+    monkeypatch.setenv("SERVONAUT_AI_PROVIDER", "fixture")
+    monkeypatch.setenv("SERVONAUT_AI_NO_TOOLS", "1")
+    monkeypatch.setattr(main, "_setup_logging", Mock())
+    layout = SimpleNamespace(executable=tmp_path / "servonaut")
+    monkeypatch.setattr(runtime, "detect_runtime", lambda: layout)
+    app = Mock(return_code=apt.APT_RESTART_EXIT_CODE)
+    monkeypatch.setattr(application, "ServonautApp", Mock(return_value=app))
+    restart = Mock()
+    monkeypatch.setattr(apt, "exec_apt_restart", restart)
+
+    main._main()
+
+    app.run.assert_called_once()
+    restart.assert_called_once_with(
+        layout.executable, ["--config", str(tmp_path / "fixture.json"), "--demo", "--debug"],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+async def test_update_notice_waits_for_completed_apt_source_evidence(managed, monkeypatch):
+    from servonaut.app import ServonautApp
+    from servonaut.updates import apt as detection
+
+    tasks = []
+    app = SimpleNamespace(
+        runtime_layout=SimpleNamespace(product_version="2.34.0"),
+        apt_upgrade_state=None, _apt_notices=set(), _apt_notices_pending=set(),
+        run_worker=lambda job, **_kwargs: tasks.append(asyncio.create_task(job)),
+        notify=Mock(),
+    )
+    app._show_apt_upgrade = MethodType(ServonautApp._show_apt_upgrade, app)
+    app._notify_apt_upgrade = MethodType(ServonautApp._notify_apt_upgrade, app)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    uncached = True
+
+    async def probe(function, runtime):
+        assert function is detection.refresh_apt_status
+        assert runtime is app.runtime_layout
+        entered.set()
+        await asyncio.wait_for(release.wait(), 3)
+        return detection.AptInstallStatus(managed=managed and not uncached, checked=not uncached)
+
+    monkeypatch.setattr(asyncio, "to_thread", probe)
+    installed = apt.AptBuildIdentity("99.0.0", "fixture", 1, (1, 2))
+    state = apt.AptUpgradeState(apt.AptChange.RESTART_REQUIRED, installed)
+    try:
+        app._show_apt_upgrade(state)
+        await asyncio.wait_for(entered.wait(), 3)
+        assert app.apt_upgrade_state == state
+        app.notify.assert_not_called()
+        app._show_apt_upgrade(state)
+        assert len(tasks) == 1
+    finally:
+        release.set()
+    await asyncio.wait_for(tasks[0], 3)
+    app.notify.assert_not_called()
+    assert installed not in app._apt_notices
+
+    uncached = False
+    app._show_apt_upgrade(state)
+    await asyncio.wait_for(tasks[1], 3)
+    app.notify.assert_called_once()
+    expected = "Servonaut was updated by apt." if managed else "Servonaut was updated."
+    assert app.notify.call_args.args[0].startswith(expected)
+    app._show_apt_upgrade(state)
+    assert len(tasks) == 2
 
 
 @pytest.mark.parametrize(("setting", "expected_wait"), [("", 0.5), ("0.2", 0.2), ("inf", 0.5)])

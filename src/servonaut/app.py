@@ -314,6 +314,7 @@ class ServonautApp(App):
         self._apt_checking = False
         self._apt_restart_pending = False
         self._apt_notices: set[AptBuildIdentity] = set()
+        self._apt_notices_pending: set[AptBuildIdentity] = set()
         self.client_kind = client_kind
         from servonaut.services.client_identity import configure_client_identity
         configure_client_identity(
@@ -3335,20 +3336,34 @@ class ServonautApp(App):
         self.apt_upgrade_state = state
         if state is None:
             return
-        if state.restart_version and state.installed not in self._apt_notices:
-            from servonaut.services.apt_runtime import package_update_notice
-            from servonaut.services.client_identity import is_apt_managed_install
+        installed = state.installed
+        if state.restart_version and installed is not None:
+            if installed not in self._apt_notices and installed not in self._apt_notices_pending:
+                self._apt_notices_pending.add(installed)
+                self.run_worker(self._notify_apt_upgrade(installed), group="apt_upgrade_notice", exit_on_error=False)
+        elif state.change is AptChange.REMOVED and (old is None or old.change is not AptChange.REMOVED):
+            self.notify("The Servonaut package was removed.", severity="warning", markup=False)
 
-            self._apt_notices.add(state.installed)
+    async def _notify_apt_upgrade(self, installed: AptBuildIdentity) -> None:
+        from servonaut.services.apt_runtime import package_update_notice
+        from servonaut.updates.apt import refresh_apt_status
+
+        try:
+            # Join an in-flight warm-up and recheck the installation off the UI
+            # thread. An inconclusive probe leaves the notice eligible to retry.
+            source = await asyncio.to_thread(refresh_apt_status, self.runtime_layout)
+            state = self.apt_upgrade_state
+            if not source.checked or state is None or not state.restart_version or state.installed != installed:
+                return
+            self._apt_notices.add(installed)
             self.notify(
                 package_update_notice(
-                    self.runtime_layout.product_version, state.restart_version,
-                    managed_by_apt=is_apt_managed_install(runtime=self.runtime_layout),
+                    self.runtime_layout.product_version, installed.product_version, managed_by_apt=source.managed,
                 ),
                 severity="information", markup=False,
             )
-        elif state.change is AptChange.REMOVED and (old is None or old.change is not AptChange.REMOVED):
-            self.notify("The Servonaut package was removed.", severity="warning", markup=False)
+        finally:
+            self._apt_notices_pending.discard(installed)
 
     def request_apt_restart(self) -> None:
         """Ask before ending this window and start a fresh package generation."""
