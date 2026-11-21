@@ -554,6 +554,39 @@ def cli(journey: Journey, servonaut_cmd: list[str]) -> Callable[..., Any]:
 
 
 @pytest.fixture
+def version_gate_vault(journey, fake_cloud, account_home, cli, servonaut_cmd):
+    """A signed-in child home with durable Vault custody and a bound SSH key."""
+    from e2e.journeys.vault.test_cli_vault import (
+        _assert_only_getpass_tty_access,
+        _configure_test_custody,
+        _json,
+        _setup_with_recovery_confirmation,
+    )
+    from e2e.journeys.vault.test_custom_personal_binding import SERVER
+    from e2e.journeys.vault.test_vault_key_names import _ed25519_key_pair, _host_key
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    fake_cloud.configure(plan="teams")
+    _configure_test_custody(journey)
+    home = account_home("gate-vault", custom_servers=[SERVER], heartbeat_interval=1)
+    setup, _ = _setup_with_recovery_confirmation(journey, home, servonaut_cmd)
+    assert setup.returncode == 0, setup.text
+    _assert_only_getpass_tty_access(journey)
+
+    vault_id = _json(cli(home, "vault", "create", "--name", "Fixture vault", "--json"))["vault_id"]
+    key_path = home.home / "fixture_ed25519"
+    key_path.write_text(_ed25519_key_pair()[0], encoding="utf-8")
+    key_path.chmod(0o600)
+    item_id = _json(cli(home, "vault", "import", "ssh", "--vault", vault_id, "--path", str(key_path), "--json"))["item_id"]
+    _json(cli(
+        home, "vault", "bind-personal", "--vault", vault_id, "--item", item_id,
+        "--provider", "custom", "--instance-id", SERVER.name, "--hostname", SERVER.host,
+        "--port", str(SERVER.port), "--login", SERVER.username, "--host-key", _host_key(), "--yes", "--json",
+    ))
+    return home, SERVER.name, f"/api/v1/me/instances/custom/{custom_binding_id(SERVER.name)}/credential-binding"
+
+
+@pytest.fixture
 def mcp(journey: Journey, servonaut_cmd: list[str]) -> Callable[..., Any]:
     """Factory: ``async with mcp(sandbox) as session:`` runs ``servonaut --mcp``."""
     from e2e.harness.processes import mcp_session

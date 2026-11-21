@@ -19,6 +19,7 @@ from servonaut.services.client_identity import (
     client_request_headers,
     format_update_required_message,
     parse_upgrade_header,
+    response_is_update_required,
 )
 from servonaut.services.version_policy import normalize_public_version, safe_update_url
 from servonaut.utils.endpoints import (
@@ -239,6 +240,18 @@ class ClientUpdateRequiredError(APIError):
         return _sanitize_update_hints((self.details or {}).get("update_hints"))
 
 
+def find_client_update_required(error: BaseException) -> Optional[ClientUpdateRequiredError]:
+    """Find the typed refusal through intentional exception wrappers."""
+    current: Optional[BaseException] = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ClientUpdateRequiredError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__
+    return None
+
+
 class EndpointConfigError(APIError, EndpointOverrideError):
     """``SERVONAUT_API_URL`` holds a URL the client refuses to use.
 
@@ -285,7 +298,6 @@ _CODE_TO_EXC: Dict[str, Type[APIError]] = {
     "payment_required": PaymentRequiredError,
     "forbidden": ForbiddenError,
     "device_signature_expired": DeviceSignatureExpiredError,
-    "client_update_required": ClientUpdateRequiredError,
 }
 
 
@@ -386,32 +398,17 @@ class APIClient(APIClientInterface):
                 message = f"HTTP {status} — service returned an error page"
             else:
                 message = text[:200] or f"HTTP {status}"
-            if status == 426:
-                return ClientUpdateRequiredError(
-                    code="client_update_required",
-                    message=message,
-                    status=426,
-                    response_headers=headers_dict,
-                )
-            return APIError(
-                code="unknown",
-                message=message,
-                status=status,
-                response_headers=headers_dict,
-            )
+            code, details = "unknown", None
 
-        exc_class = (
-            ClientUpdateRequiredError
-            if status == 426
-            else _CODE_TO_EXC.get(code, APIError)
-        )
-        effective_code = (
-            "client_update_required"
-            if exc_class is ClientUpdateRequiredError and code == "unknown"
-            else code
-        )
+        if (status == 426 or code == "client_update_required") and response_is_update_required(response):
+            exc_class = ClientUpdateRequiredError
+            code = "client_update_required"
+        elif status == 426:
+            exc_class = APIError
+        else:
+            exc_class = _CODE_TO_EXC.get(code, APIError)
         return exc_class(
-            code=effective_code,
+            code=code,
             message=message,
             status=status,
             details=details,

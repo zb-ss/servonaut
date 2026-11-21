@@ -5,7 +5,7 @@ import asyncio
 import logging
 from html import unescape
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from textual.app import App, ComposeResult
@@ -21,7 +21,7 @@ from servonaut.screens.vault import (
     VaultScreen,
     show_pending_device,
 )
-from servonaut.services.api_client import APIError, FeatureDisabledError
+from servonaut.services.api_client import APIError, ClientUpdateRequiredError, FeatureDisabledError
 from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.action_button import ActionButton
@@ -90,6 +90,63 @@ class _StyledVaultHost(_VaultHost):
     """Load product styles so compact-layout geometry is tested as users see it."""
 
     CSS_PATH = CSS_FILES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["status", "list_vaults"])
+async def test_proxy_426_keeps_ordinary_vault_screen_error(proxy_426, endpoint) -> None:
+    service = _VaultStatusService(remote_identity={}, local_identity="local")
+    setattr(service, endpoint, AsyncMock(side_effect=proxy_426))
+    app = _VaultHost(service)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await wait_until(lambda: "HTTP 426" in screen._status_raw)
+        assert screen._identity_state == "unverified"
+        assert screen._status_raw.startswith("Could not ")
+        assert "Update Servonaut" not in screen._status_raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["status", "list_vaults"])
+async def test_vault_version_refusal_explains_why_keyboard_actions_are_disabled(endpoint) -> None:
+    service = _VaultStatusService(remote_identity={}, local_identity="local")
+    setattr(service, endpoint, AsyncMock(side_effect=ClientUpdateRequiredError(
+        details={"minimum_version": "99.0.0"},
+    )))
+    app = _StyledVaultHost(service)
+    app.notify = Mock()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await wait_until(lambda: screen._identity_state == "update_required" and not screen._busy_work)
+        assert "Update to 99.0.0" in screen._status_raw
+        assert screen.has_class("-update-required")
+        assert not screen.query_one("#vault_workspace").display
+        await pilot.press("d", "i", "g", "e", "v")
+        assert [call.args[0] for call in app.notify.call_args_list] == [
+            "Update Servonaut to use this Vault action.",
+        ] * 5
+
+
+@pytest.mark.asyncio
+async def test_vault_status_expands_when_visible_status_becomes_multiline() -> None:
+    app = _StyledVaultHost(_VaultStatusService(remote_identity=None))
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: screen._identity_state == "first_user" and not screen._busy_work)
+        status = screen.query_one("#vault_status", Static)
+        screen._status("Checking Vault…")
+        await pilot.pause()
+        short_height = status.region.height
+
+        screen._status("Update Servonaut to regain access to the Vault. " * 3 + "Last instruction")
+        await pilot.pause()
+        assert status.region.height > short_height
+        assert "Last" in unescape(app.export_screenshot(simplify=True))
 
 
 @pytest.mark.asyncio

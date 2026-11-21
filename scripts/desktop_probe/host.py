@@ -9,7 +9,7 @@ import json
 import secrets
 import socket
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from importlib import metadata, resources
 from pathlib import Path
 
@@ -21,10 +21,16 @@ from .renderer import canvas_renderer
 
 
 class ProbeHost:
-    def __init__(self, command: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        command: Sequence[str] | None = None,
+        *,
+        on_root_request: Callable[[], None] | None = None,
+    ) -> None:
         self.config = load_config()
         self._token = secrets.token_urlsafe(32)
         self._used = False
+        self._on_root_request = on_root_request
         self.origin = ""
         self.finished = asyncio.Event()
         self.child = TextualChild(
@@ -115,6 +121,10 @@ class ProbeHost:
         self._validate_host(request)
         if request.query_string:
             raise web.HTTPBadRequest()
+        if request.path == "/" and self._on_root_request is not None:
+            callback = self._on_root_request
+            self._on_root_request = None
+            callback()
         data, content_type = self._assets[request.path]
         return web.Response(body=data, content_type=content_type)
 

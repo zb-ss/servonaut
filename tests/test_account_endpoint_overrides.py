@@ -40,6 +40,7 @@ from servonaut.utils.endpoints import (
     endpoint_override_errors,
     validate_relay_urls,
 )
+from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests._hermetic_app import run_hermetic_app
 
 # A credential embedded in a refused URL. It must never reach an error message.
@@ -734,14 +735,19 @@ class _AccountHost(App):
 
 async def _press_local_sign_out(app: _AccountHost, pilot) -> Any:
     from servonaut.screens.confirm_action import ConfirmActionScreen
+    from servonaut.screens.login import LoginScreen
 
-    await pilot.pause()
-    account = app.screen
+    account = await wait_for_screen_ready(
+        app, LoginScreen, required=("#btn_logout_local",),
+    )
     button = account.query_one("#btn_logout_local", Button)
+    await wait_until(lambda: button.display is True)
     assert button.display is True
     button.press()
-    await pilot.pause()
-    assert isinstance(app.screen, ConfirmActionScreen)
+    # ConfirmActionScreen composes its controls after push_screen; wait for them to mount.
+    await wait_for_screen_ready(
+        app, ConfirmActionScreen, required=("#confirm_input", "#btn_confirm", "#btn_cancel"),
+    )
     return account
 
 
@@ -754,9 +760,25 @@ async def test_tui_sign_out_on_this_device_only(monkeypatch, sent, auth_file):
         account = await _press_local_sign_out(app, pilot)
         confirm = app.screen
         confirm.query_one("#confirm_input", Input).value = "sign out"
-        await pilot.pause()
-        confirm.query_one("#btn_confirm", Button).press()
-        await pilot.pause()
+        confirm_btn = confirm.query_one("#btn_confirm", Button)
+        await wait_until(lambda: not confirm_btn.disabled)
+        confirm_btn.press()
+        # Screen.notify posts a Notify message asynchronously to the app; wait
+        # for both the logged-out view and the warning notice to arrive.
+        await wait_until(
+            lambda: app.screen is account
+            and account.query_one("#logged_out_container").display is True
+            and any(
+                n.severity == "error" and "Sign out on this device only" in n.message
+                for n in app._notifications
+            )
+            and any(
+                n.severity == "warning"
+                and "not revoked" in n.message
+                and "until it expires" in n.message
+                for n in app._notifications
+            )
+        )
 
         assert app.screen is account
         assert account.query_one("#logged_out_container").display is True
@@ -783,7 +805,7 @@ async def test_tui_sign_out_on_this_device_only_can_be_cancelled(monkeypatch, se
     async with app.run_test(headless=True) as pilot:
         account = await _press_local_sign_out(app, pilot)
         app.screen.query_one("#btn_cancel", Button).press()
-        await pilot.pause()
+        await wait_until(lambda: app.screen is account)
         assert app.screen is account
 
     assert auth_file.exists()
@@ -794,12 +816,18 @@ async def test_tui_sign_out_on_this_device_only_can_be_cancelled(monkeypatch, se
 async def test_tui_logout_with_a_refused_api_url_points_to_local_sign_out(
     monkeypatch, sent, auth_file
 ):
+    from servonaut.screens.login import LoginScreen
+
     monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
     app = _AccountHost(_signed_in(auth_file))
     async with app.run_test(headless=True) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#btn_logout", Button).press()
-        await pilot.pause()
+        account = await wait_for_screen_ready(
+            app, LoginScreen, required=("#btn_logout",),
+        )
+        account.query_one("#btn_logout", Button).press()
+        await wait_until(
+            lambda: any(n.message.startswith("Logout error:") for n in app._notifications)
+        )
         await app.workers.wait_for_complete()
         notes = [n.message for n in app._notifications]
 

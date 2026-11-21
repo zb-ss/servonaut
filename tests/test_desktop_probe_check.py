@@ -18,7 +18,12 @@ from scripts.desktop_probe.config import (
     load_config,
     scaled_seconds,
 )
-from scripts.desktop_probe.diagnostics import PREFIX, exception_record, parse_record
+from scripts.desktop_probe.diagnostics import (
+    PREFIX,
+    exception_record,
+    parse_record,
+    sanitize_stderr_tail,
+)
 from scripts.desktop_probe.renderer import WEBGL_REGISTRATION, canvas_renderer
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.command_output import CommandOutput
@@ -188,6 +193,87 @@ def test_child_exception_diagnostic_omits_values() -> None:
 )
 def test_child_diagnostics_reject_unexpected_fields_or_paths(line: bytes) -> None:
     assert parse_record(line) is None
+
+
+def test_sanitize_stderr_tail_bounds_and_scrubs_credentials_urls_and_paths() -> None:
+    raw_lines = [f"noise line {index}" for index in range(25)]
+    raw_lines.extend([
+        "WebView2 initialization failed: auth.synthetic-credential at http://127.0.0.1:41234/ws",
+        "startServonaut(\"synthetic-credential\") token=synthetic-credential",
+        "path C:\\Users\\runner\\AppData\\Local\\Temp\\wv2 and /home/runner/work/app/file.py",
+        "x" * 300,
+    ])
+    tail = sanitize_stderr_tail("\n".join(raw_lines), max_lines=5, max_line_length=120)
+    assert len(tail) == 5
+    joined = "\n".join(tail)
+    assert "WebView2 initialization failed" in joined
+    assert "synthetic-credential" not in joined
+    assert "127.0.0.1" not in joined
+    assert "C:\\Users\\runner" not in joined
+    assert "/home/runner/work" not in joined
+    assert "auth.<redacted>" in joined
+    assert "startServonaut(<redacted>)" in joined
+    assert "<url>" in joined
+    assert "<path>" in joined
+    assert all(len(line) <= 120 for line in tail)
+
+
+def test_check_records_native_stderr_only_on_failure() -> None:
+    results = Results()
+    results.pytest_runtest_logreport(
+        SimpleNamespace(
+            when="call",
+            failed=False,
+            skipped=False,
+            nodeid="passing",
+            outcome="passed",
+            user_properties=[("native_stderr", ["benign warning"])],
+        )
+    )
+    results.pytest_runtest_logreport(
+        SimpleNamespace(
+            when="call",
+            failed=True,
+            skipped=False,
+            nodeid="failing",
+            outcome="failed",
+            user_properties=[
+                ("native_stages", ["host-ready", "gui-starting", "window-shown"]),
+                ("native_stderr", ["WebView2 initialization failed"]),
+            ],
+        )
+    )
+    assert "passing" not in results.failures
+    assert results.failures["failing"]["native_stages"] == [
+        "host-ready",
+        "gui-starting",
+        "window-shown",
+    ]
+    assert results.failures["failing"]["native_stderr"] == [
+        "WebView2 initialization failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_host_reports_first_root_request_once() -> None:
+    aiohttp = pytest.importorskip("aiohttp")
+    from scripts.desktop_probe.host import ProbeHost
+
+    seen: list[str] = []
+    host = ProbeHost(on_root_request=lambda: seen.append("root"))
+    await host.start()
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.get(host.origin + "/style.css") as response:
+                assert response.status == 200
+            assert seen == []
+            async with client.get(host.origin + "/") as response:
+                assert response.status == 200
+            async with client.get(host.origin + "/") as response:
+                assert response.status == 200
+            assert seen == ["root"]
+    finally:
+        await host.stop()
 
 
 def test_canvas_adapter_changes_only_the_reviewed_registration() -> None:

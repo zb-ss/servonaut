@@ -1358,6 +1358,59 @@ class TestTeamKeyOnAnOwnServerOnRelay:
         executor._audit = MagicMock()
         return executor
 
+    def test_proxy_426_keeps_ordinary_credential_refusal(self, proxy_426):
+        executor = self._executor(_TeamKeyRuntime(error=proxy_426))
+        response = run(executor.execute(make_request(from_agent=True, payload={"command": "uptime"})))
+
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Error: could not check which vault key this server uses, so agents "
+            "cannot act on it right now. Try again shortly."
+        )
+        assert executor._audit.log.call_args.args[4] == "credential_check_failed"
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("path", "cmd_type"),
+        [
+            ("rules", CommandType.RUN_COMMAND),
+            ("shared-target", CommandType.RUN_COMMAND),
+            ("lease", CommandType.RUN_COMMAND),
+            ("lease", CommandType.GET_LOGS),
+        ],
+    )
+    def test_version_refusal_audits_each_vault_path(self, path, cmd_type):
+        from servonaut.services.api_client import ClientUpdateRequiredError
+
+        refusal = ClientUpdateRequiredError(details={"minimum_version": "99.0.0"})
+        runtime = _TeamKeyRuntime()
+        target = "i-abc123"
+        if path == "rules":
+            runtime.credential_team = AsyncMock(side_effect=refusal)
+        elif path == "shared-target":
+            target = "shared-web"
+            runtime.resolve_relay_target = AsyncMock(side_effect=refusal)
+        else:
+            runtime.resolve_ssh = AsyncMock(side_effect=refusal)
+        executor = self._executor(runtime)
+        request = make_request(
+            cmd_type=cmd_type, target=target,
+            payload={"command": "uptime"} if cmd_type == CommandType.RUN_COMMAND else {},
+            from_agent=path == "rules",
+        )
+
+        response = run(executor.execute(request))
+
+        assert response.status == "rejected"
+        assert "Update to 99.0.0" in response.error_message
+        assert response.error_message.endswith("Restart the relay after updating.")
+        executor._audit.log.assert_called_once()
+        audit = executor._audit.log.call_args
+        assert audit.args[0] == cmd_type.value
+        assert audit.args[3:] == (False, "client_update_required")
+        assert audit.kwargs == {"source": "relay", "request_id": request.id}
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
     def test_the_teams_rule_refuses_what_local_settings_allow(self):
         trust_signed_team_rules("ops", {
             "role_levels": {"owner": "standard", "admin": "standard",

@@ -474,6 +474,7 @@ def format_update_required_message(
     update_url: Optional[str] = None,
     update_hints: Optional[Mapping[str, str]] = None,
     apt_managed: Optional[bool] = None,
+    client_kind: Optional[str] = None,
 ) -> str:
     """Build one consistent, terminal-safe update-required message."""
     min_ver, extracted_url, extracted_hints = _extract_update_context(error_or_version)
@@ -518,6 +519,10 @@ def format_update_required_message(
             "This version of Servonaut is too old for team and cloud features. "
             f"Update Servonaut to continue ({step})."
         )
+    if client_kind == "mcp":
+        message += " Reconnect the MCP server after updating."
+    elif client_kind == "relay":
+        message += " Restart the relay after updating."
     return _terminal_safe(message)
 
 

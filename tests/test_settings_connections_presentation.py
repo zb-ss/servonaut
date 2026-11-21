@@ -117,15 +117,16 @@ async def _expose(app, pilot: Pilot, widget: Widget, scroll_target: Widget | Non
 async def _click(app: _ConnectionsHost, pilot: Pilot, widget: Widget) -> None:
     if isinstance(widget, Button):
         await wait_until(lambda: not widget.has_class("-active"))
-    widget.scroll_visible(animate=False)
-    await pilot.pause()
-    await wait_until(lambda: _exposed(app, widget))
+    await _expose(app, pilot, widget)
     assert await pilot.click(widget)
 
 
 async def _tab_to(app: _ConnectionsHost, pilot: Pilot, widget: Widget) -> None:
     for _ in range(len(app.screen.focus_chain) + 1):
         if app.focused is widget:
+            # Native focus schedules animated scrolling; wait for it to expose the control.
+            await pilot.wait_for_scheduled_animations()
+            await wait_until(lambda: _exposed(app, widget))
             assert _exposed(app, widget)
             return
         await pilot.press("tab")
@@ -160,13 +161,20 @@ async def test_connection_form_labels_editor_and_actions_keep_native_reachabilit
             assert _compact(label) in _compact(_paint(app))
         editor = panel.query_one("#pf_extra_ssh_options" if form_kind == "profile" else "#rl_match_conditions")
         editor.scroll_visible(animate=False)
-        await pilot.pause()
+        await wait_until(lambda: (
+            editor.region.width > 0
+            and editor.region.x == form.content_region.x
+            and editor.region.right == form.content_region.right
+        ))
         assert editor.region.x == form.content_region.x
         assert editor.region.right == form.content_region.right
         await _tab_to(app, pilot, editor.query_one(".list-add" if form_kind == "profile" else ".kv-add", Button))
         await _tab_to(app, pilot, panel.query_one(f"#btn_{form_kind}_save", Button))
-        assert _exposed(app, panel.query_one("#save_connections", Button))
+        save_connections = panel.query_one("#save_connections", Button)
+        await wait_until(lambda: _exposed(app, save_connections))
+        assert _exposed(app, save_connections)
         await _click(app, pilot, panel.query_one(f"#btn_{form_kind}_cancel", Button))
+        await wait_until(lambda: not form.display)
         assert not form.display and not panel.is_dirty()
         assert manager._config_path.read_bytes() == before
         app.assert_no_external_operations()
@@ -264,6 +272,7 @@ async def test_demo_keyboard_toggle_closes_bound_forms_and_refuses_pointer_edit(
     async with app.run_test(size=(100, 30)) as pilot:
         panel = await _ready(app, pilot)
         await _click(app, pilot, panel.query_one(f"#btn_{kind}_edit", Button))
+        await wait_until(lambda: panel.query_one(f"#{kind}_form").display)
         assert panel.query_one(f"#{kind}_form").display
         await pilot.press("ctrl+shift+d")
         await wait_until(lambda: app.demo_mode and not panel.query_one(f"#{kind}_form").display)

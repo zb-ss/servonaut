@@ -167,6 +167,16 @@ class TestSetupHappyPath:
 
 
 class TestSetupFailurePaths:
+    def test_proxy_426_keeps_ordinary_save_error(self, proxy_426, capsys):
+        with _Ctx() as ctx:
+            ctx.api.put_user_secrets_config.side_effect = proxy_426
+            rc = run(_run_setup_async(_args()))
+        assert rc == _EXIT_GENERIC_ERROR
+        ctx.auth.apply_user_secrets_config.assert_not_called()
+        captured = capsys.readouterr()
+        assert f"Failed to save config: {proxy_426.message} (status 426)" in captured.out
+        assert "Update Servonaut" not in captured.out + captured.err
+
     def test_test_connection_failure_saves_nothing(self):
         with _Ctx(test_exc=BwsOnboardingError("cannot reach project")) as ctx:
             rc = run(_run_setup_async(_args()))

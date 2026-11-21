@@ -320,6 +320,8 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
     """
     from mcp.types import TextContent
     from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+    from servonaut.services.api_client import find_client_update_required
+    from servonaut.services.client_identity import format_update_required_message
 
     if name not in TOOL_SCHEMAS:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -332,9 +334,11 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
         return [TextContent(type="text", text=refused)]
     try:
         result = await handler(**arguments)
-    except Exception as exc:  # noqa: BLE001 — a throwing tool must NOT crash
-        # the stdio loop (which would drop the whole session). Log the full
-        # traceback for diagnosis; return a bounded error to the caller.
+    except Exception as exc:  # noqa: BLE001 — keep the stdio session alive
+        if update := find_client_update_required(exc):
+            message = format_update_required_message(update, client_kind="mcp")
+            return [TextContent(type="text", text=f"Error: {message[:500]}")]
+        # Log the full traceback for diagnosis and bound the returned error.
         logger.exception("MCP tool %r raised", name)
         return [TextContent(
             type="text", text=f"tool '{name}' failed: {str(exc)[:500]}",
