@@ -27,6 +27,7 @@ class _SidebarScreen(Screen):
 
 class _Host(App):
     vault_available = reactive(False)
+    vault_update_required = reactive(False)
 
     def on_mount(self) -> None:
         self.push_screen(_SidebarScreen())
@@ -69,6 +70,19 @@ async def test_sidebar_below_the_top_screen_follows_discovery_too() -> None:
         await pilot.pause()
         assert app.screen is below
         assert _vault_nav_shown(below) == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_update_required_keeps_vault_without_announcing_ca_discovery() -> None:
+    app = _Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.vault_update_required = True
+        await pilot.pause()
+        assert _vault_nav_shown(app.screen) == [True, False]
+
+        app.vault_update_required = False
+        await pilot.pause()
+        assert _vault_nav_shown(app.screen) == [False, False]
 
 
 @pytest.mark.asyncio

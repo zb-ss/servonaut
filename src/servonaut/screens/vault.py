@@ -36,6 +36,8 @@ from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens._batch_status import failure_details
 from servonaut.screens.bulk_action import BulkActionModal
 from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
+from servonaut.services.api_client import ClientUpdateRequiredError
+from servonaut.services.client_identity import format_update_required_message
 from servonaut.services.vault import onboarding
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, member_approval_lines, ssh_rotation_failure,
@@ -1730,6 +1732,7 @@ class VaultScreen(WorkspaceScreen):
             "custody_missing": ("Recovery needed", "vault_recover"),
             "custody_unavailable": ("Identity locked", None),
             "unverified": ("Identity not verified", None),
+            "update_required": ("Update required", None),
             "ready": ("Identity available", None),
         }.get(state, ("Identity not verified", None))
         self._identity_summary(label, action)
@@ -1754,9 +1757,10 @@ class VaultScreen(WorkspaceScreen):
     def _sync_presentation_state(self) -> None:
         """Show the existing allowed controls without changing their guards."""
         self.set_class(self._identity_state != "ready", "-identity-pending")
+        self.set_class(self._identity_state == "update_required", "-update-required")
         self.set_class(bool(self._busy_work), "-vault-busy")
         self.set_class(
-            self._identity_state in {"unverified", "custody_unavailable"},
+            self._identity_state in {"unverified", "custody_unavailable", "update_required"},
             "-identity-error",
         )
         for button in self.query("#vault_actions Button"):
@@ -1770,7 +1774,9 @@ class VaultScreen(WorkspaceScreen):
         if self._identity_state in states:
             return True
         self.app.notify(
-            "Complete the vault identity step shown above before using this action.",
+            "Update Servonaut to use this Vault action."
+            if self._identity_state == "update_required"
+            else "Complete the vault identity step shown above before using this action.",
             severity="warning",
             markup=False,
         )
@@ -1833,11 +1839,16 @@ class VaultScreen(WorkspaceScreen):
             return
         try:
             status = await _invoke(service, "status")
+        except ClientUpdateRequiredError as exc:
+            self._show_update_required(exc)
+            return
         except Exception as exc:
             self._set_identity_state("unverified")
             self._status(f"Could not check vault identity state ({vault_failure_reason(exc)}).")
             return
         readiness = await self._identity_readiness(service, status)
+        if readiness not in {"unverified", "ready"}:
+            self._resume_after_update_refusal()
         if readiness == "first_user":
             self._set_identity_state(readiness)
             self._status("No vault identity exists yet. Choose Setup to create one and record its recovery key.")
@@ -1865,10 +1876,14 @@ class VaultScreen(WorkspaceScreen):
             return
         try:
             vaults = await _invoke(service, "list_vaults")
+        except ClientUpdateRequiredError as exc:
+            self._show_update_required(exc)
+            return
         except Exception as exc:
             self._set_identity_state("unverified")
             self._status(f"Could not load vault metadata ({vault_failure_reason(exc)}).")
             return
+        self._resume_after_update_refusal()
         self._set_identity_state("ready")
         self._vaults = [dict(row) for row in vaults or []]
         for view in _SCOPED_VIEWS:
@@ -1891,6 +1906,15 @@ class VaultScreen(WorkspaceScreen):
         self._status(line)
         self._table_mode = "vaults"
         self._render_vaults()
+
+    def _show_update_required(self, error: ClientUpdateRequiredError) -> None:
+        self._set_identity_state("update_required")
+        self._status(format_update_required_message(error, runtime=getattr(self.app, "runtime_layout", None)))
+
+    def _resume_after_update_refusal(self) -> None:
+        resume = getattr(self.app, "resume_vault_after_update_refusal", None)
+        if callable(resume):
+            resume()
 
     @staticmethod
     async def _can_create_personal(service: Any) -> bool:

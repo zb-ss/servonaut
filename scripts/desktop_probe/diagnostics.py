@@ -14,6 +14,43 @@ from .config import load_config
 
 PREFIX = "SERVONAUT_PROBE_ERROR "
 
+_MAX_STDERR_LINE_LENGTH = 200
+_REDACT_PATTERNS = (
+    (re.compile(r"auth\.[A-Za-z0-9_=-]+"), "auth.<redacted>"),
+    (re.compile(r"startServonaut\([^)]*\)"), "startServonaut(<redacted>)"),
+    (
+        re.compile(r"(?i)\b(token|authorization|cookie|secret|password)\s*([:=])\s*\S+"),
+        r"\1\2<redacted>",
+    ),
+    (re.compile(r"\b(?:https?|wss?)://\S+"), "<url>"),
+    (re.compile(r"[A-Za-z]:\\[^\s\"'<>|]+"), "<path>"),
+    (re.compile(r"(?<![A-Za-z0-9_:])(?:/[A-Za-z0-9_.~+-]+){2,}"), "<path>"),
+)
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def sanitize_stderr_tail(
+    text: str,
+    *,
+    max_lines: int | None = None,
+    max_line_length: int = _MAX_STDERR_LINE_LENGTH,
+) -> list[str]:
+    """Return a bounded, credential- and path-scrubbed tail of stderr lines."""
+    limit = load_config().max_diagnostic_entries if max_lines is None else max_lines
+    if limit <= 0 or max_line_length <= 0:
+        return []
+    lines = deque(maxlen=limit)
+    for raw in text.splitlines():
+        cleaned = _CONTROL_CHARS.sub(" ", raw).strip()
+        if not cleaned:
+            continue
+        for pattern, replacement in _REDACT_PATTERNS:
+            cleaned = pattern.sub(replacement, cleaned)
+        if len(cleaned) > max_line_length:
+            cleaned = cleaned[: max_line_length - 1] + "…"
+        lines.append(cleaned)
+    return list(lines)
+
 
 def exception_record(error: BaseException) -> dict[str, object]:
     frames = deque(maxlen=load_config().max_diagnostic_entries)

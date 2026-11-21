@@ -636,7 +636,6 @@ async def _do_chat_stream(
         if (
             isinstance(stream_error, ClientUpdateRequiredError)
             or getattr(stream_error, "code", None) == "client_update_required"
-            or getattr(stream_error, "status", None) == 426
         ):
             print(f"\n{format_update_required_message(stream_error)}", file=sys.stderr)
             return _EXIT_GENERIC_ERROR

@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from e2e.harness.relay_events import wait_until_connected
+from e2e.harness.fake_cloud import routes_version_policy
+from e2e.harness.relay_events import (
+    command_event, tool_call_event, wait_for_result, wait_for_tool_result, wait_until_connected,
+)
 from e2e.harness.waits import wait_for
 from servonaut.main import RELAY_EXIT_UPDATE_REQUIRED
 from servonaut.services.version_policy import parse_client_signal
@@ -21,6 +24,38 @@ from servonaut.services.version_policy import parse_client_signal
 pytestmark = [pytest.mark.e2e_pr]
 
 MINIMUM_VERSION = "99.0.0"
+
+
+def test_relay_reports_vault_refusals_for_commands_and_agent_tools(
+    journey, fake_cloud, relay, version_gate_vault, monkeypatch,
+):
+    home, target, binding_path = version_gate_vault
+    # Keep the already connected transport and result routes available while
+    # the Vault API refuses the credential read with a real HTTP 426.
+    monkeypatch.setattr(routes_version_policy, "is_gated_path", lambda path: path == binding_path)
+    fake_cloud.set_client_version_policy(mode="enforce", minimum_version=MINIMUM_VERSION)
+    listener = relay(home).start()
+    user_id = wait_until_connected(fake_cloud, listener)
+
+    fake_cloud.relay.publish(command_event(
+        "vault-command", user_id, "run_command", target, {"command": "hostname"},
+    ))
+    command = wait_for_result(fake_cloud, "vault-command", listener)
+    assert command["status"] == "rejected", command
+
+    fake_cloud.relay.publish(tool_call_event(
+        "vault-tool", user_id, "ssh_exec_readonly", {"instance_id": target, "command": "hostname"},
+    ), topic="ai-tool-calls")
+    tool = wait_for_tool_result(fake_cloud, "vault-tool", listener)
+    assert tool["status"] == "error", tool
+    for text in (command["error_message"], tool["result"]):
+        assert f"Update to {MINIMUM_VERSION}" in text, text
+        assert "update your source checkout and reinstall" in text
+        assert "Restart the relay after updating" in text
+
+    assert fake_cloud.statuses(binding_path).count(426) >= 2
+    assert not journey.shims.calls("ssh")
+    assert not journey.shims.calls("ssh-agent")
 
 
 def test_relay_stops_with_exit_5_and_does_not_retry_on_426(

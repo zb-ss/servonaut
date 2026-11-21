@@ -67,6 +67,11 @@ def _make_client(auth: Optional[MagicMock] = None) -> APIClient:
 # ---------------------------------------------------------------------------
 
 class TestParseError:
+    def test_proxy_426_remains_an_ordinary_api_error(self, proxy_426):
+        assert type(proxy_426) is APIError
+        assert proxy_426.status == 426
+        assert "Update Servonaut" not in proxy_426.message
+
     def test_rate_limited(self):
         client = _make_client()
         resp = _make_response(429, {"error": {"code": "rate_limited", "message": "Too many requests"}})
