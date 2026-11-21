@@ -20,6 +20,7 @@ from servonaut.screens.command_picker import (
     CommandPickerModal, SaveCommandModal, _DEBOUNCE_SECONDS,
 )
 from servonaut.utils import platform_utils
+from servonaut.widgets.filterable_selection import FilterableSelection
 from servonaut.widgets.dialogs import DialogBody, DialogContent, DialogFrame
 from tests._async_bounds import wait_for_screen_ready, wait_until
 from tests.test_dialog_frame import DialogHost
@@ -129,7 +130,7 @@ async def test_utility_prompt_native_focus_and_pinned_action_geometry(
     if kind == "bulk":
         modal, focus = _bulk(), "#bulk_action_cancel"
         selectors = ("#bulk_action_prompt", "#bulk_action_confirm_input",
-                     "#bulk_action_status", "#bulk_action_cancel",
+                     "#bulk_action_cancel",
                      "#bulk_action_submit")
     elif kind == "picker":
         modal, focus = _picker(), "#picker_search"
@@ -142,7 +143,7 @@ async def test_utility_prompt_native_focus_and_pinned_action_geometry(
         for selector in selectors:
             _assert_exposed(app, modal, selector)
         if kind == "bulk":
-            body = modal.query_one("#bulk_action_body", DialogBody)
+            body = modal.query_one("#bulk_action_details", DialogBody)
             modal.query_one("#bulk_action_description", Static).update(
                 "\n".join(
                     f"Review example record detail {index}." for index in range(45)
@@ -294,6 +295,7 @@ async def test_bulk_demo_redraw_keeps_selection_highlight_and_literal_labels(
         listing = modal.query_one(SelectionList)
         listing.select("b")
         listing.highlighted = 1
+        await wait_until(lambda: modal.query_one(FilterableSelection).selected == ["b"])
         app.demo_mode = True
         modal.refresh_after_demo_toggle()
         await pilot.pause()

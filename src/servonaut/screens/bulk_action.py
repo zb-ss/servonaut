@@ -1,38 +1,58 @@
 """A bounded picker with typed confirmation for a destructive batch."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, SelectionList, Static
-from textual.widgets.selection_list import Selection
+from textual.widgets import Button, Checkbox, Input, Static
 
 from servonaut.services.vault.display import terminal_safe
 from servonaut.widgets.dialogs import (
-    DialogActions, DialogBody, DialogFrame, DialogNotificationSpace,
+    DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogBody, DialogContent,
+    DialogFrame, DialogNotificationSpace,
+)
+from servonaut.widgets.filterable_selection import (
+    PICKER_BINDINGS, FilterableSelection, PickerActions, SelectionRow, SortOrder,
+    without_digest_prefix,
 )
 
 
-class BulkActionModal(ModalScreen[list[str] | None]):
+@dataclass(frozen=True)
+class BulkPreset:
+    """A button that replaces the selection with keys the caller computes.
+
+    ``build`` returns the keys to select and a plain-text note shown under the
+    description (never interpreted as markup).
+    """
+
+    label: str
+    build: Callable[[], tuple[Sequence[str], str]]
+
+
+class BulkActionModal(PickerActions, ModalScreen[list[str] | None]):
     """Select records explicitly and type the action before returning their ids."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel"), *PICKER_BINDINGS]
     DEFAULT_CSS = """
     BulkActionModal #bulk_action_title { text-style: bold; color: $text-warning; }
+    BulkActionModal #bulk_action_details { height: auto; max-height: 6; margin-bottom: 0; }
     BulkActionModal #bulk_action_description { height: auto; }
-    BulkActionModal #bulk_action_list { height: auto; max-height: 8; }
-    BulkActionModal #bulk_action_body Horizontal { height: auto; }
-    BulkActionModal #bulk_action_body Button { margin-right: 1; }
-    BulkActionModal #bulk_action_status { height: auto; color: $text-warning; }
+    BulkActionModal #bulk_action_note_box { height: auto; max-height: 4; display: none; }
+    BulkActionModal #bulk_action_note { height: auto; color: $text-warning; }
     BulkActionModal #bulk_action_acknowledge { width: 1fr; height: auto; }
     BulkActionModal #bulk_action_acknowledge_hint { height: auto; color: $text-warning; }
-    BulkActionModal.-short #bulk_action_list { max-height: 6; }
+    BulkActionModal.-dialog-tight #bulk_action_details,
+    BulkActionModal.-dialog-minimal #bulk_action_details { max-height: 3; }
+    BulkActionModal.-dialog-tight #bulk_action_note_box,
+    BulkActionModal.-dialog-minimal #bulk_action_note_box { max-height: 2; }
     """
-    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
+    VERTICAL_BREAKPOINTS = DIALOG_VERTICAL_BREAKPOINTS
 
     def __init__(
         self, title: str, description: str, choices: Sequence[tuple[str, str]],
@@ -43,6 +63,9 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         description_builder: Callable[[], str] | None = None,
         selected: Sequence[str] = (),
         acknowledgement_keys: Sequence[str] | None = None,
+        sort_orders: Sequence[SortOrder] = (),
+        sort_keys_builder: Callable[[str], Mapping[str, Any]] | None = None,
+        preset: BulkPreset | None = None,
     ) -> None:
         super().__init__(classes="dialog-screen")
         self._title = title
@@ -56,6 +79,9 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         self._description_builder = description_builder
         self._initial_selected = set(selected)
         self._acknowledgement_keys = set(acknowledgement_keys) if acknowledgement_keys is not None else None
+        self._sort_orders = tuple(sort_orders)
+        self._sort_keys_builder = sort_keys_builder
+        self._preset = preset
         self.acknowledged = False
 
     def compose(self) -> ComposeResult:
@@ -73,15 +99,25 @@ class BulkActionModal(ModalScreen[list[str] | None]):
             confirmation = [
                 Input(id="bulk_action_confirm_input", placeholder=self._confirm_text),
             ]
+        tools = []
+        if self._preset is not None:
+            tools = [Button(self._preset.label, id="bulk_action_preset", compact=True)]
         yield DialogNotificationSpace()
         yield DialogFrame(
             heading=Static(Text(self._title), id="bulk_action_title"),
-            body=DialogBody(
-                Static(Text(self._description_text()), id="bulk_action_description"),
-                SelectionList(id="bulk_action_list"),
-                Horizontal(
-                    Button("Select all", id="bulk_action_all"),
-                    Button("Select none", id="bulk_action_none"),
+            body=DialogContent(
+                DialogBody(
+                    Static(Text(self._description_text()), id="bulk_action_description"),
+                    id="bulk_action_details",
+                ),
+                DialogBody(
+                    Static(id="bulk_action_note", markup=False),
+                    id="bulk_action_note_box",
+                ),
+                FilterableSelection(
+                    prefix="bulk_action",
+                    sort_orders=(SortOrder("name", "Name"), *self._sort_orders),
+                    tools=tools,
                 ),
                 *acknowledgement,
                 id="bulk_action_body",
@@ -89,7 +125,6 @@ class BulkActionModal(ModalScreen[list[str] | None]):
             status=Vertical(
                 Static("Choose records to continue.", id="bulk_action_prompt"),
                 *confirmation,
-                Static("Nothing selected.", id="bulk_action_status"),
             ),
             actions=DialogActions(
                 Button("Cancel", id="bulk_action_cancel"),
@@ -104,22 +139,29 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         )
 
     def on_mount(self) -> None:
-        self.refresh_after_demo_toggle()
+        self._picker().set_rows(self._rows())
         self._update_submit()
         self.query_one("#bulk_action_cancel", Button).focus()
 
+    def _rows(self) -> list[SelectionRow]:
+        rows = []
+        for key, label in self._choices:
+            text = self._display(key, label)
+            extra = self._sort_keys_builder(key) if self._sort_keys_builder else {}
+            rows.append(SelectionRow(
+                value=key, label=Text(text), search_text=without_digest_prefix(text),
+                selected=key in self._initial_selected,
+                sort_keys={"name": text.casefold(), **extra},
+            ))
+        return rows
+
     def refresh_after_demo_toggle(self) -> None:
-        listing = self.query_one("#bulk_action_list", SelectionList)
-        selected = set(listing.selected) if listing.option_count else self._initial_selected
-        highlighted = listing.highlighted
-        listing.clear_options()
-        listing.add_options([
-            Selection(Text(self._display(key, label)), key, key in selected)
-            for key, label in self._choices
-        ])
-        if self._choices:
-            listing.highlighted = min(highlighted or 0, len(self._choices) - 1)
+        self._picker().set_rows(self._rows(), keep_selection=True)
         self.query_one("#bulk_action_description", Static).update(Text(self._description_text()))
+        note_box = self.query_one("#bulk_action_note_box")
+        if self._preset is not None and note_box.display:
+            self.query_one("#bulk_action_note", Static).update(Text(self._preset.build()[1]))
+        self._update_submit()
 
     def _description_text(self) -> str:
         return self._description_builder() if self._description_builder is not None else self._description
@@ -134,7 +176,7 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         return label
 
     def _update_submit(self) -> None:
-        selected = set(self.query_one("#bulk_action_list", SelectionList).selected)
+        selected = set(self._picker().selected)
         count = len(selected)
         if self._acknowledgement is not None and self._acknowledgement_keys is not None:
             checkbox = self.query_one("#bulk_action_acknowledge", Checkbox)
@@ -153,7 +195,8 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         button = self.query_one("#bulk_action_submit", Button)
         button.disabled = not count or not confirmed
         button.label = f"{self._action_label} ({count})"
-        self.query_one("#bulk_action_status", Static).update(f"{count} selected." if count else "Nothing selected.")
+        # A label change alone keeps the button's old width: "(9)" to "(10)" would clip.
+        button.refresh(layout=True)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
@@ -164,23 +207,26 @@ class BulkActionModal(ModalScreen[list[str] | None]):
         self.acknowledged = event.value
         self._update_submit()
 
-    def on_selection_list_selected_changed(self, event: SelectionList.SelectedChanged) -> None:
+    def on_filterable_selection_changed(self, event: FilterableSelection.Changed) -> None:
         event.stop()
         self._update_submit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        listing = self.query_one("#bulk_action_list", SelectionList)
-        if event.button.id == "bulk_action_all":
-            listing.select_all()
-        elif event.button.id == "bulk_action_none":
-            listing.deselect_all()
+        picker = self._picker()
+        if event.button.id == "bulk_action_preset" and self._preset is not None:
+            keys, text = self._preset.build()
+            picker.select_values(keys, replace=True)
+            note = self.query_one("#bulk_action_note", Static)
+            note.update(Text(text))
+            self.query_one("#bulk_action_note_box").display = bool(text)
+            self._update_submit()
         elif event.button.id == "bulk_action_cancel":
             self.dismiss(None)
         elif event.button.id == "bulk_action_submit":
             self._update_submit()
             if not event.button.disabled:
-                selected = set(listing.selected)
+                selected = set(picker.selected)
                 self.dismiss([key for key, _ in self._choices if key in selected])
 
     def action_cancel(self) -> None:

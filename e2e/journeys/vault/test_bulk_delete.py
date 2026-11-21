@@ -4,7 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from textual.widgets import Button, DataTable, Input, SelectionList
+from textual.widgets import Button, DataTable, Input, SelectionList, Static
 
 from e2e.harness.waits import wait_for_async
 from e2e.harness.fake_cloud.routes_vault import TEAM_ID
@@ -82,3 +82,60 @@ async def test_bulk_delete_cancels_then_deletes_unused_keys_and_keeps_exposed_ke
     vaults = await service.list_vaults()
     assert next(row for row in vaults if row["vault_id"] == vault_id)["counts"]["items"] == 1
     assert len((await service.list_items(vault_id=vault_id, include_deleted=True))["data"]) == 3
+
+
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_bulk_delete_keeps_a_selection_the_filter_hides_and_deletes_it(
+    fake_cloud, journey, account_home, monkeypatch, size,
+):
+    home = account_home("bulk-delete-filter").home
+    service = _native_service(fake_cloud, home, monkeypatch)
+    vault = await service.create_vault(team=None, name="Keys", grant_policy="auto")
+    vault_id = vault["vault_id"]
+    items = []
+    for index in range(3):
+        private_key, _ = _ed25519_key_pair()
+        items.append(await service.import_keys(
+            source="ssh", vault_id=vault_id, private_key=private_key.encode(), name=f"key-{index + 1}",
+        ))
+    service._remote_executor = MagicMock(side_effect=AssertionError("vault deletion must not contact hosts"))
+    app = _BulkHost(service, instances=[])
+    async with app.run_test(size=size):
+        screen = app.screen
+        await wait_for_async(lambda: screen.query_one("#vault_table", DataTable).row_count == 1, desc="vault listed")
+        await wait_for_async(lambda: not screen.query_one("#vault_items", Button).disabled, desc="items enabled")
+        screen.query_one("#vault_items", Button).press()
+        await wait_for_async(lambda: screen._table_mode == "items" and len(screen._items) == 3, desc="three keys loaded")
+        screen.query_one("#vault_delete_keys", Button).press()
+        modal = await wait_for_async(
+            lambda: app.screen if isinstance(app.screen, BulkActionModal)
+            and bool(app.screen.query("#bulk_action_list"))
+            and app.screen.query_one("#bulk_action_list", SelectionList).option_count == 3 else None,
+            desc="bulk picker ready",
+        )
+        listing = modal.query_one("#bulk_action_list", SelectionList)
+        count = modal.query_one("#bulk_action_count", Static)
+
+        def count_reads(text: str) -> bool:
+            return str(count.render()) == text
+
+        modal.query_one("#bulk_action_search", Input).value = "key-2"
+        await wait_for_async(lambda: listing.option_count == 1, desc="one row shown for the filter")
+        modal.query_one("#bulk_action_all", Button).press()
+        await wait_for_async(lambda: count_reads("1 selected of 3 (1 shown)"), desc="one shown row selected")
+        modal.query_one("#bulk_action_search", Input).value = ""
+        await wait_for_async(lambda: listing.option_count == 3, desc="all rows shown again")
+        await wait_for_async(lambda: count_reads("1 selected of 3 (3 shown)"), desc="hidden selection kept")
+
+        modal.query_one("#bulk_action_submit", Button).press()
+        await wait_for_async(lambda: isinstance(app.screen, BulkActionModal) and app.screen is not modal
+                             and bool(app.screen.query("#bulk_action_confirm_input")), desc="deletion reviewed")
+        review = app.screen
+        review.query_one("#bulk_action_confirm_input", Input).value = "DELETE"
+        await wait_for_async(lambda: not review.query_one("#bulk_action_submit", Button).disabled, desc="confirmation accepted")
+        review.query_one("#bulk_action_submit", Button).press()
+        await wait_for_async(lambda: len(screen._items) == 2 and not screen._busy_work, desc="batch complete")
+        assert items[1]["item_id"] not in {item["item_id"] for item in screen._items}
+
+    service._remote_executor.assert_not_called()
+    assert len(fake_cloud.requests(method="DELETE")) == 1
