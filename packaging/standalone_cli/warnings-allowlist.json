@@ -21040,6 +21040,117 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "2ab8fe75a329d854c0ba4f0e640d918484642086c9db5b2a5afb1fbd30f7f502",
+        "importers": [
+          {
+            "module": "getpass",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "http.server",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "netrc",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "pathlib",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "posixpath",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.updates.macos_install",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.updates.macos_native",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "setuptools._distutils.archive_util",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "setuptools._distutils.util",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "setuptools._vendor.backports.tarfile",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "shutil",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "tarfile",
+            "qualifiers": [
+              "optional"
+            ]
+          }
+        ],
+        "module": "pwd",
+        "reason": "Reviewed PyInstaller missing-module for pwd.",
+        "target_facts": {
+          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
+          "target": "windows-x64",
+          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -21437,6 +21548,79 @@
         ],
         "module": "websockets.frames",
         "reason": "Reviewed PyInstaller missing-module for websockets.frames.",
+        "target_facts": {
+          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
+          "target": "windows-x64",
+          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "3c4f17257a06d99d4288b597bd539b12c05bce5fc99fb8381cb6def8d2059aed",
+        "importers": [
+          {
+            "module": "pty",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.debian_layout",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.bw_ssh_config_service",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.relay_lock",
+            "qualifiers": [
+              "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.vault.ca_pins",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.updates.macos_install",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.updates.status",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "optional"
+            ]
+          }
+        ],
+        "module": "fcntl",
+        "reason": "Reviewed PyInstaller missing-module for fcntl.",
         "target_facts": {
           "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
           "target": "windows-x64",
@@ -22565,72 +22749,6 @@
         ],
         "module": "email_validator",
         "reason": "Reviewed PyInstaller missing-module for email_validator.",
-        "target_facts": {
-          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
-          "target": "windows-x64",
-          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "63832eec075d6a96ff6e5b9f1d37675747ca7c82a35758e9a9ca729fd7ab5ca4",
-        "importers": [
-          {
-            "module": "pty",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.debian_layout",
-            "qualifiers": [
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.bw_ssh_config_service",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.relay_lock",
-            "qualifiers": [
-              "delayed"
-            ]
-          },
-          {
-            "module": "servonaut.services.vault.ca_pins",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.updates.status",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "optional"
-            ]
-          }
-        ],
-        "module": "fcntl",
-        "reason": "Reviewed PyInstaller missing-module for fcntl.",
         "target_facts": {
           "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
           "target": "windows-x64",
@@ -24756,105 +24874,6 @@
         ],
         "module": "pycparser.lextab",
         "reason": "Reviewed PyInstaller missing-module for pycparser.lextab.",
-        "target_facts": {
-          "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
-          "target": "windows-x64",
-          "toolchain_sha256": "ecf0e0a68cb96a9da98c8cf642af1f0d34fd9d4b9667a0f33842f4eb615db1e9"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "b60e550522355640711bd31fe6f36f77ef86458993dbc0f6cdffefbadcdbee95",
-        "importers": [
-          {
-            "module": "getpass",
-            "qualifiers": [
-              "delayed"
-            ]
-          },
-          {
-            "module": "http.server",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "netrc",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "pathlib",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "posixpath",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "setuptools._distutils.archive_util",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "setuptools._distutils.util",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "setuptools._vendor.backports.tarfile",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "shutil",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "tarfile",
-            "qualifiers": [
-              "optional"
-            ]
-          }
-        ],
-        "module": "pwd",
-        "reason": "Reviewed PyInstaller missing-module for pwd.",
         "target_facts": {
           "lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
           "target": "windows-x64",
