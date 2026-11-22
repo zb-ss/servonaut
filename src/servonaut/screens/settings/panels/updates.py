@@ -75,6 +75,9 @@ _CHECK_ERROR_RESULTS = frozenset({
     UpdateCheckResult.OS_TOO_OLD,
 })
 
+# Shown when a failed check left no reason of its own.
+_STATUS_FALLBACK_FAILURE = "The last update check did not complete. Try again."
+
 _CHECK_OUTCOME_NOTIFICATIONS: dict[str, tuple[str, str]] = {
     "busy": ("An update check is already running.", "information"),
     "skipped": ("Automatic updates are turned off for this session.", "information"),
@@ -322,6 +325,10 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._saving_channel = False
         self._check_baseline: UpdateStatus | None = None
         self._apt_status: Optional[AptInstallStatus] = None
+        # The app's own check outcome the status was last drawn from, so a
+        # background check that finishes later redraws the panel.
+        self._drawn_app_check: tuple[Optional[UpdateCheckResult], Optional[str], Optional[str]] | None = None
+        self._showing_check_failure = False
         self._checking_apt: bool = False
 
     # ------------------------------------------------------------------
@@ -623,7 +630,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             self._check_baseline = None
             self._last_checked_at = time.time()
             redraw = True
-        if redraw or snapshot != previous:
+        if redraw or snapshot != previous or self._app_check_state() != self._drawn_app_check:
             self._render_status()
 
     def _selected_channel(self) -> Channel:
@@ -732,6 +739,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         status = self._status
         if status is None:
             return
+        self._drawn_app_check = self._app_check_state()
+        self._showing_check_failure = False
 
         installed = _terminal_safe(status.installed_version or get_version()).strip() or "unknown"
         install_kind = status.install_kind or ""
@@ -823,7 +832,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             )
             if show_check:
                 btn_check.display = True
-            if self._check_error and show_check and not show_download:
+            if self._showing_check_failure and show_check and not show_download:
                 primary_widget.add_class("-warning")
             if show_download:
                 link_download.display = True
@@ -957,20 +966,50 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._sync_channel_notes()
         self._sync_action_busy()
 
-    def _up_to_date_lines(self, idle_secondary: str) -> tuple[str, str, bool]:
+    def _app_check_state(self) -> tuple[Optional[UpdateCheckResult], Optional[str], Optional[str]]:
+        """``(result, latest, reason)`` of the app's own last update check.
+
+        The app checks at start, before this panel exists; until a check runs
+        here, its outcome is the only evidence of what is available.
+        """
+        service = getattr(self.app, "update_service", None)
+        result = getattr(service, "last_check_result", None)
+        latest = getattr(service, "latest_version", None)
+        reason = getattr(service, "update_status", None)
+        return (
+            result if isinstance(result, UpdateCheckResult) else None,
+            latest if isinstance(latest, str) else None,
+            reason if isinstance(reason, str) else None,
+        )
+
+    def _up_to_date_lines(
+        self, idle_secondary: str, *, app_check: bool = False,
+    ) -> tuple[str, str, bool]:
         """Headline and detail for a check that found nothing newer.
 
         Returns ``(primary, secondary, failed)``. "Up to date" is only claimed
         after a check that succeeded; a failed one says so, with its reason.
+        With *app_check*, the app's own last check stands in until a check
+        runs here, and no check at all is reported as such.
         """
         ago = format_checked_ago(self._last_checked_at) if self._last_checked_at is not None else ""
-        if self._check_error:
+        error = self._check_error
+        unchecked = False
+        if app_check and not error and self._last_checked_at is None:
+            result, _latest, reason = self._app_check_state()
+            if result in _CHECK_ERROR_RESULTS:
+                error = reason or _STATUS_FALLBACK_FAILURE
+            unchecked = result is None
+        if error:
+            self._showing_check_failure = True
             tried = f"  ·  tried {ago}" if ago else ""
             return (
                 f"Couldn't check for updates{tried}",
-                _terminal_safe(self._check_error).strip(),
+                _terminal_safe(error).strip(),
                 True,
             )
+        if unchecked:
+            return "Not checked yet", "Check now looks for a newer version.", False
         primary = f"Up to date  ·  checked {ago}" if ago else "Up to date"
         return primary, idle_secondary, False
 
@@ -1020,8 +1059,13 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 None,
             )
         if _supports_download_link(install_kind, apt_managed=apt_managed):
+            discovered = self._discovered_version
+            if discovered is None and self._last_checked_at is None:
+                result, latest, _reason = self._app_check_state()
+                if result is UpdateCheckResult.UPDATE_AVAILABLE:
+                    discovered = latest
             available = _terminal_safe(
-                status.target_version or self._discovered_version or ""
+                status.target_version or discovered or ""
             ).strip()
             if available and (macos_update or self._is_newer(available, status.installed_version)):
                 return (
@@ -1033,7 +1077,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     available,
                 )
             primary, secondary, _ = self._up_to_date_lines(
-                "New releases are available from servonaut.dev/download."
+                "New releases are available from servonaut.dev/download.", app_check=True,
             )
             return (primary, secondary, "", True, False, None)
 
