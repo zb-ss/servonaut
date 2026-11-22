@@ -63,6 +63,18 @@ def _normalize_kind(kind: Optional[str]) -> str:
     return "cli"
 
 
+def _chosen_desktop_channel(runtime: RuntimeLayout) -> Optional[str]:
+    """The channel a packaged desktop user picked, which outranks the build's."""
+    if getattr(runtime, "kind", None) is not DistributionKind.PACKAGED_DESKTOP:
+        return None
+    data_root = getattr(runtime, "data_root", None)
+    if data_root is None:
+        return None
+    from servonaut.updates.channel_preference import read_channel_preference
+
+    return read_channel_preference(data_root)
+
+
 def _derive_channel(
     version: str,
     *,
@@ -75,8 +87,12 @@ def _derive_channel(
             return "rc"
         if cleaned in VALID_CLIENT_CHANNELS:
             return cleaned
-    if runtime is not None and getattr(runtime, "release_channel", None) == "preview":
-        return "rc"
+    if runtime is not None:
+        chosen = _chosen_desktop_channel(runtime)
+        if chosen is not None:
+            return chosen
+        if getattr(runtime, "release_channel", None) == "preview":
+            return "rc"
     parsed = parse_contract_version(version)
     if parsed is not None and parsed.is_prerelease:
         return "rc"

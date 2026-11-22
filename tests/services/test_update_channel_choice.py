@@ -340,3 +340,24 @@ def test_saving_for_a_packaged_app_writes_the_preference(tmp_path):
     assert pref.read_channel_preference(runtime.data_root) == "rc"
     assert set_update_channel("preview", runtime) is False  # type: ignore[arg-type]
     assert pref.read_channel_preference(runtime.data_root) == "rc"
+
+
+# --- client identity ---------------------------------------------------------
+
+@pytest.mark.parametrize(("build", "choice", "reported"), [
+    ("stable", "rc", "rc"), ("preview", "stable", "stable"),
+    ("stable", None, "stable"), ("preview", None, "rc"),
+])
+def test_client_identity_reports_the_chosen_channel(tmp_path, build, choice, reported):
+    from servonaut.services.client_identity import configure_client_identity, reset_client_identity_for_tests
+
+    runtime = _runtime(tmp_path, build)
+    if choice:
+        pref.write_channel_preference(runtime.data_root, choice)
+    reset_client_identity_for_tests()
+    try:
+        assert configure_client_identity(runtime=runtime).channel == reported
+        # An explicit channel still wins over the saved choice.
+        assert configure_client_identity(runtime=runtime, channel="stable").channel == "stable"
+    finally:
+        reset_client_identity_for_tests()
