@@ -123,6 +123,15 @@ DialogFrame > .dialog-footer > DialogActions > Button:hover {
     border: round $accent;
 }
 
+/* A role frame keeps its colour on hover, so lighten it to keep a hover cue. */
+DialogFrame > .dialog-footer > DialogActions > Button.-warning:hover {
+    border: round $warning-lighten-2;
+}
+
+DialogFrame > .dialog-footer > DialogActions > Button.-error:hover {
+    border: round $error-lighten-2;
+}
+
 DialogFrame > .dialog-footer > DialogActions > Button.-warning {
     background: transparent;
     color: auto 100%;
@@ -208,6 +217,23 @@ DialogFrame > .dialog-footer > DialogActions > Button.-error.-active:ansi:enable
 }
 
 DialogFrame > .dialog-footer > DialogActions > Button:disabled { opacity: 50%; }
+
+/* A disabled action looks the same hovered as idle. */
+DialogFrame > .dialog-footer > DialogActions > Button:disabled:hover {
+    background: transparent;
+    color: $text;
+    border: round $border-blurred;
+}
+
+DialogFrame > .dialog-footer > DialogActions > Button.-warning:disabled:hover {
+    color: auto 100%;
+    border: round $warning;
+}
+
+DialogFrame > .dialog-footer > DialogActions > Button.-error:disabled:hover {
+    color: auto 100%;
+    border: round $error;
+}
 
 /* Prompts fit their content until the cap; only the body scrolls. */
 DialogFrame.dialog-compact > .dialog-heading,
