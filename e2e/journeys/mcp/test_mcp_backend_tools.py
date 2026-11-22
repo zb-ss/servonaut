@@ -2,7 +2,9 @@
 
 Against the (fake) service, signed in: ``whoami`` describes the session
 without revealing the token; ``api_request`` calls the API with the CLI's
-session and recovers from an expired access token by refreshing it;
+session and recovers from an expired access token by refreshing it, also
+when another process rotated the shared pair so long ago that the stored
+access token has expired as well;
 ``mcp_tool_call`` runs a tool on the hosted MCP server over Streamable HTTP
 (ending the session after each call, which frees its connection slot at
 once), passes the server's answer for an unknown tool through, returns its
@@ -24,10 +26,11 @@ answers "not logged in" without calling the service.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
-from e2e.harness.session_seed import read_session
+from e2e.harness.session_seed import auth_file, read_session, seed_session
 from e2e.harness.waits import wait_for, wait_for_async
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -152,6 +155,43 @@ async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, accou
         assert healthy["action"] == "none"
         assert listener.background_pid() == pid
 
+    assert session.protocol_errors == []
+
+
+async def test_api_request_refreshes_a_pair_another_process_stored_long_ago(
+    mcp, journey, fake_cloud, account_home, cli,
+):
+    """The server keeps its sign-in in memory while another process rotates
+    the shared pair. An hour on, the stored pair's access token has expired as
+    well: a refused request adopts the stored pair and refreshes it before the
+    retry, instead of retrying with an access token the service refuses."""
+    home = account_home("mcp-rotated-elsewhere")
+    # The server's pair was issued before the stored one, so it expired first.
+    seed_session(home.home, fake_cloud, expires_in=-3700)
+    user_id = fake_cloud.entitlements()["user_id"]
+
+    async with mcp(home) as session:
+        assert (await _json(session, "whoami"))["logged_in"] is True
+
+        fake_cloud.expire_access_token()
+        status = cli(home, "connect", "--status")
+        assert status.returncode == 0, status.describe()
+        refreshes = fake_cloud.statuses("/api/oauth/refresh")
+        assert refreshes and set(refreshes) == {200}
+        stored = read_session(home.home)
+        assert stored["refresh_token"] == fake_cloud.tokens()[1]
+
+        stored["expires_at"] = time.time() - 90
+        auth_file(home.home).write_text(json.dumps(stored), encoding="utf-8")
+        fake_cloud.expire_access_token()
+        me_before = len(fake_cloud.statuses("/api/v1/me"))
+
+        me = await _json(session, "api_request", {"method": "GET", "path": "/api/v1/me"})
+
+    assert me["status"] == 200 and me["body"] == {"user_id": user_id}
+    assert fake_cloud.statuses("/api/v1/me")[me_before:] == [401, 200]
+    assert fake_cloud.statuses("/api/oauth/refresh") == refreshes + [200]
+    assert read_session(home.home)["refresh_token"] == fake_cloud.tokens()[1]
     assert session.protocol_errors == []
 
 
