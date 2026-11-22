@@ -90,23 +90,46 @@ async def _mail(pilot: Any) -> dict:
     return pilot.app.screen.query_one(InstanceTable).get_selected_instance()
 
 
+def _record_paints(row: ValueRow, monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
+    """Record ``(copied, shown text)`` each time the row repaints its value cell.
+
+    The confirmation only lasts ``COPIED_SECONDS``, so checking it after a pause
+    races the timer on a slow machine. The record keeps what the user saw.
+    """
+    painted: List[tuple] = []
+    update = row.value_widget.update
+
+    def recording_update(*args: Any, **kwargs: Any) -> None:
+        update(*args, **kwargs)
+        painted.append((row.copied, row.shown_text))
+
+    monkeypatch.setattr(row.value_widget, "update", recording_update)
+    return painted
+
+
 def test_a_click_copies_the_value_and_confirms_in_place(
     clipboard: _Clipboard, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(fleet_values, "COPIED_SECONDS", 0.3)
+    confirmed = (True, "✓ copied")
 
     async def scenario(pilot: Any) -> None:
         instance = await _mail(pilot)
         row = _row(pilot, "public_ip")
         assert row.value == instance["public_ip"]
+        painted = _record_paints(row, monkeypatch)
         toasts = len(pilot.app._notifications)
         await pilot.click(row.value_widget)
-        await pilot.pause()
+        await _harness.wait_until(pilot, lambda: clipboard.calls, "the value to be copied")
         assert clipboard.calls == [instance["public_ip"]]
-        assert row.copied and row.shown_text == "✓ copied"
-        assert len(pilot.app._notifications) == toasts
-        await _harness.wait_until(pilot, lambda: not row.copied, "the confirmation to clear")
+        await _harness.wait_until(
+            pilot, lambda: confirmed in painted and not row.copied, "the confirmation to clear",
+        )
+        # The confirmation replaced the value in place, then the value came back.
+        shown = painted[painted.index(confirmed):]
+        assert shown[:2] == [confirmed, (False, instance["public_ip"])]
         assert row.shown_text == instance["public_ip"]
+        assert len(pilot.app._notifications) == toasts
 
     _run(scenario)
 
@@ -128,7 +151,11 @@ def test_dragging_inside_a_value_copies_only_the_highlighted_part(clipboard: _Cl
 
 
 @sizes
-def test_y_then_arrows_and_enter_copy_the_chosen_value(clipboard: _Clipboard, size: str) -> None:
+def test_y_then_arrows_and_enter_copy_the_chosen_value(
+    clipboard: _Clipboard, size: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The confirmation must still be showing when it is checked below.
+    monkeypatch.setattr(fleet_values, "COPIED_SECONDS", 60)
     narrow = size == "100x30"
     forward, back = ("right", "left") if narrow else ("down", "up")
 
