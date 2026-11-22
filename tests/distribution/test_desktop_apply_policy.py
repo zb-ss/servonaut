@@ -348,8 +348,14 @@ def test_corrupt_state_recovers_only_from_verified_current_policy(apply, caplog)
 
 
 def test_policy_lifetime_limits_replay_after_state_recovery(apply):
-    with pytest.raises(ManifestError, match="at most one hour"):
-        apply.policy(expires_at=(apply.now + timedelta(hours=1)).isoformat())
+    with pytest.raises(ManifestError, match="at most seven days"):
+        apply.policy(expires_at=(apply.now + timedelta(days=7)).isoformat())
+
+
+def test_a_three_day_policy_authorizes_the_staged_update(apply):
+    # The publisher signs three-day policies; clients must accept them.
+    apply.set_policy(apply.policy(expires_at=(apply.now + timedelta(days=3)).isoformat()))
+    assert apply.check() is DesktopApplyDecision.AUTHORIZED
 
 
 def test_stage_replacement_during_hash_is_deferred_without_unlinking(apply, monkeypatch):
