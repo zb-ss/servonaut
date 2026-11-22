@@ -292,13 +292,74 @@ Button.-error:ansi:focus,
     text-style: not bold;
 }
 
+/* A disabled button looks the same hovered as idle: the hover rules above
+   would otherwise light its frame and words as if it could be pressed. Each
+   role restates its idle colours here (same specificity as its hover rule,
+   declared later so it wins the tie). */
+Button:disabled:hover {
+    background: transparent;
+    color: $text;
+    border: round $border-blurred;
+    text-style: bold;
+}
+
+Button.-primary:disabled:hover {
+    color: $text-accent;
+    border: round $primary;
+}
+
+Button.-success:disabled:hover {
+    color: $text-success;
+    border: round $success;
+}
+
+Button.-warning:disabled:hover {
+    color: $text-warning;
+    border: round $warning;
+}
+
+Button.-error:disabled:hover {
+    color: $text-error;
+    border: round $error;
+}
+
+#btn_back:disabled:hover {
+    color: $text-muted;
+    border: round $border-blurred;
+}
+
 Button:ansi:disabled:hover,
 Button.-primary:ansi:disabled:hover,
 Button.-success:ansi:disabled:hover,
 Button.-warning:ansi:disabled:hover,
 Button.-error:ansi:disabled:hover,
 #btn_back:ansi:disabled:hover {
+    background: transparent;
+    color: $foreground;
     text-style: not underline not bold;
+}
+
+/* The terminal-colour hover frame is heavy and accent coloured: a disabled
+   button keeps its idle role frame instead. */
+Button:ansi:disabled:hover,
+#btn_back:ansi:disabled:hover {
+    border: round $border-blurred;
+}
+
+Button.-primary:ansi:disabled:hover {
+    border: round $primary;
+}
+
+Button.-success:ansi:disabled:hover {
+    border: round $success;
+}
+
+Button.-warning:ansi:disabled:hover {
+    border: round $warning;
+}
+
+Button.-error:ansi:disabled:hover {
+    border: round $error;
 }
 
 /* ===================================================================

@@ -518,9 +518,17 @@ SettingsScreen .panel-save-dock Button {
     color: $text;
 }
 
+/* The frame is round and a fill is drawn in whole cells, so a hover fill shows
+   as square corners outside it: hover brightens the frame instead. */
 SettingsScreen .panel-save-dock Button:hover {
     border: round $accent-lighten-2;
-    background: $foreground 10%;
+    background: transparent;
+    text-style: bold;
+}
+
+SettingsScreen .panel-save-dock Button:disabled:hover {
+    border: round $accent;
+    color: $text;
     text-style: bold;
 }
 
@@ -528,6 +536,12 @@ SettingsScreen .panel-save-dock Button:ansi:hover {
     border: heavy $accent;
     background: transparent;
     text-style: none;
+}
+
+SettingsScreen .panel-save-dock Button:ansi:disabled:hover {
+    border: round $accent;
+    background: transparent;
+    text-style: not bold not underline;
 }
 
 SettingsScreen .panel-save-dock Button:focus {
