@@ -151,3 +151,30 @@ def test_a_certificate_failure_is_logged_as_such_without_the_url(tmp_path, caplo
     assert "URLError" in caplog.text
     assert "secret-host" not in caplog.text
     assert service.update_status == "Could not reach the update server. Check your connection and try again."
+
+
+def test_an_unreachable_server_is_logged_at_info_so_it_never_reaches_stderr(tmp_path, caplog):
+    # Offline use is ordinary; where logging is not set up (the packaged
+    # build's self-test), Python prints only WARNING and above to stderr.
+    import logging
+    import urllib.error
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from servonaut.distribution import TrustPolicy
+    from servonaut.runtime import DistributionKind
+    from servonaut.services.update_service import UpdateCheckResult, UpdateService
+    from tests.services.test_update_service_frozen import _FakeOpener, _make_frozen_runtime
+
+    runtime = _make_frozen_runtime(tmp_path, kind=DistributionKind.PACKAGED_DESKTOP)
+    service = UpdateService(
+        runtime, manifest_url="https://127.0.0.1:9/manifest.json",
+        trust_policy=TrustPolicy(
+            trusted_public_keys={"k": Ed25519PrivateKey.generate().public_key()}, minimum_signatures=1,
+        ),
+        opener=_FakeOpener(urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))),
+    )
+    with caplog.at_level("INFO", logger=update_service.__name__):
+        assert service.check_for_update() is None
+    assert service.last_check_result is UpdateCheckResult.OFFLINE
+    records = [r for r in caplog.records if "Release manifest request failed" in r.getMessage()]
+    assert records and all(r.levelno == logging.INFO for r in records)
