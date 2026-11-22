@@ -589,8 +589,8 @@ async def test_state_5_managed_elsewhere_variants(
             assert panel.query_one("#updates_channel_apt_summary", Static).display is True
         else:
             assert command_widget.display is False
-            assert panel.query_one("#updates_channel_radio", RadioSet).display is True
-            assert panel.query_one("#updates_channel_radio", RadioSet).disabled is True
+            # Nothing to choose on this install, so the whole section is hidden.
+            assert panel.query_one("#updates_channel_section").display is False
         assert panel.query_one("#save_updates", Button).disabled is True
 
 
@@ -1051,6 +1051,162 @@ async def test_switching_rc_to_stable_on_prerelease_shows_no_downgrade_note(
         await _click(app, pilot, "#updates_channel_stable")
         await wait_until(lambda: note.display)
         assert "no downgrade" in str(note.render()).lower()
+
+
+# ---------------------------------------------------------------------------
+# Packaged apps choose their own channel; installs that cannot hide the section
+# ---------------------------------------------------------------------------
+
+
+def _packaged_runtime(tmp_path: Path, *, version: str = "2.34.0", channel: str = "stable") -> RuntimeLayout:
+    import dataclasses
+
+    return dataclasses.replace(
+        _fake_runtime(DistributionKind.PACKAGED_DESKTOP, version=version),
+        data_root=tmp_path / "data", release_channel=channel, packaging_revision=1,
+    )
+
+
+def _not_apt(monkeypatch: pytest.MonkeyPatch, platform_name: str) -> None:
+    import servonaut.screens.settings.panels.updates as updates_mod
+    from servonaut.updates.apt import AptInstallStatus
+
+    _disable_pipx_install(monkeypatch)
+    monkeypatch.setattr(updates_mod.sys, "platform", platform_name)
+    monkeypatch.setattr(
+        updates_mod, "refresh_apt_status",
+        lambda _rt, **_kw: AptInstallStatus(managed=False, dpkg_owned=True, architecture="amd64", checked=True),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform_name", ["darwin", "linux"])
+async def test_packaged_app_can_choose_its_channel_and_saving_rechecks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str,
+) -> None:
+    from servonaut.updates.channel_preference import read_channel_preference
+
+    _not_apt(monkeypatch, platform_name)
+    runtime = _packaged_runtime(tmp_path)
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        radio = panel.query_one("#updates_channel_radio", RadioSet)
+        assert panel.query_one("#updates_channel_section").display is True
+        assert radio.display is True and radio.disabled is False
+        assert panel.query_one("#save_updates", Button).disabled is False
+        assert panel.current_values() == {"channel": "stable"}
+        assert "pipx" not in str(panel.query_one("#updates_channel_note", Static).render())
+
+        await _click(app, pilot, "#updates_channel_rc")
+        await wait_until(lambda: panel.has_unsaved_changes())
+        checks_before = app.update_service.check_for_update.call_count
+        await _click(app, pilot, "#save_updates")
+        await wait_until(lambda: not panel.has_unsaved_changes())
+
+        assert read_channel_preference(runtime.data_root) == "rc"
+        assert get_client_identity().channel == "rc"
+        await wait_until(lambda: app.update_service.check_for_update.call_count > checks_before)
+        assert panel.current_values() == {"channel": "rc"}
+
+
+@pytest.mark.asyncio
+async def test_packaged_app_shows_the_saved_channel_and_the_no_downgrade_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from servonaut.updates.channel_preference import write_channel_preference
+
+    _not_apt(monkeypatch, "darwin")
+    runtime = _packaged_runtime(tmp_path, version="2.35.0rc1", channel="preview")
+    write_channel_preference(runtime.data_root, "rc")
+    app = _UpdatesHost(tmp_path, runtime=runtime)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        assert panel.current_values() == {"channel": "rc"}
+        note = panel.query_one("#updates_channel_note", Static)
+        assert note.display is False
+
+        await _click(app, pilot, "#updates_channel_stable")
+        await wait_until(lambda: note.display)
+        assert "no downgrade" in str(note.render()).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [DistributionKind.PIP, DistributionKind.SOURCE, DistributionKind.FROZEN_CLI])
+async def test_release_channel_section_is_hidden_where_it_cannot_act(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: DistributionKind,
+) -> None:
+    _disable_pipx_install(monkeypatch)
+    app = _UpdatesHost(tmp_path, runtime=_fake_runtime(kind, version="2.34.0"))
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+
+        assert panel.query_one("#updates_channel_section").display is False
+        assert panel.query_one("#save_updates", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_release_channel_section_stays_for_pipx(tmp_path: Path, pipx_env: Path) -> None:
+    app = _UpdatesHost(tmp_path)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+
+        assert panel.query_one("#updates_channel_section").display is True
+        assert panel.query_one("#updates_channel_radio", RadioSet).disabled is False
+
+
+# ---------------------------------------------------------------------------
+# A failed check never claims the install is up to date
+# ---------------------------------------------------------------------------
+
+_FAILED_CHECK = "Could not reach the update server. Check your connection and try again."
+
+
+@pytest.mark.asyncio
+async def test_failed_check_headline_does_not_say_up_to_date_for_generation_installs(
+    tmp_path: Path, pipx_env: Path,
+) -> None:
+    _seed_pipx_files(pipx_env, state={"status": "up_to_date", "checked_at": 12345})
+    app = _UpdatesHost(tmp_path)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        panel._last_checked_at = time.time()
+        panel._check_error = _FAILED_CHECK
+        panel._render_status()
+
+        primary = panel.query_one("#updates_status_primary", Static)
+        assert "Up to date" not in str(primary.render())
+        assert str(primary.render()) == "Couldn't check for updates  ·  tried just now"
+        assert primary.has_class("-warning") and not primary.has_class("-success")
+        assert str(panel.query_one("#updates_status_secondary", Static).render()) == _FAILED_CHECK
+
+        panel._check_error = None
+        panel._render_status()
+        assert "Up to date" in str(primary.render())
+        assert primary.has_class("-success")
+
+
+@pytest.mark.asyncio
+async def test_failed_check_headline_does_not_say_up_to_date_for_packaged_apps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _not_apt(monkeypatch, "darwin")
+    app = _UpdatesHost(tmp_path, runtime=_packaged_runtime(tmp_path))
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        panel._last_checked_at = time.time()
+        panel._check_error = _FAILED_CHECK
+        panel._render_status()
+
+        primary = panel.query_one("#updates_status_primary", Static)
+        assert str(primary.render()) == "Couldn't check for updates  ·  tried just now"
+        assert primary.has_class("-warning")
+        assert str(panel.query_one("#updates_status_secondary", Static).render()) == _FAILED_CHECK
+        assert panel.query_one("#updates_btn_check", Button).display is True
+
+        panel._check_error = None
+        panel._render_status()
+        assert "Up to date" in str(primary.render())
 
 
 # ---------------------------------------------------------------------------
