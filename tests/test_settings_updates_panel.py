@@ -1209,6 +1209,59 @@ async def test_failed_check_headline_does_not_say_up_to_date_for_packaged_apps(
         assert "Up to date" in str(primary.render())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result,latest,reason,headline,warning",
+    [
+        (None, None, None, "Not checked yet", False),
+        ("OFFLINE", None, _FAILED_CHECK, "Couldn't check for updates", True),
+        ("UP_TO_DATE", None, None, "Up to date", False),
+        ("UPDATE_AVAILABLE", "2.35.0rc2", None, "2.35.0rc2 is available", False),
+    ],
+)
+async def test_packaged_app_opens_on_the_outcome_of_the_apps_own_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    result: Optional[str], latest: Optional[str], reason: Optional[str], headline: str, warning: bool,
+) -> None:
+    # The app checks at start; until a check runs in the panel, that outcome is
+    # what the panel shows. It never claims "Up to date" without a check.
+    from servonaut.services.update_service import UpdateCheckResult
+
+    _not_apt(monkeypatch, "darwin")
+    app = _UpdatesHost(tmp_path, runtime=_packaged_runtime(tmp_path, version="2.35.0rc1", channel="preview"))
+    app.update_service.last_check_result = UpdateCheckResult[result] if result else None
+    app.update_service.latest_version = latest
+    app.update_service.update_status = reason
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        panel._render_status()
+        primary = panel.query_one("#updates_status_primary", Static)
+        assert str(primary.render()) == headline
+        assert primary.has_class("-warning") is warning
+        if reason:
+            assert str(panel.query_one("#updates_status_secondary", Static).render()) == reason
+
+
+@pytest.mark.asyncio
+async def test_packaged_app_redraws_when_the_apps_check_finishes_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from servonaut.services.update_service import UpdateCheckResult
+
+    _not_apt(monkeypatch, "darwin")
+    app = _UpdatesHost(tmp_path, runtime=_packaged_runtime(tmp_path, version="2.35.0rc1", channel="preview"))
+    app.update_service.last_check_result = None
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        primary = panel.query_one("#updates_status_primary", Static)
+        await wait_until(lambda: str(primary.render()) == "Not checked yet")
+        app.update_service.last_check_result = UpdateCheckResult.UPDATE_AVAILABLE
+        app.update_service.latest_version = "2.35.0rc2"
+        # The next status poll sees an unchanged install status but a new app check.
+        panel._accept_snapshot(panel._status)
+        await wait_until(lambda: str(primary.render()) == "2.35.0rc2 is available")
+
+
 # ---------------------------------------------------------------------------
 # Check now: loading indicator in-flight + completion + policy floor refresh
 # ---------------------------------------------------------------------------
