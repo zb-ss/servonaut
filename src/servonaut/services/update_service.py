@@ -182,9 +182,24 @@ def _transfer_failure_reason(exc: BaseException) -> str:
     return f"{type(reason).__name__}: {reason}"
 
 
+def _transfer_failure_level(exc: BaseException) -> int:
+    """WARNING for a TLS failure or an error answer, INFO for a missing connection.
+
+    A failing trust store or a server that refuses the request must stand out
+    in the log. Being offline is ordinary: it is still logged, at INFO, which
+    reaches the log file but never stderr where logging is not set up.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, ssl.SSLError) or isinstance(exc, urllib.error.HTTPError):
+        return logging.WARNING
+    return logging.INFO
+
+
 def _log_transfer_failure(what: str, exc: BaseException) -> None:
-    """Log at WARNING so a failing trust store is visible in a normal log."""
-    log.warning("%s failed (%s): %s", what, type(exc).__name__, _transfer_failure_reason(exc))
+    log.log(
+        _transfer_failure_level(exc), "%s failed (%s): %s",
+        what, type(exc).__name__, _transfer_failure_reason(exc),
+    )
 
 
 def build_https_opener() -> urllib.request.OpenerDirector:
