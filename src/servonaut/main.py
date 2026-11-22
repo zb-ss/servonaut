@@ -1880,6 +1880,9 @@ def _main() -> None:
         return
 
     if args.update:
+        # The command prints its own result; log records such as the cause of
+        # a failed update request belong in the log file, not on stderr.
+        _setup_logging(debug=args.debug)
         _run_update()
         return
 
