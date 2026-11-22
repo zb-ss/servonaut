@@ -2403,7 +2403,7 @@ def test_policy_renewal_is_uncached_and_monotonic(tmp_path):
     _, _, manifest = _update_manifest(tmp_path)
     bucket = FakeBucket()
     key = mirror.apply_key(STABLE_JSON)
-    interval = mirror.apply_intervals("", "")
+    interval = mirror.apply_intervals("60", "15")
     assert interval == (timedelta(hours=1), timedelta(minutes=15))
 
     def publish(now, controls=mirror.DesktopControls()):
@@ -2806,6 +2806,27 @@ def test_freshness_observes_threshold_outside_the_writer_schedule(tmp_path, monk
     assert (tmp_path / "github-output").read_text() == f"stale={stale}\n"
 
 
+@pytest.mark.parametrize("remaining_hours,stale", [(25, "false"), (23, "true")])
+def test_freshness_alerts_by_default_when_less_than_a_day_remains(tmp_path, monkeypatch, remaining_hours, stale):
+    from servonaut.distribution.apply_policy import DesktopApplyPolicy, sign_apply_policy
+
+    _with_signing(monkeypatch)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    bucket = FakeBucket()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(hours=remaining_hours)
+    for key, channel in mirror.UPDATE_MANIFESTS.values():
+        policy = sign_apply_policy(DesktopApplyPolicy(
+            ReleaseChannel(channel), 1, (expires - timedelta(days=3)).isoformat(),
+            expires.isoformat(), True, (),
+        ), *SIGNER)
+        bucket.put_object(Bucket="b", Key=mirror.apply_key(key), Body=json.dumps(policy.to_dict()).encode(),
+                          ContentType=mirror.JSON_TYPE, CacheControl=mirror.UNCACHED)
+    monkeypatch.setattr(mirror, "fetch", _policy_fixture_fetcher(bucket, {}))
+    assert mirror.main(["desktop-freshness", "--base", BASE]) == 0
+    assert (tmp_path / "github-output").read_text() == f"stale={stale}\n"
+
+
 def test_desktop_policy_workflow_rejects_silent_skips_and_limits_permissions(workflow):
     assert "    - cron: \"*/15 * * * *\"" in workflow
     assert "inputs.desktop_action != 'auto' && 'desktop-owner'" in workflow
@@ -2943,7 +2964,27 @@ def test_bucket_lock_rule_must_be_enabled_indefinite_and_on_the_exact_log():
     assert not matches({**rule, "prefix": root + "one-file.json"})
 
 
-def test_a_fresh_policy_is_backdated_with_strict_one_hour_lifetime(tmp_path):
+def test_default_policy_lasts_three_days_and_renews_once_a_day_old(tmp_path):
+    from servonaut.distribution.apply_policy import MAX_POLICY_VALIDITY
+
+    _, _, manifest = _update_manifest(tmp_path)
+    bucket = FakeBucket()
+    key = mirror.apply_key(STABLE_JSON)
+    intervals = mirror.apply_intervals("", "")
+    assert intervals == (timedelta(days=3), timedelta(days=1))
+    # The publisher can never sign a lifetime the clients reject.
+    assert timedelta(minutes=mirror.MAX_APPLY_VALIDITY_MINUTES) == MAX_POLICY_VALIDITY
+
+    def publish(now):
+        return mirror.publish_apply_policy(bucket, "b", key, "stable", manifest, mirror.DesktopControls(),
+                                           SIGNER, now, intervals, POLICY_FOR)
+
+    publish(NOW)
+    assert "not due" in publish(NOW + timedelta(hours=23))
+    assert "valid until" in publish(NOW + timedelta(days=1))
+
+
+def test_a_fresh_policy_is_backdated_with_a_strict_lifetime(tmp_path):
     from servonaut.distribution.apply_policy import DesktopApplyPolicy
 
     _, _, manifest = _update_manifest(tmp_path)
@@ -2954,9 +2995,10 @@ def test_a_fresh_policy_is_backdated_with_strict_one_hour_lifetime(tmp_path):
                                 SIGNER, NOW, interval, POLICY_FOR)
     policy = DesktopApplyPolicy.from_json(bucket.objects[key]["data"])
     assert NOW - timedelta(minutes=1) <= parse_timestamp(policy.issued_at) < NOW
-    assert parse_timestamp(policy.expires_at) - parse_timestamp(policy.issued_at) == timedelta(hours=1)
-    with pytest.raises(mirror.MirrorError, match="at most one hour"):
-        mirror.apply_intervals("61", "")
+    assert parse_timestamp(policy.expires_at) - parse_timestamp(policy.issued_at) == timedelta(days=3)
+    assert mirror.apply_intervals("10080", "")[0] == timedelta(days=7)
+    with pytest.raises(mirror.MirrorError, match="at most seven days"):
+        mirror.apply_intervals("10081", "")
 
 
 def test_desktop_rollout_default_preserves_ordinary_signed_manifest_writes(tmp_path, monkeypatch):
