@@ -78,6 +78,9 @@ def _check_client_kind(client_kind: str) -> None:
 # Seconds allowed for one whole ``/api/oauth/refresh`` round-trip (enforced
 # with ``asyncio.wait_for``; httpx's own timeout applies per phase).
 _REFRESH_HTTP_TIMEOUT_SECONDS = 30
+# A pair adopted from auth.json is used as it is only while its access token
+# has more than this left; otherwise its refresh token is exchanged first.
+_ADOPTED_ACCESS_TOKEN_MARGIN_SECONDS = 60
 # How long a refresh waits for another process to finish its own. Longer
 # than one round-trip, so a live holder that is mid-request completes first.
 # On expiry the refresh re-reads auth.json and gives up for now (transient)
@@ -937,7 +940,10 @@ class AuthService(AuthServiceInterface):
            instead of presenting a token that process may be rotating.
         2. Inside the locks we re-read ``auth.json`` and, if it holds a
            newer pair of the same account, adopt it without a network
-           round-trip — somebody else already rotated for us.
+           round-trip — somebody else already rotated for us. When that
+           pair's access token has expired as well (it was rotated long
+           ago), we exchange its unused refresh token instead of handing
+           the caller an access token the server will refuse.
         3. On ``invalid_grant`` we re-read ``auth.json`` once more before
            declaring the session revoked: if another process rotated past
            the token we presented (possible when the lock file could not
@@ -967,12 +973,20 @@ class AuthService(AuthServiceInterface):
                 # the in-memory copy than wipe the user's session over a
                 # transient FS hiccup).
                 if self._adopt_rotated_disk_token(attempted_with):
+                    if self._access_token_outlives_margin():
+                        logger.info(
+                            "refresh_token: adopted newer token from disk "
+                            "(another task or process rotated while we waited "
+                            "for the lock)"
+                        )
+                        return True
+                    # Rotated elsewhere long ago: its access token has expired
+                    # too, so a retry with it would only be refused again.
+                    # Its refresh token is unused, so exchange that instead.
                     logger.info(
-                        "refresh_token: adopted newer token from disk "
-                        "(another task or process rotated while we waited "
-                        "for the lock)"
+                        "refresh_token: adopted newer token from disk, but its "
+                        "access token has expired; refreshing it"
                     )
-                    return True
                 if lock_timed_out:
                     logger.warning(
                         "Token refresh skipped: another process is still "
@@ -1077,6 +1091,15 @@ class AuthService(AuthServiceInterface):
         self._persisted_refresh_token = disk_token.refresh_token
         self._refresh_grant_revoked = False
         return True
+
+    def _access_token_outlives_margin(self) -> bool:
+        """Whether the held access token has more than the margin left.
+
+        The margin covers clock drift and the time a request takes, so a
+        token that is about to expire counts as expired.
+        """
+        remaining = self._token.expires_at - time.time()
+        return remaining > _ADOPTED_ACCESS_TOKEN_MARGIN_SECONDS
 
     def _is_newer_pair_of_our_account(self, stored: AuthToken) -> bool:
         """Whether ``stored`` may replace our in-memory pair.

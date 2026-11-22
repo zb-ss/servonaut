@@ -1434,6 +1434,88 @@ def test_refresh_never_adopts_an_older_stored_pair(tmp_path, monkeypatch):
     assert json.loads(auth_file.read_text())["refresh_token"] == "R2"
 
 
+@pytest.mark.parametrize("stored_expires_in", [-90, 30])
+def test_refresh_exchanges_an_adopted_pair_whose_access_token_expired(
+    tmp_path, monkeypatch, stored_expires_in,
+):
+    """Another process rotated R0 -> R1 long ago and nothing has refreshed
+    since, so A1 has expired (or is about to). Handing A1 to the caller would
+    only get its retry refused again; the unused R1 is exchanged instead."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-3700)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.write_text(json.dumps(
+        _pair("A1", "R1", expires_in=stored_expires_in),
+    ))
+    fake_client = _client_answering(httpx.Response(200, json={
+        "access_token": "A2", "refresh_token": "R2", "expires_in": 3600,
+    }))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.refresh_token()) is True
+
+    assert fake_client.post.await_args.kwargs["json"]["refresh_token"] == "R1"
+    assert svc.access_token == "A2"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R2"
+
+
+def test_refresh_of_an_expired_adopted_pair_refused_ends_the_session(
+    tmp_path, monkeypatch,
+):
+    """The stored pair's refresh token was revoked too: one exchange is
+    tried, and the session is then reported as signed out."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-3700)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=-90)))
+    fake_client = _client_answering(
+        httpx.Response(400, json={"error": "invalid_grant"}),
+    )
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.refresh_token()) is False
+
+    assert fake_client.post.await_count == 1
+    assert fake_client.post.await_args.kwargs["json"]["refresh_token"] == "R1"
+    assert svc._refresh_grant_revoked is True
+    assert svc.is_authenticated is False
+
+
+def test_refresh_lock_timeout_keeps_an_expired_adopted_pair_without_success(
+    tmp_path, monkeypatch, held_refresh_lock,
+):
+    """The lock holder may be exchanging R1 right now, so R1 is not presented;
+    the refresh reports a transient failure instead of an expired A1."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-3700)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    monkeypatch.setattr(
+        "servonaut.services.auth_service._REFRESH_LOCK_WAIT_SECONDS", 0.2,
+    )
+    svc = AuthService()
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=-90)))
+    fake_client = _client_answering()
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
+
+    assert ok is False
+    fake_client.post.assert_not_awaited()
+    assert svc._token.refresh_token == "R1"
+    assert svc.is_authenticated is True
+
+
 def test_refresh_never_adopts_another_accounts_pair(tmp_path, monkeypatch):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=60)))
