@@ -667,7 +667,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return
         fields = self.collect()
         channel: Channel = fields["channel"]
-        if self._status is not None and self._status.state == "managed_elsewhere":
+        if self._status.state == "managed_elsewhere" and not self._status.channel_selectable:
             self._finish_save("No changes to save.")
             return
         self._saving_channel = True
@@ -696,6 +696,10 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             self._set_radio_channel(snapshot.channel)
             self._finish_save("Release channel saved.")
             self._accept_snapshot(snapshot, redraw=True)
+            if snapshot.state == "managed_elsewhere":
+                # The packaged app has no background updater to notice the
+                # switch, so look at the new channel straight away.
+                self._start_check()
         finally:
             self._saving_channel = False
             if self.is_attached and self._status is not None:
@@ -819,6 +823,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             )
             if show_check:
                 btn_check.display = True
+            if self._check_error and show_check and not show_download:
+                primary_widget.add_class("-warning")
             if show_download:
                 link_download.display = True
                 primary_widget.add_class("-accent")
@@ -928,14 +934,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 btn_update.display = True
                 self._configure_release_notes_link(link_notes, discovered)
             else:
-                if self._last_checked_at is not None:
-                    ago = format_checked_ago(self._last_checked_at)
-                    primary_text = f"Up to date  ·  checked {ago}"
-                else:
-                    primary_text = "Up to date"
-                primary_widget.add_class("-success")
-                if self._check_error:
-                    secondary_text = _terminal_safe(self._check_error).strip()
+                primary_text, secondary_text, failed = self._up_to_date_lines("")
+                primary_widget.add_class("-warning" if failed else "-success")
                 btn_check.display = True
 
         primary_widget.update(primary_text)
@@ -956,6 +956,23 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._sync_channel_controls(status)
         self._sync_channel_notes()
         self._sync_action_busy()
+
+    def _up_to_date_lines(self, idle_secondary: str) -> tuple[str, str, bool]:
+        """Headline and detail for a check that found nothing newer.
+
+        Returns ``(primary, secondary, failed)``. "Up to date" is only claimed
+        after a check that succeeded; a failed one says so, with its reason.
+        """
+        ago = format_checked_ago(self._last_checked_at) if self._last_checked_at is not None else ""
+        if self._check_error:
+            tried = f"  ·  tried {ago}" if ago else ""
+            return (
+                f"Couldn't check for updates{tried}",
+                _terminal_safe(self._check_error).strip(),
+                True,
+            )
+        primary = f"Up to date  ·  checked {ago}" if ago else "Up to date"
+        return primary, idle_secondary, False
 
     def _managed_elsewhere_view(
         self,
@@ -1015,15 +1032,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     True,
                     available,
                 )
-            if self._last_checked_at is not None:
-                ago = format_checked_ago(self._last_checked_at)
-                primary = f"Up to date  ·  checked {ago}"
-            else:
-                primary = "Up to date"
-            secondary = (
-                _terminal_safe(self._check_error).strip()
-                if self._check_error
-                else "New releases are available from servonaut.dev/download."
+            primary, secondary, _ = self._up_to_date_lines(
+                "New releases are available from servonaut.dev/download."
             )
             return (primary, secondary, "", True, False, None)
 
@@ -1047,7 +1057,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         install_kind = status.install_kind or ""
         apt_managed = self._effective_apt_managed(install_kind)
         is_apt = _is_apt_install(install_kind, apt_managed=apt_managed)
-        managed = status.state == "managed_elsewhere" or is_apt
+        selectable = status.channel_selectable and not is_apt
+        managed = (status.state == "managed_elsewhere" and not selectable) or is_apt
+        # A control that cannot act on this install is hidden, never shown locked.
+        self.query_one("#updates_channel_section").display = (
+            is_apt or selectable or status.state != "managed_elsewhere"
+        )
         title = self.query_one("#updates_channel_title", Static)
         radio = self.query_one("#updates_channel_radio", RadioSet)
         apt_summary = self.query_one("#updates_channel_apt_summary", Static)
@@ -1071,7 +1086,9 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             save_btn.disabled = managed or self._saving_channel
         except NoMatches:
             pass
-        self.query_one("#updates_auto_note", Static).display = not managed
+        self.query_one("#updates_auto_note", Static).display = (
+            not managed and status.state != "managed_elsewhere"
+        )
 
     def _sync_channel_notes(self) -> None:
         note = self.query_one("#updates_channel_note", Static)
@@ -1084,13 +1101,6 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         apt_managed = self._effective_apt_managed(install_kind)
         if _is_apt_install(install_kind, apt_managed=apt_managed):
             note.update("Servonaut does not modify APT configuration.")
-            note.display = True
-            return
-        if status.state == "managed_elsewhere":
-            note.update(
-                "Release channel selection applies to pipx installations "
-                "with automatic background updates."
-            )
             note.display = True
             return
         if self._selected_channel() == "stable" and _is_prerelease_version(
@@ -1206,6 +1216,9 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     @on(Button.Pressed, "#updates_btn_check")
     def _on_check_now_pressed(self, event: Button.Pressed) -> None:
         event.stop()
+        self._start_check()
+
+    def _start_check(self) -> None:
         if self._busy or self._check_baseline is not None:
             return
         self.run_worker(
