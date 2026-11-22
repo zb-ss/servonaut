@@ -20,6 +20,7 @@ from typing import Any
 from servonaut.updates.status import public_version
 from servonaut.utils.endpoints import endpoint_override
 from servonaut.utils.package_version import PackageVersion
+from servonaut.utils.tls import build_opener
 
 DEFAULT_PROJECT_URL = "https://pypi.org/pypi/servonaut/json"
 DEFAULT_INDEX_URL = "https://pypi.org/simple/"
@@ -52,7 +53,7 @@ class _RestrictedRedirects(urllib.request.HTTPRedirectHandler):
 
 def _open(url: str, timeout: float, headers: Mapping[str, str] | None = None):
     request = urllib.request.Request(url, headers=dict(headers or {}))
-    return urllib.request.build_opener(_RestrictedRedirects()).open(request, timeout=timeout)
+    return build_opener(_RestrictedRedirects()).open(request, timeout=timeout)
 
 
 def read_document(url: str, timeout: float, headers: Mapping[str, str] | None = None) -> dict:

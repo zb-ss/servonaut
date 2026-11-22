@@ -304,7 +304,7 @@ def test_update_check_failures_are_reported_without_the_url(monkeypatch, caplog,
     assert service.last_check_result is UpdateCheckResult.OFFLINE
     assert PYPI_URL_ENV in caplog.text
     assert "secret-part" not in caplog.text
-    assert service.update_status == "Could not check for updates (offline)."
+    assert service.update_status == "Could not reach the update server. Check your connection and try again."
 
 
 def test_cli_update_says_the_check_failed(monkeypatch, capsys):
@@ -318,7 +318,7 @@ def test_cli_update_says_the_check_failed(monkeypatch, capsys):
     main_module._run_update()
 
     out = capsys.readouterr().out
-    assert "Could not check for updates" in out
+    assert "Could not reach the update server" in out
     assert "Already up to date" not in out
 
 

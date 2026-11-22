@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import subprocess
+import ssl
 import stat
 import tempfile
 import threading
@@ -54,11 +55,14 @@ from servonaut.runtime import (
     RuntimeLayout,
     detect_runtime,
 )
+from servonaut.updates.channel_preference import read_channel_preference, release_channel_for
 from servonaut.updates.desktop_apply import (
-    DesktopApplyDecision, DesktopApplyEvidence, StagedDesktopUpdate, prepare_desktop_apply, read_desktop_apply_policy,
+    DesktopApplyDecision, DesktopApplyEvidence, StagedDesktopUpdate, discard_staged_update, is_prerelease_version,
+    prepare_desktop_apply, read_desktop_apply_policy,
 )
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 from servonaut.utils.package_version import PackageVersion
+from servonaut.utils.tls import build_opener
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +126,9 @@ _STATUS_MESSAGES: Final[Mapping[UpdateCheckResult, str]] = {
         "Automatic updates are not configured for this packaged Servonaut build. "
         "Install a newer signed build when one is provided."
     ),
-    UpdateCheckResult.OFFLINE: "Could not check for updates (offline).",
+    UpdateCheckResult.OFFLINE: (
+        "Could not reach the update server. Check your connection and try again."
+    ),
     UpdateCheckResult.INVALID_MANIFEST: (
         "Could not read the published release information. Try again later."
     ),
@@ -160,9 +166,30 @@ class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _transfer_failure_reason(exc: BaseException) -> str:
+    """Name the cause of a failed transfer without quoting the URL."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"certificate verification failed ({reason.verify_message})"
+    if isinstance(reason, ssl.SSLError):
+        return f"TLS error ({reason.reason or type(reason).__name__})"
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP status {exc.code}"
+    if isinstance(reason, str):
+        return reason
+    if isinstance(reason, ValueError):
+        return type(reason).__name__  # the text of a URL error quotes the URL
+    return f"{type(reason).__name__}: {reason}"
+
+
+def _log_transfer_failure(what: str, exc: BaseException) -> None:
+    """Log at WARNING so a failing trust store is visible in a normal log."""
+    log.warning("%s failed (%s): %s", what, type(exc).__name__, _transfer_failure_reason(exc))
+
+
 def build_https_opener() -> urllib.request.OpenerDirector:
     """Return an opener whose redirects can never leave HTTPS."""
-    return urllib.request.build_opener(HttpsOnlyRedirectHandler)
+    return build_opener(HttpsOnlyRedirectHandler)
 
 
 class UpdateService:
@@ -195,6 +222,9 @@ class UpdateService:
         # the other endpoint overrides, so a value loaded from the secrets
         # file after construction applies.
         self._manifest_url = manifest_url
+        # An injected policy always wins; otherwise the policy follows the
+        # effective channel, which the user can change while the app runs.
+        self._injected_trust_policy = trust_policy
         self._trust_policy = trust_policy or _pinned_trust_policy(
             self._runtime.release_channel
         )
@@ -255,9 +285,27 @@ class UpdateService:
         """Path to downloaded and integrity-verified update artifact."""
         return self._downloaded_path
 
+    def effective_channel(self) -> str:
+        """The channel updates follow now: the user's choice, else the build's.
+
+        Only a packaged desktop build can follow a choice. It is read on every
+        use, so a switch applies without a restart.
+        """
+        if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+            choice = read_channel_preference(self._runtime.data_root)
+            if choice is not None:
+                return release_channel_for(choice).value
+        return self._runtime.release_channel
+
+    def _refresh_channel_policy(self) -> None:
+        """Point the trust policy at the effective channel before a check or apply."""
+        if self._injected_trust_policy is None:
+            self._trust_policy = _pinned_trust_policy(self.effective_channel())
+
     def check_for_update(self) -> Optional[str]:
         """Check for an update depending on the distribution channel."""
         self._macos_offer = None
+        self._refresh_channel_policy()
         if self._runtime.is_frozen:
             if self._runtime.kind is DistributionKind.PACKAGED_DESKTOP:
                 from servonaut.updates.apt import (
@@ -337,7 +385,7 @@ class UpdateService:
             log.warning("Release manifest rejected: %s", exc)
             return self._record(UpdateCheckResult.INVALID_MANIFEST)
         except _TRANSFER_ERRORS as exc:
-            log.debug("Frozen manifest request failed: %s", exc)
+            _log_transfer_failure("Release manifest request", exc)
             return self._record(UpdateCheckResult.OFFLINE)
         try:
             manifest = ReleaseManifest.from_json(raw_bytes)
@@ -361,7 +409,7 @@ class UpdateService:
         if self._manifest_url:
             return self._manifest_url
         return endpoint_override(RELEASE_MANIFEST_URL_ENV) or default_manifest_url(
-            self._runtime
+            self._runtime, self.effective_channel()
         )
 
     def _record_refused_override(self, exc: EndpointOverrideError) -> None:
@@ -390,8 +438,14 @@ class UpdateService:
 
     def prepare_staged_desktop_apply(self, staged: StagedDesktopUpdate) -> DesktopApplyEvidence | DesktopApplyDecision:
         """Fetch and verify a staged replacement before excluding launches."""
+        self._refresh_channel_policy()
         if self._runtime.kind is not DistributionKind.PACKAGED_DESKTOP or self._trust_policy is None:
             return DesktopApplyDecision.DEFERRED
+        if self.effective_channel() == ReleaseChannel.STABLE.value and is_prerelease_version(
+            staged.identity.product_version
+        ):
+            # The user went back to Stable after this candidate was staged.
+            return discard_staged_update(staged, self._runtime.data_root)
         try:
             manifest_url = self._resolve_manifest_url()
             if manifest_url is None:
@@ -400,7 +454,7 @@ class UpdateService:
                 staged, data_root=self._runtime.data_root,
                 fetch=lambda url: self._fetch_manifest(url, uncached=True),
                 manifest_url=manifest_url, trust=self._trust_policy,
-                channel=ReleaseChannel(self._runtime.release_channel),
+                channel=ReleaseChannel(self.effective_channel()),
                 running_version=self._current, running_revision=self._current_revision,
                 status=self._record_desktop_apply_warning,
             )
@@ -408,12 +462,13 @@ class UpdateService:
             return DesktopApplyDecision.DEFERRED
 
     def _read_macos_policy(self) -> DesktopApplyPolicy | None:
+        self._refresh_channel_policy()
         try:
             manifest_url = self._resolve_manifest_url()
             if manifest_url is not None and self._trust_policy is not None:
                 return read_desktop_apply_policy(
                     data_root=self._runtime.data_root, fetch=lambda url: self._fetch_manifest(url, uncached=True),
-                    manifest_url=manifest_url, trust=self._trust_policy, channel=ReleaseChannel(self._runtime.release_channel),
+                    manifest_url=manifest_url, trust=self._trust_policy, channel=ReleaseChannel(self.effective_channel()),
                     warn=log.warning,
                 )
         except (ManifestError, RecursionError, *_TRANSFER_ERRORS):
@@ -890,17 +945,20 @@ class UpdateService:
         return latest_version > current_version
 
 
-def default_manifest_url(runtime: RuntimeLayout) -> Optional[str]:
+def default_manifest_url(
+    runtime: RuntimeLayout, channel: Optional[str] = None
+) -> Optional[str]:
     """The pinned release manifest URL of the channel a packaged build was cut for.
 
     Only a build marker states a build's channel and packaging revision. A
     frozen layout without one reports the stable channel as a fallback and,
     with no revision to order by, would be offered its own version again, so
     it gets no default. Neither does a channel without a pinned manifest.
+    *channel* replaces the build's when the user follows another one.
     """
     if runtime.packaging_revision is None:
         return None
-    return trust_root.DEFAULT_MANIFEST_URLS.get(runtime.release_channel)
+    return trust_root.DEFAULT_MANIFEST_URLS.get(channel or runtime.release_channel)
 
 
 def _pinned_trust_policy(channel: str) -> Optional[TrustPolicy]:

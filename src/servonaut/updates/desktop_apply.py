@@ -17,6 +17,7 @@ from servonaut.distribution import (
     ManifestDowngradeError, ManifestError, ManifestExpiredError, ReleaseChannel, ReleaseManifest,
     TrustPolicy, check_downgrade, verify_manifest,
 )
+from servonaut.distribution.manifest import parse_semver
 from servonaut.distribution.apply_policy import (
     DesktopApplyPolicy,
     DesktopArtifactIdentity,
@@ -128,6 +129,19 @@ def _discard(staged: StagedDesktopUpdate, staging_dir: Path) -> DesktopApplyDeci
     except (OSError, ValueError) as error:
         logger.warning("Could not discard denied desktop update (%s).", type(error).__name__)
     return DesktopApplyDecision.DENIED
+
+
+def discard_staged_update(staged: StagedDesktopUpdate, data_root: Path) -> DesktopApplyDecision:
+    """Remove a staged update that the user's channel no longer offers."""
+    return _discard(staged, data_root / DESKTOP_STAGING_DIR)
+
+
+def is_prerelease_version(version: str) -> bool:
+    """True for a semantic version that carries a pre-release label."""
+    try:
+        return bool(parse_semver(version).prerelease)
+    except ManifestError:
+        return False
 
 
 def read_desktop_apply_policy(

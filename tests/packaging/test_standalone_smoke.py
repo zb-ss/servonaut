@@ -86,7 +86,7 @@ elif args == ['--update']:
     print('Checking for updates...')
     # Offline only while the manifest check is sent to the smoke's loopback port.
     if os.environ.get('SERVONAUT_RELEASE_MANIFEST_URL') == 'https://127.0.0.1:9/manifest.json':
-        print('Could not check for updates (offline).')
+        print('Could not reach the update server. Check your connection and try again.')
     else:
         print('Update available: v99.0.0')
 elif args == ['--list-backups']:
