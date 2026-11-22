@@ -204,6 +204,9 @@ class UpdateStatus:
     checked_at: float | None = None
     poll_seconds: float = STATUS_POLL_SECONDS
     old_session_version: str | None = None
+    # True when the install can follow a user-chosen channel: a pipx install
+    # with the background updater, or a packaged desktop app.
+    channel_selectable: bool = False
 
 
 def public_version(value: object) -> PackageVersion | None:
@@ -299,7 +302,20 @@ def _read_status(root: Path, version: str) -> UpdateStatus:
         checked_at=positive(state.get("checked_at"), 0) or None,
         poll_seconds=preferences.status_poll_seconds,
         old_session_version=next(iter(session_versions)) if len(session_versions) == 1 else None,
+        channel_selectable=True,
     )
+
+
+def _managed_elsewhere_status(version: str, runtime: RuntimeLayout | None) -> UpdateStatus:
+    """Status of an install this updater does not run; a packaged app still has a channel."""
+    from servonaut.runtime import DistributionKind, detect_runtime
+    from servonaut.updates.channel_preference import display_channel_for, read_channel_preference
+
+    runtime = runtime or detect_runtime()
+    if runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+        channel = read_channel_preference(runtime.data_root) or display_channel_for(runtime.release_channel)
+        return UpdateStatus("managed_elsewhere", version, runtime.kind.value, channel, channel_selectable=True)
+    return UpdateStatus("managed_elsewhere", version, runtime.kind.value, default_channel(version))
 
 
 def read_update_status(runtime: RuntimeLayout | None = None) -> UpdateStatus:
@@ -308,7 +324,7 @@ def read_update_status(runtime: RuntimeLayout | None = None) -> UpdateStatus:
     try:
         layout = locate_install()
         if layout is None or os.environ.get("SERVONAUT_SKIP_AUTO_APPLY") == "1":
-            return UpdateStatus("managed_elsewhere", version, _kind(runtime), default_channel(version))
+            return _managed_elsewhere_status(version, runtime)
         return _read_status(layout[0], version)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return UpdateStatus("failed", version, "pipx", "stable",
@@ -316,6 +332,11 @@ def read_update_status(runtime: RuntimeLayout | None = None) -> UpdateStatus:
 
 
 def set_update_channel(channel: Channel, runtime: RuntimeLayout | None = None) -> bool:
+    from servonaut.runtime import DistributionKind
+    from servonaut.updates.channel_preference import write_channel_preference
+
+    if runtime is not None and runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+        return write_channel_preference(runtime.data_root, channel)
     layout = locate_install()
     if layout is None or channel not in ("stable", "rc"):
         return False

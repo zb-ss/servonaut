@@ -89,7 +89,7 @@ _UPDATE_SMOKE_ENVIRONMENT = {
     _MANIFEST_URL_ENV: _UNREACHABLE_MANIFEST_URL,
     "SERVONAUT_PYPI_URL": "http://package-index.invalid/pypi/servonaut/json",
 }
-_OFFLINE_UPDATE_STATUS = "Could not check for updates (offline)."
+_OFFLINE_UPDATE_STATUS = "Could not reach the update server. Check your connection and try again."
 _CALLER_ENVIRONMENT_CANARIES = {
     "AWS_ACCESS_KEY_ID": "caller-isolation-access-key",
     "AWS_PROFILE": "caller-isolation-profile",

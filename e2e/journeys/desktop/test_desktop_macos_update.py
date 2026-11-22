@@ -129,3 +129,34 @@ async def test_desktop_quit_to_install_requires_confirmation(desktop, seed, monk
             stage.assert_not_called()
             request.assert_not_called()
         assert page.errors() == []
+
+
+async def test_desktop_packaged_app_saves_its_release_channel(desktop, seed, monkeypatch):
+    # A packaged app Servonaut updates itself offers the channel choice, and
+    # saving it keeps the choice under the app's data root.
+    from servonaut.updates import channel_preference
+
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+    simulated = replace(
+        runtime.detect_runtime(), kind=runtime.DistributionKind.PACKAGED_DESKTOP,
+        data_root=seed.home / ".servonaut", release_channel="stable", packaging_revision=1,
+    )
+    monkeypatch.setattr(runtime, "detect_runtime", lambda: simulated)
+    monkeypatch.setattr(UpdatesPanel, "_effective_apt_managed", lambda *_: False)
+    monkeypatch.setattr(UpdateService, "check_for_update", lambda _service: None)
+    monkeypatch.setattr(host, "sys", SimpleNamespace(platform="darwin"))
+
+    async with desktop.in_process() as desktop_app, desktop.browser() as browser:
+        page = await open_session(browser, desktop_app)
+        tui = desktop_app.tui
+        await nav(page, desktop_app, "nav_settings")
+        await tui.wait_for_screen("SettingsScreen")
+        await click_widget(page, desktop_app, tui.on_screen("#navbtn_updates"))
+        await tui.wait_for_text("Release channel")
+        assert not tui.on_screen("#updates_channel_radio").disabled
+        await click_widget(page, desktop_app, tui.on_screen("#updates_channel_rc"))
+        await click_widget(page, desktop_app, tui.on_screen("#save_updates"))
+        await tui.wait_for_text("Release channel saved")
+        assert channel_preference.read_channel_preference(simulated.data_root) == "rc"
+        assert page.errors() == []

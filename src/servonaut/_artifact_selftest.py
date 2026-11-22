@@ -623,6 +623,12 @@ def _probe_ca_bundle() -> None:
             raise ValueError
         if context.verify_mode != ssl.CERT_REQUIRED or not context.get_ca_certs():
             raise ValueError
+        # The helper every urllib request uses must also carry roots, or the
+        # update check fails certificate verification on a user's computer.
+        from servonaut.utils.tls import client_ssl_context
+
+        if client_ssl_context().cert_store_stats()["x509_ca"] <= 0:
+            raise ValueError
     except Exception:
         raise _SelftestFailure("diagnostic-ca") from None
 
