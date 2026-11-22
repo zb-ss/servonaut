@@ -34,7 +34,12 @@ from servonaut.distribution.trust import (
 
 PURPOSE = "servonaut.desktop-apply-policy"
 CHANNELS = (ReleaseChannel.STABLE, ReleaseChannel.PREVIEW)
-MAX_POLICY_VALIDITY = timedelta(hours=1)
+# The longest lifetime a signed apply policy may claim. The publisher signs
+# shorter policies and renews them well before they expire, and every check
+# fetches the policy uncached, so a withdrawal or pause reaches online
+# installs at their next check whatever the lifetime. The lifetime only bounds
+# how long a replayed old policy could still be accepted.
+MAX_POLICY_VALIDITY = timedelta(days=7)
 _MAX_SEQUENCE = (1 << 53) - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TARGET_PLATFORMS = {
@@ -100,7 +105,7 @@ class DesktopApplyPolicy:
         validate_policy_sequence(self.sequence)
         lifetime = parse_timestamp(self.expires_at) - parse_timestamp(self.issued_at)
         if not timedelta(0) < lifetime <= MAX_POLICY_VALIDITY:
-            raise ManifestSchemaError("Desktop apply policy must last at most one hour.")
+            raise ManifestSchemaError("Desktop apply policy must last at most seven days.")
         if type(self.paused) is not bool or (self.paused and self.permitted):
             raise ManifestSchemaError("A paused desktop policy cannot permit artifacts.")
         if len(set(self.permitted)) != len(self.permitted) or len(set(self.withdrawn)) != len(self.withdrawn):

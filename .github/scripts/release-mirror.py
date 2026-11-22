@@ -101,9 +101,15 @@ UPDATE_MANIFESTS = {
 DESKTOP_CONTROLS_KEY = "manifest/desktop-controls.json"
 DESKTOP_CHECKPOINT_ROOT = "manifest/desktop-controls-log/"
 _DESKTOP_CONTROL_BYTES = 1 << 20
-DEFAULT_APPLY_VALIDITY_MINUTES = 60
-DEFAULT_APPLY_REFRESH_MINUTES = 15
-MAX_APPLY_VALIDITY_MINUTES = 60
+# A policy lasts three days and is re-signed once it is a day old, so it
+# stays valid while scheduled runs are delayed for up to two days (GitHub
+# skips many scheduled runs). Releases, withdrawals and pauses re-sign it at
+# once. The maximum matches the clients' limit (apply_policy.MAX_POLICY_VALIDITY).
+DEFAULT_APPLY_VALIDITY_MINUTES = 3 * 24 * 60
+DEFAULT_APPLY_REFRESH_MINUTES = 24 * 60
+MAX_APPLY_VALIDITY_MINUTES = 7 * 24 * 60
+# The freshness audit alerts when a policy has less than this left.
+DEFAULT_APPLY_ALERT_MINUTES = 24 * 60
 _APPLY_ISSUE_BACKDATE = timedelta(seconds=30)
 # Keep enough validity for another scheduled release-mirror run.
 APPLY_SCHEDULE_INTERVAL = timedelta(minutes=15)
@@ -978,14 +984,14 @@ def apply_key(manifest_key: str) -> str:
 
 def apply_intervals(validity: str, refresh: str) -> tuple[timedelta, timedelta]:
     supplied = (validity.strip(), refresh.strip())
-    if any(value and not re.fullmatch(r"[1-9][0-9]{0,3}", value) for value in supplied):
+    if any(value and not re.fullmatch(r"[1-9][0-9]{0,4}", value) for value in supplied):
         raise MirrorError("Apply policy validity and refresh must be whole positive minutes")
     validity_minutes = int(supplied[0]) if supplied[0] else DEFAULT_APPLY_VALIDITY_MINUTES
     refresh_minutes = int(supplied[1]) if supplied[1] else DEFAULT_APPLY_REFRESH_MINUTES
     validity = timedelta(minutes=validity_minutes)
     refresh = timedelta(minutes=refresh_minutes)
     if not max(refresh, APPLY_SCHEDULE_INTERVAL) < validity <= timedelta(minutes=MAX_APPLY_VALIDITY_MINUTES):
-        raise MirrorError("Apply policy validity must exceed its refresh and scheduling intervals and be at most one hour")
+        raise MirrorError("Apply policy validity must exceed its refresh and scheduling intervals and be at most seven days")
     return validity, refresh
 
 
@@ -2171,9 +2177,9 @@ def command_notes(args: argparse.Namespace) -> None:
 def command_desktop_freshness(args: argparse.Namespace) -> None:
     from servonaut.distribution.manifest import parse_timestamp
 
-    setting = args.alert_minutes.strip() or "20"
-    if not re.fullmatch(r"[1-9][0-9]?", setting) or int(setting) >= MAX_APPLY_VALIDITY_MINUTES:
-        raise MirrorError("Desktop apply freshness threshold must be between 1 and 59 minutes")
+    setting = args.alert_minutes.strip() or str(DEFAULT_APPLY_ALERT_MINUTES)
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", setting) or int(setting) >= MAX_APPLY_VALIDITY_MINUTES:
+        raise MirrorError("Desktop apply freshness threshold must be a whole number of minutes below seven days")
     now = datetime.now(timezone.utc)
     threshold = timedelta(minutes=int(setting))
     problems, stale = [], []
