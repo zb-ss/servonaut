@@ -68,3 +68,33 @@ def test_frozen_update_exits_nonzero_when_the_download_fails(frozen_update, caps
 
     assert exit_info.value.code == 1
     assert "could not be downloaded" in capsys.readouterr().out
+
+
+def test_update_logs_a_failed_check_to_the_file_not_stderr(tmp_path: Path) -> None:
+    # Scripts and the packaged smoke test read --update's stdout and require an
+    # empty stderr; the cause of the failure is still in the log file.
+    import os
+    import subprocess
+    import sys
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("SERVONAUT_", "PIPX_", "VIRTUAL_ENV"))
+    }
+    env.update({
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        # Nothing listens on port 9, so the request really fails.
+        "SERVONAUT_PYPI_URL": "https://127.0.0.1:9/pypi/servonaut/json",
+    })
+    result = subprocess.run(
+        [sys.executable, "-m", "servonaut.main", "--update"],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+    )
+    assert result.stderr == ""
+    assert "Could not" in result.stdout
+    log = (home / ".servonaut" / "logs" / "servonaut.log").read_text(encoding="utf-8")
+    assert "Version check via SERVONAUT_PYPI_URL failed" in log
