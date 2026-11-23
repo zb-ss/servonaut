@@ -457,6 +457,17 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         if self._status_timer is not None:
             self._status_timer.stop()
 
+    def _is_live(self) -> bool:
+        """Whether a worker or callback that has just resumed may update the panel.
+
+        Closing Settings removes the panel's controls before it cancels the
+        panel's workers, so a check that finishes in between still sees the
+        panel attached while its controls are gone. Textual marks every widget
+        it is removing as soon as the removal starts; checking that mark
+        closes the window.
+        """
+        return self.is_attached and not getattr(self, "_pruning", False)
+
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout(event.size.width)
 
@@ -549,11 +560,11 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._queue_status_refresh()
 
     def refresh_after_demo_toggle(self) -> None:
-        if self._status is not None and self.is_attached:
+        if self._status is not None and self._is_live():
             self._render_status()
 
     def _queue_status_refresh(self, *, redraw: bool = False) -> None:
-        if (not self.is_attached or not self.display or self.screen is not self.app.screen
+        if (not self._is_live() or not self.display or self.screen is not self.app.screen
                 or self._saving_channel):
             return
         if self._status_worker is not None and not self._status_worker.is_finished:
@@ -566,7 +577,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         runtime = self._runtime()
         snapshot = await asyncio.to_thread(read_update_status, runtime)
         policy = self._policy or await asyncio.to_thread(self._load_cached_policy)
-        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+        if not self._is_live() or not self.display or self.screen is not self.app.screen:
             return
         changed = policy != self._policy
         self._policy = policy
@@ -592,7 +603,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             fresh_apt = AptInstallStatus(managed=False, checked=False)
         finally:
             self._checking_apt = False
-        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+        if not self._is_live() or not self.display or self.screen is not self.app.screen:
             return
         if not fresh_apt.checked:
             last_good = (
@@ -693,7 +704,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     async def _save_channel(self, channel: Channel) -> None:
         try:
             snapshot = await asyncio.to_thread(self._persist_channel, channel, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             if snapshot is None:
                 message = "Couldn't save the update channel right now. Try again."
@@ -709,7 +720,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 self._start_check()
         finally:
             self._saving_channel = False
-            if self.is_attached and self._status is not None:
+            if self._is_live() and self._status is not None:
                 self._sync_channel_controls(self._status)
 
     @on(RadioSet.Changed, "#updates_channel_radio")
@@ -1160,7 +1171,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         note.display = False
 
     def _sync_action_busy(self) -> None:
-        if not self.is_attached:
+        if not self._is_live():
             return
         updating = bool(getattr(self.app, "_update_in_progress", False))
         checking = self._check_baseline is not None or bool(self._status and self._status.checking)
@@ -1200,7 +1211,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         if (
             not cleaned or cleaned in self._presented_versions
             or cleaned in self._presentations_in_progress
-            or not self.is_attached or not self.display or self.screen is not self.app.screen
+            or not self._is_live() or not self.display or self.screen is not self.app.screen
         ):
             return
         marker = getattr(updates_status, "mark_update_presented", None)
@@ -1241,7 +1252,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self.app.request_macos_install(self._show_macos_download)
 
     def _show_macos_download(self, downloading: bool) -> None:
-        if not self.is_attached:
+        if not self._is_live():
             return
         self._busy = downloading
         busy = self.query_one("#updates_busy", BusyIndicator)
@@ -1376,7 +1387,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             if callable(requester):
                 baseline = self._status
                 outcome = await requester()
-                if not self.is_attached:
+                if not self._is_live():
                     return
                 if (
                     outcome == "queued" and baseline is not None
@@ -1409,7 +1420,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 logger.debug("Version policy refresh failed: %s", exc)
 
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             if callable(requester) and outcome in (None, "queued") and status.state == "managed_elsewhere" and service is not None:
                 last_result = getattr(service, "last_check_result", None)
@@ -1443,7 +1454,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 self._accept_snapshot(status, redraw=True)
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()
 
@@ -1456,7 +1467,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         try:
             ok = await asyncio.to_thread(postpone_update, version, self._runtime())
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             self._accept_snapshot(status, redraw=True)
             if ok:
@@ -1478,7 +1489,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 )
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()
 
@@ -1494,7 +1505,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             runner = getattr(self.app, "run_requested_upgrade", None)
             if is_frozen:
                 if service is None:
-                    if self.is_attached:
+                    if self._is_live():
                         self.app.notify(
                             "Updater is unavailable for this installation.",
                             severity="error",
@@ -1508,7 +1519,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             elif service is not None:
                 success, message = await service.run_upgrade()
             else:
-                if self.is_attached:
+                if self._is_live():
                     self.app.notify(
                         "Updater is unavailable for this installation.",
                         severity="error",
@@ -1516,7 +1527,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     )
                 return
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             self._accept_snapshot(status, redraw=True)
             self.app.notify(
@@ -1527,6 +1538,6 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             )
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()

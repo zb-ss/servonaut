@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -1108,6 +1109,59 @@ async def test_packaged_app_can_choose_its_channel_and_saving_rechecks(
         assert get_client_identity().channel == "rc"
         await wait_until(lambda: app.update_service.check_for_update.call_count > checks_before)
         assert panel.current_values() == {"channel": "rc"}
+
+
+class _SlowToClose(Static):
+    """Holds its parent's removal open until the test lets it finish."""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        super().__init__("")
+        self._release = release
+
+    async def on_unmount(self) -> None:
+        await self._release.wait()
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_finishes_while_settings_closes_leaves_the_panel_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing Settings removes the panel's controls before it stops the
+    panel's workers. A check finishing in between used to look for a control
+    that was already gone and crash the app."""
+    _not_apt(monkeypatch, "darwin")
+    fetch_started = asyncio.Event()
+    finish_fetch = asyncio.Event()
+
+    async def _held_fetch(**_kwargs: Any) -> None:
+        fetch_started.set()
+        await finish_fetch.wait()
+
+    policy_client = SimpleNamespace(cached=MagicMock(return_value=None), fetch=_held_fetch)
+    app = _UpdatesHost(tmp_path, runtime=_packaged_runtime(tmp_path), policy_client=policy_client)
+    async with app.run_test(size=(160, 50)) as pilot:
+        panel = await _wait_updates_panel(app, pilot)
+        release_removal = asyncio.Event()
+        await panel.mount(_SlowToClose(release_removal))
+        title = panel.query_one("#updates_channel_title", Static)
+
+        try:
+            await _click(app, pilot, "#updates_btn_check")
+            await asyncio.wait_for(fetch_started.wait(), timeout=10)
+            check = next(worker for worker in app.workers if worker.name == "updates_check_now")
+
+            # Remove the panel the way closing Settings does; the slow child keeps
+            # the panel itself (and so its workers) alive after its controls go.
+            removal = panel.remove()
+            await wait_until(lambda: not title.is_attached)
+            assert panel.is_attached
+            finish_fetch.set()
+            await wait_until(lambda: check.is_finished)
+            assert check.error is None
+        finally:
+            finish_fetch.set()
+            release_removal.set()
+        await removal
 
 
 @pytest.mark.asyncio
