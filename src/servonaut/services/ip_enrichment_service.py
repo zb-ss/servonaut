@@ -29,6 +29,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from servonaut.utils.endpoints import endpoint_override
+from servonaut.utils.tls import build_opener
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ class IPEnrichmentService:
             req = urllib.request.Request(
                 url, data=data, method=method, headers=headers or {},
             )
-            opener = urllib.request.build_opener(_RefuseRedirects)
+            opener = build_opener(_RefuseRedirects)
             with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 

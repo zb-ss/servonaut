@@ -21,7 +21,9 @@ def pipx_home(tmp_path, monkeypatch):
 
 def test_fresh_pipx_reports_up_to_date_without_creating_state(pipx_home):
     actual = status.read_update_status()
-    assert actual == status.UpdateStatus("up_to_date", "2.34.0", "pipx", "stable")
+    assert actual == status.UpdateStatus(
+        "up_to_date", "2.34.0", "pipx", "stable", channel_selectable=True,
+    )
     assert not status.storage_for(pipx_home).exists()
 
 

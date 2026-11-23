@@ -211,6 +211,26 @@ ActionButton.-textual-compact:disabled {
     border: none !important;
 }
 
+/* The back action restates its idle look under the id selector that out-ranks
+   the generic disabled rules above. */
+ActionButton#btn_back:disabled:hover {
+    border: round $border-blurred;
+    color: $text;
+    background: transparent;
+    text-style: none;
+}
+
+ActionButton#btn_back.-textual-compact:disabled:hover {
+    border: none !important;
+}
+
+ActionButton#btn_back:ansi:disabled:hover {
+    border: round $border-blurred;
+    background: transparent;
+    color: $foreground;
+    text-style: dim not bold not underline;
+}
+
 /* Terminal-colour themes have no muted colour, so a disabled action is dimmed
    instead, and neither hover nor a compact primary's bold changes that. */
 ActionButton:ansi:disabled,

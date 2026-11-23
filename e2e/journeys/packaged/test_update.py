@@ -98,7 +98,7 @@ def test_update_says_when_the_index_cannot_be_reached(
     installs.extra_env[ENV_PYPI_URL] = f"{DEAD_HTTPS_URL}/pypi/servonaut/json"
 
     update = support.ok(venv.run(sandbox, "--update"))
-    assert "Could not check for updates (offline)." in update.stdout
+    assert "Could not reach the update server. Check your connection and try again." in update.stdout
     assert "Already up to date" not in update.stdout
     assert "Running:" not in update.stdout
     assert support.reported_version(venv, sandbox) == build_version

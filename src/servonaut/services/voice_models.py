@@ -58,6 +58,7 @@ from servonaut.services.voice_engines import (
 )
 from servonaut.utils.archive_safety import UnsafeArchiveError, extract_tar_safely
 from servonaut.utils.credential_scrub import scrub_credentials
+from servonaut.utils.tls import build_opener
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,7 @@ class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def build_https_only_opener() -> urllib.request.OpenerDirector:
     """URL opener whose redirects can never downgrade to plain HTTP."""
-    return urllib.request.build_opener(HttpsOnlyRedirectHandler)
+    return build_opener(HttpsOnlyRedirectHandler)
 
 
 def _header(response: Any, name: str) -> Optional[str]:

@@ -75,6 +75,9 @@ _CHECK_ERROR_RESULTS = frozenset({
     UpdateCheckResult.OS_TOO_OLD,
 })
 
+# Shown when a failed check left no reason of its own.
+_STATUS_FALLBACK_FAILURE = "The last update check did not complete. Try again."
+
 _CHECK_OUTCOME_NOTIFICATIONS: dict[str, tuple[str, str]] = {
     "busy": ("An update check is already running.", "information"),
     "skipped": ("Automatic updates are turned off for this session.", "information"),
@@ -322,6 +325,10 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._saving_channel = False
         self._check_baseline: UpdateStatus | None = None
         self._apt_status: Optional[AptInstallStatus] = None
+        # The app's own check outcome the status was last drawn from, so a
+        # background check that finishes later redraws the panel.
+        self._drawn_app_check: tuple[Optional[UpdateCheckResult], Optional[str], Optional[str]] | None = None
+        self._showing_check_failure = False
         self._checking_apt: bool = False
 
     # ------------------------------------------------------------------
@@ -450,6 +457,17 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         if self._status_timer is not None:
             self._status_timer.stop()
 
+    def _is_live(self) -> bool:
+        """Whether a worker or callback that has just resumed may update the panel.
+
+        Closing Settings removes the panel's controls before it cancels the
+        panel's workers, so a check that finishes in between still sees the
+        panel attached while its controls are gone. Textual marks every widget
+        it is removing as soon as the removal starts; checking that mark
+        closes the window.
+        """
+        return self.is_attached and not getattr(self, "_pruning", False)
+
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout(event.size.width)
 
@@ -542,11 +560,11 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._queue_status_refresh()
 
     def refresh_after_demo_toggle(self) -> None:
-        if self._status is not None and self.is_attached:
+        if self._status is not None and self._is_live():
             self._render_status()
 
     def _queue_status_refresh(self, *, redraw: bool = False) -> None:
-        if (not self.is_attached or not self.display or self.screen is not self.app.screen
+        if (not self._is_live() or not self.display or self.screen is not self.app.screen
                 or self._saving_channel):
             return
         if self._status_worker is not None and not self._status_worker.is_finished:
@@ -559,7 +577,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         runtime = self._runtime()
         snapshot = await asyncio.to_thread(read_update_status, runtime)
         policy = self._policy or await asyncio.to_thread(self._load_cached_policy)
-        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+        if not self._is_live() or not self.display or self.screen is not self.app.screen:
             return
         changed = policy != self._policy
         self._policy = policy
@@ -585,7 +603,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             fresh_apt = AptInstallStatus(managed=False, checked=False)
         finally:
             self._checking_apt = False
-        if not self.is_attached or not self.display or self.screen is not self.app.screen:
+        if not self._is_live() or not self.display or self.screen is not self.app.screen:
             return
         if not fresh_apt.checked:
             last_good = (
@@ -623,7 +641,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             self._check_baseline = None
             self._last_checked_at = time.time()
             redraw = True
-        if redraw or snapshot != previous:
+        if redraw or snapshot != previous or self._app_check_state() != self._drawn_app_check:
             self._render_status()
 
     def _selected_channel(self) -> Channel:
@@ -667,7 +685,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             return
         fields = self.collect()
         channel: Channel = fields["channel"]
-        if self._status is not None and self._status.state == "managed_elsewhere":
+        if self._status.state == "managed_elsewhere" and not self._status.channel_selectable:
             self._finish_save("No changes to save.")
             return
         self._saving_channel = True
@@ -686,7 +704,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     async def _save_channel(self, channel: Channel) -> None:
         try:
             snapshot = await asyncio.to_thread(self._persist_channel, channel, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             if snapshot is None:
                 message = "Couldn't save the update channel right now. Try again."
@@ -696,9 +714,13 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             self._set_radio_channel(snapshot.channel)
             self._finish_save("Release channel saved.")
             self._accept_snapshot(snapshot, redraw=True)
+            if snapshot.state == "managed_elsewhere":
+                # The packaged app has no background updater to notice the
+                # switch, so look at the new channel straight away.
+                self._start_check()
         finally:
             self._saving_channel = False
-            if self.is_attached and self._status is not None:
+            if self._is_live() and self._status is not None:
                 self._sync_channel_controls(self._status)
 
     @on(RadioSet.Changed, "#updates_channel_radio")
@@ -728,6 +750,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         status = self._status
         if status is None:
             return
+        self._drawn_app_check = self._app_check_state()
+        self._showing_check_failure = False
 
         installed = _terminal_safe(status.installed_version or get_version()).strip() or "unknown"
         install_kind = status.install_kind or ""
@@ -819,6 +843,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             )
             if show_check:
                 btn_check.display = True
+            if self._showing_check_failure and show_check and not show_download:
+                primary_widget.add_class("-warning")
             if show_download:
                 link_download.display = True
                 primary_widget.add_class("-accent")
@@ -928,14 +954,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 btn_update.display = True
                 self._configure_release_notes_link(link_notes, discovered)
             else:
-                if self._last_checked_at is not None:
-                    ago = format_checked_ago(self._last_checked_at)
-                    primary_text = f"Up to date  ·  checked {ago}"
-                else:
-                    primary_text = "Up to date"
-                primary_widget.add_class("-success")
-                if self._check_error:
-                    secondary_text = _terminal_safe(self._check_error).strip()
+                primary_text, secondary_text, failed = self._up_to_date_lines("")
+                primary_widget.add_class("-warning" if failed else "-success")
                 btn_check.display = True
 
         primary_widget.update(primary_text)
@@ -956,6 +976,53 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self._sync_channel_controls(status)
         self._sync_channel_notes()
         self._sync_action_busy()
+
+    def _app_check_state(self) -> tuple[Optional[UpdateCheckResult], Optional[str], Optional[str]]:
+        """``(result, latest, reason)`` of the app's own last update check.
+
+        The app checks at start, before this panel exists; until a check runs
+        here, its outcome is the only evidence of what is available.
+        """
+        service = getattr(self.app, "update_service", None)
+        result = getattr(service, "last_check_result", None)
+        latest = getattr(service, "latest_version", None)
+        reason = getattr(service, "update_status", None)
+        return (
+            result if isinstance(result, UpdateCheckResult) else None,
+            latest if isinstance(latest, str) else None,
+            reason if isinstance(reason, str) else None,
+        )
+
+    def _up_to_date_lines(
+        self, idle_secondary: str, *, app_check: bool = False,
+    ) -> tuple[str, str, bool]:
+        """Headline and detail for a check that found nothing newer.
+
+        Returns ``(primary, secondary, failed)``. "Up to date" is only claimed
+        after a check that succeeded; a failed one says so, with its reason.
+        With *app_check*, the app's own last check stands in until a check
+        runs here, and no check at all is reported as such.
+        """
+        ago = format_checked_ago(self._last_checked_at) if self._last_checked_at is not None else ""
+        error = self._check_error
+        unchecked = False
+        if app_check and not error and self._last_checked_at is None:
+            result, _latest, reason = self._app_check_state()
+            if result in _CHECK_ERROR_RESULTS:
+                error = reason or _STATUS_FALLBACK_FAILURE
+            unchecked = result is None
+        if error:
+            self._showing_check_failure = True
+            tried = f"  ·  tried {ago}" if ago else ""
+            return (
+                f"Couldn't check for updates{tried}",
+                _terminal_safe(error).strip(),
+                True,
+            )
+        if unchecked:
+            return "Not checked yet", "Check now looks for a newer version.", False
+        primary = f"Up to date  ·  checked {ago}" if ago else "Up to date"
+        return primary, idle_secondary, False
 
     def _managed_elsewhere_view(
         self,
@@ -1003,8 +1070,13 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 None,
             )
         if _supports_download_link(install_kind, apt_managed=apt_managed):
+            discovered = self._discovered_version
+            if discovered is None and self._last_checked_at is None:
+                result, latest, _reason = self._app_check_state()
+                if result is UpdateCheckResult.UPDATE_AVAILABLE:
+                    discovered = latest
             available = _terminal_safe(
-                status.target_version or self._discovered_version or ""
+                status.target_version or discovered or ""
             ).strip()
             if available and (macos_update or self._is_newer(available, status.installed_version)):
                 return (
@@ -1015,15 +1087,8 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     True,
                     available,
                 )
-            if self._last_checked_at is not None:
-                ago = format_checked_ago(self._last_checked_at)
-                primary = f"Up to date  ·  checked {ago}"
-            else:
-                primary = "Up to date"
-            secondary = (
-                _terminal_safe(self._check_error).strip()
-                if self._check_error
-                else "New releases are available from servonaut.dev/download."
+            primary, secondary, _ = self._up_to_date_lines(
+                "New releases are available from servonaut.dev/download.", app_check=True,
             )
             return (primary, secondary, "", True, False, None)
 
@@ -1047,7 +1112,12 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         install_kind = status.install_kind or ""
         apt_managed = self._effective_apt_managed(install_kind)
         is_apt = _is_apt_install(install_kind, apt_managed=apt_managed)
-        managed = status.state == "managed_elsewhere" or is_apt
+        selectable = status.channel_selectable and not is_apt
+        managed = (status.state == "managed_elsewhere" and not selectable) or is_apt
+        # A control that cannot act on this install is hidden, never shown locked.
+        self.query_one("#updates_channel_section").display = (
+            is_apt or selectable or status.state != "managed_elsewhere"
+        )
         title = self.query_one("#updates_channel_title", Static)
         radio = self.query_one("#updates_channel_radio", RadioSet)
         apt_summary = self.query_one("#updates_channel_apt_summary", Static)
@@ -1071,7 +1141,9 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             save_btn.disabled = managed or self._saving_channel
         except NoMatches:
             pass
-        self.query_one("#updates_auto_note", Static).display = not managed
+        self.query_one("#updates_auto_note", Static).display = (
+            not managed and status.state != "managed_elsewhere"
+        )
 
     def _sync_channel_notes(self) -> None:
         note = self.query_one("#updates_channel_note", Static)
@@ -1084,13 +1156,6 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         apt_managed = self._effective_apt_managed(install_kind)
         if _is_apt_install(install_kind, apt_managed=apt_managed):
             note.update("Servonaut does not modify APT configuration.")
-            note.display = True
-            return
-        if status.state == "managed_elsewhere":
-            note.update(
-                "Release channel selection applies to pipx installations "
-                "with automatic background updates."
-            )
             note.display = True
             return
         if self._selected_channel() == "stable" and _is_prerelease_version(
@@ -1106,7 +1171,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         note.display = False
 
     def _sync_action_busy(self) -> None:
-        if not self.is_attached:
+        if not self._is_live():
             return
         updating = bool(getattr(self.app, "_update_in_progress", False))
         checking = self._check_baseline is not None or bool(self._status and self._status.checking)
@@ -1146,7 +1211,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         if (
             not cleaned or cleaned in self._presented_versions
             or cleaned in self._presentations_in_progress
-            or not self.is_attached or not self.display or self.screen is not self.app.screen
+            or not self._is_live() or not self.display or self.screen is not self.app.screen
         ):
             return
         marker = getattr(updates_status, "mark_update_presented", None)
@@ -1187,7 +1252,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         self.app.request_macos_install(self._show_macos_download)
 
     def _show_macos_download(self, downloading: bool) -> None:
-        if not self.is_attached:
+        if not self._is_live():
             return
         self._busy = downloading
         busy = self.query_one("#updates_busy", BusyIndicator)
@@ -1206,6 +1271,9 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
     @on(Button.Pressed, "#updates_btn_check")
     def _on_check_now_pressed(self, event: Button.Pressed) -> None:
         event.stop()
+        self._start_check()
+
+    def _start_check(self) -> None:
         if self._busy or self._check_baseline is not None:
             return
         self.run_worker(
@@ -1319,7 +1387,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             if callable(requester):
                 baseline = self._status
                 outcome = await requester()
-                if not self.is_attached:
+                if not self._is_live():
                     return
                 if (
                     outcome == "queued" and baseline is not None
@@ -1352,7 +1420,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 logger.debug("Version policy refresh failed: %s", exc)
 
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             if callable(requester) and outcome in (None, "queued") and status.state == "managed_elsewhere" and service is not None:
                 last_result = getattr(service, "last_check_result", None)
@@ -1386,7 +1454,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 self._accept_snapshot(status, redraw=True)
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()
 
@@ -1399,7 +1467,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
         try:
             ok = await asyncio.to_thread(postpone_update, version, self._runtime())
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             self._accept_snapshot(status, redraw=True)
             if ok:
@@ -1421,7 +1489,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                 )
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()
 
@@ -1437,7 +1505,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             runner = getattr(self.app, "run_requested_upgrade", None)
             if is_frozen:
                 if service is None:
-                    if self.is_attached:
+                    if self._is_live():
                         self.app.notify(
                             "Updater is unavailable for this installation.",
                             severity="error",
@@ -1451,7 +1519,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             elif service is not None:
                 success, message = await service.run_upgrade()
             else:
-                if self.is_attached:
+                if self._is_live():
                     self.app.notify(
                         "Updater is unavailable for this installation.",
                         severity="error",
@@ -1459,7 +1527,7 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
                     )
                 return
             status = await asyncio.to_thread(read_update_status, self._runtime())
-            if not self.is_attached:
+            if not self._is_live():
                 return
             self._accept_snapshot(status, redraw=True)
             self.app.notify(
@@ -1470,6 +1538,6 @@ class UpdatesPanel(LayoutRefitMixin, SettingsPanel):
             )
         finally:
             self._busy = False
-            if self.is_attached:
+            if self._is_live():
                 busy.stop()
                 self._sync_action_busy()

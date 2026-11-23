@@ -270,7 +270,7 @@ class TestUpdateServiceFrozen:
         service = _service(tmp_path, policy, urllib.error.URLError("Network is unreachable"))
 
         assert service.check_for_update() is None
-        assert "offline" in service.update_status.lower()
+        assert "could not reach the update server" in service.update_status.lower()
         assert service.last_check_result is UpdateCheckResult.OFFLINE
 
     def test_check_for_update_signature_verification_failure(self, tmp_path, trust_setup) -> None:
