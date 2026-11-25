@@ -52,7 +52,7 @@ async def test_scan_save_and_remove(mcp, journey, fake_cloud, account_home):
             label: token for token, label in re.findall(r"token=(dbstg_\S+)  \[(\w+)\]", scan)
         }
         assert set(tokens) == {"shop", "blog"}
-        assert "pw=****a1f" in scan and "pw=****20c" in scan
+        assert f"pw=****{SHOP_PASSWORD[-3:]}" in scan and f"pw=****{BLOG_PASSWORD[-3:]}" in scan
 
         saved = await session.call(
             "db_setup_save", {"token": tokens["blog"], "instance_id": HOST.name}
