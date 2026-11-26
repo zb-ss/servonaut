@@ -15,8 +15,11 @@ from e2e.harness.fleet import AwsHost
 from e2e.harness.shims import ShimSet
 
 FILE_MARKER = "===FILE:"
-SHOP_PASSWORD = "fabricated-shop-pass-6a1f"
-BLOG_PASSWORD = "fabricated-blog-pass-e20c"
+# Journeys also assert that no password's last three characters are shown
+# (a masked "...xyz" hint). Those characters are not hex digits, so that
+# check can never match inside a random id or digest in the output.
+SHOP_PASSWORD = "fabricated-shop-pass-6xqz"
+BLOG_PASSWORD = "fabricated-blog-pass-ewvk"
 
 SCAN_OUTPUT = (
     f"{FILE_MARKER}/var/www/shop/configuration.php===\n"
