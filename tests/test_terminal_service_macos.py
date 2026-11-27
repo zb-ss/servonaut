@@ -637,3 +637,33 @@ def test_macos_unreadable_configured_path_does_not_crash_launch(tmp_path: Path) 
         service.launch_ssh_in_terminal(["/usr/bin/ssh", "example.invalid"])
 
     assert popen.call_args.args[0][2].splitlines()[0] == 'tell application "Terminal"'
+
+
+@pytest.mark.parametrize(
+    "plist_bytes",
+    [b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><key>a</key></plist>'],
+    ids=["key-without-value"],
+)
+def test_macos_malformed_info_plist_keeps_name_fallback(
+    tmp_path: Path, plist_bytes: bytes
+) -> None:
+    _bundle, executable = _make_bundle(
+        tmp_path,
+        "Malformed Terminal.app",
+        executable_name="Bin",
+        plist_bytes=plist_bytes,
+    )
+    assert executable is not None
+    service = TerminalService(
+        preferred=str(executable),
+        data_root=tmp_path,
+        command_resolver={str(executable): str(executable)}.get,
+    )
+
+    with (
+        patch("servonaut.services.terminal_service.get_os", return_value="darwin"),
+        patch("servonaut.services.terminal_service.subprocess.Popen") as popen,
+    ):
+        assert service.launch_ssh_in_terminal(["/usr/bin/ssh", "example.invalid"])
+
+    assert popen.call_args.args[0][2].splitlines()[0] == 'tell application "Terminal"'

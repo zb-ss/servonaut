@@ -529,8 +529,10 @@ fi
         try:
             with (contents / "Info.plist").open("rb") as file:
                 info = plistlib.load(file)
-        except (OSError, ValueError, ExpatError, AttributeError):
-            # plistlib can raise AttributeError for an invalid XML date.
+        except (OSError, ValueError, ExpatError, AttributeError, IndexError, RecursionError):
+            # plistlib can raise AttributeError for an invalid XML date,
+            # IndexError for a <key> without a value and RecursionError for
+            # deeply nested input.
             return _MacOSBundleInfo(
                 bundle=bundle,
                 bundle_id=None,
