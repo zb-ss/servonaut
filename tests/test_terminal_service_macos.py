@@ -610,3 +610,30 @@ def test_macos_auto_detection_prefers_iterm_then_terminal_then_fallback(
 
 def test_escape_applescript_text_escapes_special_characters() -> None:
     assert _escape_applescript_text('a\\b"c\rd\ne') == r'a\\b\"c\rd\ne'
+
+
+def test_macos_unreadable_configured_path_does_not_crash_launch(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    configured = locked / "Private Terminal.app"
+    real_stat = os.stat
+
+    def deny_locked(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(path).startswith(str(locked)):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    service = TerminalService(
+        preferred=str(configured),
+        data_root=tmp_path,
+        command_resolver=lambda _name: None,
+    )
+
+    with (
+        patch("servonaut.services.terminal_service.get_os", return_value="darwin"),
+        patch("servonaut.services.terminal_service.os.stat", side_effect=deny_locked),
+        patch("servonaut.services.terminal_service._macos_app_search_dirs", return_value=()),
+        patch("servonaut.services.terminal_service.subprocess.Popen") as popen,
+    ):
+        service.launch_ssh_in_terminal(["/usr/bin/ssh", "example.invalid"])
+
+    assert popen.call_args.args[0][2].splitlines()[0] == 'tell application "Terminal"'

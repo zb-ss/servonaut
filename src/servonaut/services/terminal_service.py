@@ -71,10 +71,12 @@ def _macos_app_search_dirs() -> tuple[Path, ...]:
 
 def _is_macos_bundle_dir(path: Path) -> bool:
     """Return whether *path* is an existing macOS ``.app`` bundle directory."""
-    if path.suffix.lower() != ".app" or not path.is_dir():
+    # os.path probes return False on OSError; Path.is_dir()/is_file() raise
+    # PermissionError on Python < 3.14 for an untraversable parent directory.
+    if path.suffix.lower() != ".app" or not os.path.isdir(path):
         return False
     contents = path / "Contents"
-    return (contents / "Info.plist").is_file() or (contents / "MacOS").is_dir()
+    return os.path.isfile(contents / "Info.plist") or os.path.isdir(contents / "MacOS")
 
 
 def _windows_system_directory() -> Path:
@@ -498,7 +500,7 @@ fi
 
     @staticmethod
     def _bundle_paths_from_candidate(candidate: Path) -> tuple[Path, Path] | None:
-        if candidate.suffix.lower() == ".app" and candidate.is_dir():
+        if candidate.suffix.lower() == ".app" and os.path.isdir(candidate):
             return candidate, candidate / "Contents"
         macos = candidate.parent
         contents = macos.parent
@@ -516,7 +518,8 @@ fi
         if located is None:
             try:
                 resolved = candidate.resolve()
-            except OSError:
+            except (OSError, RuntimeError):
+                # RuntimeError: symlink loop on Python < 3.13.
                 return None
             if resolved != candidate:
                 located = self._bundle_paths_from_candidate(resolved)
@@ -553,7 +556,7 @@ fi
     def _resolve_macos_bundle_cli(self, bundle_info: _MacOSBundleInfo) -> tuple[str, str] | None:
         """Resolve a CLI-capable executable and launch style for a third-party ``.app`` bundle."""
         detected_path = Path(self._detected_path) if self._detected_path is not None else None
-        detected_is_file = detected_path is not None and detected_path.is_file()
+        detected_is_file = detected_path is not None and os.path.isfile(detected_path)
 
         if bundle_info.bundle_id == _WEZTERM_BUNDLE_ID:
             if detected_is_file and self._detected_path is not None:
@@ -561,7 +564,7 @@ fi
             macos_dir = bundle_info.bundle / "Contents" / "MacOS"
             for candidate_name in ("wezterm", bundle_info.executable_name or "wezterm-gui"):
                 candidate = macos_dir / candidate_name
-                if candidate.is_file():
+                if os.path.isfile(candidate):
                     return str(candidate), "start_separator"
             return None
 
@@ -577,7 +580,7 @@ fi
             )
             if style is not None:
                 exe_path = bundle_info.bundle / "Contents" / "MacOS" / bundle_info.executable_name
-                if exe_path.is_file():
+                if os.path.isfile(exe_path):
                     return str(exe_path), style
 
         return None
