@@ -191,7 +191,7 @@ class TestInlineBrowse:
         screen._inline_view = "browse"
         cleared = []
         screen._clear_inline = lambda: (cleared.append(1), setattr(screen, "_inline_view", None))
-        screen._safe_focus = lambda sel: None
+        screen._safe_focus = lambda sel, **_options: None
         screen.action_back()
         assert cleared == [1]
         assert popped == []  # first Esc closes inline, does not leave the screen

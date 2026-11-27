@@ -1437,10 +1437,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # Inline read-only views (Browse / Logs) — mounted in #sa-inline
     # ------------------------------------------------------------------
 
-    def _safe_focus(self, selector: str) -> None:
+    def _safe_focus(self, selector: str, *, scroll_visible: bool = True) -> None:
         """Focus the widget matching *selector*, swallowing query failures."""
         try:
-            self.query_one(selector).focus()
+            self.query_one(selector).focus(scroll_visible=scroll_visible)
         except Exception:  # noqa: BLE001
             pass
 
@@ -3199,7 +3199,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         """
         if self._inline_view is not None:
             self._clear_inline()
-            self._safe_focus(f"#{self._inline_return_focus}")
+            # The overview returns to its saved position after the next
+            # refresh. Scrolling the button into view as well would race that
+            # restore and could leave the overview somewhere else.
+            self._safe_focus(f"#{self._inline_return_focus}", scroll_visible=False)
             return
         self.app.pop_screen()
 
