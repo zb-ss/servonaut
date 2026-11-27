@@ -709,8 +709,8 @@ Set `terminal_emulator` to one of the following, `"auto"` for automatic detectio
 
 - `gnome-terminal`
 - `konsole`
-- `alacritty` / `Alacritty.app`
-- `kitty` / `kitty.app`
+- `alacritty` / `Alacritty.app` (macOS)
+- `kitty` / `kitty.app` (macOS)
 - `xterm`
 - `xfce4-terminal`
 - `mate-terminal`
@@ -723,6 +723,8 @@ Set `terminal_emulator` to one of the following, `"auto"` for automatic detectio
 - `wt.exe` (Windows Terminal)
 
 On macOS, `terminal_emulator` accepts app bundle names (such as `Terminal.app` or `iTerm.app`), custom `.app` bundle paths (including `~/Applications/...`), inner `Contents/MacOS/...` executable paths, or supported CLI terminal binaries without needing extra launch arguments.
+
+If a configured `.app` bundle is not a supported terminal (for example Warp), opening a terminal fails with an error naming the bundle; Servonaut does not fall back to Terminal.
 
 ## Servonaut AI
 
