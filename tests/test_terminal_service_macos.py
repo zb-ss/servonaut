@@ -667,3 +667,32 @@ def test_macos_malformed_info_plist_keeps_name_fallback(
         assert service.launch_ssh_in_terminal(["/usr/bin/ssh", "example.invalid"])
 
     assert popen.call_args.args[0][2].splitlines()[0] == 'tell application "Terminal"'
+
+
+@pytest.mark.parametrize("executable_value", ["../outside/kitty", "/bin/sh"])
+def test_macos_bundle_executable_must_stay_inside_bundle(
+    tmp_path: Path, executable_value: str
+) -> None:
+    bundle, _ = _make_bundle(
+        tmp_path / "Applications",
+        "Escaping.app",
+        plist_bytes=plistlib.dumps(
+            {"CFBundleIdentifier": "net.kovidgoyal.kitty", "CFBundleExecutable": executable_value}
+        ),
+    )
+    outside = bundle / "Contents" / "outside"
+    outside.mkdir()
+    (outside / "kitty").touch()
+    service = TerminalService(
+        preferred=str(bundle),
+        data_root=tmp_path,
+        command_resolver=lambda _name: None,
+    )
+
+    with (
+        patch("servonaut.services.terminal_service.get_os", return_value="darwin"),
+        patch("servonaut.services.terminal_service.subprocess.Popen") as popen,
+    ):
+        assert not service.launch_ssh_in_terminal(["/usr/bin/ssh", "example.invalid"])
+
+    popen.assert_not_called()

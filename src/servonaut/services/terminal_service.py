@@ -79,6 +79,11 @@ def _is_macos_bundle_dir(path: Path) -> bool:
     return os.path.isfile(contents / "Info.plist") or os.path.isdir(contents / "MacOS")
 
 
+def _is_plain_file_name(value: object) -> bool:
+    """Return whether *value* is a bare file name that cannot leave its directory."""
+    return isinstance(value, str) and os.path.basename(value) == value and value not in ("", ".", "..")
+
+
 def _windows_system_directory() -> Path:
     """Load the shared, fail-closed native Windows system-directory helper."""
     from servonaut.services.process_control import windows_system_directory
@@ -551,7 +556,7 @@ fi
         return _MacOSBundleInfo(
             bundle=bundle,
             bundle_id=raw_bundle_id if isinstance(raw_bundle_id, str) else None,
-            executable_name=raw_executable if isinstance(raw_executable, str) else None,
+            executable_name=raw_executable if _is_plain_file_name(raw_executable) else None,
             plist_readable=True,
         )
 
