@@ -1902,6 +1902,9 @@ def _main() -> None:
     if args.mcp:
         import asyncio
         _setup_logging(debug=args.debug, mcp=True)
+        from servonaut.utils.login_path import merge_login_path
+        # The MCP client chose this PATH; only add what it lacks.
+        merge_login_path(prefer_current=True)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
         return

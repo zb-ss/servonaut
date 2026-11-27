@@ -14,6 +14,7 @@ from pathlib import Path
 
 from servonaut.updates.index import ManualUpdateRequired, UpdateUnavailable
 from servonaut.updates.status import PIPX_METADATA, public_version, read_json
+from servonaut.utils.login_path import well_known_bin_dirs
 from servonaut.utils.package_version import PackageVersion
 
 _INDEX_SPEC = re.compile(
@@ -79,8 +80,8 @@ def _usual_locations() -> tuple[Path, ...]:
         appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
         return (home / ".local" / "bin" / "pipx.exe",
                 appdata / "Python" / python_tag / "Scripts" / "pipx.exe")
-    return (home / ".local" / "bin" / "pipx", home / "bin" / "pipx",
-            Path("/opt/homebrew/bin/pipx"), Path("/usr/local/bin/pipx"), Path("/usr/bin/pipx"))
+    directories = (home / ".local" / "bin", home / "bin", *well_known_bin_dirs(home), Path("/usr/bin"))
+    return tuple(dict.fromkeys(directory / "pipx" for directory in directories))
 
 
 def _pipx_candidates(root: Path, recorded: object) -> list[tuple[str, ...]]:

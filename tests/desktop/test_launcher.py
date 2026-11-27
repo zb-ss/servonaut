@@ -728,6 +728,79 @@ def test_gui_entry_writes_its_log_under_the_data_root(
     assert "desktop start probe" in log_file.read_text(encoding="utf-8")
 
 
+def _patch_gui_entry(
+    entry: object, monkeypatch: pytest.MonkeyPatch, runtime: RuntimeLayout
+) -> list[str]:
+    events: list[str] = []
+    monkeypatch.setattr(entry, "detect_runtime", lambda: runtime)
+    monkeypatch.setattr(entry, "validate_desktop_process_role", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "servonaut.utils.login_path.merge_login_path",
+        lambda *a, **k: events.append("merge"),
+    )
+    monkeypatch.setattr(
+        "servonaut.updates.macos_install.recover_after_quit", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        entry, "run_desktop", lambda request: events.append("run") or 0
+    )
+    return events
+
+
+@pytest.mark.usefixtures("restore_root_logging")
+def test_packaged_gui_entry_merges_the_login_path_before_launching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    entry = _load_gui_entry()
+    runtime = dataclasses.replace(
+        _test_runtime(tmp_path),
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        is_frozen=True,
+    )
+    events = _patch_gui_entry(entry, monkeypatch, runtime)
+
+    assert entry.main([]) == 0
+
+    assert events == ["merge", "run"]
+
+
+@pytest.mark.usefixtures("restore_root_logging")
+def test_source_gui_entry_does_not_merge_the_login_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = _load_gui_entry()
+    events = _patch_gui_entry(entry, monkeypatch, _test_runtime(tmp_path))
+
+    assert entry.main([]) == 0
+
+    assert events == ["run"]
+
+
+@pytest.mark.usefixtures("restore_root_logging")
+def test_artifact_selftest_does_not_merge_the_login_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    entry = _load_gui_entry()
+    runtime = dataclasses.replace(
+        _test_runtime(tmp_path),
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        is_frozen=True,
+    )
+    events = _patch_gui_entry(entry, monkeypatch, runtime)
+    monkeypatch.setattr(
+        "servonaut.desktop.artifact_selftest.run_desktop_artifact_selftest",
+        lambda rt: 0,
+    )
+
+    assert entry.main(["--_artifact-selftest"]) == 0
+
+    assert events == []
+
+
 # GTK names a window after the program: its Wayland app_id and X11 WM_CLASS.
 # The packaged Linux launcher is dev.servonaut.Servonaut.desktop with that
 # StartupWMClass, so the desktop shell can match the window to it.

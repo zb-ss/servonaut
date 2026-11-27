@@ -272,6 +272,19 @@ def test_pipx_discovery_without_path(install, monkeypatch, location):
     assert observed == [[*prefix, "environment", "--value", "PIPX_LOCAL_VENVS"]]
 
 
+def test_usual_pipx_locations_derive_from_shared_bin_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert profile._usual_locations() == (
+        tmp_path / ".local" / "bin" / "pipx",
+        tmp_path / "bin" / "pipx",
+        Path("/opt/homebrew/bin/pipx"),
+        Path("/opt/homebrew/sbin/pipx"),
+        Path("/usr/local/bin/pipx"),
+        Path("/usr/bin/pipx"),
+    )
+
+
 def test_missing_pipx_preserves_offer_and_throttles(install):
     store, journal = install
     _ready(store, journal, status="ready", builder={"token": "builder"}, checked_at=time.time())
