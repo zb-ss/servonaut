@@ -6,6 +6,7 @@ from unittest.mock import PropertyMock, patch
 import pytest
 from textual.content import Content
 from textual.containers import VerticalScroll
+from textual.screen import Screen
 from textual.widgets import Button, Static, TextArea, Tree
 
 from servonaut.screens.server_actions import ServerActionsScreen
@@ -95,12 +96,23 @@ async def test_files_uses_viewport_and_escape_restores_overview(size, monkeypatc
         tree = screen.query_one("#remote_tree", Tree)
         assert screen.focused is tree
         assert tree.region.height >= screen.query_one("#sa-detail").region.height // 2
+        centred = []
+        real_scroll_to_center = Screen.scroll_to_center
+
+        def record_scroll_to_center(self, widget, *args, **kwargs):
+            centred.append(widget)
+            return real_scroll_to_center(self, widget, *args, **kwargs)
+
+        monkeypatch.setattr(Screen, "scroll_to_center", record_scroll_to_center)
         await pilot.press("escape")
         await pilot.pause()
         assert screen.query_one("#sa-overview") is overview and overview.display
         assert screen.query_one("#server_identity") is identity
         assert overview.scroll_y == scroll_y
         assert screen.focused is screen.query_one("#btn_memory")
+        # The return button is out of view at the saved position. Scrolling it
+        # into view would move the overview once a slower run has laid it out.
+        assert screen.focused not in centred
 
 
 @pytest.mark.asyncio
