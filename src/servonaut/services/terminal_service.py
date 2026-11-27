@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -11,7 +12,8 @@ import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path, PureWindowsPath
-from typing import Final, Optional
+from typing import Final, NamedTuple, Optional
+from xml.parsers.expat import ExpatError
 
 from servonaut.services.interfaces import TerminalServiceInterface
 from servonaut.utils.markup import inert_text
@@ -24,9 +26,55 @@ logger = logging.getLogger(__name__)
 # runtime-aware callers inject ``data_root`` instead of changing this value.
 _WRAPPER_DIR: Final[Path] = Path.home() / ".servonaut" / "logs"
 _WRAPPER_TTL_SECONDS: Final[int] = 24 * 60 * 60
+_ITERM_BUNDLE_ID: Final[str] = "com.googlecode.iterm2"
+_TERMINAL_BUNDLE_ID: Final[str] = "com.apple.Terminal"
+_GHOSTTY_BUNDLE_ID: Final[str] = "com.mitchellh.ghostty"
+_WEZTERM_BUNDLE_ID: Final[str] = "com.github.wez.wezterm"
+_ALACRITTY_BUNDLE_ID: Final[str] = "org.alacritty"
+_KITTY_BUNDLE_ID: Final[str] = "net.kovidgoyal.kitty"
+_RIO_BUNDLE_ID: Final[str] = "com.raphaelamorim.rio"
+_MACOS_CLI_TERMINAL_STYLES: Final[dict[str, str]] = {
+    "alacritty": "list",
+    "kitty": "list",
+    "xterm": "list",
+    "rio": "list",
+    "wezterm": "start_separator",
+    "wezterm-gui": "start_separator",
+}
+_MACOS_CLI_BUNDLE_STYLES: Final[dict[str, str]] = {
+    _ALACRITTY_BUNDLE_ID: "list",
+    _KITTY_BUNDLE_ID: "list",
+    _RIO_BUNDLE_ID: "list",
+    _WEZTERM_BUNDLE_ID: "start_separator",
+}
 # PowerShell's tokenizer ends a single-quoted string at the ASCII apostrophe
 # and at the typographic single quotes U+2018..U+201B alike.
 _POWERSHELL_SINGLE_QUOTES: Final[frozenset[str]] = frozenset("'\u2018\u2019\u201a\u201b")
+
+
+class _MacOSBundleInfo(NamedTuple):
+    bundle: Path
+    bundle_id: str | None
+    executable_name: str | None
+    plist_readable: bool
+
+
+def _macos_app_search_dirs() -> tuple[Path, ...]:
+    """Return standard macOS directories searched for ``.app`` bundles."""
+    return (
+        Path("/Applications"),
+        Path("/System/Applications/Utilities"),
+        Path("/System/Applications"),
+        Path.home() / "Applications",
+    )
+
+
+def _is_macos_bundle_dir(path: Path) -> bool:
+    """Return whether *path* is an existing macOS ``.app`` bundle directory."""
+    if path.suffix.lower() != ".app" or not path.is_dir():
+        return False
+    contents = path / "Contents"
+    return (contents / "Info.plist").is_file() or (contents / "MacOS").is_dir()
 
 
 def _windows_system_directory() -> Path:
@@ -39,6 +87,11 @@ def _windows_system_directory() -> Path:
 def _terminal_identity(name: str) -> str:
     """Normalise a terminal name or path for case-insensitive comparison."""
     return PureWindowsPath(name).name.casefold().removesuffix(".exe")
+
+
+def _escape_applescript_text(value: str) -> str:
+    """Escape a value for a double-quoted AppleScript literal."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
 
 
 def quote_powershell_argument(argument: str) -> str:
@@ -142,7 +195,7 @@ class TerminalService(TerminalServiceInterface):
         ("tilix", "string"),
     )
     DEFAULT_LINUX_TERMINAL_STYLE: Final[str] = "string"
-    MACOS_TERMINALS: Final[tuple[str, ...]] = ("Terminal.app", "iTerm.app")
+    MACOS_TERMINALS: Final[tuple[str, ...]] = ("iTerm.app", "Terminal.app")
     WINDOWS_TERMINALS: Final[tuple[str, ...]] = ("wt.exe", "cmd.exe")
 
     def __init__(
@@ -167,14 +220,18 @@ class TerminalService(TerminalServiceInterface):
 
     def detect_terminal(self) -> str:
         """Detect an available terminal emulator, or return ``"none"``."""
+        os_name = get_os()
         if self._preferred and self._preferred != "auto":
-            resolved = self._resolve_terminal_executable(self._preferred)
+            resolved = (
+                self._resolve_macos_terminal(self._preferred)
+                if os_name == "darwin"
+                else self._resolve_terminal_executable(self._preferred)
+            )
             if resolved is not None:
                 self._remember_detected_terminal(self._preferred, resolved)
                 return self._preferred
             logger.warning("Preferred terminal %r was not found", self._preferred)
 
-        os_name = get_os()
         if os_name == "linux":
             return self._detect_linux_terminal()
         if os_name == "darwin":
@@ -194,11 +251,30 @@ class TerminalService(TerminalServiceInterface):
 
     def _detect_macos_terminal(self) -> str:
         for name in self.MACOS_TERMINALS:
-            if (Path("/Applications") / name).exists():
-                self._remember_detected_terminal(name, None)
+            bundle = self._find_macos_app_bundle(name)
+            if bundle is not None:
+                self._remember_detected_terminal(name, str(bundle))
                 return name
         self._remember_detected_terminal("Terminal.app", None)
         return self._detected
+
+    @staticmethod
+    def _find_macos_app_bundle(bundle_name: str) -> Path | None:
+        for directory in _macos_app_search_dirs():
+            candidate = directory / bundle_name
+            if _is_macos_bundle_dir(candidate):
+                return candidate
+        return None
+
+    def _resolve_macos_terminal(self, preferred: str) -> str | None:
+        expanded = os.path.expanduser(preferred)
+        candidate = Path(expanded)
+        if candidate.is_absolute() and _is_macos_bundle_dir(candidate):
+            return str(candidate)
+        if "/" not in expanded and "\\" not in expanded and expanded.lower().endswith(".app"):
+            bundle = self._find_macos_app_bundle(expanded)
+            return str(bundle) if bundle is not None else None
+        return self._resolve_terminal_executable(expanded)
 
     def _detect_windows_terminal(self) -> str:
         for name in self.WINDOWS_TERMINALS:
@@ -215,7 +291,8 @@ class TerminalService(TerminalServiceInterface):
 
     def _resolve_terminal_executable(self, name: str) -> str | None:
         """Resolve a terminal once and retain its absolute executable path."""
-        resolved = self._command_resolver(name)
+        expanded = os.path.expanduser(name)
+        resolved = self._command_resolver(expanded)
         if not resolved:
             return None
         value = str(resolved)
@@ -419,19 +496,107 @@ fi
             self._last_error = f"Could not start terminal {terminal}: {exc}"
             return False
 
-    def _launch_macos_terminal(self, terminal: str, ssh_command: Sequence[str]) -> bool:
+    @staticmethod
+    def _bundle_paths_from_candidate(candidate: Path) -> tuple[Path, Path] | None:
+        if candidate.suffix.lower() == ".app" and candidate.is_dir():
+            return candidate, candidate / "Contents"
+        macos = candidate.parent
+        contents = macos.parent
+        bundle = contents.parent
+        if macos.name == "MacOS" and contents.name == "Contents" and bundle.suffix.lower() == ".app":
+            return bundle, contents
+        return None
+
+    def _configured_macos_bundle(self) -> _MacOSBundleInfo | None:
+        """Read the identity of the bundle for the configured macOS terminal."""
+        if self._detected_path is None:
+            return None
+        candidate = Path(self._detected_path)
+        located = self._bundle_paths_from_candidate(candidate)
+        if located is None:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                return None
+            if resolved != candidate:
+                located = self._bundle_paths_from_candidate(resolved)
+        if located is None:
+            return None
+        bundle, contents = located
+        try:
+            with (contents / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+        except (OSError, ValueError, ExpatError, AttributeError):
+            # plistlib can raise AttributeError for an invalid XML date.
+            return _MacOSBundleInfo(
+                bundle=bundle,
+                bundle_id=None,
+                executable_name=None,
+                plist_readable=False,
+            )
+        if not isinstance(info, dict):
+            return _MacOSBundleInfo(
+                bundle=bundle,
+                bundle_id=None,
+                executable_name=None,
+                plist_readable=False,
+            )
+        raw_bundle_id = info.get("CFBundleIdentifier")
+        raw_executable = info.get("CFBundleExecutable")
+        return _MacOSBundleInfo(
+            bundle=bundle,
+            bundle_id=raw_bundle_id if isinstance(raw_bundle_id, str) else None,
+            executable_name=raw_executable if isinstance(raw_executable, str) else None,
+            plist_readable=True,
+        )
+
+    def _resolve_macos_bundle_cli(self, bundle_info: _MacOSBundleInfo) -> tuple[str, str] | None:
+        """Resolve a CLI-capable executable and launch style for a third-party ``.app`` bundle."""
+        detected_path = Path(self._detected_path) if self._detected_path is not None else None
+        detected_is_file = detected_path is not None and detected_path.is_file()
+
+        if bundle_info.bundle_id == _WEZTERM_BUNDLE_ID:
+            if detected_is_file and self._detected_path is not None:
+                return self._detected_path, "start_separator"
+            macos_dir = bundle_info.bundle / "Contents" / "MacOS"
+            for candidate_name in ("wezterm", bundle_info.executable_name or "wezterm-gui"):
+                candidate = macos_dir / candidate_name
+                if candidate.is_file():
+                    return str(candidate), "start_separator"
+            return None
+
+        if detected_is_file and self._detected_path is not None:
+            identity = _terminal_identity(self._detected_path)
+            if identity in _MACOS_CLI_TERMINAL_STYLES:
+                return self._detected_path, _MACOS_CLI_TERMINAL_STYLES[identity]
+
+        if bundle_info.executable_name:
+            exe_identity = _terminal_identity(bundle_info.executable_name)
+            style = _MACOS_CLI_TERMINAL_STYLES.get(exe_identity) or _MACOS_CLI_BUNDLE_STYLES.get(
+                bundle_info.bundle_id or ""
+            )
+            if style is not None:
+                exe_path = bundle_info.bundle / "Contents" / "MacOS" / bundle_info.executable_name
+                if exe_path.is_file():
+                    return str(exe_path), style
+
+        return None
+
+    def _launch_macos_applescript(
+        self, app: str, *, use_iterm: bool, ssh_command: Sequence[str]
+    ) -> bool:
         wrapper = self._create_posix_wrapper(ssh_command)
         shell_command = f"bash {shlex.quote(wrapper)}"
-        escaped_shell_command = shell_command.replace("\\", "\\\\").replace('"', '\\"')
-        if "iTerm" in terminal:
+        escaped_shell_command = _escape_applescript_text(shell_command)
+        if use_iterm:
             script = (
-                'tell application "iTerm"\n'
+                f'tell application "{app}"\n'
                 f'  create window with default profile command "{escaped_shell_command}"\n'
                 "end tell"
             )
         else:
             script = (
-                'tell application "Terminal"\n'
+                f'tell application "{app}"\n'
                 f'  do script "{escaped_shell_command}"\n'
                 "  activate\n"
                 "end tell"
@@ -440,6 +605,99 @@ fi
             ["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         return True
+
+    def _launch_macos_ghostty(self, target: str, ssh_command: Sequence[str]) -> bool:
+        wrapper = self._create_posix_wrapper(ssh_command)
+        subprocess.Popen(
+            ["open", "-na", target, "--args", "-e", "bash", wrapper],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+
+    def _launch_macos_terminal(self, terminal: str, ssh_command: Sequence[str]) -> bool:
+        configured_bundle = self._configured_macos_bundle()
+        if configured_bundle is not None:
+            bundle_id = configured_bundle.bundle_id
+            if bundle_id in (_ITERM_BUNDLE_ID, _TERMINAL_BUNDLE_ID):
+                app = _escape_applescript_text(configured_bundle.bundle.as_posix())
+                return self._launch_macos_applescript(
+                    app, use_iterm=bundle_id == _ITERM_BUNDLE_ID, ssh_command=ssh_command
+                )
+
+            is_ghostty = (
+                bundle_id == _GHOSTTY_BUNDLE_ID
+                or (
+                    configured_bundle.executable_name is not None
+                    and _terminal_identity(configured_bundle.executable_name) == "ghostty"
+                )
+                or (
+                    self._detected_path is not None
+                    and _terminal_identity(self._detected_path) == "ghostty"
+                )
+            )
+            if is_ghostty:
+                return self._launch_macos_ghostty(
+                    configured_bundle.bundle.as_posix(), ssh_command
+                )
+
+            cli_launch = self._resolve_macos_bundle_cli(configured_bundle)
+            if cli_launch is not None:
+                executable, style = cli_launch
+                wrapper = self._create_posix_wrapper(ssh_command)
+                command = self._build_command_for_style(style, executable, wrapper)
+                subprocess.Popen(
+                    command,
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+
+            bundle_name_lower = configured_bundle.bundle.name.casefold()
+            if (not configured_bundle.plist_readable or bundle_id is None) and (
+                "iterm" in bundle_name_lower or "terminal" in bundle_name_lower
+            ):
+                use_iterm = "iterm" in bundle_name_lower
+                return self._launch_macos_applescript(
+                    "iTerm" if use_iterm else "Terminal",
+                    use_iterm=use_iterm,
+                    ssh_command=ssh_command,
+                )
+
+            self._last_error = (
+                f"Unsupported macOS terminal bundle {configured_bundle.bundle.name}. "
+                "Use Terminal.app, iTerm.app, Ghostty.app, WezTerm.app, Alacritty.app, "
+                "kitty.app, Rio.app, or a CLI terminal executable."
+            )
+            return False
+
+        if self._detected_path is not None:
+            identity = _terminal_identity(self._detected_path)
+            if identity == "ghostty":
+                ghostty_bundle = self._find_macos_app_bundle("Ghostty.app")
+                target = ghostty_bundle.as_posix() if ghostty_bundle is not None else "Ghostty"
+                return self._launch_macos_ghostty(target, ssh_command)
+            wrapper = self._create_posix_wrapper(ssh_command)
+            style = _MACOS_CLI_TERMINAL_STYLES.get(identity) or self._linux_terminal_style(
+                terminal
+            )
+            command = self._build_command_for_style(style, self._detected_path, wrapper)
+            subprocess.Popen(
+                command,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+
+        use_iterm = "iTerm" in terminal
+        return self._launch_macos_applescript(
+            "iTerm" if use_iterm else "Terminal",
+            use_iterm=use_iterm,
+            ssh_command=ssh_command,
+        )
 
     def _launch_linux_terminal(
         self, terminal: str, executable: str, ssh_command: Sequence[str]
@@ -454,15 +712,24 @@ fi
         )
         return True
 
-    def _build_linux_command(
-        self, terminal: str, executable: str, wrapper_script: str
+    @staticmethod
+    def _build_command_for_style(
+        style: str, executable: str, wrapper_script: str
     ) -> list[str]:
-        style = self._linux_terminal_style(terminal)
         if style == "separator":
             return [executable, "--", "bash", wrapper_script]
+        if style == "start_separator":
+            return [executable, "start", "--", "bash", wrapper_script]
         if style == "list":
             return [executable, "-e", "bash", wrapper_script]
         return [executable, "-e", f"bash {shlex.quote(wrapper_script)}"]
+
+    def _build_linux_command(
+        self, terminal: str, executable: str, wrapper_script: str
+    ) -> list[str]:
+        return self._build_command_for_style(
+            self._linux_terminal_style(terminal), executable, wrapper_script
+        )
 
     def _linux_terminal_style(self, terminal: str) -> str:
         """Return the declared argv style for a terminal name or path."""
