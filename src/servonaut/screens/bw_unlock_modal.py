@@ -30,6 +30,11 @@ from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
 
+#: Who can use the keys once Bitwarden is unlocked; shown wherever the user unlocks.
+BW_UNLOCK_SCOPE_NOTE = (
+    "Unlocking also lets the app's AI chat and relay tools connect with your "
+    "Bitwarden SSH keys until the app quits."
+)
 _CLI_DOCS_URL = "https://bitwarden.com/help/cli/"
 
 
@@ -138,6 +143,7 @@ class BwUnlockModal(ModalScreen[bool]):
     def _render_locked(self) -> None:
         self._body().mount(
             Static("Enter your Bitwarden master password to unlock the vault for this session."),
+            Static(f"[dim]{BW_UNLOCK_SCOPE_NOTE}[/dim]", id="bw_unlock_scope"),
             SecretInput(placeholder="Master password", id="bw_master_pw"),
             Checkbox(
                 "Remember on this device (coming soon)",

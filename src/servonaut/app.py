@@ -208,6 +208,7 @@ class ServonautApp(App):
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
     bw_ssh_config_service = None
     bw_session_service = None
+    bw_ssh_keys = None
     aws_object_storage_service = None
     hetzner_object_storage_service = None
     ovh_object_storage_service = None
@@ -885,6 +886,42 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("BwSessionService init skipped: %s", e)
 
+        try:
+            from servonaut.services.bw_ssh_keys import BwSshKeyProvider
+            self.bw_ssh_keys = BwSshKeyProvider(
+                ref_service=lambda: getattr(self, "bw_ssh_config_service", None),
+                team_service=lambda: getattr(self, "team_service", None),
+                ssh_service=self.ssh_service,
+                session_getter=self._bw_session_token,
+            )
+        except Exception as e:
+            logger.debug("BwSshKeyProvider init skipped: %s", e)
+        add_lock_listener = getattr(self.bw_session_service, "add_lock_listener", None)
+        if callable(add_lock_listener):
+            # Locking Bitwarden must not leave its decrypted key files behind.
+            add_lock_listener(self._forget_bw_keys)
+        self._wire_bw_keys()
+
+        tools = getattr(self, "servonaut_tools", None)
+        if tools is not None and callable(getattr(tools, "set_bw_session_getter", None)):
+            tools.set_bw_session_getter(self._bw_session_token)
+
+    def _forget_bw_keys(self) -> None:
+        """Drop the Bitwarden key provider's ref lookups and key files (lock, sign-in/out)."""
+        provider = self.bw_ssh_keys
+        if provider is None:
+            return
+        try:
+            provider.forget_refs()
+            provider.forget_keys()
+        except Exception as exc:  # noqa: BLE001 - cleanup must not break sign-in or sign-out
+            logger.debug("Bitwarden key cleanup skipped (%s)", type(exc).__name__)
+
+    def _bw_session_token(self) -> Optional[str]:
+        """The in-memory Bitwarden session, or None. Never log it."""
+        service = self.bw_session_service
+        return service.session() if service is not None else None
+
     def _init_voice_services(self, voice_config: VoiceConfig) -> None:
         """Wire the voice services this distribution ships.
 
@@ -1149,6 +1186,7 @@ class ServonautApp(App):
         if getattr(self, "vault_command_service", None) is not None:
             self.workers.cancel_group(self, "vault_background")
             self.vault_update_required = False
+        self._forget_bw_keys()
         # Config-sync session
         if getattr(self, "config_sync_service", None) is not None:
             self.config_sync_service.clear_session()
@@ -1353,11 +1391,13 @@ class ServonautApp(App):
         connections; this hands them the current vault runtime and one lease
         cache, so a server's private agent is reused across them. A new
         runtime (after signing in again) gets a new cache: the old runtime
-        closed its leases.
+        closed its leases. The same services also get the Bitwarden key provider.
         """
         from servonaut.services.ssh_credentials import VaultLeaseCache
 
         self.vault_lease_cache = VaultLeaseCache()
+        # A new sign-in may be another account: its refs and keys are not the old ones.
+        self._forget_bw_keys()
         for service in (
             getattr(self, "memory_service", None),
             getattr(self, "log_viewer_service", None),
@@ -1366,12 +1406,29 @@ class ServonautApp(App):
             setter = getattr(service, "set_vault_runtime", None)
             if callable(setter):
                 setter(self.vault_command_service, self.vault_lease_cache)
+        self._wire_bw_keys()
         # Rows are asked per build: the fleet changes while the app runs. Demo
         # mode reads the real records, never the stand-in rows on screen.
         for service in (getattr(self, "memory_service", None), getattr(self, "scan_service", None)):
             rows_setter = getattr(service, "set_connection_rows", None)
             if callable(rows_setter):
                 rows_setter(self._connection_rows)
+
+    def _wire_bw_keys(self) -> None:
+        """Hand the Bitwarden key provider to the services that connect on their own.
+
+        Called from :meth:`_wire_vault_ssh` and again once the provider is
+        built, because a signed-in user's paid services are wired before it
+        exists.
+        """
+        for service in (
+            getattr(self, "memory_service", None),
+            getattr(self, "log_viewer_service", None),
+            getattr(self, "scan_service", None),
+        ):
+            bw_setter = getattr(service, "set_bw_keys", None)
+            if callable(bw_setter):
+                bw_setter(self.bw_ssh_keys)
 
     def _connection_rows(self) -> tuple:
         """``(team_rows, fleet_rows)`` for the services that connect on their own."""

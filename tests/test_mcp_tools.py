@@ -1409,6 +1409,376 @@ class TestBwVaultKeyResolution:
 
         assert not os.path.exists(observed["key_path"])
 
+    # --- Bitwarden cause in authentication failures -----------------------
+
+    AUTH_STDERR = b"deploy@web-1: Permission denied (publickey)."
+    LOCKED_NOTICE = "Bitwarden is locked, so this server's Bitwarden key was not used."
+    HEADLESS_FIX = (
+        "Ask the user to unlock Bitwarden and restart this MCP server with "
+        "BW_SESSION set in its environment; do not request or handle the "
+        "session value yourself."
+    )
+
+    def _locked_tools(self, tmp_path, monkeypatch, exc=None, **kwargs):
+        self._patch_home(monkeypatch, tmp_path)
+        tools = make_tools(
+            guard_level=kwargs.pop("guard_level", GuardLevel.STANDARD),
+            bw_ssh_config_service=self._bw_service(self.REF_PAYLOAD),
+        )
+        return tools
+
+    def _run_failing(self, tools, call, exc, stderr, stdout=b"", returncode=255):
+        """Run *call* with ssh answering *stderr*; exit 255 (ssh's own failure) by default."""
+        from servonaut.utils.ssh_utils import SSHOutput
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            if returncode is None:
+                return (stdout, stderr)
+            return SSHOutput(stdout, stderr, returncode)
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.side_effect = exc
+            result = run(call(tools))
+        return result, resolver_cls
+
+    def test_locked_vault_auth_failure_names_bitwarden_in_run_command(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        import logging
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        with caplog.at_level(logging.DEBUG):
+            result, _ = self._run_failing(
+                tools, lambda t: t.run_command("i-abc123", "ls"),
+                BwSessionMissingError("secret-detail"), self.AUTH_STDERR,
+            )
+
+        assert result.startswith("Error: SSH authentication failed. ")
+        assert self.LOCKED_NOTICE in result
+        assert self.HEADLESS_FIX in result
+        assert tools._audit.log.call_args[0][4] == "ssh_auth_failed"
+        assert "secret-detail" not in result + caplog.text
+        assert "PRIVATE KEY" not in result + caplog.text
+        assert "BwSessionMissingError" in caplog.text
+        assert "; using local key" in caplog.text
+
+    def test_locked_vault_auth_failure_names_bitwarden_in_get_server_info(
+        self, tmp_path, monkeypatch,
+    ):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t.get_server_info("i-abc123"),
+            BwSessionMissingError("secret-detail"), self.AUTH_STDERR,
+        )
+
+        assert result.startswith("Error: SSH authentication failed. ")
+        assert self.LOCKED_NOTICE in result
+        assert self.HEADLESS_FIX in result
+        assert "secret-detail" not in result
+        assert tools._audit.log.call_args[0][4] == "ssh_auth_failed"
+
+    def test_locked_vault_auth_failure_names_bitwarden_in_transfer_file(
+        self, tmp_path, monkeypatch,
+    ):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch, guard_level=GuardLevel.DANGEROUS)
+        tools._scp_service.execute_transfer = AsyncMock(
+            return_value=(255, "", "deploy@web-1: Permission denied (publickey).")
+        )
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls:
+            resolver_cls.return_value.resolve_ssh_key.side_effect = (
+                BwSessionMissingError("secret-detail")
+            )
+            result = run(tools.transfer_file("i-abc123", "/l", "/r", "download"))
+
+        assert "Transfer failed" in result
+        assert self.LOCKED_NOTICE in result
+        assert self.HEADLESS_FIX in result
+        assert "secret-detail" not in result
+
+    @pytest.mark.parametrize("exc_name, fragment", [
+        ("BwCliMissingError", "The Bitwarden CLI (bw) was not found"),
+        ("BwItemNotFoundError", "Bitwarden item was not found"),
+        ("BwItemShapeError", "is not an SSH key item"),
+        ("RuntimeError", "could not be read"),
+    ])
+    def test_other_bitwarden_causes_are_named(
+        self, tmp_path, monkeypatch, exc_name, fragment,
+    ):
+        from servonaut.services import bw_errors
+
+        exc_cls = getattr(bw_errors, exc_name, None) or RuntimeError
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t.run_command("i-abc123", "ls"),
+            exc_cls("detail"), self.AUTH_STDERR,
+        )
+
+        assert result.startswith("Error: SSH authentication failed. ")
+        assert fragment in result
+
+    def test_auth_failure_without_bitwarden_ref_is_unchanged(self):
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"", self.AUTH_STDERR)
+
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess), \
+                patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("SSH_AUTH_SOCK", None)
+            run_result = run(tools.run_command("i-abc123", "ls"))
+            info_result = run(tools.get_server_info("i-abc123"))
+
+        assert (
+            "Error: SSH authentication failed. Forward SSH_AUTH_SOCK so the MCP "
+            "server can use an unlocked agent identity. Verify the configured "
+            "username and key." in run_result
+        )
+        assert info_result == (
+            "Error: SSH authentication failed. Verify the configured username "
+            "and key or the forwarded SSH agent identities."
+        )
+        assert "Bitwarden" not in run_result + info_result
+
+    def test_agent_retry_variant_is_unchanged_without_ref(self, monkeypatch):
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"", self.AUTH_STDERR)
+
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert (
+            "Error: SSH authentication failed. The configured key and forwarded "
+            "SSH agent were both tried. Verify the configured username and key."
+        ) in result
+        assert "Bitwarden" not in result
+
+    def test_exec_ssh_attaches_the_locked_notice_on_refused_login(
+        self, tmp_path, monkeypatch,
+    ):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools,
+            lambda t: t._exec_ssh({"id": "i-abc123", "provider": "aws"}, "ls"),
+            BwSessionMissingError("secret-detail"), self.AUTH_STDERR, returncode=255,
+        )
+        stdout, stderr = result
+        hint = stderr.bw_hint
+
+        assert stdout == ""
+        assert stderr == self.AUTH_STDERR.decode()  # the hint is kept out of the text
+        assert self.LOCKED_NOTICE in hint
+        assert hint.endswith(self.HEADLESS_FIX)
+        assert "secret-detail" not in hint
+
+    @pytest.mark.parametrize("returncode", [None, 0, 1])
+    def test_exec_ssh_no_notice_unless_ssh_itself_failed(
+        self, tmp_path, monkeypatch, returncode,
+    ):
+        """A remote command printing ssh's refusal words is not a refused login."""
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools,
+            lambda t: t._exec_ssh({"id": "i-abc123", "provider": "aws"}, "ls"),
+            BwSessionMissingError("x"), self.AUTH_STDERR, returncode=returncode,
+        )
+        assert result[1] == self.AUTH_STDERR.decode()
+        assert getattr(result[1], "bw_hint", None) is None
+
+    @pytest.mark.parametrize("call", [
+        lambda t: t.run_command("i-abc123", "ls"),
+        lambda t: t.get_server_info("i-abc123"),
+    ], ids=["run_command", "get_server_info"])
+    @pytest.mark.parametrize("returncode", [None, 0, 1])
+    def test_no_hint_unless_ssh_itself_failed(self, tmp_path, monkeypatch, call, returncode):
+        """A remote command printing ssh's refusal words is not a refused login."""
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, call, BwSessionMissingError("x"), self.AUTH_STDERR, returncode=returncode,
+        )
+        assert "Bitwarden" not in result
+
+    def test_transfer_hint_needs_scp_s_own_failure_code(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch, guard_level=GuardLevel.DANGEROUS)
+        tools._scp_service.execute_transfer = AsyncMock(
+            return_value=(2, "", "deploy@web-1: Permission denied (publickey).")
+        )
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls:
+            resolver_cls.return_value.resolve_ssh_key.side_effect = BwSessionMissingError("x")
+            result = run(tools.transfer_file("i-abc123", "/l", "/r", "download"))
+        assert "Transfer failed" in result and "Bitwarden" not in result
+
+    def test_legacy_scp_exit_1_still_gets_the_hint(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch, guard_level=GuardLevel.DANGEROUS)
+        tools._scp_service.execute_transfer = AsyncMock(
+            return_value=(1, "", "deploy@web-1: Permission denied (publickey).")
+        )
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls:
+            resolver_cls.return_value.resolve_ssh_key.side_effect = BwSessionMissingError("x")
+            result = run(tools.transfer_file("i-abc123", "/l", "/r", "download"))
+        assert self.LOCKED_NOTICE in result
+
+    def test_exec_ssh_adds_no_hint_for_a_caller_that_hides_stderr(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t._exec_ssh({"id": "i-abc123", "provider": "aws"}, "ls"),
+            BwSessionMissingError("x"), self.AUTH_STDERR, returncode=255,
+        )
+        assert result[1] == self.AUTH_STDERR.decode()
+
+    def test_web_traffic_summary_shows_the_hint_whole(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t.web_traffic_summary("i-abc123"),
+            BwSessionMissingError("x"), self.AUTH_STDERR, returncode=255,
+        )
+        assert self.LOCKED_NOTICE in result and self.HEADLESS_FIX in result
+
+    @pytest.mark.parametrize("tool", ["db_processlist", "db_top_queries"])
+    def test_db_tools_show_the_hint(self, tmp_path, monkeypatch, tool):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        from types import SimpleNamespace
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        db = ({"id": "i-abc123", "provider": "aws"}, SimpleNamespace(engine="mysql"), "test-db-pass", None)
+        with patch.object(tools, "_resolve_db", AsyncMock(return_value=db)), \
+                patch.object(tools, "_build_db_command", return_value="true"):
+            result, _ = self._run_failing(
+                tools, lambda t: getattr(t, tool)("i-abc123"),
+                BwSessionMissingError("x"), self.AUTH_STDERR, returncode=255,
+            )
+        assert self.LOCKED_NOTICE in result
+
+    BANNER = ("#" * 598 + "\n").encode()  # a 600-character login banner before ssh's refusal
+
+    @pytest.mark.parametrize("tool", ["db_processlist", "db_top_queries"])
+    def test_db_tools_keep_the_hint_after_a_long_banner(self, tmp_path, monkeypatch, tool):
+        from types import SimpleNamespace
+
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        db = ({"id": "i-abc123", "provider": "aws"}, SimpleNamespace(engine="mysql"), "test-db-pass", None)
+        with patch.object(tools, "_resolve_db", AsyncMock(return_value=db)), \
+                patch.object(tools, "_build_db_command", return_value="true"):
+            result, _ = self._run_failing(
+                tools, lambda t: getattr(t, tool)("i-abc123"),
+                BwSessionMissingError("x"), self.BANNER + self.AUTH_STDERR, returncode=255,
+            )
+        assert result.endswith(self.HEADLESS_FIX)
+        assert self.LOCKED_NOTICE in result
+
+    def test_web_traffic_summary_keeps_the_hint_after_a_long_banner(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t.web_traffic_summary("i-abc123"),
+            BwSessionMissingError("x"), self.BANNER + self.AUTH_STDERR, returncode=255,
+        )
+        assert result.endswith(self.HEADLESS_FIX)
+
+    def test_headless_notice_never_tells_the_agent_to_unlock(self):
+        from servonaut.services.bw_key_notice import bw_key_notice
+
+        notice = bw_key_notice("BwSessionMissingError", headless=True)
+        assert "bw unlock" not in notice and "--raw" not in notice
+        assert "Ask the user" in notice
+
+    def test_exec_ssh_stderr_unchanged_without_bitwarden_ref(self):
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"", self.AUTH_STDERR)
+
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            _, stderr = run(
+                tools._exec_ssh({"id": "i-abc123", "provider": "aws"}, "ls")
+            )
+
+        assert stderr == self.AUTH_STDERR.decode()
+
+    def test_locked_vault_success_shows_no_bitwarden_text(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        result, _ = self._run_failing(
+            tools, lambda t: t.run_command("i-abc123", "ls"),
+            BwSessionMissingError("x"), b"", stdout=b"ok", returncode=0,
+        )
+
+        assert "Bitwarden" not in result
+        key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+        assert key_path == "~/.ssh/test.pem"
+
+    def test_locked_vault_connection_failure_still_triggers_ssm_fallback(
+        self, tmp_path, monkeypatch,
+    ):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        stderr = b"ssh: connect to host 192.0.2.10 port 22: Connection refused"
+        instance = {"id": "i-abc123", "provider": "aws"}
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"", stderr)
+
+        results = []
+        for exc in (BwSessionMissingError("x"), None):
+            tools = self._locked_tools(tmp_path, monkeypatch)
+            with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                    patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+                resolver_cls.return_value.resolve_ssh_key.side_effect = exc or RuntimeError("y")
+                results.append(run(tools._run_command_via_ssh(instance, "ls")))
+
+        assert results[0][:4] == (None, True, False, None)
+        assert results[0] == results[1]
+
+    def test_session_getter_default_and_binding(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        assert tools._bw_session_getter is None
+        _, resolver_cls = self._run_failing(
+            tools, lambda t: t.run_command("i-abc123", "ls"),
+            BwSessionMissingError("x"), self.AUTH_STDERR,
+        )
+        resolver_cls.assert_called_with(session_getter=None)
+
+        getter = lambda: "token"  # noqa: E731
+        tools = self._locked_tools(tmp_path, monkeypatch)
+        tools.set_bw_session_getter(getter)
+        result, resolver_cls = self._run_failing(
+            tools, lambda t: t.run_command("i-abc123", "ls"),
+            BwSessionMissingError("x"), self.AUTH_STDERR,
+        )
+        resolver_cls.assert_called_with(session_getter=getter)
+        assert "Unlock it under Settings > Bitwarden SSH and retry." in result
+        assert "BW_SESSION" not in result
+
     def test_set_bw_ssh_config_service_binds_late_and_clears_memo(self):
         """The TUI builds the shared tools instance BEFORE the authenticated
         APIClient exists, so the BW ref client is pushed in late via the
@@ -1427,6 +1797,51 @@ class TestBwVaultKeyResolution:
 
         tools.set_bw_ssh_config_service(None)
         assert tools._bw_ssh_config_service is None
+
+    @pytest.mark.parametrize("tool,extra", [
+        ("disk_usage", ()), ("journal_errors", ()), ("pending_updates", ()),
+        ("security_audit", ()), ("service_state", ()), ("tls_cert_check", ()),
+        ("auth_log_summary", ()), ("docker_log_summary", ("web",)),
+        ("docker_ps", ()), ("docker_stats", ()), ("docker_logs", ("web",)),
+        ("docker_events_summary", ()),
+    ])
+    def test_probe_audit_rows_carry_key_source(self, tmp_path, monkeypatch, tool, extra):
+        """The probe tools record the Bitwarden key on their audit rows, as run_command does."""
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            run(getattr(tools, tool)("i-abc123", *extra))
+
+        call = tools._audit.log.call_args
+        assert call[0][0] == tool
+        assert call.kwargs.get("key_source") == "bw_personal"
+        assert "PRIVATE KEY" not in str(call)
+
+    @pytest.mark.parametrize("tool", ["disk_usage", "docker_ps"])
+    def test_probe_failure_audit_rows_carry_key_source(self, tmp_path, monkeypatch, tool):
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+
+        async def failing_subprocess(ssh_cmd, timeout=None):
+            raise RuntimeError("connection reset")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=failing_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(getattr(tools, tool)("i-abc123"))
+
+        assert result.startswith("Error")
+        call = tools._audit.log.call_args
+        assert call[0][3] is False
+        assert call.kwargs.get("key_source") == "bw_personal"
 
     def test_late_bound_bw_service_resolves_vault_key(self, tmp_path, monkeypatch):
         """A tools instance constructed WITHOUT the BW service (the TUI

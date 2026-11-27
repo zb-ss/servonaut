@@ -15,6 +15,9 @@ lists as their own without a vault key uses a team's key for the same server,
 unless the user set a key of their own for the hop. Without either the hop
 uses the user's own SSH setup.
 
+A server with a personal or team Bitwarden SSH ref connects with that key too
+when an in-app caller passes a ``bw_keys`` provider and no vault key applies.
+
 A long-running app shares one :class:`VaultLeaseCache`, so a server's lease
 (one private agent holding the key) is reused while the key is still loaded,
 instead of starting an agent for every command. Headless one-shot callers pass
@@ -542,6 +545,7 @@ async def resolve_with_vault(
     team_rows: Iterable[Mapping[str, Any]] = (),
     rows: Optional[Iterable[Mapping[str, Any]]] = None,
     raise_rate_limited: bool = False,
+    bw_keys: Any = None,
 ) -> dict[str, Any]:
     """*conn* unchanged, or with the server's vault credential applied.
 
@@ -560,6 +564,14 @@ async def resolve_with_vault(
     setup applies as before: an agent or ssh's default keys may hold the
     server's key.
 
+    With *bw_keys* (an object with ``async apply(conn, instance)``), a server
+    with a personal or team Bitwarden SSH ref and no vault key connects with
+    that key file (``key_source`` 'bw_personal' / 'bw_team', route unchanged).
+    A vault key (own, certificate or team) always wins over it, and it wins
+    over a local key. A ref whose key cannot be read leaves the connection as
+    before and adds ``bw_key_unavailable`` (see ``services/bw_key_notice``);
+    nothing is added when the server has no ref.
+
     The hop to a bastion that is one of *rows* (the fleet; *team_rows*
     when not given) and has a vault key uses that key (:func:`bastion_lease`).
 
@@ -576,6 +588,13 @@ async def resolve_with_vault(
             raise_rate_limited=raise_rate_limited,
         )
 
+    async def own_setup() -> dict[str, Any]:
+        """The user's own setup: the server's Bitwarden key when it has a ref, else *conn* as given."""
+        own = conn
+        if bw_keys is not None:
+            own = await bw_keys.apply(conn, instance) or conn
+        return await _with_hop(own, instance, connection_service, hop_for)
+
     lease = await vault_lease(instance, vault_runtime, cache=cache)
     if lease is not None:
         profile = _route_profile(conn, instance, connection_service)
@@ -584,16 +603,16 @@ async def resolve_with_vault(
         )
     team = team_key_target(instance) or team_key_fallback(instance, team_rows, conn.get("key_path"))
     if team is None:
-        return await _with_hop(conn, instance, connection_service, hop_for)
+        return await own_setup()
     try:
         lease = await vault_lease(team, vault_runtime, cache=cache)
     except VaultCredentialError as exc:
         if raise_rate_limited and rate_limit_wait(exc)[0]:
             raise
         logger.warning("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
-        return await _with_hop(conn, instance, connection_service, hop_for)
+        return await own_setup()
     if lease is None:
-        return await _with_hop(conn, instance, connection_service, hop_for)
+        return await own_setup()
     # The team's route: its connection rule and options, not the user's own row's.
     profile, extra_options = None, []
     if connection_service is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import asyncio
+import os
 import subprocess
 import logging
 import re
@@ -16,7 +17,9 @@ from textual.message import Message
 from servonaut.utils.markup import single_line_text
 from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.remote_shell import shell_path, posix_command
-from servonaut.utils.ssh_utils import run_ssh
+from servonaut.services.ssh_host_keys import SSH_FAILURE_EXIT_CODE
+from servonaut.utils.ssh_utils import is_ssh_own_login_refusal, run_ssh
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice, uses_bw_key
 from servonaut.config.schema import SSHConfig
 
 if TYPE_CHECKING:
@@ -24,6 +27,26 @@ if TYPE_CHECKING:
     from servonaut.services.connection_service import ConnectionService
 
 logger = logging.getLogger(__name__)
+
+
+class RemoteLoginRefusedError(RuntimeError):
+    """ssh itself refused the login (its exit code 255 and its own refusal line)."""
+
+
+class RemoteCredentialError(RemoteLoginRefusedError):
+    """Why the server's Bitwarden key was not used, shown as it is when ssh then refuses the login."""
+
+
+class _ListingError(str):
+    """A failed listing's error text, with the exit code (255: ssh itself failed)."""
+
+    returncode: Optional[int] = None
+
+
+def _listing_error(text: str, returncode: int) -> str:
+    error = _ListingError(text)
+    error.returncode = returncode
+    return error
 
 
 class RemoteTree(Tree):
@@ -57,6 +80,7 @@ class RemoteTree(Tree):
         connection_timeout: Optional[int] = None,
         literal_paths: bool = False,
         scrub=None,
+        bw_key_reason: Optional[str] = None,
         **kwargs
     ) -> None:
         """Initialize remote tree widget.
@@ -86,7 +110,13 @@ class RemoteTree(Tree):
         )
         self._literal_paths = literal_paths
         self._scrub = scrub
+        self._bw_key_reason = bw_key_reason
         self._vault_lock = asyncio.Lock()
+        # The connection before the vault / Bitwarden resolution (set by the
+        # first one), the last resolution, and whether ssh then refused the login.
+        self._base_conn: Optional[dict] = None
+        self._resolved: dict = {}
+        self._login_refused = False
 
         # Resolve connection details once
         self._profile = connection_service.resolve_profile(instance)
@@ -165,7 +195,10 @@ class RemoteTree(Tree):
             if node.data:
                 data = node.data
                 if data.get('type') == 'error':
-                    node.set_label(self._label(self._error_label(data['error'], refused=data.get('refused', False))))
+                    node.set_label(self._label(self._error_label(
+                        data['error'], refused=data.get('refused', False),
+                        login_refused=data.get('login_refused', False),
+                    )))
                     return
                 name = data.get('name', data['path'])
                 prefix = '📁' if data['type'] == 'directory' else '📄'
@@ -275,38 +308,57 @@ class RemoteTree(Tree):
         async with self._vault_lock:
             await self._apply_vault()
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: self._fetch_directory_contents(path)
-        )
+        try:
+            return await loop.run_in_executor(
+                None,
+                lambda: self._fetch_directory_contents(path)
+            )
+        except RuntimeError:
+            if self._login_refused:
+                self._drop_refused_key()
+            raise
+
+    def _drop_refused_key(self) -> None:
+        """After ssh refused the login with the server's Bitwarden key, have it read again."""
+        provider = getattr(self.app, "bw_ssh_keys", None)
+        key_refused = getattr(provider, "key_refused", None)
+        if callable(key_refused):
+            key_refused(self._resolved)
 
     async def _apply_vault(self) -> None:
-        """Use the server's Servonaut Vault key, if it has one (once per tree).
+        """Use the server's Servonaut Vault key, or its Bitwarden key, if it has one.
+
+        Resolved once per tree, except when the Bitwarden part needs another
+        look (see ``_should_resolve_again``).
 
         Raises:
             RuntimeError: the server's vault credential cannot be used.
         """
-        if self._identity is not None:
+        if self._identity is not None and not self._should_resolve_again():
             return
         from servonaut.screens._demo_resolve import fleet_rows, team_rows
         from servonaut.services.ssh_credentials import (
             VaultCredentialError, resolve_with_vault, ssh_identity_kwargs,
         )
 
+        self._login_refused = False
+        if self._base_conn is None:
+            self._base_conn = {
+                "host": self._host, "username": self._username, "key_path": self._key_path,
+                "proxy_args": list(self._proxy_args), "port": self._port,
+                "extra_options": list(self._extra_options), "profile": self._profile,
+            }
         app = self.app
         try:
             resolved = await resolve_with_vault(
-                {
-                    "host": self._host, "username": self._username, "key_path": self._key_path,
-                    "proxy_args": self._proxy_args, "port": self._port,
-                    "extra_options": self._extra_options, "profile": self._profile,
-                },
+                dict(self._base_conn),
                 self._instance,
                 vault_runtime=getattr(app, "vault_command_service", None),
                 connection_service=self._connection_service,
                 cache=getattr(app, "vault_lease_cache", None),
                 team_rows=team_rows(app),
                 rows=fleet_rows(app),
+                bw_keys=getattr(app, "bw_ssh_keys", None),
             )
         except VaultCredentialError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -315,7 +367,25 @@ class RemoteTree(Tree):
         self._key_path = resolved.get("key_path")
         self._proxy_args = list(resolved.get("proxy_args") or [])
         self._port = resolved.get("port")
+        self._bw_key_reason = resolved.get(BW_KEY_UNAVAILABLE)
+        self._resolved = dict(resolved)
         self._identity = {key: value for key, value in ssh_identity_kwargs(resolved).items() if value}
+
+    def _should_resolve_again(self) -> bool:
+        """Whether the next listing resolves the connection again.
+
+        Only the tree's own resolution (no caller-supplied connection
+        options) is redone: after ssh refused the login while the Bitwarden
+        key was missing or used, or when the Bitwarden key file it holds is
+        gone (Bitwarden locked, signed out, the ref edited). A working one
+        stays cached.
+        """
+        if self._base_conn is None:
+            return False
+        used_bw_key = uses_bw_key(self._resolved)
+        if self._login_refused and (self._bw_key_reason or used_bw_key):
+            return True
+        return used_bw_key and not os.path.isfile(str(self._key_path or ""))
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker not in self._pending_fetch or not event.worker.is_finished:
@@ -326,12 +396,16 @@ class RemoteTree(Tree):
         node.remove_children()
         error = str(event.worker.error) if event.worker.error else ''
         if error:
-            refused = isinstance(event.worker.error, SSHRefusal)
+            refused = isinstance(event.worker.error, (SSHRefusal, RemoteCredentialError))
+            login_refused = isinstance(event.worker.error, RemoteLoginRefusedError)
             self._errors[path] = error
             logger.warning('Could not list remote folder %s: %s', path, error)
             node.add(
-                self._label(self._error_label(error, refused=refused)),
-                data={'path': path, 'type': 'error', 'error': error, 'refused': refused},
+                self._label(self._error_label(error, refused=refused, login_refused=login_refused)),
+                data={
+                    'path': path, 'type': 'error', 'error': error, 'refused': refused,
+                    'login_refused': login_refused,
+                },
             ).allow_expand = False
             if refused:
                 self.app.notify(error, severity='error', markup=False)
@@ -351,9 +425,11 @@ class RemoteTree(Tree):
             node = parent
         return True
 
-    def _error_label(self, error: str, *, refused: bool = False) -> str:
+    def _error_label(self, error: str, *, refused: bool = False, login_refused: bool = False) -> str:
         if refused:
             return error
+        if login_refused:
+            return '🔑 Authentication failed'
         if not self._literal_paths:
             return f'❌ {error}'
         lowered = error.lower()
@@ -393,12 +469,20 @@ class RemoteTree(Tree):
         else:
             stdout, error_msg = self._run_ls(command)
         if error_msg is not None:
+            # Only ssh itself (exit 255, its own line) refuses a login; a
+            # remote error can contain the same words.
+            login_refused = is_ssh_own_login_refusal(
+                error_msg, ssh_failed=getattr(error_msg, "returncode", None) == SSH_FAILURE_EXIT_CODE,
+            )
+            if login_refused:
+                self._login_refused = True
             # EFS / NFS shares and other root-owned mounts are commonly
             # unreadable by the login user (ec2-user / ubuntu). Retry once with
             # non-interactive sudo — read-only, and `-n` never prompts, so it
             # fails fast where passwordless sudo isn't available and we fall
             # back to the original "Permission denied" message.
-            if "permission denied" in error_msg.lower():
+            # A refused login is not fixed by sudo and must not cost a second connection.
+            if "permission denied" in error_msg.lower() and not login_refused:
                 if self._literal_paths:
                     sudo_out, sudo_err, sudo_portable = self._read_literal_listing(safe_path, sudo=True)
                 else:
@@ -408,6 +492,11 @@ class RemoteTree(Tree):
                     stdout, error_msg = sudo_out, None
                     portable = sudo_portable
             if error_msg is not None:
+                notice = bw_key_notice(self._bw_key_reason) if login_refused else None
+                if notice:
+                    raise RemoteCredentialError(notice)
+                if login_refused:
+                    raise RemoteLoginRefusedError(str(error_msg))
                 raise RuntimeError(error_msg)
 
         if portable:
@@ -523,7 +612,9 @@ class RemoteTree(Tree):
         """Run a remote listing command. Returns ``(stdout, error_or_None)``.
 
         A non-None second element is a cleaned, user-facing error string; the
-        caller decides whether to retry (e.g. with sudo) or surface it.
+        caller decides whether to retry (e.g. with sudo) or surface it. When
+        the command ran, the string's ``returncode`` is its exit code (255:
+        ssh itself failed).
         """
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=self._host,
@@ -560,7 +651,7 @@ class RemoteTree(Tree):
                 if not line.startswith("Warning:")
             ]
             detail = '\n'.join(stderr_lines) if self._literal_paths else (stderr_lines[-1] if stderr_lines else stderr)
-            return "", detail or "ls failed"
+            return "", _listing_error(detail or "ls failed", result.returncode)
 
         return stdout, None
 

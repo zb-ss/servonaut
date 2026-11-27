@@ -29,7 +29,7 @@ def _run_tool(tmp_path, line: str):
     )
     scripts = []
 
-    async def fake_exec(instance, remote, timeout=60):
+    async def fake_exec(instance, remote, timeout=60, **_kwargs):
         scripts.append(remote)
         script = (
             remote.replace("/etc/nginx", str(tmp_path / "nginx"))

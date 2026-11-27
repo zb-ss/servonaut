@@ -268,7 +268,10 @@ def test_the_app_hands_the_vault_to_every_ssh_service():
         vault_command_service=object(),
         memory_service=services[0], log_viewer_service=services[1], scan_service=services[2],
         _connection_rows=lambda: ([], []),
+        bw_ssh_keys=None,
     )
+    host._wire_bw_keys = lambda: ServonautApp._wire_bw_keys(host)
+    host._forget_bw_keys = lambda: ServonautApp._forget_bw_keys(host)
 
     ServonautApp._wire_vault_ssh(host)
 
@@ -291,3 +294,84 @@ def test_binding_a_new_key_drops_the_servers_cached_lease(lease):
     asyncio.run(vault_lease(dict(CUSTOM), runtime, cache=cache))
 
     assert runtime.resolve_ssh.await_count == 2
+
+
+def test_the_bitwarden_provider_reaches_services_wired_before_it_exists():
+    """A signed-in user's services are wired before the provider is built."""
+    from servonaut.app import ServonautApp
+
+    services = [MagicMock(), MagicMock(), MagicMock()]
+    provider = object()
+    host = SimpleNamespace(
+        memory_service=services[0], log_viewer_service=services[1], scan_service=services[2],
+        bw_ssh_keys=provider,
+    )
+
+    ServonautApp._wire_bw_keys(host)
+
+    for service in services:
+        service.set_bw_keys.assert_called_once_with(provider)
+
+
+def test_a_signed_in_start_hands_the_bitwarden_provider_to_every_service(tmp_path):
+    """The real init path: paid services are wired before the provider exists."""
+    from unittest.mock import patch
+
+    from servonaut.app import ServonautApp
+
+    app = ServonautApp(config_path=tmp_path / "config.json")
+    auth = MagicMock(is_authenticated=True)
+    with patch("servonaut.services.auth_service.AuthService", return_value=auth), \
+            patch.object(ServonautApp, "init_paid_services",
+                         autospec=True, side_effect=ServonautApp.init_paid_services) as paid:
+        app._init_services()
+
+    paid.assert_called()
+    assert app.bw_ssh_keys is not None
+    assert app.memory_service._bw_keys is app.bw_ssh_keys
+    assert app.log_viewer_service._bw_keys is app.bw_ssh_keys
+    assert app.scan_service._bw_keys is app.bw_ssh_keys
+
+
+def test_the_app_tools_read_the_apps_unlocked_bitwarden_session(tmp_path):
+    """The AI chat and relay tools use the app's in-memory unlock (the owner's choice, disclosed in the UI)."""
+    from servonaut.app import ServonautApp
+
+    app = ServonautApp(config_path=tmp_path / "config.json")
+    app._init_services()
+    app.bw_session_service = MagicMock()
+    app.bw_session_service.session.return_value = "unlocked-session"
+
+    getter = app.servonaut_tools._bw_session_getter
+    assert getter is not None
+    assert getter() == "unlocked-session"
+    app.bw_session_service.session.return_value = None
+    assert getter() is None
+
+
+def _signed_out_app(tmp_path):
+    from servonaut.app import ServonautApp
+
+    app = ServonautApp(config_path=tmp_path / "config.json")
+    app._init_services()
+    app.bw_ssh_keys = MagicMock()
+    return app
+
+
+def test_locking_bitwarden_drops_the_cached_key_files(tmp_path):
+    app = _signed_out_app(tmp_path)
+    app.bw_session_service.lock()
+    app.bw_ssh_keys.forget_keys.assert_called_once_with()
+
+
+def test_signing_out_drops_the_cached_key_files(tmp_path):
+    app = _signed_out_app(tmp_path)
+    app.on_user_logout()
+    app.bw_ssh_keys.forget_keys.assert_called_once_with()
+    app.bw_ssh_keys.forget_refs.assert_called_once_with()
+
+
+def test_signing_in_drops_the_cached_key_files(tmp_path):
+    app = _signed_out_app(tmp_path)
+    app._wire_vault_ssh()
+    app.bw_ssh_keys.forget_keys.assert_called_once_with()

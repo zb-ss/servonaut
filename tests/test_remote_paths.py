@@ -102,3 +102,28 @@ async def test_remote_parent_timeout_can_be_reported_and_retried(monkeypatch):
     monkeypatch.setattr('servonaut.services.remote_paths.run_ssh', Mock(side_effect=subprocess.TimeoutExpired('ssh', 7)))
     with pytest.raises(RuntimeError, match='Connection timed out'):
         await remote_parent_directory(app, {}, '~')
+
+
+def test_ssh_login_refusal_is_a_sign_in_message():
+    from servonaut.services.remote_paths import path_error_message
+    assert path_error_message('deploy@web-1: Permission denied (publickey).') == (
+        'Could not sign in to the server. Check the connection settings.'
+    )
+
+
+def test_remote_permission_error_keeps_its_message():
+    from servonaut.services.remote_paths import path_error_message
+    assert path_error_message("ls: cannot open directory '/x': Permission denied") == (
+        "You don't have permission to open this folder."
+    )
+
+
+@pytest.mark.parametrize('reason', [
+    'BwCliMissingError', 'BwSessionMissingError', 'BwItemNotFoundError',
+    'BwItemShapeError', 'BwKeyUnreadable',
+])
+def test_bitwarden_notice_is_returned_unchanged(reason):
+    from servonaut.services.bw_key_notice import bw_key_notice
+    from servonaut.services.remote_paths import path_error_message
+    notice = bw_key_notice(reason)
+    assert path_error_message(notice) == notice

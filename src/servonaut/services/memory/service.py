@@ -29,6 +29,7 @@ from .status import BUSY_BUILD_REASON, STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, RecordLockTimeout, _validate_finding_id
 from .team_merge import share_identity
 from .summariser import build_summary_markdown
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice
 from servonaut.services.shared_servers import is_shared_row
 from servonaut.services.ssh_host_keys import (
     SSH_FAILURE_EXIT_CODE,
@@ -298,6 +299,7 @@ class MemoryService(MemoryServiceInterface):
 
     # Class-level so a stand-in built without __init__ still works.
     _connection_rows: Any = None
+    _bw_keys: Any = None
 
     def __init__(
         self,
@@ -327,6 +329,7 @@ class MemoryService(MemoryServiceInterface):
         # of the local connection by every SSH runner made here.
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        self._bw_keys: Any = None
         # Connection caps per bastion, shared by every build of this service.
         self._bastion_gates: Dict[tuple[str, int], asyncio.Semaphore] = {}
         # Asked per build for (team_rows, fleet_rows); see set_connection_rows.
@@ -1402,6 +1405,10 @@ class MemoryService(MemoryServiceInterface):
         self._resolve_id = _id
         self._store.set_instance_id_resolver(_id)
 
+    def set_bw_keys(self, provider: Any) -> None:
+        """Use a server's Bitwarden SSH key for memory builds."""
+        self._bw_keys = provider
+
     def set_vault_runtime(self, runtime: Any, leases: Any = None) -> None:
         """Use a server's Servonaut Vault key (or SSH certificate) for every probe.
 
@@ -1757,6 +1764,7 @@ class MemoryService(MemoryServiceInterface):
         )
 
         vault_runtime, vault_leases = self._vault_runtime, self._vault_leases
+        bw_keys = self._bw_keys
         # The vault credential is applied on the first command (it needs the
         # event loop); later commands reuse it.
         resolved: Dict[str, Any] = {}
@@ -1765,6 +1773,14 @@ class MemoryService(MemoryServiceInterface):
         resolution: List["asyncio.Future[None]"] = []
 
         def _record_problem(reason: str, message: str) -> None:
+            if reason == "ssh_auth_failed":
+                notice = bw_key_notice(resolved.get(BW_KEY_UNAVAILABLE))
+                if notice:
+                    message = f"{message} {notice}"
+                # A refused Bitwarden key is read again by the next build.
+                key_refused = getattr(bw_keys, "key_refused", None)
+                if callable(key_refused):
+                    key_refused(resolved)
             # Concurrent probers fail alike; keep and log the first.
             if _real_runner.connection_problem is None:  # type: ignore[attr-defined]
                 logger.warning(
@@ -1895,6 +1911,7 @@ class MemoryService(MemoryServiceInterface):
                         conn, instance, vault_runtime=vault_runtime,
                         connection_service=connection_service, cache=vault_leases,
                         team_rows=team_rows, rows=fleet_rows, raise_rate_limited=True,
+                        bw_keys=bw_keys,
                     ))
                     break
                 except VaultCredentialError as exc:

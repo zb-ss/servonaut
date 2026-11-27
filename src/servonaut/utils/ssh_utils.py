@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -289,6 +290,35 @@ def ssh_diagnostics(output: Any) -> str:
 
 #: Exit status OpenSSH uses for its own failures (not the remote command's).
 _SSH_OWN_FAILURE_EXIT_CODE = 255
+
+_SSH_LOGIN_REFUSAL = re.compile(r"permission denied \([a-z,-]+\)", re.IGNORECASE)
+
+
+def is_ssh_login_refusal(text: str) -> bool:
+    """Whether *text* is ssh refusing the login ("Permission denied (publickey).").
+
+    ssh names the methods it tried in brackets; a remote file error
+    ("ls: ...: Permission denied") never does.
+    """
+    return bool(_SSH_LOGIN_REFUSAL.search(text or ""))
+
+
+# ssh's own refusal line: "user@host: Permission denied (publickey)." on a
+# line of its own (scp and a remote command's output never start a line so).
+_SSH_OWN_LOGIN_REFUSAL_LINE = re.compile(
+    r"^\S+@\S+: permission denied \([a-z,-]+\)\.?\s*$", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def is_ssh_own_login_refusal(text: str, *, ssh_failed: bool) -> bool:
+    """Whether ssh itself refused the login: its own exit code and its own refusal line.
+
+    *ssh_failed*: the process exited with ssh's (or scp's) own failure code,
+    so the text is not a remote command's output, which can contain the
+    same words (a file name, say).
+    """
+    return ssh_failed and bool(_SSH_OWN_LOGIN_REFUSAL_LINE.search(text or ""))
+
 
 _SSH_AUTH_FAILURE_MARKERS = (
     "permission denied",

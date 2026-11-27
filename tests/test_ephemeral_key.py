@@ -315,3 +315,30 @@ class TestCleanupStaleBwKeys:
         cleanup_stale_bw_keys(max_age_seconds=86400)
 
         assert live_file.exists()
+
+
+def test_a_failed_removal_stays_with_the_exit_sweeper(monkeypatch):
+    from servonaut.utils import ephemeral_key
+
+    path = ephemeral_key.persistent_bw_ssh_key("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n")  # leak-guard:allow - synthetic key fixture
+    real_unlink = ephemeral_key.os.unlink
+
+    def in_use(target, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(ephemeral_key.os, "unlink", in_use)
+    ephemeral_key.remove_bw_ssh_key(path)
+    assert Path(path).exists()
+    assert path in ephemeral_key._live_bw_key_paths
+    monkeypatch.setattr(ephemeral_key.os, "unlink", real_unlink)
+    ephemeral_key._sweep_live_bw_keys()
+    assert not Path(path).exists()
+
+
+def test_a_successful_removal_leaves_the_exit_sweeper(monkeypatch):
+    from servonaut.utils import ephemeral_key
+
+    path = ephemeral_key.persistent_bw_ssh_key("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n")  # leak-guard:allow - synthetic key fixture
+    ephemeral_key.remove_bw_ssh_key(path)
+    assert not Path(path).exists()
+    assert path not in ephemeral_key._live_bw_key_paths

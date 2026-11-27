@@ -70,6 +70,38 @@ When you SSH to a server that has a Bitwarden ref, Servonaut:
 The private key body is only ever read at connect time and is never rendered in
 the UI, written to a log, or sent anywhere.
 
+The same Bitwarden key is used everywhere the app connects to a server over
+SSH, not only the terminal: the file browser, file transfer (SCP), the command
+overlay, quick connect from the server list, log viewing, scans and server
+memory.
+
+- **Precedence.** A Servonaut Vault key or SSH certificate always wins over a
+  Bitwarden reference, and a Bitwarden reference wins over a local key file.
+- **Key file lifecycle.** Each Bitwarden key is written to a `0600` file under
+  `~/.servonaut/tmp/`; a key file is never changed once written. About every
+  ten minutes, on its next use, the key is read from Bitwarden again, and a
+  refused login with it has it read again too. An unchanged key keeps its
+  file; a rotated key gets a new file, and the old one is removed about ten
+  minutes later. If a later read fails (the vault is locked, or the `bw` CLI
+  cannot answer or returns something unreadable), the file already in place
+  keeps being used; if the item is gone, its file is removed. The decrypted key files
+  stay on disk until Bitwarden is locked in the app, you sign in or out, you
+  change or remove the server's SSH key reference, or you quit, the same as
+  for Connect. Key files are overwritten before they are removed.
+- **When Servonaut cannot be reached.** If the list of your servers' SSH key
+  references cannot be read (Servonaut offline or not answering), servers
+  connect as before, without their Bitwarden key, for about a minute before
+  the list is tried again. A slow answer never holds a connection for more
+  than a few seconds.
+- **When the key cannot be read** (CLI not found, vault locked, item not found,
+  or the item is not an SSH key), these screens connect as before, using your
+  local key or SSH agent. Only if the server then refuses the login do they say
+  why and how to fix it, for example by unlocking under **Settings > Bitwarden
+  SSH**; retry after fixing it to use the key. Quick connect from the server
+  list is the exception: it opens an external terminal, so there the reason is
+  only written to the Servonaut log.
+  A connection that succeeds shows nothing extra.
+
 ### MCP / headless resolution
 
 The SSH-backed MCP tools (`run_command`, `get_logs`, `get_server_info`,
@@ -81,7 +113,15 @@ vault and preferred over local `~/.ssh` discovery. Requirements and behavior:
   prompt — run `bw unlock` and export `BW_SESSION` in the environment the MCP
   server (or `servonaut connect`) runs in. If the vault is locked or the `bw`
   CLI is missing, the tool silently falls back to the local key, so a working
-  local setup never breaks.
+  local setup never breaks. If that local key is then refused, the error from
+  `run_command`, `get_server_info`, `transfer_file`, `web_traffic_summary`,
+  `db_processlist` and `db_top_queries` names the Bitwarden cause and asks the
+  agent to have you unlock Bitwarden and restart the MCP server with
+  `BW_SESSION` set in its environment. The agent is told not to ask for or
+  handle the session value itself. The other probes report a failed login
+  without the Bitwarden cause.
+- **Tools inside the desktop app** use the app's own unlock session, so no
+  exported `BW_SESSION` is needed there.
 - **Personal refs only.** Team-shared refs are not resolved on the headless
   surface yet.
 - **Per-call temp key lifecycle.** The resolved key is written to a `0600`

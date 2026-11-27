@@ -42,6 +42,7 @@ def get_scan_paths_for_instance(config, instance: dict) -> List[str]:
 def build_remote_tree(
     app, instance: dict, tree_id: str = "remote_tree", *,
     connection_options: dict | None = None, literal_paths: bool = False, scrub=None,
+    bw_key_reason: str | None = None,
 ) -> RemoteTree:
     """Build a :class:`RemoteTree` for *instance* using *app*'s services.
 
@@ -73,6 +74,7 @@ def build_remote_tree(
         connection_timeout=config.ssh.connect_timeout + config.ssh.listing_allowance_seconds,
         literal_paths=literal_paths,
         scrub=scrub,
+        bw_key_reason=bw_key_reason,
         id=tree_id,
     )
 

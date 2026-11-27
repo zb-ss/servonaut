@@ -1318,6 +1318,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'bw_picker_search',       # Reason: Input; inherits global Input styling
         'bw_ssh_vault_folder',    # Reason: Input; inherits global Input styling (.setting_row)
         'bw_remember',            # Reason: Checkbox; inherits global Checkbox styling
+        'bw_unlock_scope',        # Reason: Static note; dimmed by markup, inherits body copy styling
         'bw_picker_folder_toggle',  # Reason: Checkbox; inherits global Checkbox styling
         'bw_session_status',      # Reason: Dynamic status Static; content-colored at runtime
         'ssh_ref_selected',       # Reason: Dynamic Static; content-colored at runtime

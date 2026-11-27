@@ -234,6 +234,17 @@ class SshRefEditorModal(ModalScreen[bool]):
         if result.get("vault_url"):
             self.query_one("#vault_url", Input).value = result["vault_url"]
 
+    def _forget_bw_refs(self, *item_ids: str) -> None:
+        """Drop the memoised refs, and the key files of *item_ids*, so a saved or removed ref applies at once."""
+        forget = getattr(getattr(self.app, "bw_ssh_keys", None), "forget_refs", None)
+        if callable(forget):
+            forget([item for item in (*item_ids, self._existing_item_id()) if item])
+
+    def _existing_item_id(self) -> str:
+        """The item id of the ref this editor opened with ('' when none)."""
+        ref = (self._existing_ref or {}).get("ssh_credential_ref", {})
+        return str(ref.get("item_id") or "") if isinstance(ref, dict) else ""
+
     async def _do_save(self) -> None:
         """Validate inputs and call PUT API."""
         from servonaut.services.api_client import APIError
@@ -315,6 +326,7 @@ class SshRefEditorModal(ModalScreen[bool]):
             )
             return
 
+        self._forget_bw_refs(item_id_value)
         self.dismiss(True)
 
     async def _do_delete(self) -> None:
@@ -353,4 +365,5 @@ class SshRefEditorModal(ModalScreen[bool]):
             )
             return
 
+        self._forget_bw_refs()
         self.dismiss(True)

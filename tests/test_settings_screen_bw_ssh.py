@@ -652,3 +652,22 @@ class TestSessionStatus:
         fake._app.bw_session_service = svc
         self._run_status(fake)
         assert "unlocked" in fake._session_status_widget.last_update.lower()
+
+
+def test_panel_says_what_unlocking_also_allows():
+    from textual.app import App
+    from textual.widgets import Static
+
+    from servonaut.screens.bw_unlock_modal import BW_UNLOCK_SCOPE_NOTE
+
+    class _Host(App):
+        def compose(self):
+            yield from BwSshPanel().form_rows()
+
+    async def run():
+        async with _Host().run_test() as pilot:
+            await pilot.pause()
+            note = pilot.app.query_one("#bw_unlock_scope", Static)
+            return str(note.render())
+
+    assert BW_UNLOCK_SCOPE_NOTE in asyncio.run(run())
