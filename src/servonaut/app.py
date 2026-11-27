@@ -808,7 +808,7 @@ class ServonautApp(App):
             connection_service=self.connection_service,
             scp_service=self.scp_service,
             guard=CommandGuard(config.mcp, self.config_manager),
-            audit=AuditTrail(config.mcp.audit_path),
+            audit=AuditTrail(config.mcp.audit_path, default_origin="ui"),
             ovh_service=self.ovh_service,
             hetzner_service=self.hetzner_service,
             cloudtrail_service=self.cloudtrail_service,
@@ -1567,6 +1567,7 @@ class ServonautApp(App):
                     mcp_audit=ai_audit,
                     confirm_callback=build_modal_confirm(self),
                     auth_service=self.auth_service,
+                    audit_origin="ui",
                     # Inject the same ServonautTools the MCP server uses
                     # so AI-driven readonly tools (list_instances,
                     # describe_instance) execute via the local CLI
@@ -3071,6 +3072,7 @@ class ServonautApp(App):
         ("Hetzner object storage", "nav_hetzner_s3", "Hetzner Object Storage buckets"),
         ("Account", "nav_login", "Sign in to your Servonaut account"),
         ("Teams", "nav_teams", "Team members and shared access"),
+        ("Agent activity", "nav_agent_activity", "Read-only audit log of MCP, UI chat, and proactive agent calls"),
         ("Report a bug", "nav_bug_report", "Send a bug report after reviewing what it contains"),
     )
 
@@ -3648,6 +3650,9 @@ class ServonautApp(App):
         elif target_id == "nav_memory_export":
             from servonaut.screens.memory_export import MemoryExportScreen
             self.switch_screen(MemoryExportScreen())
+        elif target_id == "nav_agent_activity":
+            from servonaut.screens.agent_activity import AgentActivityScreen
+            self.switch_screen(AgentActivityScreen())
         elif target_id == "nav_bug_report":
             if self.bug_report_service is None:
                 self.notify(

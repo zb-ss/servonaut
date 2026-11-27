@@ -16,13 +16,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
+from servonaut.mcp.audit_classifier import classify_audit_entry, infer_origin
 from servonaut.utils.logging_setup import warn_stderr
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,67 @@ _recorded_outcomes: ContextVar[Optional[List[AuditOutcome]]] = ContextVar(
 )
 
 
+@dataclass
+class AuditCallContext:
+    """Ambient provenance and execution telemetry for one tool invocation.
+
+    Set at the dispatch boundary (MCP stdio server or AI tool bridge) so every
+    ``AuditTrail.log`` call automatically receives ``origin``, ``source``,
+    ``client``, ``session_id``, and ``duration_ms`` without modifying every
+    tool call site.
+    """
+
+    origin: str = ""
+    source: str = ""
+    client: str = ""
+    session_id: str = ""
+    started_at: float = field(default_factory=time.monotonic)
+    suppress_writes: bool = False
+    logged_count: int = 0
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+_call_context: ContextVar[Optional[AuditCallContext]] = ContextVar(
+    "servonaut_audit_call_context", default=None,
+)
+
+
+@contextmanager
+def audit_call_context(
+    *,
+    origin: str = "",
+    source: str = "",
+    client: str = "",
+    session_id: str = "",
+    suppress_writes: bool = False,
+) -> Iterator[AuditCallContext]:
+    """Attach provenance and timing metadata to audit rows written in this block."""
+    ctx = AuditCallContext(
+        origin=origin,
+        source=source,
+        client=client,
+        session_id=session_id,
+        started_at=time.monotonic(),
+        suppress_writes=suppress_writes,
+    )
+    token = _call_context.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _call_context.reset(token)
+
+
+def update_call_context(**extras: Any) -> None:
+    """Attach execution telemetry (e.g. ``transport_used``, ``exit_code``, ``target``)
+    to the active audit call context, if any."""
+    ctx = _call_context.get()
+    if ctx is None:
+        return
+    for key, value in extras.items():
+        if value is not None and value != "":
+            ctx.extras[key] = value
+
+
 @contextmanager
 def record_outcomes() -> Iterator[List[AuditOutcome]]:
     """Collect the outcome of every audit row written inside the block.
@@ -75,21 +138,39 @@ def record_outcomes() -> Iterator[List[AuditOutcome]]:
 
 
 class AuditTrail:
-    def __init__(self, audit_path: str, *, warn_to_stderr: bool = False) -> None:
+    def __init__(
+        self,
+        audit_path: str,
+        *,
+        warn_to_stderr: bool = False,
+        default_origin: str = "",
+    ) -> None:
         self._path = Path(audit_path).expanduser()
         self._warn_to_stderr = warn_to_stderr
+        self._default_origin = default_origin
         self._warned_unavailable = False
         self._writes_since_check = 0
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             if warn_to_stderr:
-                flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
+                flags = (
+                    os.O_APPEND
+                    | os.O_CREAT
+                    | os.O_WRONLY
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
                 descriptor = os.open(self._path, flags, 0o600)
                 os.close(descriptor)
         except (OSError, ValueError) as error:
             if not warn_to_stderr:
                 raise
             self._warn_unavailable(error)
+
+    @property
+    def path(self) -> Path:
+        """Resolved path to the live JSONL audit log."""
+        return self._path
 
     def _warn_unavailable(self, error: Exception) -> None:
         if not self._warn_to_stderr:
@@ -128,7 +209,14 @@ class AuditTrail:
                 compatible: future surfaces can add metadata without
                 breaking older audit readers.
         """
-        entry = {
+        ctx = _call_context.get()
+        effective_source = source or (ctx.source if ctx is not None else "")
+        effective_origin = str(
+            extras.get("origin")
+            or (ctx.origin if ctx is not None else "")
+            or self._default_origin
+        )
+        entry: Dict[str, Any] = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'tool': tool,
             'args': args,
@@ -136,19 +224,61 @@ class AuditTrail:
             'reason': reason,
             'result_length': len(result) if result else 0,
         }
-        if source:
-            entry['source'] = source
+        if effective_source:
+            entry['source'] = effective_source
+        if effective_origin:
+            entry['origin'] = effective_origin
+        else:
+            inferred = infer_origin(entry)
+            if effective_source:
+                entry['origin'] = inferred
+
+        if ctx is not None:
+            if ctx.client and 'client' not in extras:
+                entry['client'] = ctx.client
+            if ctx.session_id and 'session_id' not in extras:
+                entry['session_id'] = ctx.session_id
+            if 'duration_ms' not in extras:
+                entry['duration_ms'] = max(0, int((time.monotonic() - ctx.started_at) * 1000))
+            for key, value in ctx.extras.items():
+                if key not in entry and key not in extras:
+                    entry[key] = value
+
+        # Deterministic remote/command classification (lightweight, pure Python).
+        classified = classify_audit_entry(tool, args, allowed=allowed, reason=reason)
+        entry['op_class'] = classified['op_class']
+        entry['remote_exec'] = classified['remote_exec']
+        entry['command_category'] = classified['command_category']
+        if classified['command_stems']:
+            entry['command_stems'] = classified['command_stems']
+        if classified['used_sudo']:
+            entry['used_sudo'] = True
+
         # Surplus kwargs land last so they can't accidentally clobber the
-        # canonical fields above.
+        # canonical fields above (except explicit origin/classification already handled).
         for key, value in extras.items():
-            if key not in entry:
+            if key not in entry and value is not None:
                 entry[key] = value
         outcomes = _recorded_outcomes.get()
         if outcomes is not None:
             outcomes.append(AuditOutcome(tool, bool(allowed), str(reason or "")))
+
+        if ctx is not None:
+            ctx.logged_count += 1
+            if ctx.suppress_writes:
+                # Forward execution telemetry captured by an inner tool call
+                # (e.g. ServonautTools called from AIToolBridge) so the single
+                # outer audit row carries transport_used / target / exit_code.
+                for telemetry_key in (
+                    'transport_used', 'ssh_fell_back', 'ssm_command_id',
+                    'exit_code', 'target', 'key_source',
+                ):
+                    if telemetry_key in entry:
+                        ctx.extras[telemetry_key] = entry[telemetry_key]
+                return
+
         try:
-            with open(self._path, 'a') as f:
-                f.write(json.dumps(entry) + '\n')
+            self._append_line(json.dumps(entry) + '\n')
         except (OSError, TypeError, ValueError, RecursionError) as error:
             self._warn_unavailable(error)
             return
@@ -160,6 +290,19 @@ class AuditTrail:
                 self._maybe_rotate()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("MCP audit rotation skipped: %s", exc)
+
+    def _append_line(self, line: str) -> None:
+        """Append one line atomically with 0o600 permissions and O_NOFOLLOW."""
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | no_follow
+        fd = os.open(str(self._path), flags, 0o600)
+        try:
+            f = os.fdopen(fd, 'a', encoding='utf-8')
+        except Exception:
+            os.close(fd)
+            raise
+        with f:
+            f.write(line)
 
     def read_recent(self, count: int = 50) -> List[Dict]:
         """Read recent audit entries."""

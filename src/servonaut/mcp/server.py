@@ -10,8 +10,10 @@ import asyncio
 import io
 import logging
 import sys
+import uuid
 from typing import NoReturn
 
+from servonaut.mcp.audit import audit_call_context
 from servonaut.mcp.reconnect import MCPDisplayText, PIPX_GENERATION_CURRENT, PipxReconnectHint
 
 logger = logging.getLogger(__name__)
@@ -297,7 +299,33 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
     return tools
 
 
-async def _dispatch_tool(tools, name: str, arguments: dict, reconnect: PipxReconnectHint | None = None):
+def _extract_mcp_client_label(server) -> str:
+    """Best-effort client name/version from the active MCP session."""
+    try:
+        req_ctx = server.request_context
+        session = getattr(req_ctx, "session", None)
+        params = getattr(session, "client_params", None)
+        info = getattr(params, "clientInfo", None)
+        if info is None:
+            return ""
+        name = str(getattr(info, "name", "") or "").strip()
+        version = str(getattr(info, "version", "") or "").strip()
+        if name and version:
+            return f"{name}/{version}"
+        return name
+    except Exception:  # noqa: BLE001 — lookup outside active request context
+        return ""
+
+
+async def _dispatch_tool(
+    tools,
+    name: str,
+    arguments: dict,
+    reconnect: PipxReconnectHint | None = None,
+    *,
+    client: str = "",
+    session_id: str = "",
+):
     """Dispatch one tool call, converting any handler failure into an error
     result instead of letting it crash the server loop.
 
@@ -325,36 +353,66 @@ async def _dispatch_tool(tools, name: str, arguments: dict, reconnect: PipxRecon
     from servonaut.services.api_client import find_client_update_required
     from servonaut.services.client_identity import format_update_required_message
 
-    if name not in TOOL_SCHEMAS:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-    handler = getattr(tools, name, None)
-    if handler is None:
-        return [TextContent(type="text", text=f"Tool handler not available: {name}")]
-    refusal = getattr(tools, "refusal", None)
-    refused = refusal(name) if callable(refusal) else None
-    if isinstance(refused, str) and refused:
-        return [TextContent(type="text", text=refused)]
-    if reconnect is not None:
-        reconnect.refresh_if_due()
-    try:
-        result = await handler(**arguments)
-    except Exception as exc:  # noqa: BLE001 — keep the stdio session alive
-        if update := find_client_update_required(exc):
-            message = format_update_required_message(update, client_kind="mcp")
-            return [TextContent(type="text", text=f"Error: {message[:500]}")]
-        # Log the full traceback for diagnosis and bound the returned error.
-        logger.exception("MCP tool %r raised", name)
-        return [TextContent(
-            type="text", text=f"tool '{name}' failed: {str(exc)[:500]}",
-        )]
-    content = [TextContent(type="text", text=result)]
-    if reconnect is not None and (name == "whoami" or isinstance(result, MCPDisplayText)):
-        message = reconnect.message(diagnostic=name in ("whoami", "check_status"))
-        if message is not None:
-            content.append(TextContent(
-                type="text", text=message, _meta={"servonaut.dev/reason": PIPX_GENERATION_CURRENT},
-            ))
-    return content
+    audit = getattr(tools, "_audit", None)
+    safe_args = arguments if isinstance(arguments, dict) else {}
+    audit_log_fn = getattr(audit, "log", None)
+    before_mock_calls = getattr(audit_log_fn, "call_count", None)
+
+    def _already_audited() -> bool:
+        if call_ctx.logged_count > 0:
+            return True
+        if isinstance(before_mock_calls, int):
+            current = getattr(audit_log_fn, "call_count", before_mock_calls)
+            return current > before_mock_calls
+        return False
+
+    with audit_call_context(
+        origin="mcp",
+        source="mcp",
+        client=client,
+        session_id=session_id,
+    ) as call_ctx:
+        if name not in TOOL_SCHEMAS:
+            if audit is not None:
+                audit.log(name, safe_args, "", False, "unknown_tool")
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        handler = getattr(tools, name, None)
+        if handler is None:
+            if audit is not None:
+                audit.log(name, safe_args, "", False, "handler_unavailable")
+            return [TextContent(type="text", text=f"Tool handler not available: {name}")]
+        refusal = getattr(tools, "refusal", None)
+        refused = refusal(name) if callable(refusal) else None
+        if isinstance(refused, str) and refused:
+            return [TextContent(type="text", text=refused)]
+        if reconnect is not None:
+            reconnect.refresh_if_due()
+        try:
+            result = await handler(**safe_args)
+        except Exception as exc:  # noqa: BLE001 — keep the stdio session alive
+            if update := find_client_update_required(exc):
+                if audit is not None and not _already_audited():
+                    audit.log(name, safe_args, "", False, "client_update_required")
+                message = format_update_required_message(update, client_kind="mcp")
+                return [TextContent(type="text", text=f"Error: {message[:500]}")]
+            # Log the full traceback for diagnosis and bound the returned error.
+            logger.exception("MCP tool %r raised", name)
+            if audit is not None and not _already_audited():
+                audit.log(
+                    name, safe_args, "", False,
+                    f"exception:{type(exc).__name__}: {str(exc)[:160]}",
+                )
+            return [TextContent(
+                type="text", text=f"tool '{name}' failed: {str(exc)[:500]}",
+            )]
+        content = [TextContent(type="text", text=result)]
+        if reconnect is not None and (name == "whoami" or isinstance(result, MCPDisplayText)):
+            message = reconnect.message(diagnostic=name in ("whoami", "check_status"))
+            if message is not None:
+                content.append(TextContent(
+                    type="text", text=message, _meta={"servonaut.dev/reason": PIPX_GENERATION_CURRENT},
+                ))
+        return content
 
 
 #: What every connecting agent is told at session start. The record-findings
@@ -492,13 +550,22 @@ def create_mcp_server():
             have_aws=tools.has_aws,
         )
 
+    session_id = uuid.uuid4().hex[:12]
+
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
         # Dispatch is method lookup on the shared ServonautTools instance (tool
         # name == method name; tool_schemas.py is the sole registry). Delegated
         # to _dispatch_tool so a throwing handler returns an error instead of
         # crashing the stdio loop and dropping the whole session.
-        return await _dispatch_tool(tools, name, arguments, reconnect)
+        return await _dispatch_tool(
+            tools,
+            name,
+            arguments,
+            reconnect,
+            client=_extract_mcp_client_label(server),
+            session_id=session_id,
+        )
 
     server.servonaut_tools = tools
     server.reconnect_hint = reconnect

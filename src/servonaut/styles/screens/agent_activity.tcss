@@ -1,0 +1,217 @@
+/* Agent activity: read-only audit browser for MCP, UI chat, relay, and proactive calls. */
+
+#agent_activity_container {
+    width: 1fr;
+    height: 100%;
+    padding: 0 1;
+    overflow-y: auto;
+    overflow-x: auto;
+}
+
+#aa_heading {
+    height: auto;
+}
+
+#aa_title {
+    width: auto;
+}
+
+#aa_context {
+    width: 1fr;
+}
+
+#aa_summary_bar {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+    background: $panel;
+    color: $text-muted;
+}
+
+#aa_filters {
+    layout: grid;
+    grid-size: 5 2;
+    grid-columns: 1fr 1fr 1fr 1fr 1fr;
+    min-width: 96;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    height: auto;
+    padding: 0 1;
+    background: $panel;
+    border: none;
+    margin-bottom: 1;
+}
+
+#aa_filters Vertical {
+    width: 100%;
+    height: auto;
+}
+
+#aa_filters Label {
+    width: 100%;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#aa_filters Select {
+    width: 100%;
+    height: 3;
+}
+
+#aa_filters SelectCurrent {
+    padding: 0 1;
+}
+
+#aa_filters SelectCurrent Static#label {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#aa_filters Select SelectOverlay {
+    width: auto;
+    min-width: 100%;
+    max-width: 44;
+}
+
+#aa_filter_time,
+#aa_filter_origin,
+#aa_filter_scope,
+#aa_filter_category,
+#aa_filter_transport {
+    width: 100%;
+    height: auto;
+}
+
+#aa_select_time,
+#aa_select_origin,
+#aa_select_scope,
+#aa_select_category,
+#aa_select_transport {
+    width: 100%;
+}
+
+#aa_filter_search {
+    column-span: 3;
+    width: 100%;
+    height: auto;
+}
+
+#aa_search_input {
+    width: 100%;
+    height: 3;
+}
+
+#aa_filter_actions {
+    column-span: 2;
+    width: 100%;
+    height: auto;
+    margin: 1 0 0 0;
+    align: right middle;
+}
+
+#aa_btn_refresh,
+#aa_btn_clear,
+#aa_btn_back,
+#aa_btn_prev,
+#aa_btn_next {
+    width: auto;
+}
+
+AgentActivityScreen.-content-narrow #aa_filters {
+    grid-size: 2 4;
+    grid-columns: 1fr 1fr;
+    min-width: 50;
+}
+
+AgentActivityScreen.-content-narrow #aa_filter_search {
+    column-span: 1;
+}
+
+AgentActivityScreen.-content-narrow #aa_filter_actions {
+    column-span: 2;
+    margin: 0;
+    align: left middle;
+}
+
+#aa_workspace {
+    height: 1fr;
+    min-height: 10;
+}
+
+#aa_results {
+    width: 7fr;
+    height: 100%;
+    min-height: 7;
+    margin-right: 1;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    background: transparent;
+}
+
+#aa_results:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+#aa_table {
+    height: 1fr;
+    border: none;
+}
+
+#aa_pager {
+    height: auto;
+    align: center middle;
+    padding: 0 1;
+    background: $panel;
+}
+
+#aa_page_info {
+    height: auto;
+    width: 1fr;
+    content-align: center middle;
+    text-align: center;
+    color: $text-muted;
+}
+
+#aa_detail {
+    width: 4fr;
+    height: 100%;
+    min-height: 6;
+    padding: 0 1;
+    background: transparent;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    overflow-y: auto;
+}
+
+#aa_detail_text {
+    height: auto;
+    width: 100%;
+}
+
+#aa_detail:focus-within {
+    border: round $accent;
+    border-title-color: $text-accent;
+}
+
+AgentActivityScreen.-content-narrow #aa_workspace {
+    layout: vertical;
+    min-height: 14;
+}
+
+AgentActivityScreen.-content-narrow #aa_results {
+    width: 100%;
+    height: 3fr;
+    margin: 0 0 1 0;
+}
+
+AgentActivityScreen.-content-narrow #aa_detail {
+    width: 100%;
+    height: 2fr;
+}
+
+AgentActivityScreen.-short #aa_heading {
+    margin-bottom: 0;
+}

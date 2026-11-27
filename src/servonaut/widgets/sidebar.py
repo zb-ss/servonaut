@@ -66,6 +66,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "HetznerSSHKeysScreen": "nav_hetzner_ssh_keys",
     "LoginScreen": "nav_login",
     "TeamManagementScreen": "nav_teams",
+    "AgentActivityScreen": "nav_agent_activity",
     "BugReportScreen": "nav_bug_report",
 }
 
@@ -237,6 +238,9 @@ class Sidebar(Widget):
                           tooltip="Sign in to your Servonaut account"),
                 self._nav("Teams", "nav_teams",
                           tooltip="Manage team members and shared access"),
+                self._nav("Agent activity", "nav_agent_activity",
+                          tooltip="Read-only audit log of MCP, UI chat, relay, and "
+                                  "proactive agent activity"),
                 self._nav("Report a bug", "nav_bug_report",
                           tooltip="Send a bug report — review exactly what's "
                                   "included before anything leaves your machine"),

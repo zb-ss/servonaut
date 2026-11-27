@@ -918,6 +918,7 @@ def _relay_run_foreground() -> None:
                 auth_service=auth_service,
                 servonaut_tools=headless_tools,
                 ip_ban_service=ip_ban_service,
+                audit_origin="relay",
                 readonly_commands=lambda: (
                     config_manager.get().ai_provider.readonly_command_allowlist
                 ),
@@ -937,6 +938,7 @@ def _relay_run_foreground() -> None:
                 servonaut_tools=headless_tools,
                 ip_ban_service=ip_ban_service,
                 audit_source="proactive",
+                audit_origin="proactive",
             )
             ai_tool_note = (
                 f"enabled (auto-approve up to: "
@@ -1474,7 +1476,7 @@ def _run_connect(args: argparse.Namespace) -> None:
 
 _TEXT_SUBCOMMANDS = frozenset({
     'ai', 'hetzner', 'secrets', 'vault', 'ca', 'ssh', 'servers', 'team',
-    'db', 'memory', 'login', 'logout', 'connect',
+    'db', 'memory', 'login', 'logout', 'connect', 'mcp',
 })
 
 
@@ -1779,6 +1781,10 @@ def _main() -> None:
     from servonaut.cli.theme import add_theme_parser, handle_theme_command
     add_theme_parser(subparsers)
 
+    # ---- mcp subcommand (local MCP / agent activity audit logs) ----
+    from servonaut.cli.mcp_audit import add_mcp_parser, handle_mcp_command
+    add_mcp_parser(subparsers)
+
     # ---- login / logout subcommands (headless device-flow sign-in) ----
     from servonaut.cli.login import add_login_parser, add_logout_parser
     add_login_parser(subparsers)
@@ -1803,7 +1809,7 @@ def _main() -> None:
     subcommand = getattr(args, 'subcommand', None)
     if subcommand in {
         'ai', 'hetzner', 'secrets', 'vault', 'ca', 'ssh',
-        'servers', 'team', 'db', 'theme', 'memory', 'login', 'logout',
+        'servers', 'team', 'db', 'theme', 'memory', 'login', 'logout', 'mcp',
     }:
         from servonaut.runtime import detect_runtime
         from servonaut.services.client_identity import configure_client_identity
@@ -1858,6 +1864,10 @@ def _main() -> None:
     if getattr(args, 'subcommand', None) == 'theme':
         _setup_logging(debug=args.debug)
         sys.exit(handle_theme_command(args))
+
+    if getattr(args, 'subcommand', None) == 'mcp':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_mcp_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)
