@@ -180,6 +180,16 @@ class DeviceSignatureExpiredError(APIError):
     """403 device signature timestamp is outside the server's skew window."""
 
 
+SIGN_IN_ENDED_MESSAGE = (
+    "Your Servonaut sign-in has ended. Sign in again with `servonaut login` "
+    "or Account / login in the app."
+)
+
+
+class SignInEndedError(APIError):
+    """401 after the API refused the stored sign-in for good: sign in again."""
+
+
 class ClientUpdateRequiredError(APIError):
     """426 client_update_required — running client is below the minimum version."""
 
@@ -338,6 +348,13 @@ class APIClient(APIClientInterface):
         status: int = response.status_code
         content_type: str = response.headers.get("content-type", "")
         headers_dict: Dict[str, str] = {k.lower(): v for k, v in response.headers.items()}
+        if status == 401 and getattr(self._auth, "sign_in_ended", False) is True:
+            return SignInEndedError(
+                code="sign_in_ended",
+                message=SIGN_IN_ENDED_MESSAGE,
+                status=status,
+                response_headers=headers_dict,
+            )
 
         # §7: Symfony PayloadSizeLimitListener emits 413 with HTML, not JSON envelope.
         if status == 413 and "application/json" not in content_type:

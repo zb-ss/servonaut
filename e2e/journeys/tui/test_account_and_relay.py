@@ -3,8 +3,8 @@
 Signing in on the Account screen starts the in-process relay listener; the
 sidebar indicator turns to "connected" and account-only entries appear. A
 stale access token is refreshed transparently (the Teams screen still
-loads), a revoked session flips the indicator to "session expired" and one
-click leads back to sign-in, and signing out revokes the session and stops
+loads), a revoked session shows one "sign-in has ended" notice, flips the
+indicator to "session expired" and one click leads back to sign-in, and signing out revokes the session and stops
 the relay. The relay status screen shows the local and the service's view
 and can stop and restart the listener. ``servonaut connect --force-bg``
 takes the relay over from a running TUI.
@@ -125,8 +125,12 @@ async def test_revoked_session_leads_back_to_sign_in(tui, seed, fake_cloud):
         await _relay_shows(t, CONNECTED)
 
         fake_cloud.revoke_session()
-        await t.wait_for_toast("Servonaut session expired", severity="warning")
+        await t.wait_for_toast("Your Servonaut sign-in has ended", severity="warning")
         await _relay_shows(t, SESSION_EXPIRED)
+        # One notice: the relay does not repeat it.
+        assert not [text for _, text in t.toasts() if "session expired" in text]
+        # The refused sign-in is gone from disk, so a later start is signed out.
+        assert read_session(seed.home) is None
         await t.wait_until(lambda: not _live(fake_cloud), desc="relay unsubscribed")
 
         # Clicking the indicator goes straight to sign-in.

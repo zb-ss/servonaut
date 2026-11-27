@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -118,6 +119,16 @@ _GENERIC_FRAMEWORK_ACTIONS = frozenset({
 def _is_generic_framework_action(action: str, parameters: tuple) -> bool:
     """True for an action the app refuses to run (see the set above)."""
     return str(action).strip() in _GENERIC_FRAMEWORK_ACTIONS
+
+
+# The relay's "session expired" notice is skipped this long after the
+# sign-in-ended notice, which already says how to sign in again.
+_SIGN_IN_NOTICE_DEDUP_SECONDS = 60
+
+
+def _shown_recently(shown_at: Optional[float]) -> bool:
+    """Whether a notice shown at monotonic time *shown_at* was shown just now."""
+    return shown_at is not None and time.monotonic() - shown_at < _SIGN_IN_NOTICE_DEDUP_SECONDS
 
 
 class ServonautApp(App):
@@ -842,6 +853,7 @@ class ServonautApp(App):
         try:
             from servonaut.services.auth_service import AuthService
             self.auth_service = AuthService()
+            self.auth_service.add_sign_in_ended_listener(self._on_sign_in_ended)
             if self.auth_service.is_authenticated:
                 self.init_paid_services()
         except ImportError:
@@ -1010,6 +1022,7 @@ class ServonautApp(App):
         if (
             new_state is RelayState.SESSION_EXPIRED
             and prior_state is not RelayState.SESSION_EXPIRED
+            and not _shown_recently(getattr(self, "_sign_in_ended_notice_at", None))
         ):
             try:
                 self.notify(
@@ -1133,6 +1146,19 @@ class ServonautApp(App):
                 f"MCP relay failed to start: {result.message}",
                 severity="error", timeout=20, markup=False,
             )
+
+    def _on_sign_in_ended(self) -> None:
+        """Tell the user once that the service no longer accepts this sign-in."""
+        self._sign_in_ended_notice_at = time.monotonic()
+        try:
+            self.notify(
+                "Your Servonaut sign-in has ended. Sign in again from Account / login.",
+                severity="warning",
+                timeout=15,
+                markup=False,
+            )
+        except Exception:  # noqa: BLE001 - the app may be closing
+            logger.debug("Could not show the sign-in-ended notice", exc_info=True)
 
     def on_user_logout(self) -> None:
         """Called by LoginScreen after logout — tear down all session state.
@@ -1287,7 +1313,7 @@ class ServonautApp(App):
     async def _run_vault_background(self) -> None:
         """Discover native Vault support and process verified grant hints."""
         from httpx import TransportError
-        from servonaut.services.api_client import APIError, ClientUpdateRequiredError
+        from servonaut.services.api_client import APIError, ClientUpdateRequiredError, SignInEndedError
         from servonaut.services.client_identity import format_update_required_message
         from servonaut.services.vault.identity_store import IdentityStoreError
         from servonaut.services.vault.crypto import VaultCryptoError
@@ -1322,6 +1348,10 @@ class ServonautApp(App):
             # wait for a later explicit access or application restart.
             self.vault_available = False
             logger.debug("Vault background endpoint is unavailable: %s", type(exc).__name__)
+        except SignInEndedError:
+            # The sign-in-ended notice already says what to do; a second
+            # warning asking for a restart would point the wrong way.
+            logger.info("Vault background processing stopped: the sign-in has ended")
         except (APIError, IdentityStoreError, VaultCryptoError) as exc:
             # A locked store or unverified server state must never grant keys.
             logger.warning("Vault background processing stopped: %s", type(exc).__name__)

@@ -702,8 +702,8 @@ def test_refresh_invalid_grant_sets_revoked_flag(tmp_path, monkeypatch):
     assert ok is False
     assert svc._refresh_grant_revoked is True
     assert svc.is_authenticated is False
-    # Sanity: the token wasn't preemptively cleared — file lifecycle is
-    # owned by validate_token / logout. refresh_token only sets the flag.
+    # The in-memory token stays (callers read the flag); the dead pair is
+    # removed from disk so later processes do not present it again.
     assert svc._token is not None
 
 
@@ -726,10 +726,9 @@ def test_a_refused_refresh_token_is_not_presented_again(tmp_path, monkeypatch):
         assert run(svc.refresh_token()) is False
         assert run(svc.refresh_token()) is False
         assert fake_client.post.await_count == 1
+        assert not auth_file.exists()
 
         # Any other refresh token is still presented.
-        stored = json.loads(auth_file.read_text())
-        auth_file.write_text(json.dumps({**stored, "refresh_token": "R1"}))
         svc._token.refresh_token = "R1"
         assert run(svc.refresh_token()) is False
         assert fake_client.post.await_count == 2
@@ -1067,7 +1066,10 @@ def test_invalid_grant_with_unchanged_stored_pair_revokes(tmp_path, monkeypatch)
 
     assert ok is False
     assert svc._refresh_grant_revoked is True
-    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+    # The refused pair is removed, so a process started later does not
+    # present it again (after the server's grace window that revokes the
+    # whole sign-in) and starts signed out instead.
+    assert not auth_file.exists()
 
 
 _LOCK_HOLDER = r"""
@@ -1262,40 +1264,83 @@ def _open_descriptors() -> int:
     return len(os.listdir("/proc/self/fd"))
 
 
+def _client_answering_when(release: asyncio.Event, posting: asyncio.Event, response):
+    """A stand-in client whose POST is sent at once but answers only on *release*."""
+    async def post(*_args, **_kwargs):
+        posting.set()
+        await release.wait()
+        return response
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=post)
+    return fake_client
+
+
 @pytest.mark.skipif(
     not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors",
 )
-def test_cancelled_refresh_releases_the_lock(tmp_path, monkeypatch):
-    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
-    posting = asyncio.Event()
-
-    async def hang(*_args, **_kwargs):
-        posting.set()
-        await asyncio.sleep(30)
-
-    fake_client = _client_answering()
-    fake_client.post = AsyncMock(side_effect=hang)
+def test_a_refresh_whose_caller_is_cancelled_still_stores_the_new_pair(tmp_path, monkeypatch):
+    """Once sent, the server has rotated the pair: cancelling the caller (a
+    screen closing, a background load replaced by a newer one) must not lose it."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
 
     async def scenario():
-        task = asyncio.ensure_future(svc.refresh_token())
-        await asyncio.wait_for(posting.wait(), timeout=5)
-        locked_while_posting = not _refresh_lock_is_free(tmp_path)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        return locked_while_posting, task.cancelled()
+        posting, release = asyncio.Event(), asyncio.Event()
+        fake_client = _client_answering_when(release, posting, httpx.Response(
+            200, json={"access_token": "A1", "refresh_token": "R1", "expires_in": 3600},
+        ))
+        with patch("servonaut.services.auth_service.httpx.AsyncClient", return_value=fake_client):
+            caller = asyncio.ensure_future(svc.refresh_token())
+            await asyncio.wait_for(posting.wait(), timeout=5)
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+            locked_after_cancel = not _refresh_lock_is_free(tmp_path)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*svc._refresh_tasks), timeout=5)
+        return caller.cancelled(), locked_after_cancel
 
     before = _open_descriptors()
-    with patch(
-        "servonaut.services.auth_service.httpx.AsyncClient",
-        return_value=fake_client,
-    ):
-        locked_while_posting, cancelled = run(scenario())
+    cancelled, locked_after_cancel = run(scenario())
 
-    assert locked_while_posting is True
     assert cancelled is True
+    # The locks stay with the exchange until its pair is stored.
+    assert locked_after_cancel is True
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R1"
+    assert (svc._token.access_token, svc._token.refresh_token) == ("A1", "R1")
+    assert svc.is_authenticated is True
     assert _refresh_lock_is_free(tmp_path)
     assert _open_descriptors() == before
-    assert svc.is_authenticated is True
+
+
+def test_a_replaced_request_uses_the_pair_its_cancelled_predecessor_received(
+    tmp_path, monkeypatch,
+):
+    """The sequence that ended a sign-in: a background load is replaced while
+    its refresh is in flight, and the new load meets the same expired token."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    async def scenario():
+        posting, release = asyncio.Event(), asyncio.Event()
+        fake_client = _client_answering_when(release, posting, httpx.Response(
+            200, json={"access_token": "A1", "refresh_token": "R1", "expires_in": 3600},
+        ))
+        with patch("servonaut.services.auth_service.httpx.AsyncClient", return_value=fake_client):
+            first = asyncio.ensure_future(svc.refresh_token())
+            await asyncio.wait_for(posting.wait(), timeout=5)
+            second = asyncio.ensure_future(svc.refresh_token())
+            await asyncio.sleep(0)
+            first.cancel()
+            release.set()
+            result = await asyncio.wait_for(second, timeout=5)
+            await asyncio.gather(first, return_exceptions=True)
+        return result, fake_client.post.await_count
+
+    result, posts = run(scenario())
+
+    assert result is True
+    assert posts == 1  # the old refresh token is never presented a second time
+    assert svc._token.access_token == "A1"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R1"
 
 
 @pytest.mark.skipif(
@@ -1757,3 +1802,89 @@ def test_unknown_client_kind_is_refused_before_any_request(auth_service, device_
     with pytest.raises(ValueError, match="Unknown client kind 'browser'"):
         run(flow)
     assert device_flow_requests == []
+
+
+def _refused():
+    return httpx.Response(400, json={"error": "invalid_grant", "error_description": "Refresh token has been revoked."})
+
+
+def test_a_refused_sign_in_is_removed_from_disk_and_announced_once(tmp_path, monkeypatch):
+    """Left on disk, every later process presented the dead pair again and
+    never told the user to sign in."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    ended = []
+    svc.add_sign_in_ended_listener(lambda: ended.append(True))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(_refused()),
+    ):
+        assert run(svc.refresh_token()) is False
+        assert run(svc.refresh_token()) is False  # not presented again
+
+    assert not auth_file.exists()
+    assert ended == [True]
+    assert svc.sign_in_ended is True
+    assert svc.is_authenticated is False
+    assert AuthService().is_authenticated is False  # a process started later
+
+
+def test_a_refusal_keeps_a_sign_in_another_process_stored_meanwhile(tmp_path, monkeypatch):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    other_account = {**_rotated_pair("A9", "R9"), "user_id": 7}
+    svc._token.user_id = 42
+
+    async def post(*_args, **_kwargs):
+        # Another account signs in on this machine while the refresh is out.
+        auth_file.write_text(json.dumps(other_account))
+        return _refused()
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=post)
+    with patch("servonaut.services.auth_service.httpx.AsyncClient", return_value=fake_client):
+        assert run(svc.refresh_token()) is False
+
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R9"
+
+
+def test_a_process_whose_sign_in_ended_takes_up_a_new_sign_in(tmp_path, monkeypatch):
+    """A long-running MCP server or relay works again once the user signs in
+    elsewhere, without a restart; the refused pair is never taken back."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(_refused()),
+    ):
+        assert run(svc.refresh_token()) is False
+    refused_pair = {**_rotated_pair("A0", "R0")}
+
+    auth_file.write_text(json.dumps(refused_pair))
+    assert svc.is_authenticated is False
+    assert svc.access_token is None
+
+    auth_file.write_text(json.dumps(_rotated_pair("A5", "R5")))
+    assert svc.is_authenticated is True
+    assert svc.sign_in_ended is False
+    assert svc.access_token == "A5"
+
+
+def test_api_requests_after_the_sign_in_ended_say_to_sign_in_again(tmp_path, monkeypatch):
+    from servonaut.services.api_client import (
+        APIClient, SIGN_IN_ENDED_MESSAGE, SignInEndedError,
+    )
+
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    client = APIClient(svc)
+    unauthorized = httpx.Response(401, json={"error": "unauthorized", "message": "Unauthorized"})
+    assert not isinstance(client._parse_error(unauthorized), SignInEndedError)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(_refused()),
+    ):
+        run(svc.refresh_token())
+
+    error = client._parse_error(unauthorized)
+    assert isinstance(error, SignInEndedError)
+    assert (error.status, error.code, str(error)) == (401, "sign_in_ended", SIGN_IN_ENDED_MESSAGE)
+    assert "servonaut login" in SIGN_IN_ENDED_MESSAGE
