@@ -69,3 +69,30 @@ def test_other_transitions_do_not_fire_session_expired_toast():
         stub.notify.assert_not_called(), (
             f"Toast must not fire on transition {prior} -> {new}"
         )
+
+
+def test_relay_notice_is_skipped_right_after_the_sign_in_ended_notice():
+    """One event, one notice: the sign-in-ended notice already says how to sign in."""
+    import time
+
+    stub = _StubApp(RelayState.CONNECTED)
+    stub._sign_in_ended_notice_at = time.monotonic()
+    ServonautApp._on_relay_state_change(stub, RelayState.SESSION_EXPIRED)  # type: ignore[arg-type]
+    stub.notify.assert_not_called()
+
+    later = _StubApp(RelayState.CONNECTED)
+    later._sign_in_ended_notice_at = time.monotonic() - 120
+    ServonautApp._on_relay_state_change(later, RelayState.SESSION_EXPIRED)  # type: ignore[arg-type]
+    later.notify.assert_called_once()
+
+
+def test_sign_in_ended_notice_says_how_to_sign_in_again():
+    stub = _StubApp(RelayState.CONNECTED)
+    ServonautApp._on_sign_in_ended(stub)  # type: ignore[arg-type]
+
+    stub.notify.assert_called_once()
+    args = stub.notify.call_args
+    assert args.args[0] == "Your Servonaut sign-in has ended. Sign in again from Account / login."
+    assert args.kwargs.get("severity") == "warning"
+    assert args.kwargs.get("markup") is False
+    assert stub._sign_in_ended_notice_at is not None
