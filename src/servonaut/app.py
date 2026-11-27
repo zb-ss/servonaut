@@ -1308,7 +1308,7 @@ class ServonautApp(App):
     async def _run_vault_background(self) -> None:
         """Discover native Vault support and process verified grant hints."""
         from httpx import TransportError
-        from servonaut.services.api_client import APIError, ClientUpdateRequiredError
+        from servonaut.services.api_client import APIError, ClientUpdateRequiredError, SignInEndedError
         from servonaut.services.client_identity import format_update_required_message
         from servonaut.services.vault.identity_store import IdentityStoreError
         from servonaut.services.vault.crypto import VaultCryptoError
@@ -1343,6 +1343,10 @@ class ServonautApp(App):
             # wait for a later explicit access or application restart.
             self.vault_available = False
             logger.debug("Vault background endpoint is unavailable: %s", type(exc).__name__)
+        except SignInEndedError:
+            # The sign-in-ended notice already says what to do; a second
+            # warning asking for a restart would point the wrong way.
+            logger.info("Vault background processing stopped: the sign-in has ended")
         except (APIError, IdentityStoreError, VaultCryptoError) as exc:
             # A locked store or unverified server state must never grant keys.
             logger.warning("Vault background processing stopped: %s", type(exc).__name__)

@@ -9,7 +9,11 @@ import httpx
 import pytest
 
 from servonaut.app import ServonautApp
-from servonaut.services.api_client import ClientUpdateRequiredError
+from servonaut.services.api_client import (
+    SIGN_IN_ENDED_MESSAGE,
+    ClientUpdateRequiredError,
+    SignInEndedError,
+)
 from servonaut.services.vault.crypto import IntegrityError
 from servonaut.services.vault.identity_store import IdentityStoreError
 
@@ -76,6 +80,19 @@ async def test_proxy_426_follows_ordinary_vault_startup_warning(proxy_426) -> No
     assert app.vault_available is False
     assert app.vault_update_required is False
     assert app.notify.call_args.args == ("Vault is unavailable. Restart Servonaut to retry.",)
+
+
+@pytest.mark.asyncio
+async def test_an_ended_sign_in_stops_vault_quietly() -> None:
+    """The sign-in-ended notice says what to do; Vault must not add "restart"."""
+    app = ServonautApp()
+    ended = SignInEndedError(code="sign_in_ended", message=SIGN_IN_ENDED_MESSAGE, status=401)
+    app.vault_command_service = Mock(discover=AsyncMock(side_effect=ended))
+    app.notify = Mock()
+
+    await app._run_vault_background()
+
+    app.notify.assert_not_called()
 
 
 @pytest.mark.asyncio
