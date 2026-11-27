@@ -705,19 +705,26 @@ TUI's in-process listener:
 
 ## Supported Terminals
 
-Set `terminal_emulator` to one of the following, or `"auto"` for automatic detection:
+Set `terminal_emulator` to one of the following, `"auto"` for automatic detection, or a custom macOS `.app` bundle / executable path:
 
 - `gnome-terminal`
 - `konsole`
-- `alacritty`
-- `kitty`
+- `alacritty` / `Alacritty.app` (macOS)
+- `kitty` / `kitty.app` (macOS)
 - `xterm`
 - `xfce4-terminal`
 - `mate-terminal`
 - `tilix`
 - `Terminal.app` (macOS)
 - `iTerm.app` (macOS)
+- `Ghostty.app` / `ghostty` (macOS)
+- `WezTerm.app` / `wezterm` (macOS)
+- `Rio.app` / `rio` (macOS)
 - `wt.exe` (Windows Terminal)
+
+On macOS, `terminal_emulator` accepts app bundle names (such as `Terminal.app` or `iTerm.app`), custom `.app` bundle paths (including `~/Applications/...`), inner `Contents/MacOS/...` executable paths, or supported CLI terminal binaries without needing extra launch arguments.
+
+If a configured `.app` bundle is not a supported terminal (for example Warp), opening a terminal fails with an error naming the bundle; Servonaut does not fall back to Terminal.
 
 ## Servonaut AI
 
