@@ -121,6 +121,16 @@ def _is_generic_framework_action(action: str, parameters: tuple) -> bool:
     return str(action).strip() in _GENERIC_FRAMEWORK_ACTIONS
 
 
+# The relay's "session expired" notice is skipped this long after the
+# sign-in-ended notice, which already says how to sign in again.
+_SIGN_IN_NOTICE_DEDUP_SECONDS = 60
+
+
+def _shown_recently(shown_at: Optional[float]) -> bool:
+    """Whether a notice shown at monotonic time *shown_at* was shown just now."""
+    return shown_at is not None and time.monotonic() - shown_at < _SIGN_IN_NOTICE_DEDUP_SECONDS
+
+
 class ServonautApp(App):
     """Servonaut TUI application."""
 
@@ -1012,7 +1022,7 @@ class ServonautApp(App):
         if (
             new_state is RelayState.SESSION_EXPIRED
             and prior_state is not RelayState.SESSION_EXPIRED
-            and not self._sign_in_ended_recently()
+            and not _shown_recently(getattr(self, "_sign_in_ended_notice_at", None))
         ):
             try:
                 self.notify(
@@ -1149,11 +1159,6 @@ class ServonautApp(App):
             )
         except Exception:  # noqa: BLE001 - the app may be closing
             logger.debug("Could not show the sign-in-ended notice", exc_info=True)
-
-    def _sign_in_ended_recently(self) -> bool:
-        """Whether the sign-in-ended notice was just shown (the relay's would repeat it)."""
-        shown_at = getattr(self, "_sign_in_ended_notice_at", None)
-        return shown_at is not None and time.monotonic() - shown_at < 60
 
     def on_user_logout(self) -> None:
         """Called by LoginScreen after logout — tear down all session state.
