@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -842,6 +843,7 @@ class ServonautApp(App):
         try:
             from servonaut.services.auth_service import AuthService
             self.auth_service = AuthService()
+            self.auth_service.add_sign_in_ended_listener(self._on_sign_in_ended)
             if self.auth_service.is_authenticated:
                 self.init_paid_services()
         except ImportError:
@@ -1010,6 +1012,7 @@ class ServonautApp(App):
         if (
             new_state is RelayState.SESSION_EXPIRED
             and prior_state is not RelayState.SESSION_EXPIRED
+            and not self._sign_in_ended_recently()
         ):
             try:
                 self.notify(
@@ -1133,6 +1136,24 @@ class ServonautApp(App):
                 f"MCP relay failed to start: {result.message}",
                 severity="error", timeout=20, markup=False,
             )
+
+    def _on_sign_in_ended(self) -> None:
+        """Tell the user once that the service no longer accepts this sign-in."""
+        self._sign_in_ended_notice_at = time.monotonic()
+        try:
+            self.notify(
+                "Your Servonaut sign-in has ended. Sign in again from Account / login.",
+                severity="warning",
+                timeout=15,
+                markup=False,
+            )
+        except Exception:  # noqa: BLE001 - the app may be closing
+            logger.debug("Could not show the sign-in-ended notice", exc_info=True)
+
+    def _sign_in_ended_recently(self) -> bool:
+        """Whether the sign-in-ended notice was just shown (the relay's would repeat it)."""
+        shown_at = getattr(self, "_sign_in_ended_notice_at", None)
+        return shown_at is not None and time.monotonic() - shown_at < 60
 
     def on_user_logout(self) -> None:
         """Called by LoginScreen after logout — tear down all session state.
