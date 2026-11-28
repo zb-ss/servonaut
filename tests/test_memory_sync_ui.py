@@ -505,7 +505,7 @@ async def test_move_flow_confirm_recovery_key_then_toast() -> None:
             message = app.screen.query_one("#confirm_modal_message", Static).render().plain
             assert "passphrase stops working" in message
             assert "recovery key becomes the only way" in message
-            assert "config snapshots" in message
+            assert "from Config snapshots" in message
             worker = next(w for w in app.workers if w.name == "msync_move_to_vault")
             assert worker.group == "memory_custody"
             await _press(app, pilot, "btn_confirm_yes", _on(app, VaultSecretPromptModal))

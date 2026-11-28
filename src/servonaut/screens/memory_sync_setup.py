@@ -68,11 +68,10 @@ _MOVE_CONFIRM_MESSAGE = (
     "This moves your Memory Sync key into your vault and cannot be undone.\n\n"
     "- Your Memory Sync passphrase stops working.\n"
     "- Your vault recovery key becomes the only way to recover your synced "
-    "memory if you lose access to your vault.\n"
-    "- Old config snapshots are replaced when you move the config sync key "
-    "from Config snapshots.\n\n"
-    "You will be asked for your recovery key, and for your passphrase only "
-    "if Memory Sync is locked."
+    "memory.\n"
+    "- The config sync key moves separately, from Config snapshots.\n\n"
+    "Next you enter your recovery key (and your passphrase if Memory Sync "
+    "is locked)."
 )
 _ROTATE_CONFIRM_MESSAGE = (
     "Servonaut creates a new Memory Sync key in your vault and uploads your "
@@ -710,7 +709,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 Static(
                     "[dim]Disabling stops the background sync loop on this "
                     "device but leaves your encrypted data intact on the "
-                    "server. Re-enrol any time to resume.[/dim]",
+                    "server. Turn it back on from this screen at any time.[/dim]",
                     classes="msync_card_body",
                 ),
                 classes="msync_card",
