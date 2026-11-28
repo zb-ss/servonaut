@@ -31,6 +31,27 @@ def _exit_missing_sdk() -> NoReturn:
     sys.exit(1)
 
 
+def _wire_headless_shared_memory(tools, config_manager, auth_service) -> None:
+    """Let the tools read team-shared memory when Memory Sync was unlocked in the app.
+
+    Best effort: the shared copy is only a fallback, so a failure here leaves
+    the tools exactly as they were. Builds no network call and no unwrap.
+    """
+    if not auth_service.is_authenticated:
+        return
+    try:
+        from servonaut.services.api_client import APIClient
+        from servonaut.services.memory.headless_shared import build_headless_shared_memory
+        shared = build_headless_shared_memory(
+            config_manager, auth_service, APIClient(auth_service),
+        )
+        if shared is not None:
+            tools.set_shared_memory_reader(shared.reader, shared.check_lock)
+            logger.info("Shared team memory wired for MCP")
+    except Exception as e:  # noqa: BLE001 - never block startup
+        logger.warning("Shared team memory unavailable in MCP: %s", e)
+
+
 def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=None,
                          audit_to_stderr: bool = False):
     """Construct a fully wired :class:`ServonautTools` with no TUI.
@@ -290,6 +311,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         team_policy=team_policy,
         team_merge=HeadlessTeamMerge(memory_service) if memory_service is not None else None,
     )
+    _wire_headless_shared_memory(tools, config_manager, auth_service)
     if memory_service is not None:
         # A memory build hops through a bastion's vault key and falls back to
         # a team's key like the other tools do.

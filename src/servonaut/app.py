@@ -69,8 +69,9 @@ _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 # the package) neither bundles it nor reports this import as missing.
 _DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
 
-# A headless or scripted session supplies the Memory Sync passphrase here
-# instead of through the passphrase dialog.
+# A scripted session of the app supplies the Memory Sync passphrase here
+# instead of through the passphrase dialog. Only the app reads it: the
+# standalone MCP server and the CLI do not.
 MEMORY_PASSPHRASE_ENV = "SERVONAUT_MEMORY_PASSPHRASE"
 
 if TYPE_CHECKING:
@@ -1973,24 +1974,16 @@ class ServonautApp(App):
     def _remember_passphrase_expired(self, cfg) -> bool:
         """Return ``True`` when the remembered passphrase has passed its TTL.
 
-        Reads ``config.memory.sync_remember_expires_at`` (ISO-8601 UTC).  An
-        empty value means "no expiry recorded" (legacy enrolment from before
-        the TTL feature) and is treated as NOT expired so existing users are
-        not surprised by a sudden re-prompt; the timestamp is stamped the next
-        time they re-enter the passphrase.  Unparseable values fail open
-        (not expired) — a malformed timestamp should not lock a user out.
+        The rule (empty or malformed timestamps count as not expired) lives
+        in :func:`remember_passphrase_expired`, which the standalone MCP
+        server shares.
         """
-        raw = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
-        if not raw:
-            return False
-        try:
-            from datetime import datetime, timezone
-            exp = datetime.fromisoformat(raw)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            return datetime.now(timezone.utc) >= exp
-        except Exception:
-            return False
+        from servonaut.services.memory.remembered_passphrase import (
+            remember_passphrase_expired,
+        )
+        return remember_passphrase_expired(
+            getattr(cfg.memory, "sync_remember_expires_at", "")
+        )
 
     def _clear_remember_device(self, *, drop_cache: bool = False) -> None:
         """Forget the device-remembered passphrase (keychain + config flags).
@@ -2725,8 +2718,9 @@ class ServonautApp(App):
     async def _prompt_memory_passphrase(self, mode: str = "enrol") -> str:
         """Return the memory encryption passphrase.
 
-        Checks ``SERVONAUT_MEMORY_PASSPHRASE`` env var first (headless/MCP
-        mode).  Falls back to ``PassphraseEnrolModal`` in TUI mode with
+        Checks the ``SERVONAUT_MEMORY_PASSPHRASE`` env var first (for scripted
+        app sessions; the standalone MCP server and CLI never read it).
+        Falls back to ``PassphraseEnrolModal`` in TUI mode with
         the appropriate ``mode`` (``"enrol"`` for first-time setup,
         ``"unlock"`` when the keypair already exists server-side).
 

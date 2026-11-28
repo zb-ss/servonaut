@@ -90,7 +90,7 @@ def test_without_a_reader_a_shared_server_says_the_app_is_needed():
     error = json.loads(out)["error"]
     assert error["code"] == "missing"
     assert "build_server_memory" not in error["hint"]
-    assert "Servonaut app" in error["hint"]
+    assert "signed in to Servonaut on a plan that includes Memory Sync" in error["hint"]
 
 
 def test_the_tuis_own_tools_get_the_shared_reader():
@@ -135,3 +135,43 @@ def test_full_output_names_the_team_that_supplied_the_shown_module():
     reader.read = AsyncMock(return_value=combine_shared([a, b]))
     out = json.loads(asyncio.run(_tools(reader).get_server_memory("web-1", format="full")))
     assert out["source"].startswith("Shared by Team B") and "Team A" not in out["source"]
+
+
+def test_the_unlock_hook_runs_before_the_shared_read():
+    order: list = []
+    reader = MagicMock()
+    reader.read = AsyncMock(side_effect=lambda *a: order.append("read") or _shared())
+
+    async def unlock():
+        order.append("unlock")
+        return None
+
+    tools = _tools(reader)
+    tools.set_shared_memory_reader(reader, unlock)
+    out = asyncio.run(tools.get_server_memory("web-1"))
+    assert order == ["unlock", "read"]
+    assert "Shared by Team A" in out
+
+
+def test_a_locked_hook_skips_the_read_and_gives_the_reason_hint():
+    from servonaut.services.memory.headless_shared import LockReason, locked_hint
+
+    reader = MagicMock()
+    reader.read = AsyncMock(return_value=_shared())
+    tools = _tools(reader)
+    tools.set_shared_memory_reader(reader, AsyncMock(return_value=LockReason.NOT_KEPT))
+    out = asyncio.run(tools.get_server_memory("web-1"))
+    error = json.loads(out)["error"]
+    assert error["code"] == "missing"
+    assert error["hint"] == locked_hint(LockReason.NOT_KEPT)
+    assert "\u201cKeep unlocked for 30 days\u201d" in error["hint"]
+    reader.read.assert_not_awaited()
+
+
+def test_a_failing_unlock_hook_is_nothing_shared():
+    reader = MagicMock()
+    reader.read = AsyncMock(return_value=_shared())
+    tools = _tools(reader)
+    tools.set_shared_memory_reader(reader, AsyncMock(side_effect=RuntimeError("boom")))
+    out = asyncio.run(tools.get_server_memory("web-1"))
+    assert json.loads(out)["error"]["code"] == "missing"
