@@ -18,6 +18,12 @@ journeys check each digest again before installing a wheel and skip, with the
 command above as the reason, when the cache is missing. If the index cannot
 be reached, an intact cache made for this checkout is kept.
 
+``--versions 2.31,2.32`` additionally fetches the newest published patch of
+each named minor release (the "custody-<minor>" roles) for the opt-in
+old-client journey; those wheels are checked against the digest the index
+publishes. Without the flag, wheels fetched earlier for those roles stay in
+the cache.
+
 The cache directory is ``SERVONAUT_E2E_RELEASE_CACHE`` when set, otherwise
 ``.e2e-cache/releases`` in the checkout. It must not lie below your home
 directory unless it is inside the checkout: the suite cannot read there.
@@ -50,6 +56,7 @@ MANIFEST_FORMAT = 1
 DEFAULT_INDEX_URL = "https://pypi.org"
 DOWNLOAD_HOST = "files.pythonhosted.org"
 PREVIOUS_ROLE = "previous"
+CUSTODY_ROLE_PREFIX = "custody-"
 
 
 @dataclass(frozen=True)
@@ -245,6 +252,33 @@ def boundary_role(schema: int) -> str:
     return f"schema-{schema}"
 
 
+def custody_role(minor: str) -> str:
+    """The role of the newest patch of the *minor* release ("2.31")."""
+    return f"{CUSTODY_ROLE_PREFIX}{minor}"
+
+
+def parse_minors(text: str) -> list[str]:
+    """The minor releases named by ``--versions`` ("2.31,2.32"), in order."""
+    minors = [part.strip() for part in text.split(",") if part.strip()]
+    for minor in minors:
+        if not re.fullmatch(r"\d+\.\d+", minor):
+            raise FetchError(f"not a minor release (expected like 2.31): {minor!r}")
+    if not minors:
+        raise FetchError("--versions names no release")
+    return list(dict.fromkeys(minors))
+
+
+def newest_patch(minor: str, index_versions: Iterable[str]) -> str:
+    """The newest final release of *minor* ("2.31" gives e.g. "2.31.2")."""
+    wanted = tuple(int(part) for part in minor.split("."))
+    known = [
+        v for v in index_versions if is_final(v) and version_key(v)[:2] == wanted
+    ]
+    if not known:
+        raise FetchError(f"no published release of {PROJECT} {minor}")
+    return max(known, key=version_key)
+
+
 def boundary_roles() -> list[str]:
     """Every boundary role, applicable to this checkout or not."""
     return [boundary_role(schema) for schema in sorted(SCHEMA_BOUNDARY_RELEASES)]
@@ -386,8 +420,27 @@ def _prune(directory: Path, earlier: Optional[Manifest], keep: set[str]) -> None
             (directory / release.file).unlink(missing_ok=True)
 
 
+def _custody_releases(
+    directory: Path, index: Index, earlier: Optional[Manifest], minors: Optional[list[str]]
+) -> list[CachedRelease]:
+    """The old-client wheels: fetched for *minors*, else those cached earlier."""
+    if not minors:
+        kept = [r for r in (earlier.releases if earlier else ()) if r.role.startswith(CUSTODY_ROLE_PREFIX)]
+        return [r for r in kept if (directory / r.file).is_file() and sha256_of(directory / r.file) == r.sha256]
+    versions = index.versions()
+    found = []
+    for minor in minors:
+        version = newest_patch(minor, versions)
+        path, digest = fetch_wheel(index, version, directory)
+        found.append(CachedRelease(custody_role(minor), version, path.name, digest, wheel_schema(path)))
+    return found
+
+
 def prepare(
-    directory: Path, index: Index, previous_override: Optional[str] = None
+    directory: Path,
+    index: Index,
+    previous_override: Optional[str] = None,
+    custody_minors: Optional[list[str]] = None,
 ) -> list[CachedRelease]:
     current = checkout_version()
     current_schema = checkout_schema()
@@ -414,6 +467,7 @@ def prepare(
             continue
         path, digest = fetch_wheel(index, version, directory, pinned_sha256(role))
         releases.append(CachedRelease(role, version, path.name, digest, wheel_schema(path)))
+    releases.extend(_custody_releases(directory, index, earlier, custody_minors))
     not_applicable = [role for role in boundary_roles() if role not in roles]
     _write_manifest(directory, current, releases, not_applicable)
     _prune(directory, earlier, {release.file for release in releases})
@@ -426,11 +480,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--cache", help=f"cache directory (default: ${ENV_CACHE}, else {DEFAULT_CACHE})"
     )
     parser.add_argument("--previous", help="use this version as the previous release")
+    parser.add_argument(
+        "--versions",
+        help="also fetch the newest patch of these minor releases, e.g. 2.31,2.32 "
+        "(roles custody-<minor>, for the opt-in old-client journey)",
+    )
     parser.add_argument("--index-url", default=DEFAULT_INDEX_URL, help="package index base URL")
     args = parser.parse_args(argv)
     directory = cache_dir(args.cache)
     try:
-        releases = list(prepare(directory, Index(args.index_url), args.previous))
+        minors = parse_minors(args.versions) if args.versions else None
+        releases = list(prepare(directory, Index(args.index_url), args.previous, minors))
     except IndexUnavailable as exc:
         # A cache already made for this checkout, and still intact, will do.
         cached = verified_cache(directory)
