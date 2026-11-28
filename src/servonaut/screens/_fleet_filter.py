@@ -9,7 +9,7 @@ screen.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Collection, Dict, Iterable, List, Optional
 
 from servonaut.screens._demo_resolve import row_source
 
@@ -71,15 +71,19 @@ class FleetFilter:
     def is_active(self) -> bool:
         return self.state != ALL or self.provider != ALL
 
-    def matches(self, row: dict) -> bool:
+    def matches(self, row: dict, shared_ids: Collection[int] = ()) -> bool:
         """Whether *row* passes both filters."""
-        return self.passes_state(row) and self.passes_provider(row)
+        return self.passes_state(row) and self.passes_provider(row, shared_ids=shared_ids)
 
     def passes_state(self, row: dict) -> bool:
         return self.state == ALL or row_state(row) == self.state
 
-    def passes_provider(self, row: dict) -> bool:
-        return self.provider == ALL or row_provider(row) == self.provider
+    def passes_provider(self, row: dict, shared_ids: Collection[int] = ()) -> bool:
+        if self.provider == ALL:
+            return True
+        if self.provider == "shared" and id(row) in shared_ids:
+            return True
+        return row_provider(row) == self.provider
 
     def with_state(self, state: str) -> "FleetFilter":
         return replace(self, state=state if state in STATES else ALL)
@@ -110,16 +114,19 @@ class FleetFacets:
     providers: Dict[str, int]
 
 
-def facets(rows: Iterable[dict], active: FleetFilter) -> FleetFacets:
+def facets(rows: Iterable[dict], active: FleetFilter, *, shared_ids: Collection[int] = ()) -> FleetFacets:
     """Count *rows* (already narrowed by the search) per state and per provider."""
     rows = list(rows)
     states = {state: 0 for state in STATES}
     providers = {provider: 0 for provider in PROVIDERS}
     for row in rows:
-        if active.passes_provider(row):
+        if active.passes_provider(row, shared_ids=shared_ids):
             states[row_state(row)] += 1
         if active.passes_state(row):
-            providers[row_provider(row)] += 1
+            prov = row_provider(row)
+            providers[prov] += 1
+            if prov != "shared" and id(row) in shared_ids:
+                providers["shared"] += 1
     return FleetFacets(total=len(rows), states=states, providers=providers)
 
 

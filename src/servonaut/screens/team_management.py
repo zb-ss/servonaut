@@ -13,6 +13,8 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.content import Content
+from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -24,6 +26,13 @@ from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.bulk_action import BulkActionModal
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal
+from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.services.api_client import APIError, ClientUpdateRequiredError
 from servonaut.services.team_sharing import (
     SHARE_ADDRESS,
@@ -72,6 +81,54 @@ def _kept_key_paths_text(count: int) -> str:
     return "1 entry keeps your own SSH key path" if count == 1 else f"{count} entries keep your own SSH key paths"
 
 
+class _TeamBindPromptModal(ModalScreen[bool]):
+    """Lightweight yes/no prompt offering to bind a team vault key after sharing."""
+
+    DEFAULT_CLASSES = "dialog-screen"
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    _TeamBindPromptModal #team_bind_prompt_title { text-style: bold; }
+    _TeamBindPromptModal #team_bind_prompt_text { height: auto; margin-top: 1; }
+    _TeamBindPromptModal #team_bind_prompt_cancel,
+    _TeamBindPromptModal #team_bind_prompt_confirm { width: auto; min-width: 12; }
+    """
+
+    def __init__(self, server_label: str) -> None:
+        super().__init__()
+        self._server_label = server_label
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Bind team vault key[/bold]", id="team_bind_prompt_title"),
+            body=DialogBody(
+                Static(
+                    Content.assemble(
+                        "Server ",
+                        terminal_safe(self._server_label),
+                        " is now shared. Bind a team vault SSH key so teammates can connect right away?",
+                    ),
+                    id="team_bind_prompt_text",
+                )
+            ),
+            actions=DialogActions(
+                Button("Not now", id="team_bind_prompt_cancel"),
+                Button("Bind vault key", variant="primary", id="team_bind_prompt_confirm"),
+            ),
+            id="team_bind_prompt_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#team_bind_prompt_confirm", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "team_bind_prompt_confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class TeamManagementScreen(WorkspaceScreen):
     """Team management: list teams, manage members, share servers."""
 
@@ -87,6 +144,46 @@ class TeamManagementScreen(WorkspaceScreen):
     CONTENT_NARROW_WIDTH = 95
     # Short terminals get tighter cards, so a card fits above the return lane.
     VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
+
+    DEFAULT_CSS = """
+    TeamManagementScreen #no_auth_actions {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    TeamManagementScreen #btn_team_open_login,
+    TeamManagementScreen #btn_team_add_custom,
+    TeamManagementScreen #btn_team_conn_settings {
+        width: auto;
+    }
+    TeamManagementScreen #btn_bind_shared_key {
+        width: 1fr;
+        min-width: 0;
+    }
+    TeamManagementScreen #team_onboarding_strip {
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        border: round $border-blurred;
+        background: transparent;
+        align: left middle;
+    }
+    TeamManagementScreen #team_onboarding_text {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
+    TeamManagementScreen #btn_team_onboarding_go,
+    TeamManagementScreen #btn_team_onboarding_dismiss {
+        width: auto;
+        min-width: 0;
+        margin-left: 1;
+    }
+    TeamManagementScreen #share_empty_actions,
+    TeamManagementScreen #pull_config_refused_actions {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    """
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self._server_busy:
@@ -123,6 +220,8 @@ class TeamManagementScreen(WorkspaceScreen):
         self._has_team_detail = False
         self._team_seat_line = ""
         self._share_form_username = ("", "")
+        self._onboarding_dismissed = False
+        self._onboarding_action = "share"
 
     # ------------------------------------------------------------------
     # Compose
@@ -140,8 +239,12 @@ class TeamManagementScreen(WorkspaceScreen):
 
                     # No-auth notice (shown when not authenticated)
                     Static(
-                        "Login required to manage teams. Use the Login / Account button in the sidebar.",
+                        "Login required to manage teams. Use Sign in below or Account / login in the sidebar.",
                         id="no_auth_notice",
+                    ),
+                    Horizontal(
+                        Button("Sign in", variant="primary", id="btn_team_open_login"),
+                        id="no_auth_actions",
                     ),
 
                     # --- Teams section (curved card) ---
@@ -232,12 +335,19 @@ class TeamManagementScreen(WorkspaceScreen):
                         Container(
                             Static("[bold]Shared servers[/bold]", id="section_servers", classes="section_header"),
                             Static("Connect to a shared server or review the hosts available to this team.", classes="team_section_hint"),
+                            Horizontal(
+                                Static("", id="team_onboarding_text"),
+                                Button("Share server", variant="primary", id="btn_team_onboarding_go"),
+                                Button("Dismiss", variant="default", id="btn_team_onboarding_dismiss"),
+                                id="team_onboarding_strip",
+                            ),
                             BusyIndicator(id="team_servers_busy"),
                             DataTable(id="servers_table"),
                             Horizontal(
                                 Button("Connect", variant="success", id="btn_connect_shared"),
                                 Button("Share server", variant="primary", id="btn_share"),
                                 Button("Share all", variant="default", id="btn_share_all"),
+                                Button("Bind vault key", variant="default", id="btn_bind_shared_key"),
                                 classes="add_row",
                                 id="server_actions_row",
                             ),
@@ -255,6 +365,10 @@ class TeamManagementScreen(WorkspaceScreen):
                                     value=Select.BLANK,
                                     allow_blank=True,
                                     id="select_share_instance",
+                                ),
+                                Horizontal(
+                                    Button("Add custom server", variant="default", id="btn_team_add_custom"),
+                                    id="share_empty_actions",
                                 ),
                                 Select(
                                     [("Public address", "public"), ("Private address", "private")],
@@ -340,6 +454,10 @@ class TeamManagementScreen(WorkspaceScreen):
                                     id="pull_config_warning",
                                 ),
                                 Horizontal(
+                                    Button("Open connection settings", variant="default", id="btn_team_conn_settings"),
+                                    id="pull_config_refused_actions",
+                                ),
+                                Horizontal(
                                     Button("Apply", variant="warning", id="btn_confirm_pull_config"),
                                     Button("Cancel", variant="default", id="btn_cancel_pull_config"),
                                     classes="form_actions_row",
@@ -384,6 +502,9 @@ class TeamManagementScreen(WorkspaceScreen):
         self._hide_create_form()
         self._hide_invite_form()
         self._hide_change_role_form()
+        self.query_one("#share_empty_actions").display = False
+        self.query_one("#pull_config_refused_actions").display = False
+        self.query_one("#team_onboarding_strip").display = False
 
         auth_svc = getattr(self.app, "auth_service", None)
         if auth_svc is None or not auth_svc.is_authenticated:
@@ -423,7 +544,7 @@ class TeamManagementScreen(WorkspaceScreen):
 
         servers_tbl = self.query_one("#servers_table", DataTable)
         servers_tbl.cursor_type = "row"
-        servers_tbl.add_columns("Name", "Hostname", "Region")
+        servers_tbl.add_columns("Name", "Hostname", "Region", "Vault key")
 
         configs_tbl = self.query_one("#configs_table", DataTable)
         configs_tbl.cursor_type = "row"
@@ -436,12 +557,14 @@ class TeamManagementScreen(WorkspaceScreen):
     def _show_no_auth_state(self) -> None:
         self.query_one("#team_workspace_summary", Static).update("Sign in to view your teams and their shared access.")
         self.query_one("#no_auth_notice").display = True
+        self.query_one("#no_auth_actions").display = True
         self.query_one("#section_teams").display = False
         self.query_one("#teams_table").display = False
         self.query_one("#team_actions_row").display = False
 
     def _hide_no_auth_notice(self) -> None:
         self.query_one("#no_auth_notice").display = False
+        self.query_one("#no_auth_actions").display = False
 
     def _hide_detail_section(self) -> None:
         # Detail-only sections are wrapped in .settings_section cards;
@@ -478,6 +601,8 @@ class TeamManagementScreen(WorkspaceScreen):
 
     def _hide_share_server_form(self) -> None:
         self.query_one("#share_server_form").display = False
+        self.query_one("#share_empty_actions").display = False
+        self._refresh_onboarding_strip()
 
     def _show_share_server_form(self, instances: list[dict]) -> None:
         """Open the share-server form populated with the user's instances.
@@ -505,6 +630,8 @@ class TeamManagementScreen(WorkspaceScreen):
         by_id = {str(row.get("id")): row for row in candidates}
         options = [(Text(self._share_option_label(by_id[key])), key)
                    for _label, key in self._build_share_options(candidates)]
+        self.query_one("#share_empty_actions").display = not bool(options)
+        self._refresh_onboarding_strip()
         if not options:
             select.set_options([("(no servers available)", Select.BLANK)])
             select.value = Select.BLANK
@@ -664,6 +791,7 @@ class TeamManagementScreen(WorkspaceScreen):
         # Share Server / Share All require MANAGE_MEMBERS too.
         self.query_one("#btn_share").display = can_manage
         self.query_one("#btn_share_all").display = can_manage
+        self.query_one("#btn_bind_shared_key").display = can_manage and bool(getattr(self.app, "vault_available", False))
         self.query_one("#btn_remove_server").display = can_manage
         self.query_one("#btn_remove_servers").display = can_manage
         # Push Current = admin-only on the backend (hasAdminAccess). Pull is
@@ -674,6 +802,43 @@ class TeamManagementScreen(WorkspaceScreen):
             self._hide_invite_form()
             self._hide_change_role_form()
             self._hide_share_server_form()
+        self._refresh_onboarding_strip()
+
+    def _refresh_onboarding_strip(self) -> None:
+        strip = self.query_one("#team_onboarding_strip")
+        share_open = self.query_one("#share_server_form").display is True
+        vault_ready = bool(getattr(self.app, "vault_available", False))
+        if (
+            not self._has_team_detail
+            or not self._can_manage_members()
+            or not vault_ready
+            or self._onboarding_dismissed
+            or share_open
+        ):
+            strip.display = False
+            return
+        text = self.query_one("#team_onboarding_text", Static)
+        go_btn = self.query_one("#btn_team_onboarding_go", Button)
+        if not self._shared_servers:
+            has_local = bool(real_fleet_rows(self.app))
+            if not has_local:
+                self._onboarding_action = "add_custom"
+                text.update("Next step: add a custom server or refresh cloud servers to share with this team.")
+                go_btn.label = "Add custom server"
+            else:
+                self._onboarding_action = "share"
+                text.update("Next step: share a server with your team, then bind a team vault SSH key.")
+                go_btn.label = "Share server"
+            strip.display = True
+            return
+        unbound = any(self._shared_key_status(row) == "Not bound" for row in self._shared_servers)
+        if unbound:
+            self._onboarding_action = "bind"
+            text.update("Next step: bind a team vault SSH key so members connect without manual key files.")
+            go_btn.label = "Bind vault key"
+            strip.display = True
+            return
+        strip.display = False
 
     # ------------------------------------------------------------------
     # Member field helpers (handle backend GET shape variance)
@@ -1152,6 +1317,16 @@ class TeamManagementScreen(WorkspaceScreen):
                 markup=False,
             )
             await self._load_team_detail(slug)
+            if (
+                getattr(self.app, "vault_available", False)
+                and getattr(self.app, "vault_command_service", None) is not None
+            ):
+                self.app.call_later(
+                    self._offer_post_share_bind,
+                    slug,
+                    str(server_data.get("hostname") or ""),
+                    str(server_data.get("name") or ""),
+                )
         except ClientUpdateRequiredError as exc:
             logger.error("Failed to share server (%s): %s", exc.status, exc.message)
             self.notify(exc.message, severity="warning", timeout=12, markup=False)
@@ -1264,6 +1439,7 @@ class TeamManagementScreen(WorkspaceScreen):
 
     def _hide_pull_config_form(self) -> None:
         self.query_one("#pull_config_form").display = False
+        self.query_one("#pull_config_refused_actions").display = False
 
     def _show_push_config_form(self) -> None:
         """Open the push form with every custom server listed and none ticked.
@@ -1462,9 +1638,19 @@ class TeamManagementScreen(WorkspaceScreen):
             lines.append(f"  {_kept_key_paths_text(diff['kept_key_paths'])}: a team config never carries key paths.")
         lines.extend(self._refused_options_lines(diff["refused_options"]))
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
+        self.query_one("#pull_config_refused_actions").display = bool(diff["refused_options"])
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
         form.display = True
+
+    @staticmethod
+    def _shared_key_status(server: dict) -> str:
+        if (server.get("ssh_ca") or {}).get("enrolled"):
+            return "SSH CA"
+        binding = server.get("credential_binding")
+        if isinstance(binding, dict) and binding.get("source") == "servonaut_vault":
+            return "Bound"
+        return "Not bound"
 
     def _populate_servers_table(self, servers: list[dict]) -> None:
         table = self.query_one("#servers_table", DataTable)
@@ -1488,6 +1674,7 @@ class TeamManagementScreen(WorkspaceScreen):
                 # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
                 cell(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
                 cell(terminal_safe(server.get("region", "") or "")),
+                cell(self._shared_key_status(server)),
             )
 
     # ------------------------------------------------------------------
@@ -1550,6 +1737,27 @@ class TeamManagementScreen(WorkspaceScreen):
 
         elif button_id == "btn_share_all":
             self._action_share_all_servers()
+
+        elif button_id == "btn_bind_shared_key":
+            self._action_bind_shared_key()
+
+        elif button_id == "btn_team_open_login":
+            from servonaut.screens.login import LoginScreen
+
+            self.app.switch_screen(LoginScreen())
+
+        elif button_id == "btn_team_onboarding_go":
+            self._action_onboarding_go()
+
+        elif button_id == "btn_team_onboarding_dismiss":
+            self._onboarding_dismissed = True
+            self._refresh_onboarding_strip()
+
+        elif button_id == "btn_team_add_custom":
+            self._open_custom_servers_add()
+
+        elif button_id == "btn_team_conn_settings":
+            self._open_connection_settings()
 
         elif button_id == "btn_remove_server":
             self._action_remove_shared_server()
@@ -1809,6 +2017,131 @@ class TeamManagementScreen(WorkspaceScreen):
             self.notify("No servers available to share.", severity="warning")
             return
         self._show_share_server_form(instances)
+
+    def _open_custom_servers_add(self) -> None:
+        from servonaut.screens.custom_servers import CustomServersScreen
+
+        self.app.push_screen(
+            CustomServersScreen(open_add_form=True),
+            callback=lambda _res: self._refresh_after_custom_add(),
+        )
+
+    def _refresh_after_custom_add(self) -> None:
+        if not self.is_attached:
+            return
+        if self.query_one("#share_server_form").display:
+            instances = self._share_inventory()
+            if instances:
+                self._show_share_server_form(instances)
+                return
+        self._refresh_onboarding_strip()
+
+    def _open_connection_settings(self) -> None:
+        open_settings = getattr(self.app, "open_settings_screen", None)
+        if callable(open_settings):
+            open_settings(initial_panel="connections")
+            return
+        from servonaut.screens.settings import SettingsScreen
+
+        self.app.push_screen(SettingsScreen(initial_panel="connections"))
+
+    def _action_onboarding_go(self) -> None:
+        if self._onboarding_action == "add_custom":
+            self._open_custom_servers_add()
+        elif self._onboarding_action == "bind":
+            unbound_index = next(
+                (i for i, row in enumerate(self._shared_servers) if self._shared_key_status(row) == "Not bound"),
+                None,
+            )
+            if unbound_index is not None:
+                self.query_one("#servers_table", DataTable).move_cursor(row=unbound_index)
+            self._action_bind_shared_key()
+        else:
+            self._action_share_server()
+
+    def _matching_own_row(self, shared_row: dict) -> Optional[dict]:
+        target_id = str(shared_row.get("instance_id") or "")
+        if not target_id:
+            return None
+        for row in real_fleet_rows(self.app) or []:
+            if row.get("is_shared") is not True and str(row.get("id") or "") == target_id:
+                return dict(row)
+        return None
+
+    def _offer_post_share_bind(self, slug: str, hostname: str, name: str) -> None:
+        if not self.is_attached or self.app.screen is not self or self._server_busy:
+            return
+        if self._current_team_slug != slug:
+            return
+        from servonaut.screens._demo_resolve import real_instance_id
+
+        match_idx = next(
+            (
+                i
+                for i, s in enumerate(self._shared_servers)
+                if (s.get("hostname") == hostname or s.get("host") == hostname)
+                and (not name or s.get("name") == name)
+                and self._shared_key_status(s) == "Not bound"
+            ),
+            None,
+        )
+        if match_idx is None:
+            return
+        server_id = str(self._shared_servers[match_idx].get("id") or "")
+        row = next(
+            (
+                r
+                for r in getattr(self.app, "instances", None) or []
+                if r.get("is_shared") is True
+                and r.get("team_slug") == slug
+                and real_instance_id(self.app, r.get("id")) == server_id
+            ),
+            None,
+        )
+        if row is None:
+            return
+        label = self._display_server_name(self._shared_servers[match_idx].get("name") or hostname)
+        self.app.push_screen(
+            _TeamBindPromptModal(label),
+            callback=lambda confirmed: self._start_bind_row(row) if confirmed else None,
+        )
+
+    def _action_bind_shared_key(self) -> None:
+        if self._server_busy:
+            return
+        if not self._current_team_slug:
+            self.notify("Select a team first.", severity="warning")
+            return
+        if not self._can_manage_members():
+            self.notify("Only owners and admins can bind team vault keys.", severity="warning")
+            return
+        row = self._selected_shared_row()
+        if row is None:
+            return
+        self._start_bind_row(row)
+
+    def _start_bind_row(self, row: dict) -> None:
+        self.run_worker(self._bind_shared_server_row(row), group="vault", exclusive=True)
+
+    async def _bind_shared_server_row(self, row: dict) -> None:
+        service = getattr(self.app, "vault_command_service", None)
+        if service is None:
+            self.notify("Vault services are unavailable.", severity="warning", markup=False)
+            return
+        from servonaut.screens.server_actions import VaultBindingModal
+
+        own = self._matching_own_row(row)
+        values = await self.app.push_screen_wait(VaultBindingModal(service, row, own_instance=own))
+        if not values:
+            return
+        try:
+            await apply_vault_binding(self.app, service, row, values, own=own)
+        except Exception as exc:
+            self.notify(f"Vault key binding failed: {format_vault_bind_error(exc)}", severity="error", markup=False)
+            return
+        self.notify("Team vault SSH key bound.", markup=False)
+        if self._current_team_slug:
+            await self._load_team_detail(self._current_team_slug)
 
     def _action_push_config(self) -> None:
         """Open the push-config form. Only owners/admins reach this button."""

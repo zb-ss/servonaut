@@ -32,8 +32,9 @@ from textual.worker import Worker
 
 from servonaut.utils.markup import cell, literal
 from servonaut.screens.confirm_action import ConfirmActionScreen
-from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
+from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows, team_rows
 from servonaut.screens._batch_status import failure_details
+from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error
 from servonaut.screens.bulk_action import BulkActionModal, BulkPreset
 from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.api_client import ClientUpdateRequiredError
@@ -914,6 +915,78 @@ class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
         self.dismiss(self._options[index] if isinstance(index, int) and 0 <= index < len(self._options) else None)
 
 
+class VaultServerTargetModal(ModalScreen[Optional[dict[str, Any]]]):
+    """Pick a server before opening VaultBindingModal from VaultScreen."""
+
+    DEFAULT_CLASSES = "dialog-screen"
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    VaultServerTargetModal #vault_bind_target_modal {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    VaultServerTargetModal #vault_bind_target_title { text-style: bold; }
+    VaultServerTargetModal #vault_bind_target_text { margin-top: 1; height: auto; }
+    VaultServerTargetModal #vault_bind_target_select { width: 100%; margin-top: 1; }
+    VaultServerTargetModal #vault_bind_target_cancel,
+    VaultServerTargetModal #vault_bind_target_confirm { width: auto; min-width: 12; }
+    """
+
+    def __init__(self, options: list[tuple[str, dict[str, Any]]], *, team_mode: bool = False) -> None:
+        super().__init__()
+        self._options = list(options)
+        self._team_mode = team_mode
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Bind vault key to a server[/bold]", id="vault_bind_target_title"),
+            body=DialogBody(
+                Static(
+                    "Choose the shared team server to bind."
+                    if self._team_mode
+                    else "Choose the server to bind to this vault key.",
+                    id="vault_bind_target_text",
+                )
+            ),
+            status=Select(
+                [
+                    (markup_literal(terminal_safe(label)), index)
+                    for index, (label, _row) in enumerate(self._options)
+                ],
+                value=0,
+                allow_blank=False,
+                id="vault_bind_target_select",
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="vault_bind_target_cancel"),
+                Button("Continue", variant="primary", id="vault_bind_target_confirm"),
+            ),
+            id="vault_bind_target_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#vault_bind_target_select", Select).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "vault_bind_target_confirm":
+            self.dismiss(None)
+            return
+        index = self.query_one("#vault_bind_target_select", Select).value
+        if isinstance(index, int) and 0 <= index < len(self._options):
+            self.dismiss(self._options[index][1])
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class VaultAddDeviceModal(ModalScreen[Optional[str]]):
     """Say who approves this computer before it asks, and offer Recover instead.
 
@@ -1062,6 +1135,7 @@ class VaultScreen(WorkspaceScreen):
     VaultScreen #vault_busy { width: 1fr; }
     VaultScreen #vault_cancel_wait { display: none; min-width: 16; }
     VaultScreen #vault_cancel_wait.-shown { display: block; }
+    VaultScreen #vault_bind_key { width: 1fr; }
     """
 
     BINDINGS = [
@@ -1079,7 +1153,7 @@ class VaultScreen(WorkspaceScreen):
     _READY_ACTIONS = (
         "vault_confirm_identity", "vault_create", "vault_vaults", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
         "vault_rotate_exposure", "vault_devices", "vault_approve", "vault_recovery_rotate",
-        "vault_reset", "vault_import", "vault_auto_bind", "vault_roster", "vault_grants", "vault_rotate",
+        "vault_reset", "vault_import", "vault_auto_bind", "vault_bind_key", "vault_roster", "vault_grants", "vault_rotate",
         "vault_rename_key", "vault_delete_key", "vault_delete_keys",
     )
 
@@ -1175,6 +1249,7 @@ class VaultScreen(WorkspaceScreen):
                                         yield ActionButton("Delete key", id="vault_delete_key", role="error")
                                     with ActionRow(classes="vault_group_buttons"):
                                         yield ActionButton("Auto-bind keys", id="vault_auto_bind")
+                                        yield ActionButton("Bind to server", id="vault_bind_key")
                                 with Vertical(id="vault_identity_group", classes="vault_action_group"):
                                     yield Static("Identity and access", classes="vault_group_heading")
                                     with ActionRow(classes="vault_group_buttons"):
@@ -1972,6 +2047,7 @@ class VaultScreen(WorkspaceScreen):
             "vault_reset": self.action_reset,
             "vault_import": self.action_import,
             "vault_auto_bind": self.action_auto_bind,
+            "vault_bind_key": self.action_bind_key,
             "vault_roster": self.action_roster,
             "vault_grants": self.action_grants,
             "vault_rename_key": self.action_rename_key,
@@ -3093,6 +3169,122 @@ class VaultScreen(WorkspaceScreen):
 
         self.app.push_screen(VaultAutoBindScreen())
 
+    def action_bind_key(self) -> None:
+        """Bind a key from the selected vault onto a server picked by the user."""
+        if not self._allows_identity_action("ready"):
+            return
+        if self._refuse_while_busy():
+            return
+        selected = self._selected_vault()
+        if selected is None:
+            self.app.notify("Select a vault first.", severity="warning", markup=False)
+            return
+        if self._refuse_without_access(selected):
+            return
+        service = self._service()
+        if service is None:
+            self.app.notify("Vault services are unavailable in this session.", severity="warning", markup=False)
+            return
+        self.run_worker(self._bind_key_flow(dict(selected)), group="vault", exclusive=True)
+
+    def _target_server_label(self, row: Mapping[str, Any]) -> str:
+        name = self.scrub_for_display(row.get("name") or row.get("id") or "server")
+        host = self.scrub_for_display(
+            row.get("public_ip") or row.get("private_ip") or row.get("hostname") or row.get("host") or ""
+        )
+        return f"{name} ({host})" if host else str(name)
+
+    async def _bind_key_flow(self, selected: dict[str, Any]) -> None:
+        service = self._service()
+        if service is None:
+            return
+        vault_id = str(selected.get("vault_id") or "")
+        is_team = selected.get("kind") == "team"
+        targets: list[dict[str, Any]] = []
+        if is_team:
+            team_info = selected.get("team") if isinstance(selected.get("team"), Mapping) else {}
+            slug = str(team_info.get("slug") or "")
+            team_name = str(team_info.get("name") or slug)
+            targets = [dict(r) for r in (team_rows(self.app) or []) if r.get("team_slug") == slug]
+            if not targets and slug:
+                team_svc = getattr(self.app, "team_service", None)
+                if team_svc is not None and hasattr(team_svc, "list_shared_servers"):
+                    try:
+                        from servonaut.services.shared_servers import shared_row
+
+                        async with self._busy("Loading team shared servers…"):
+                            shared = await team_svc.list_shared_servers(slug)
+                        targets = [
+                            shared_row(row, {"slug": slug, "name": team_name})
+                            for row in shared or []
+                            if isinstance(row, dict)
+                        ]
+                    except Exception as exc:
+                        self.app.notify(
+                            f"Could not load shared servers ({vault_failure_reason(exc)}).",
+                            severity="error",
+                            markup=False,
+                        )
+                        return
+            if not targets:
+                self._status("This team has no shared servers yet: share a server on the Teams screen first.")
+                return
+        else:
+            targets = [
+                dict(row) for row in (real_fleet_rows(self.app) or [])
+                if row.get("is_shared") is not True
+            ]
+            if not targets:
+                self._status("No personal servers available yet: add a custom server or refresh cloud servers first.")
+                return
+
+        options = [(self._target_server_label(row), row) for row in targets]
+        chosen = await self.app.push_screen_wait(VaultServerTargetModal(options, team_mode=is_team))
+        if chosen is None:
+            return
+        own: Optional[dict[str, Any]] = None
+        if is_team:
+            target_id = str(chosen.get("instance_id") or "")
+            if target_id:
+                own = next(
+                    (
+                        dict(row) for row in (real_fleet_rows(self.app) or [])
+                        if row.get("is_shared") is not True and str(row.get("id") or "") == target_id
+                    ),
+                    None,
+                )
+        selected_item = self._selected_item()
+        preferred_item_id = (
+            str(selected_item.get("item_id") or "")
+            if isinstance(selected_item, Mapping) and selected_item.get("item_id")
+            else None
+        )
+        from servonaut.screens.server_actions import VaultBindingModal
+
+        values = await self.app.push_screen_wait(
+            VaultBindingModal(
+                service,
+                chosen,
+                own_instance=own,
+                default_vault_id=vault_id or None,
+                default_item_id=preferred_item_id,
+            )
+        )
+        if not values:
+            return
+        try:
+            async with self._busy("Binding vault key…", holds_screen=True):
+                await apply_vault_binding(self.app, service, chosen, values, own=own)
+        except Exception as exc:
+            self.app.notify(
+                f"Vault key binding failed: {format_vault_bind_error(exc)}",
+                severity="error",
+                markup=False,
+            )
+            return
+        self.app.notify("Vault key bound.", markup=False)
+        self._status("Vault key bound to the selected server.")
+
     def action_import(self) -> None:
         if not self._allows_identity_action("ready"):
             return
@@ -3176,7 +3368,14 @@ class VaultScreen(WorkspaceScreen):
                 if vault.get("vault_id") == vault_id:
                     self.query_one("#vault_table", DataTable).move_cursor(row=row)
                     break
-            self._status(message)
+            if imported_count > 0 and any(
+                isinstance(reference, Mapping) and reference.get("source") == "ssh"
+                for reference in references
+            ):
+                self._status(f"{message} Next: use Bind to server or Auto-bind keys to attach this key to a server.")
+                self._next_action = "vault_bind_key"
+            else:
+                self._status(message)
         if any(
             isinstance(reference, Mapping) and reference.get("source") == "bitwarden"
             for reference in references

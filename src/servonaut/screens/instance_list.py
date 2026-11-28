@@ -1,6 +1,7 @@
 """Instance list screen for Servonaut v2.0."""
 
 from __future__ import annotations
+from collections.abc import Mapping
 import dataclasses
 import time
 from datetime import timedelta
@@ -13,6 +14,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.css.query import NoMatches
 from textual.containers import Container, Grid, Vertical, VerticalScroll, Horizontal
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
@@ -20,6 +22,17 @@ from textual.worker import Worker, WorkerState
 from servonaut.utils.ssh_names import SSHRefusal
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._vault_bind import (
+    apply_vault_binding,
+    format_vault_bind_error,
+    resolve_bw_ssh_key_path,
+)
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.screens._fleet_filter import (
     provider_label,
     ALL, PROVIDERS, PROVIDER_LABELS, STATES, STATE_LABELS, STATE_OTHER,
@@ -122,8 +135,115 @@ class FleetChip(Button):
         self.base_label = label
 
 
+class AddServerModal(ModalScreen[Optional[str]]):
+    """Choose whether to add a custom SSH host or launch a cloud server."""
+
+    DEFAULT_CLASSES = "dialog-screen"
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    AddServerModal #add_server_modal {
+        width: 68;
+        max-width: 92%;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    AddServerModal #add_server_title { text-style: bold; }
+    AddServerModal #add_server_text { height: auto; color: $text-muted; margin: 1 0; }
+    AddServerModal #add_server_choices { height: auto; }
+    AddServerModal #add_server_custom,
+    AddServerModal #add_server_aws,
+    AddServerModal #add_server_hetzner,
+    AddServerModal #add_server_ovh {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    AddServerModal #add_server_cancel { width: auto; min-width: 12; }
+    """
+
+    def compose(self) -> ComposeResult:
+        has_aws = getattr(self.app, "aws_service", None) is not None
+        has_hetzner = getattr(self.app, "hetzner_service", None) is not None
+        has_ovh = getattr(self.app, "ovh_service", None) is not None
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Add a server[/bold]", id="add_server_title"),
+            body=DialogBody(
+                Static(
+                    "Add an existing SSH host directly or launch a new cloud instance.",
+                    id="add_server_text",
+                ),
+                Vertical(
+                    Button("Custom SSH server", variant="primary", id="add_server_custom"),
+                    Button("AWS EC2 instance", id="add_server_aws", disabled=not has_aws),
+                    Button("Hetzner Cloud server", id="add_server_hetzner", disabled=not has_hetzner),
+                    Button("OVH Public Cloud instance", id="add_server_ovh", disabled=not has_ovh),
+                    id="add_server_choices",
+                ),
+            ),
+            actions=DialogActions(Button("Cancel", id="add_server_cancel")),
+            id="add_server_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#add_server_custom", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        choices = {
+            "add_server_custom": "custom",
+            "add_server_aws": "aws",
+            "add_server_hetzner": "hetzner",
+            "add_server_ovh": "ovh",
+        }
+        self.dismiss(choices.get(event.button.id or ""))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class InstanceListScreen(WorkspaceScreen):
     """Screen displaying list of EC2 instances with search/filter."""
+
+    DEFAULT_CSS = """
+    InstanceListScreen #fleet_search_row {
+        width: 100%;
+        height: auto;
+    }
+    InstanceListScreen #fleet_add_server {
+        width: auto;
+        min-width: 0;
+        margin: 0 0 0 1;
+    }
+    InstanceListScreen #empty_fleet_card {
+        display: none;
+        height: auto;
+        margin: 1;
+        padding: 1 2;
+        border: round $border-blurred;
+        background: transparent;
+    }
+    InstanceListScreen #empty_fleet_title {
+        height: auto;
+        margin-bottom: 1;
+        color: $text;
+    }
+    InstanceListScreen #empty_fleet_text {
+        height: auto;
+        margin-bottom: 1;
+        color: $text-muted;
+    }
+    InstanceListScreen #empty_fleet_actions {
+        height: auto;
+    }
+    InstanceListScreen #btn_empty_add_custom,
+    InstanceListScreen #btn_empty_cloud_settings,
+    InstanceListScreen #btn_empty_teams {
+        width: auto;
+        margin-right: 1;
+    }
+    """
 
     @property
     def app(self) -> "ServonautApp":
@@ -166,6 +286,10 @@ class InstanceListScreen(WorkspaceScreen):
                 tooltip="Scan the fleet for database credentials"),
         Binding("k", "manage_ssh_ref", "SSH ref", show=True,
                 tooltip="Set the Bitwarden SSH key reference of the selected server"),
+        Binding("u", "use_vault_key", "Vault key", show=True,
+                tooltip="Bind a Vault SSH key to the selected server"),
+        Binding("n", "add_server", "Add server", show=True,
+                tooltip="Add a custom server or launch a cloud instance"),
         Binding("v", "verify_ssh", "Verify", show=True,
                 tooltip="Check that the selected server's SSH key works"),
         Binding("y", "copy_row", "Copy row", show=True,
@@ -207,6 +331,8 @@ class InstanceListScreen(WorkspaceScreen):
         "verify_ssh",
         "manage_ssh_ref",
         "fleet_db_scan",
+        "add_server",
+        "use_vault_key",
         "copy_value",
     )
 
@@ -220,6 +346,8 @@ class InstanceListScreen(WorkspaceScreen):
     _SPINNER_SECONDS = 0.15
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "use_vault_key" and not getattr(self.app, "vault_available", False):
+            return None
         if action == "cancel_slow_providers":
             # While typing, Esc keeps its usual meaning.
             return self._load.active and not isinstance(self.focused, (Input, TextArea))
@@ -369,11 +497,20 @@ class InstanceListScreen(WorkspaceScreen):
             yield self.workspace_sidebar()
             with Vertical(id="instance_list_container", classes="workspace-content"):
                 yield Static("Search", id="fleet_search_label", markup=False)
-                yield FleetSearchInput(
-                    self._shortcut_characters(),
-                    placeholder="Search servers, IPs and keywords…",
-                    id="search_input",
-                )
+                with Horizontal(id="fleet_search_row"):
+                    yield FleetSearchInput(
+                        self._shortcut_characters(),
+                        placeholder="Search servers, IPs and keywords…",
+                        id="search_input",
+                    )
+                    add_srv = ActionButton(
+                        "+ Add server",
+                        key="n",
+                        id="fleet_add_server",
+                        tooltip="Add a custom server or launch a cloud instance",
+                    )
+                    add_srv.can_focus = False
+                    yield add_srv
                 # Memory discoverability banner — only visible when no
                 # instance has memory yet, so it stops nagging once the user
                 # has engaged with the feature. One line, action first: on a
@@ -396,6 +533,16 @@ class InstanceListScreen(WorkspaceScreen):
                 with Horizontal(id="fleet_workspace_row", classes="fleet-workspace-row"):
                     with Vertical(id="fleet_table_column"):
                         yield InstanceTable()
+                        with Vertical(id="empty_fleet_card"):
+                            yield Static("[bold]No servers in your fleet yet[/bold]", id="empty_fleet_title")
+                            yield Static(
+                                "Add a custom SSH host, configure cloud providers, or open Teams for shared servers.",
+                                id="empty_fleet_text",
+                            )
+                            with Horizontal(id="empty_fleet_actions"):
+                                yield Button("Add custom server", variant="primary", id="btn_empty_add_custom")
+                                yield Button("Cloud settings", id="btn_empty_cloud_settings")
+                                yield Button("Teams", id="btn_empty_teams")
                         yield FleetSkeleton(id="fleet_skeleton")
                         yield FleetSummaryLine("", id="fleet_summary", markup=False)
                     with Vertical(id="fleet_inspector", classes="fleet-inspector"):
@@ -572,6 +719,7 @@ class InstanceListScreen(WorkspaceScreen):
             self._fetch_instances()
             self._fetch_ovh_instances()
             self._fetch_hetzner_instances()
+        self._sync_empty_fleet()
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
@@ -1019,12 +1167,30 @@ class InstanceListScreen(WorkspaceScreen):
         # The search text and the chips stay applied through a refresh, and
         # the table keeps the cursor on its server.
         table.configure_filters(
-            self.query_one("#search_input", Input).value, self._filter.matches,
+            self.query_one("#search_input", Input).value,
+            lambda row: self._filter.matches(row, shared_ids=table._shared_by),
         )
         table.set_marks(self._marks, redraw=False)
         table.populate(self._instances)
+        self._sync_empty_fleet()
         self._sync_memory_banner()
         self._update_detail_panel()
+
+    def _sync_empty_fleet(self) -> None:
+        """Show the onboarding card only when providers are idle and no servers exist."""
+        try:
+            card = self.query_one("#empty_fleet_card")
+            table = self.query_one(InstanceTable)
+            teams_btn = self.query_one("#btn_empty_teams", Button)
+        except NoMatches:
+            return
+        load_indicator = getattr(self, "_load", None)
+        empty_ready = not bool(getattr(load_indicator, "active", False)) and not bool(table._all_instances)
+        auth = getattr(self.app, "auth_service", None)
+        teams_btn.display = bool(
+            auth is not None and getattr(auth, "is_authenticated", False) and auth.has_feature("team_workspaces")
+        )
+        card.display = empty_ready
 
     def _sync_memory_banner(self) -> None:
         """Show the memory-discoverability banner only when no server has memory.
@@ -1082,16 +1248,19 @@ class InstanceListScreen(WorkspaceScreen):
         """Show the chips, their counts and the summary line for what the table lists."""
         try:
             table = self.query_one(InstanceTable)
-            counts = facets(table.searched_rows(), self._filter)
-            self._sync_chips(counts, table._all_instances)
+            shared_ids = frozenset(table._shared_by.keys())
+            counts = facets(table.searched_rows(), self._filter, shared_ids=shared_ids)
+            self._sync_chips(counts, table._all_instances, shared_ids=shared_ids)
             self._sync_summary(len(table._filtered_instances), len(table._all_instances))
         except NoMatches:
             return
         self._sync_updated()
 
-    def _sync_chips(self, counts: FleetFacets, fleet: List[dict]) -> None:
+    def _sync_chips(self, counts: FleetFacets, fleet: List[dict], *, shared_ids: frozenset[int] = frozenset()) -> None:
         """Label each chip with its count; show only the choices the fleet offers."""
         present = {row_provider(row) for row in fleet} | {row_state(row) for row in fleet}
+        if shared_ids:
+            present.add("shared")
         for chip in self.query(FleetChip):
             if chip.value == ALL:
                 number, shown = counts.total, True
@@ -1181,14 +1350,20 @@ class InstanceListScreen(WorkspaceScreen):
         self._filter = new_filter
         self._remember_filter()
         table = self.query_one(InstanceTable)
-        table.filter(self.query_one("#search_input", Input).value, self._filter.matches)
+        table.filter(
+            self.query_one("#search_input", Input).value,
+            lambda row: self._filter.matches(row, shared_ids=table._shared_by),
+        )
         self._update_status_bar()
         self._update_detail_panel()
 
     def _present_in_fleet(self, value: str) -> bool:
-        rows = self.query_one(InstanceTable)._all_instances
+        table = self.query_one(InstanceTable)
+        rows = table._all_instances
         if value in STATES:
             return value != STATE_OTHER or any(row_state(r) == value for r in rows)
+        if value == "shared" and table._shared_by:
+            return True
         return any(row_provider(r) == value for r in rows)
 
     def action_filter_state(self) -> None:
@@ -1355,6 +1530,7 @@ class InstanceListScreen(WorkspaceScreen):
             status.update(content)
         self._sync_load_timer()
         self._sync_skeleton()
+        self._sync_empty_fleet()
         self._sync_updated()
 
     def _sync_load_timer(self) -> None:
@@ -1431,7 +1607,7 @@ class InstanceListScreen(WorkspaceScreen):
         address = str(instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or "—")
         # Server-sourced text is content, never markup: a name written like a
         # markup link must neither crash the screen nor run an action.
-        header.update(Content.assemble(
+        parts: list[Any] = [
             literal(name, "bold $text-accent"),
             "  ",
             self._inspector_state_badge(instance),
@@ -1439,7 +1615,21 @@ class InstanceListScreen(WorkspaceScreen):
             literal(f"{provider} · {address}", "dim"),
             "\n",
             self._memory_line(instance),
-        ))
+        ]
+        key_badge = self._inspector_key_badge(instance)
+        if key_badge is not None:
+            parts.extend(("  ", key_badge))
+        header.update(Content.assemble(*parts))
+
+    @staticmethod
+    def _inspector_key_badge(instance: dict) -> Optional[Content]:
+        if (instance.get("ssh_ca") or {}).get("enrolled"):
+            return literal("● SSH CA ready", "$text-success")
+        binding = instance.get("credential_binding")
+        if isinstance(binding, Mapping) and binding.get("source") == "servonaut_vault":
+            label = "● team key ready" if instance.get("is_shared") is True else "● vault key ready"
+            return literal(label, "$text-success")
+        return None
 
     def _sync_memory_note(self) -> None:
         """Say the selected server's memory status in the status bar while the inspector is hidden."""
@@ -1493,7 +1683,7 @@ class InstanceListScreen(WorkspaceScreen):
     def _apply_search_filter(self, value: str) -> None:
         """Apply search filter and keyword search (called after debounce)."""
         table = self.query_one(InstanceTable)
-        table.filter(value, self._filter.matches)
+        table.filter(value, lambda row: self._filter.matches(row, shared_ids=table._shared_by))
         self._update_status_bar()
         self._update_detail_panel()
 
@@ -1787,6 +1977,12 @@ class InstanceListScreen(WorkspaceScreen):
         except VaultCredentialError as exc:
             self.app.notify(str(exc), severity="error", markup=False)
             return
+        if not conn.get("identity_agent"):
+            bw_key = await self._resolve_bw_key_if_configured(instance)
+            if bw_key == "__ABORT__":
+                return
+            if isinstance(bw_key, str) and bw_key:
+                conn["key_path"] = bw_key
         try:
             ssh_cmd = self.app.ssh_service.build_ssh_command(
                 host=conn["host"],
@@ -1993,6 +2189,28 @@ class InstanceListScreen(WorkspaceScreen):
         elif btn_id == "fleet_refresh":
             event.stop()
             self.action_refresh()
+        elif btn_id == "fleet_add_server":
+            event.stop()
+            self.action_add_server()
+        elif btn_id == "btn_empty_add_custom":
+            event.stop()
+            from servonaut.screens.custom_servers import CustomServersScreen
+
+            self.app.push_screen(CustomServersScreen(open_add_form=True))
+        elif btn_id == "btn_empty_cloud_settings":
+            event.stop()
+            open_settings = getattr(self.app, "open_settings_screen", None)
+            if callable(open_settings):
+                open_settings(initial_panel="aws")
+            else:
+                from servonaut.screens.settings import SettingsScreen
+
+                self.app.push_screen(SettingsScreen(initial_panel="aws"))
+        elif btn_id == "btn_empty_teams":
+            event.stop()
+            from servonaut.screens.team_management import TeamManagementScreen
+
+            self.app.switch_screen(TeamManagementScreen())
         elif btn_id in ("fleet_copy_row", "fleet_copy_row_line"):
             event.stop()
             self.action_copy_row()
@@ -2087,3 +2305,98 @@ class InstanceListScreen(WorkspaceScreen):
             return
         from servonaut.screens.db_fleet_scan import DbFleetScanScreen
         self.app.push_screen(DbFleetScanScreen(instances))
+
+    def action_add_server(self) -> None:
+        """Open the Add server workflow picker (custom SSH or cloud instance)."""
+        def _picked(choice: Optional[str]) -> None:
+            if choice == "custom":
+                from servonaut.screens.custom_servers import CustomServersScreen
+
+                self.app.push_screen(CustomServersScreen(open_add_form=True))
+            elif choice == "aws":
+                from servonaut.screens.aws_create import AWSCreateScreen
+
+                self.app.push_screen(AWSCreateScreen())
+            elif choice == "hetzner":
+                from servonaut.screens.hetzner_create import HetznerCreateScreen
+
+                self.app.push_screen(HetznerCreateScreen())
+            elif choice == "ovh":
+                from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
+
+                self.app.push_screen(OVHCloudCreateScreen())
+
+        self.app.push_screen(AddServerModal(), callback=_picked)
+
+    def action_use_vault_key(self) -> None:
+        """Bind a Vault SSH key directly to the selected instance row."""
+        instance = self.query_one(InstanceTable).get_selected_instance()
+        if not instance:
+            self.app.notify("No instance selected", severity="warning")
+            return
+        if refuse_unresolved(self.app, instance):
+            return
+        service = getattr(self.app, "vault_command_service", None)
+        if service is None:
+            self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
+            return
+        real = connection_instance(self.app, instance)
+
+        async def _flow() -> None:
+            from servonaut.screens.server_actions import VaultBindingModal
+
+            values = await self.app.push_screen_wait(VaultBindingModal(service, real))
+            if not values:
+                return
+            try:
+                await apply_vault_binding(self.app, service, real, values)
+            except Exception as exc:
+                self.app.notify(
+                    f"Vault key binding failed: {format_vault_bind_error(exc)}",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            self.app.notify("Vault key bound.", markup=False)
+            self._update_detail_panel()
+
+        self.run_worker(_flow(), group="vault", exclusive=True)
+
+    async def _resolve_bw_key_if_configured(self, instance: dict) -> Optional[str]:
+        """Resolve a Bitwarden SSH ref for quick SSH connect if configured on the instance."""
+        bw_svc = getattr(self.app, "bw_ssh_config_service", None)
+        team_svc = getattr(self.app, "team_service", None)
+        if bw_svc is None and not (instance.get("is_shared") is True and team_svc is not None):
+            return None
+        from servonaut.screens.server_actions import _NullBwService, _NullTeamService
+        from servonaut.services.ssh_ref_resolver import SshRefResolver, resolve_target
+
+        teams_supplier = None
+        if team_svc is not None:
+            try:
+                teams = await team_svc.list_teams()
+            except Exception:
+                teams = []
+            teams_supplier = lambda: teams  # noqa: E731
+        resolver = SshRefResolver(
+            bw_ssh_config_service=bw_svc or _NullBwService(),
+            team_service=team_svc or _NullTeamService(),
+            ssh_service=self.app.ssh_service,
+            teams_supplier=teams_supplier,
+            vault_runtime=None,
+        )
+        try:
+            _target, resolved = await resolve_target(resolver, instance, team_rows(self.app))
+        except Exception:
+            return None
+        if resolved is None or resolved.source not in ("personal", "team"):
+            return None
+        if not resolved.item_id:
+            self.app.notify(
+                "Bitwarden ref is missing item_id — re-register via Settings.",
+                severity="error",
+                markup=False,
+            )
+            return "__ABORT__"
+        path = await resolve_bw_ssh_key_path(self.app, resolved.item_id)
+        return path if path is not None else "__ABORT__"

@@ -204,6 +204,22 @@ class VaultAutoBindScreen(WorkspaceScreen):
     # Wider content can show the complete multi-column action grid.
     CONTENT_NARROW_WIDTH = 110
 
+    DEFAULT_CSS = """
+    VaultAutoBindScreen #auto_bind_empty_bridges {
+        height: auto;
+        margin-top: 1;
+    }
+    VaultAutoBindScreen #auto_bind_empty_bridges.-hidden {
+        display: none;
+    }
+    VaultAutoBindScreen #auto_bind_create_vault,
+    VaultAutoBindScreen #auto_bind_import_key {
+        width: auto;
+        min-width: 0;
+        margin-right: 1;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("space", "toggle_row", "Select", show=True),
@@ -229,6 +245,7 @@ class VaultAutoBindScreen(WorkspaceScreen):
         self._shown_as: dict[int, Mapping[str, Any]] = {}
         self._status_raw = ""
         self._busy = BusyWork(self, "#auto_bind_busy", display=self.scrub_for_display)
+        self._bridge_creatable: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -249,6 +266,9 @@ class VaultAutoBindScreen(WorkspaceScreen):
                                 compact=True,
                             )
                         yield Static(INTRO, id="auto_bind_intro", markup=False)
+                        with Horizontal(id="auto_bind_empty_bridges", classes="-hidden"):
+                            yield Button("Create vault…", id="auto_bind_create_vault", variant="primary")
+                            yield Button("Import SSH key…", id="auto_bind_import_key", variant="default")
                     yield BusyIndicator(id="auto_bind_busy")
                     yield Static("", id="auto_bind_status", markup=False)
                     with Horizontal(id="auto_bind_workspace"):
@@ -519,11 +539,27 @@ class VaultAutoBindScreen(WorkspaceScreen):
             return
         self.run_worker(self._load, group="vault_auto_bind", exclusive=True)
 
+    def _set_bridge_buttons(self, *, show_create: bool = False, show_import: bool = False) -> None:
+        container = self.query_one("#auto_bind_empty_bridges", Horizontal)
+        create_btn = self.query_one("#auto_bind_create_vault", Button)
+        import_btn = self.query_one("#auto_bind_import_key", Button)
+        create_btn.display = show_create
+        import_btn.display = show_import
+        if show_import and not show_create:
+            import_btn.variant = "primary"
+        else:
+            create_btn.variant = "primary"
+            import_btn.variant = "default"
+        container.set_class(not (show_create or show_import), "-hidden")
+
     async def _load(self) -> None:
         service = self._service()
         if service is None:
+            self._set_bridge_buttons()
             self._status("Vault services are unavailable: sign in, then open the Vault screen.")
             return
+        self._set_bridge_buttons()
+        self._bridge_creatable = []
         with self._busy.running("Finding your personal vault…", hold=_ACTIONS) as job:
             try:
                 vaults = await service.list_vaults()
@@ -535,12 +571,30 @@ class VaultAutoBindScreen(WorkspaceScreen):
             personal_vault_id = str(personal[0]["vault_id"]) if personal else None
 
             # Team role and name come from the team's real shared rows (team_rows(self.app))
+            # or live team service membership when Teams hasn't been visited yet.
             shared = team_rows(self.app)
             shared_by_slug: dict[str, list[dict[str, Any]]] = {}
             for row in shared:
                 slug = row.get("team_slug")
                 if slug:
                     shared_by_slug.setdefault(str(slug), []).append(row)
+
+            teams_by_slug: dict[str, dict[str, Any]] = {}
+            needs_team_lookup = any(
+                v.get("kind") == "team"
+                and v.get("my_grant") is not None
+                and str((v.get("team") or {}).get("slug") or v.get("team_slug") or "") not in shared_by_slug
+                for v in vaults
+            )
+            if needs_team_lookup:
+                team_svc = getattr(self.app, "team_service", None) or getattr(service, "teams", None)
+                if team_svc is not None and hasattr(team_svc, "list_teams"):
+                    try:
+                        for t in await team_svc.list_teams() or []:
+                            if isinstance(t, Mapping) and t.get("slug"):
+                                teams_by_slug[str(t["slug"])] = dict(t)
+                    except Exception:
+                        logger.debug("Could not inspect teams during auto-bind vault discovery", exc_info=True)
 
             team_vault_map: dict[str, tuple[str, str, str, str]] = {}
             team_vault_options_raw: list[tuple[str, str, str]] = []
@@ -554,17 +608,22 @@ class VaultAutoBindScreen(WorkspaceScreen):
                 if not slug:
                     continue
                 team_shared = shared_by_slug.get(slug, [])
+                team_entry = teams_by_slug.get(slug)
                 label = str(
                     (team_shared[0].get("team_name") if team_shared else None)
+                    or (team_entry.get("name") if team_entry else None)
                     or team_info.get("name") or v.get("label") or slug
                 )
                 if v.get("my_grant") is None:
                     not_offered.append(f"{label}: your access to its vault is not granted yet")
                     continue
-                if not team_shared:
+                if team_shared:
+                    real_role = str(team_shared[0].get("team_role") or "")
+                elif team_entry is not None:
+                    real_role = str(team_entry.get("role") or "")
+                else:
                     not_offered.append(f"{label}: no shared servers are listed (open the team on the Teams screen)")
                     continue
-                real_role = str(team_shared[0].get("team_role") or "")
                 role = real_role.lower()
                 if role in {"owner", "admin"}:
                     key = f"team:{slug}"
@@ -584,6 +643,13 @@ class VaultAutoBindScreen(WorkspaceScreen):
                 )
                 if not_offered:
                     message += " Team vaults not offered: " + "; ".join(not_offered) + "."
+                if callable(getattr(service, "creatable_vaults", None)):
+                    try:
+                        creatable = await service.creatable_vaults(vaults)
+                        self._bridge_creatable = [dict(opt) for opt in creatable if isinstance(opt, Mapping)]
+                    except Exception:
+                        self._bridge_creatable = []
+                self._set_bridge_buttons(show_create=bool(self._bridge_creatable))
                 self._status(message)
                 return
 
@@ -624,6 +690,7 @@ class VaultAutoBindScreen(WorkspaceScreen):
                 self._status(f"Could not read your vault's SSH keys ({vault_failure_reason(exc)}).")
                 return
             if not keys:
+                self._set_bridge_buttons(show_import=bool(self._vault_id and callable(getattr(service, "import_keys", None))))
                 if self._team:
                     clean_team = self.scrub_for_display(self._team_name or self._team)
                     self._status(f"Team vault for {clean_team} has no SSH key yet: import keys with Import SSH on the Vault screen.")
@@ -796,6 +863,45 @@ class VaultAutoBindScreen(WorkspaceScreen):
             self._render_rows()
         elif button == "auto_bind_apply":
             self._start_binding()
+        elif button == "auto_bind_create_vault":
+            self.run_worker(self._create_vault_bridge(), group="vault_auto_bind", exclusive=True)
+        elif button == "auto_bind_import_key":
+            self.run_worker(self._import_key_bridge(), group="vault_auto_bind", exclusive=True)
+
+    async def _create_vault_bridge(self) -> None:
+        service = self._service()
+        if service is None or not self._bridge_creatable:
+            return
+        from servonaut.screens.vault import VaultCreateModal
+
+        choice = await self.app.push_screen_wait(VaultCreateModal(list(self._bridge_creatable)))
+        if not isinstance(choice, Mapping):
+            return
+        try:
+            with self._busy.running("Creating vault…", hold=_ACTIONS):
+                await service.create_vault(team=choice.get("team"), name=None, grant_policy="auto")
+        except Exception as exc:
+            self.app.notify(f"Could not create the vault ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        self.app.notify("Vault created.", markup=False)
+        self.action_reload()
+
+    async def _import_key_bridge(self) -> None:
+        service = self._service()
+        if service is None or not self._vault_id:
+            return
+        from servonaut.screens.vault_import_modal import VaultImportModal
+
+        summary = await self.app.push_screen_wait(
+            VaultImportModal(
+                service,
+                self._vault_id,
+                session_service=getattr(self.app, "bw_session_service", None),
+                vault_name=self.scrub_for_display(self._team_name or self._team or "Personal vault"),
+            )
+        )
+        if isinstance(summary, Mapping) and (summary.get("imported") or summary.get("duplicates")):
+            self.action_reload()
 
     def _start_binding(self) -> None:
         if self._busy.is_busy or not self._selected:

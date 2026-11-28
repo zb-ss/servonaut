@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
@@ -9,11 +11,12 @@ from textual.containers import Container, Grid, Horizontal, ScrollableContainer,
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
-from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static, TextArea
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import reconcile_team_memory, replace_instances
+from servonaut.screens._demo_resolve import real_fleet_rows, reconcile_team_memory, replace_instances
+from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error
 from servonaut.utils.markup import cell
 
 
@@ -30,8 +33,45 @@ class CustomServersScreen(WorkspaceScreen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("n", "add_server", "Add", show=True),
+        Binding("e", "edit_server", "Edit", show=True),
         Binding("d", "remove_server", "Remove", show=True),
     ]
+
+    DEFAULT_CSS = """
+    CustomServersScreen #custom_post_save_row {
+        height: auto;
+        margin: 1 0;
+        padding: 1;
+        border: round $border-blurred;
+        background: transparent;
+        align: left middle;
+    }
+    CustomServersScreen #custom_post_save_text {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
+    CustomServersScreen #btn_edit_server {
+        width: auto;
+    }
+    CustomServersScreen #select_custom_ssh_key {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    CustomServersScreen #btn_custom_open_server,
+    CustomServersScreen #btn_custom_bind_vault,
+    CustomServersScreen #btn_custom_share_team {
+        width: auto;
+        min-width: 0;
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, open_add_form: bool = False) -> None:
+        super().__init__()
+        self._open_add_form = open_add_form
+        self._editing_name: Optional[str] = None
+        self._last_saved_name: Optional[str] = None
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self.navigation_focused:
@@ -55,16 +95,22 @@ class CustomServersScreen(WorkspaceScreen):
                         with Horizontal(id="custom_servers_toolbar"):
                             yield Static("Saved hosts", classes="custom-section-title")
                             with ActionRow(classes="add_row"):
-                                yield ActionButton("Add server", "n", role="primary", id="btn_add_server")
+                                yield ActionButton("Add server", "n", short="Add", role="primary", id="btn_add_server")
+                                yield ActionButton("Edit selected", "e", short="Edit", id="btn_edit_server")
                                 yield ActionButton(
                                     "Remove selected", "d", short="Remove", role="error", id="btn_remove_server"
                                 )
                                 yield ActionButton("Back", "esc", id="btn_back")
                         yield DataTable(id="custom_servers_table")
                         yield Static(
-                            "Use the arrow keys to choose a host. Scroll sideways for all connection fields.",
+                            "Use the arrow keys to choose a host, or press e / Enter to edit. Scroll sideways for all connection fields.",
                             classes="custom-record-note",
                         )
+                    with Horizontal(id="custom_post_save_row"):
+                        yield Static("", id="custom_post_save_text", markup=False)
+                        yield Button("Open server", variant="primary", id="btn_custom_open_server")
+                        yield Button("Bind vault key", id="btn_custom_bind_vault")
+                        yield Button("Share with team", id="btn_custom_share_team")
                     with Container(id="add_form"):
                         yield Static("Server details", classes="custom-section-title")
                         yield Static("Connection", classes="custom-form-group-title")
@@ -79,7 +125,13 @@ class CustomServersScreen(WorkspaceScreen):
                                 yield Label("Username")
                                 yield Input(placeholder="root", id="input_username")
                             with Vertical(classes="custom-field"):
-                                yield Label("SSH key path")
+                                yield Label("SSH key path (optional)")
+                                yield Select(
+                                    [],
+                                    prompt="Pick a local SSH key (optional)…",
+                                    allow_blank=True,
+                                    id="select_custom_ssh_key",
+                                )
                                 yield Input(placeholder="~/.ssh/id_rsa", id="input_ssh_key")
                             with Vertical(classes="custom-field"):
                                 yield Label("SSH port")
@@ -108,7 +160,11 @@ class CustomServersScreen(WorkspaceScreen):
         """Set up table and hide form on mount."""
         self._setup_table()
         self._populate_table()
+        self.query_one("#custom_post_save_row").display = False
+        self._refresh_ssh_key_select()
         self._hide_form()
+        if self._open_add_form:
+            self._show_form()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the table; close an open form when demo mode turns on.
@@ -118,9 +174,24 @@ class CustomServersScreen(WorkspaceScreen):
         refused in demo mode.
         """
         self._populate_table()
+        self._refresh_ssh_key_select()
         if self.app.demo_mode and self.query_one("#add_form").display:
             self._show_form()  # resets every field to the blank "add" state
             self._hide_form()
+
+    def _refresh_ssh_key_select(self) -> None:
+        try:
+            select = self.query_one("#select_custom_ssh_key", Select)
+        except Exception:
+            return
+        if self.app.demo_mode and self.app.redaction_service:
+            select.display = False
+            select.set_options([])
+            return
+        ssh_svc = getattr(self.app, "ssh_service", None)
+        keys = ssh_svc.list_available_keys() if ssh_svc is not None and hasattr(ssh_svc, "list_available_keys") else []
+        select.set_options([(k, k) for k in keys])
+        select.display = bool(keys)
 
     def _setup_table(self) -> None:
         """Configure DataTable columns."""
@@ -172,6 +243,7 @@ class CustomServersScreen(WorkspaceScreen):
 
     def _hide_form(self) -> None:
         """Hide the add/edit form AND its docked Save/Cancel row."""
+        self._editing_name = None
         self.query_one("#add_form").display = False
         self.query_one("#add_form_actions").display = False
 
@@ -191,11 +263,16 @@ class CustomServersScreen(WorkspaceScreen):
             )
             return
 
+        self._editing_name = server.name if server is not None else None
+        self.query_one("#custom_post_save_row").display = False
+        self._refresh_ssh_key_select()
         form = self.query_one("#add_form")
         form.display = True
         self.query_one("#add_form_actions").display = True
 
         extras_area = self.query_one("#input_extra_ssh_options", TextArea)
+        key_select = self.query_one("#select_custom_ssh_key", Select)
+        key_select.clear()
         if server:
             self.query_one("#input_name", Input).value = server.name
             self.query_one("#input_host", Input).value = server.host
@@ -217,24 +294,50 @@ class CustomServersScreen(WorkspaceScreen):
 
         self.query_one("#input_name", Input).focus()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "select_custom_ssh_key" and isinstance(event.value, str) and event.value:
+            self.query_one("#input_ssh_key", Input).value = event.value
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "custom_servers_table":
+            self.action_edit_server()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events."""
         button_id = event.button.id
 
         if button_id == "btn_add_server":
             self.action_add_server()
+        elif button_id == "btn_edit_server":
+            self.action_edit_server()
         elif button_id == "btn_remove_server":
             self.action_remove_server()
         elif button_id == "btn_save_server":
             self._save_server()
         elif button_id == "btn_cancel_form":
             self._hide_form()
+        elif button_id == "btn_custom_open_server":
+            self._open_saved_server()
+        elif button_id == "btn_custom_bind_vault":
+            self._bind_saved_server_vault()
+        elif button_id == "btn_custom_share_team":
+            self._share_saved_server_team()
         elif button_id == "btn_back":
             self.action_back()
 
     def action_add_server(self) -> None:
         """Show form to add a new server."""
         self._show_form()
+
+    def action_edit_server(self) -> None:
+        """Show form to edit the selected server."""
+        table = self.query_one("#custom_servers_table", DataTable)
+        row = table.cursor_row
+        servers = self.app.custom_server_service.list_servers()
+        if row < 0 or row >= len(servers):
+            self.app.notify("No server selected", severity="warning")
+            return
+        self._show_form(servers[row])
 
     def action_remove_server(self) -> None:
         """Remove the selected server from the table."""
@@ -308,8 +411,19 @@ class CustomServersScreen(WorkspaceScreen):
                 name, host, username, ssh_key, provider, group,
             )
 
-        # Try update first (if name already exists), else add
-        if not self.app.custom_server_service.update_server(name, server):
+        editing_name = getattr(self, "_editing_name", None)
+        if editing_name and editing_name != name:
+            existing = self.app.custom_server_service.get_server(name)
+            if existing is not None:
+                self.app.notify(f"Custom server '{name}' already exists", severity="error", markup=False)
+                return
+            try:
+                self.app.custom_server_service.add_server(server)
+                self.app.custom_server_service.remove_server(editing_name)
+            except ValueError as e:
+                self.app.notify(str(e), severity="error", markup=False)
+                return
+        elif not self.app.custom_server_service.update_server(name, server):
             try:
                 self.app.custom_server_service.add_server(server)
             except ValueError as e:
@@ -319,7 +433,87 @@ class CustomServersScreen(WorkspaceScreen):
         self._populate_table()
         self._refresh_app_instances()
         self._hide_form()
-        self.app.notify(f"Saved server: {name}", severity="information")
+        self._show_post_save_row(name)
+        shown = name
+        if self.app.demo_mode and self.app.redaction_service:
+            shown = self.app.redaction_service.redact_name(name)
+        self.app.notify(f"Saved server: {shown}", severity="information", markup=False)
+
+    def _show_post_save_row(self, name: str) -> None:
+        self._last_saved_name = name
+        auth_svc = getattr(self.app, "auth_service", None)
+        can_team = bool(auth_svc is not None and getattr(auth_svc, "is_authenticated", False) and auth_svc.has_feature("team_workspaces"))
+        can_vault = bool(getattr(self.app, "vault_available", False) and getattr(self.app, "vault_command_service", None) is not None)
+        self.query_one("#custom_post_save_text", Static).update(
+            "Server saved. Choose your next step:"
+        )
+        self.query_one("#btn_custom_bind_vault", Button).display = can_vault
+        self.query_one("#btn_custom_share_team", Button).display = can_team
+        self.query_one("#custom_post_save_row").display = True
+
+    def _saved_display_row(self) -> Optional[dict]:
+        name = self._last_saved_name
+        if not name:
+            return None
+        for row in getattr(self.app, "instances", None) or []:
+            if row.get("is_custom") is True and row.get("name") == name:
+                return row
+        for row in real_fleet_rows(self.app) or []:
+            if row.get("is_custom") is True and row.get("name") == name:
+                return row
+        return None
+
+    def _saved_real_row(self) -> Optional[dict]:
+        name = self._last_saved_name
+        if not name:
+            return None
+        for row in real_fleet_rows(self.app) or []:
+            if row.get("is_custom") is True and row.get("name") == name:
+                return row
+        return None
+
+    def _open_saved_server(self) -> None:
+        row = self._saved_display_row()
+        if row is None:
+            self.app.notify("Saved server row is not loaded in Instances yet.", severity="warning")
+            return
+        from servonaut.screens.server_actions import ServerActionsScreen
+
+        self.app.push_screen(ServerActionsScreen(row))
+
+    def _bind_saved_server_vault(self) -> None:
+        service = getattr(self.app, "vault_command_service", None)
+        if service is None:
+            self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
+            return
+        row = self._saved_real_row()
+        if row is None:
+            self.app.notify("Save the server first, or bind from Instances.", severity="warning")
+            return
+
+        async def _flow() -> None:
+            from servonaut.screens.server_actions import VaultBindingModal
+
+            values = await self.app.push_screen_wait(VaultBindingModal(service, row))
+            if not values:
+                return
+            try:
+                await apply_vault_binding(self.app, service, row, values)
+            except Exception as exc:
+                self.app.notify(
+                    f"Vault key binding failed: {format_vault_bind_error(exc)}",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            self.app.notify("Vault key bound.", markup=False)
+
+        self.run_worker(_flow(), group="vault", exclusive=True)
+
+    def _share_saved_server_team(self) -> None:
+        from servonaut.screens.team_management import TeamManagementScreen
+
+        self.app.switch_screen(TeamManagementScreen())
 
     def _refresh_app_instances(self) -> None:
         """Replace the custom-server rows in ``app.instances``.
