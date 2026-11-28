@@ -108,6 +108,7 @@ if TYPE_CHECKING:
         Envelope,
         KeyPair,
     )
+    from servonaut.services.memory.key_custody import RotationResult
     from servonaut.services.memory.retrieval_service import MemoryRetrievalService
     from servonaut.services.memory.service import MemoryService
     from servonaut.services.config.manager import ConfigManager
@@ -138,6 +139,8 @@ _SHARE_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
 )
 _QUEUE_CAP = 5000
+# Upper bound on drain rounds after a key rotation; each round moves one batch.
+_MAX_REUPLOAD_BATCHES = 200
 _QUEUE_WATCHDOG_WARN = 1000
 
 # Halt backoff multiplier for quota_exceeded (10× the normal interval)
@@ -1890,6 +1893,50 @@ class MemorySyncService:
         )
         self._announce_key_material()
         logger.info("Rotated memory keypair fingerprint=%s", new_kp.fingerprint)
+
+    async def rotate_keypair_in_vault(self) -> "RotationResult":
+        """Rotate a vault-held key and upload local memory again under the new one.
+
+        The key work (next item, signed rotate call, old item delete) lives in
+        :meth:`MemoryKeyCustody.rotate_in_vault`; this adopts the new key and
+        runs the upload in between.  Errors are mapped like other key writes:
+        ``UpsellRequired``, ``VaultCustodyLocked``, ``RateLimited``; a refusal
+        carrying ``item_type_exists`` is raised unchanged for
+        ``custody_error_message(exc, "rotation")``.
+        """
+        if self._key_custody is None:
+            raise VaultCustodyUnavailable("Memory Sync is not wired to a vault.")
+        try:
+            return await self._key_custody.rotate_in_vault(self._adopt_and_reupload)
+        except RateLimitedError as exc:
+            raise RateLimited(
+                endpoint="/api/v1/memory/keys/rotate", retry_after_s=86400.0) from exc
+        except APIError as exc:
+            self._raise_mapped_key_write_error(exc)
+            raise
+
+    async def retry_pending_item_cleanup(self) -> bool:
+        """Retry the delete of a previous key's vault item; call it after a vault unlock."""
+        if self._key_custody is None:
+            return True
+        return await self._key_custody.retry_pending_item_cleanup()
+
+    async def _adopt_and_reupload(self, material: Any) -> Optional[str]:
+        """Adopt the rotated key, queue all local memory and drain; the error reason or ``None``.
+
+        ``drain_now`` re-queues on API errors and returns an empty batch, so
+        the status is read after the loop to tell a drained queue from a stuck one.
+        """
+        self.adopt_key_material(material.user_id, material.public_key, material.private_key)
+        self.backfill_from_local_store()
+        for _ in range(_MAX_REUPLOAD_BATCHES):
+            result = await self.drain_now()
+            if not result.accepted and not result.rejected:
+                break
+        status = self.status
+        if status.pending_envelopes <= 0:
+            return None
+        return status.halted_reason or status.last_error or "upload_incomplete"
 
     # ------------------------------------------------------------------
     # Internal helpers

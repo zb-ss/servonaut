@@ -54,6 +54,7 @@ class FakeItems:
         self.list_error: Exception | None = None
         self.create_error: Exception | None = None
         self.corrupt_read_back = False
+        self.delete_errors: dict[str, Exception] = {}
 
     async def list(self, item_type):
         if self.list_error:
@@ -74,6 +75,8 @@ class FakeItems:
         return AppKeyRef("i-new", 1, payload["public_fingerprint"])
 
     async def delete(self, item_type, fingerprint):
+        if fingerprint in self.delete_errors:
+            raise self.delete_errors[fingerprint]
         self.deleted.append(fingerprint)
         return self.payloads.pop(fingerprint, None) is not None
 
@@ -619,3 +622,239 @@ def test_custody_config_defaults_and_overrides() -> None:
     assert MemoryConfig().custody_check_interval_hours == 24 and MemoryConfig().vault_key_recheck_seconds == 60
     config = MemoryConfig(custody_check_interval_hours=0, vault_key_recheck_seconds=5)
     assert config.custody_check_interval_seconds() == 0 and config.vault_key_recheck_wait() == 5
+
+
+# --- rotation in the vault -----------------------------------------------------
+
+from servonaut.services.memory.custody_errors import custody_error_message  # noqa: E402
+
+IN_USE = APIError(code="memory_key_in_use", message="svc wording", status=409)
+
+
+def _vault_account(env, record_pair=None):
+    """An account whose active key is vault-held; returns the active pair."""
+    pair = record_pair or env.with_item()
+    env.keys_me(**_record(pair, custody="vault", wrapped_private_key=None))
+    env.write_marker("vault", pair.fingerprint)
+    return pair
+
+
+def _uploader(error=None):
+    calls = []
+
+    async def upload(material):
+        calls.append(material)
+        return error
+
+    upload.calls = calls
+    return upload
+
+
+@pytest.mark.asyncio
+async def test_rotation_happy_path_runs_the_five_steps_in_order(env) -> None:
+    old = _vault_account(env)
+    events = []
+    base_delete = env.items.delete
+
+    async def traced_delete(item_type, fingerprint):
+        events.append("delete-old")
+        return await base_delete(item_type, fingerprint)
+
+    env.items.delete = traced_delete
+    upload = _uploader()
+
+    async def traced_upload(material):
+        events.append("upload")
+        assert env.marker()["fingerprint"] == crypto.fingerprint(material.public_key)
+        return await upload(material)
+
+    result = await env.custody.rotate_in_vault(traced_upload)
+
+    new_fp = env.items.created[0]
+    assert events == ["upload", "delete-old"]
+    method, path = env.api.request_signed.await_args.args
+    assert (method, path) == ("POST", "/api/v1/memory/keys/rotate")
+    kwargs = env.api.request_signed.await_args.kwargs
+    assert kwargs["device"] is env.signer
+    assert kwargs["json"]["fingerprint"] == new_fp and kwargs["json"]["custody"] == "vault"
+    assert "private" not in json.dumps(kwargs["json"])
+    assert list(env.items.payloads) == [new_fp]
+    assert env.items.deleted == [old.fingerprint]
+    assert (result.fingerprint, result.previous_fingerprint) == (new_fp, old.fingerprint)
+    assert result.old_item_kept is False and result.upload_error is None
+    assert env.marker()["fingerprint"] == new_fp
+    assert upload.calls[0].public_key == _pair_of(env, new_fp).public_key
+
+
+@pytest.mark.asyncio
+async def test_refusal_deletes_the_next_item_and_keeps_the_old_one(env) -> None:
+    old = _vault_account(env)
+    error = APIError(code="vault_not_ready", message="m", status=409)
+    env.api.request_signed = AsyncMock(side_effect=error)
+    upload = _uploader()
+    with pytest.raises(APIError) as caught:
+        await env.custody.rotate_in_vault(upload)
+    assert caught.value is error
+    assert list(env.items.payloads) == [old.fingerprint]
+    assert env.marker()["fingerprint"] == old.fingerprint
+    assert upload.calls == []
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_rotation_ratchets_the_limiter_and_cleans_up(env) -> None:
+    old = _vault_account(env)
+    env.api.request_signed = AsyncMock(
+        side_effect=RateLimitedError(code="rate_limited", message="m", status=429))
+    with pytest.raises(RateLimitedError):
+        await env.custody.rotate_in_vault(_uploader())
+    assert list(env.items.payloads) == [old.fingerprint]
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_keeps_the_next_item_for_a_resume(env) -> None:
+    old = _vault_account(env)
+    env.api.request_signed = AsyncMock(side_effect=OSError("reset"))
+    with pytest.raises(OSError):
+        await env.custody.rotate_in_vault(_uploader())
+    assert len(env.items.payloads) == 2 and env.items.deleted == []
+    assert env.marker()["fingerprint"] == old.fingerprint
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_next_item_resumes_by_deleting_the_leftover(env) -> None:
+    """The service never saw the next item: it is not active, so the next run removes it."""
+    old = _vault_account(env)
+    leftover = env.with_item()
+    result = await env.custody.rotate_in_vault(_uploader())
+    assert leftover.fingerprint in env.items.deleted
+    assert len(env.items.created) == 1 and env.items.created[0] != leftover.fingerprint
+    assert list(env.items.payloads) == [env.items.created[0]]
+    assert result.previous_fingerprint == old.fingerprint
+
+
+@pytest.mark.asyncio
+async def test_crash_after_the_service_accepted_the_key_keeps_the_new_key_active(env) -> None:
+    """Service says the new key is active and the old item is still there: no rotate call, cleanup retried."""
+    old = env.with_item()
+    new = env.with_item()
+    env.keys_me(**_record(new, custody="vault", wrapped_private_key=None))
+    env.write_marker("vault", new.fingerprint)
+    assert (await env.custody.resolve()).material is not None  # new key adopted, not the old one
+    assert (await env.custody.resolve()).fingerprint == new.fingerprint
+    assert await env.custody.retry_pending_item_cleanup() is True
+    assert env.items.deleted == [old.fingerprint]
+    env.api.request_signed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_old_item_kept_on_409_then_retried_after_the_next_unlock(env) -> None:
+    old = _vault_account(env)
+    env.items.delete_errors[old.fingerprint] = IN_USE
+    result = await env.custody.rotate_in_vault(_uploader())
+    assert result.old_item_kept is True
+    assert old.fingerprint in env.items.payloads and len(env.items.payloads) == 2
+    new_fp = result.fingerprint
+    env.keys_me(**_record(_pair_of(env, new_fp), custody="vault", wrapped_private_key=None))
+    # still in use: kept, quietly
+    assert await env.custody.retry_pending_item_cleanup() is False
+    assert old.fingerprint in env.items.payloads
+    # the service allows it later
+    env.items.delete_errors.clear()
+    assert await env.custody.retry_pending_item_cleanup() is True
+    assert list(env.items.payloads) == [new_fp]
+
+
+def _pair_of(env, fingerprint):
+    payload = env.items.payloads[fingerprint]
+    return SimpleNamespace(
+        public_key=base64.b64decode(payload["public_key"]), fingerprint=fingerprint)
+
+
+@pytest.mark.asyncio
+async def test_second_rotation_while_the_old_item_is_kept_stops_with_the_rotation_text(env) -> None:
+    old = _vault_account(env)
+    env.items.delete_errors[old.fingerprint] = IN_USE
+    first = await env.custody.rotate_in_vault(_uploader())
+    env.keys_me(**_record(_pair_of(env, first.fingerprint), custody="vault", wrapped_private_key=None))
+    env.api.request_signed.reset_mock()
+    created_before = len(env.items.created)
+    with pytest.raises(APIError) as caught:
+        await env.custody.rotate_in_vault(_uploader())
+    assert caught.value.code == "item_type_exists"
+    assert len(env.items.created) == created_before
+    env.api.request_signed.assert_not_called()
+    text = custody_error_message(caught.value, context="rotation")
+    assert text is not None and text.startswith("Your previous Memory Sync key is still needed")
+
+
+@pytest.mark.asyncio
+async def test_upload_problem_is_reported_and_the_old_item_is_still_deleted(env) -> None:
+    old = _vault_account(env)
+    result = await env.custody.rotate_in_vault(_uploader(error="quota_exceeded"))
+    assert result.upload_error == "quota_exceeded"
+    assert old.fingerprint in env.items.deleted
+
+    env2 = Env(env.marker_path.parent.parent / "other")
+    _vault_account(env2)
+
+    async def boom(material):
+        raise RuntimeError("secret-looking text")
+
+    result2 = await env2.custody.rotate_in_vault(boom)
+    assert result2.upload_error == "upload_failed" and "secret" not in repr(result2)
+
+
+@pytest.mark.asyncio
+async def test_rotation_refuses_non_vault_accounts_and_foreign_active_keys(env) -> None:
+    pair = env.with_item()
+    env.keys_me(**_record(pair, wrapped_private_key="{}"))  # passphrase custody
+    with pytest.raises(VaultCustodyUnavailable):
+        await env.custody.rotate_in_vault(_uploader())
+    env.keys_me(**_record(crypto.generate_keypair(), custody="vault", wrapped_private_key=None))
+    with pytest.raises(VaultCustodyUnavailable):  # the vault does not hold the active key
+        await env.custody.rotate_in_vault(_uploader())
+    env.api.get = AsyncMock(side_effect=NotFoundError(code="not_found", message="x", status=404))
+    with pytest.raises(VaultCustodyUnavailable):
+        await env.custody.rotate_in_vault(_uploader())
+    assert env.items.created == [] and env.items.deleted == []
+    env.api.request_signed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rotation_needs_an_unlocked_vault_a_signer_and_a_writable_custody(tmp_path) -> None:
+    locked = Env(tmp_path / "a", unlocked=False)
+    with pytest.raises(VaultCustodyLocked):
+        await locked.custody.rotate_in_vault(_uploader())
+    no_signer = Env(tmp_path / "b")
+    no_signer.locked_signer = True
+    with pytest.raises(VaultCustodyLocked):
+        await no_signer.custody.rotate_in_vault(_uploader())
+    read_only = Env(tmp_path / "c", writable=False)
+    with pytest.raises(RuntimeError):
+        await read_only.custody.rotate_in_vault(_uploader())
+
+
+@pytest.mark.asyncio
+async def test_retry_cleanup_never_raises_and_does_nothing_without_a_vault_or_a_second_item(tmp_path) -> None:
+    locked = Env(tmp_path / "a", unlocked=False)
+    assert await locked.custody.retry_pending_item_cleanup() is False
+    single = Env(tmp_path / "b")
+    single.with_item()
+    assert await single.custody.retry_pending_item_cleanup() is True
+    single.api.get.assert_not_called()
+    broken = Env(tmp_path / "c")
+    broken.items.list_error = OSError("down")
+    assert await broken.custody.retry_pending_item_cleanup() is False
+    read_only = Env(tmp_path / "d", writable=False)
+    assert await read_only.custody.retry_pending_item_cleanup() is True
+
+
+@pytest.mark.asyncio
+async def test_retry_cleanup_never_deletes_the_active_key_when_the_marker_is_stale(env) -> None:
+    """A stale marker names the wrong key as active: the service's guard refuses and nothing is lost."""
+    a = env.with_item()
+    b = env.with_item()
+    env.write_marker("vault", a.fingerprint)  # stale: b is really active
+    env.items.delete_errors[b.fingerprint] = IN_USE
+    await env.custody.retry_pending_item_cleanup()
+    assert b.fingerprint in env.items.payloads

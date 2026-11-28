@@ -2352,3 +2352,74 @@ class TestUnlockFromVault:
             svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
             assert await svc.unlock_local("pw") is LocalUnlock.OK
         assert svc.key_source == "passphrase"
+
+
+class TestRotateInVault:
+    @pytest.mark.asyncio
+    async def test_adopts_the_new_key_backfills_and_drains_until_empty(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        material = _vault_material()
+        listener = MagicMock()
+        svc.set_key_material_listener(listener)
+        svc.backfill_from_local_store = MagicMock(return_value=2)
+        batches = [
+            MagicMock(accepted=["a"], rejected=[]),
+            MagicMock(accepted=[], rejected=[]),
+        ]
+        svc.drain_now = AsyncMock(side_effect=batches)
+        sentinel = object()
+
+        async def rotate(upload):
+            assert await upload(material) is None
+            return sentinel
+
+        custody.rotate_in_vault = AsyncMock(side_effect=rotate)
+        assert await svc.rotate_keypair_in_vault() is sentinel
+        assert svc.get_key_material() == material and svc.key_source == "vault"
+        listener.assert_called_once()
+        svc.backfill_from_local_store.assert_called_once()
+        assert svc.drain_now.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_stuck_queue_reports_the_reason_after_the_loop(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        svc.backfill_from_local_store = MagicMock(return_value=0)
+        svc.drain_now = AsyncMock(return_value=MagicMock(accepted=[], rejected=[]))
+        svc._halted_reason = "quota_exceeded"
+        svc._pending.append(MagicMock())
+
+        async def rotate(upload):
+            return await upload(_vault_material())
+
+        custody.rotate_in_vault = AsyncMock(side_effect=rotate)
+        assert await svc.rotate_keypair_in_vault() == "quota_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_errors_are_mapped_like_other_key_writes(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        custody.rotate_in_vault = AsyncMock(side_effect=_Forbidden(
+            code="forbidden_entitlement", message="m", status=403, details={"required_plan": "solo"}))
+        with pytest.raises(_Upsell):
+            await svc.rotate_keypair_in_vault()
+        custody.rotate_in_vault = AsyncMock(side_effect=_APIError(
+            code="device_signature_required", message="m", status=403))
+        with pytest.raises(_Locked):
+            await svc.rotate_keypair_in_vault()
+        exists = _APIError(code="item_type_exists", message="m", status=409)
+        custody.rotate_in_vault = AsyncMock(side_effect=exists)
+        with pytest.raises(_APIError) as caught:
+            await svc.rotate_keypair_in_vault()
+        assert caught.value is exists
+
+    @pytest.mark.asyncio
+    async def test_without_a_custody_it_is_unavailable_and_retry_is_a_no_op(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path)
+        with pytest.raises(_Unavailable):
+            await svc.rotate_keypair_in_vault()
+        assert await svc.retry_pending_item_cleanup() is True
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_item_cleanup_delegates(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        custody.retry_pending_item_cleanup = AsyncMock(return_value=False)
+        assert await svc.retry_pending_item_cleanup() is False

@@ -56,6 +56,9 @@ MODE_PASSPHRASE = "passphrase"
 
 _KEYS_ME_PATH = "/api/v1/memory/keys/me"
 _KEYS_PATH = "/api/v1/memory/keys"
+_KEYS_ROTATE_PATH = "/api/v1/memory/keys/rotate"
+_MEMORY_KEY_IN_USE = "memory_key_in_use"
+_ITEM_TYPE_EXISTS = "item_type_exists"
 _MARKER_FILE_VERSION = 1
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _KEY_ITEM_NAME = "Servonaut Memory Sync key"
@@ -135,6 +138,28 @@ class CustodyMarker:
     fingerprint: str
     public_key: str
     checked_at: str
+
+
+@dataclass(frozen=True)
+class RotationResult:
+    """How a vault-mode key rotation ended (public values only).
+
+    ``old_item_kept`` is true when the service still needs the previous key
+    for older memory; the next vault unlock retries the delete through
+    :meth:`MemoryKeyCustody.retry_pending_item_cleanup`.  ``upload_error`` is
+    ``None`` when local memory was uploaded again under the new key, else the
+    reason the queue was left non-empty.
+    """
+
+    fingerprint: str
+    previous_fingerprint: str
+    old_item_kept: bool
+    upload_error: Optional[str] = None
+
+
+#: Called with the new key once the service accepted it; uploads local memory
+#: again under it and returns an error reason, or ``None`` when the queue drained.
+RotationUploader = Callable[[KeyMaterial], Awaitable[Optional[str]]]
 
 
 @dataclass
@@ -498,6 +523,158 @@ class MemoryKeyCustody:
             await items.delete(MEMORY_KEY, fingerprint)
         except Exception:  # noqa: BLE001 — cleanup must not hide the refusal that led here
             logger.warning("could not delete the unused Memory Sync key item", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Rotation
+    # ------------------------------------------------------------------
+
+    async def rotate_in_vault(self, upload: RotationUploader) -> RotationResult:
+        """Replace the vault-held key: next item, signed rotate call, re-upload, delete the old item.
+
+        Every step can be repeated after a crash.  A crash after the next
+        item exists leaves it as a non-active item that the next run deletes
+        (the service never learned of it); a crash after the service accepted
+        the key leaves the old item as a non-active item whose delete the
+        service allows once no memory is wrapped to it.  Either way the
+        active key is whichever the service names, and that is the one
+        :meth:`resolve` adopts.
+
+        Raises:
+            VaultCustodyLocked: The vault or the device signer is not available.
+            VaultCustodyUnavailable: The account is not in vault custody, or
+                the vault does not hold the active key.
+            APIError: The service refused (an ``item_type_exists`` answer means
+                the previous key is still needed); the next item is deleted again.
+        """
+        if not self._writable:
+            raise RuntimeError("a read-only custody cannot rotate a key")
+        items = self._app_keys_provider()
+        if items is None:
+            raise VaultCustodyLocked("vault_locked")
+        signer = self._signer()
+        user_id = await self._user_id()
+        previous = await self._active_fingerprint_in_vault(items)
+        if await self._finish_earlier_rotation(items, previous):
+            raise APIError(
+                code=_ITEM_TYPE_EXISTS, status=409,
+                message="a previous Memory Sync key item is still in use",
+            )
+        material = await self._create_item(items, user_id)
+        fingerprint = crypto.fingerprint(material.public_key)
+        try:
+            await self._post_rotation(material, fingerprint, signer)
+        except APIError:
+            await self._drop_item(items, fingerprint)
+            raise
+        self._write_marker(CustodyMarker(
+            user_id=user_id, custody=CUSTODY_VAULT, fingerprint=fingerprint,
+            public_key=base64.b64encode(material.public_key).decode(),
+            checked_at=self._now_iso(),
+        ))
+        upload_error = await self._run_upload(upload, material)
+        kept = await self._delete_unless_in_use(items, previous)
+        return RotationResult(
+            fingerprint=fingerprint, previous_fingerprint=previous,
+            old_item_kept=kept, upload_error=upload_error,
+        )
+
+    async def retry_pending_item_cleanup(self) -> bool:
+        """Delete a previous key's item that a rotation had to keep; never raises.
+
+        Call it after the vault unlocks.  Returns ``True`` when the vault is
+        left with no item besides the active key (or there was nothing to do),
+        ``False`` when an item was kept or the check could not be made.  The
+        service decides what may go: it refuses to delete a key that is
+        active or still has memory wrapped to it.
+        """
+        if not self._writable:
+            return True
+        items = self._app_keys_provider()
+        if items is None:
+            return False
+        try:
+            refs = await items.list(MEMORY_KEY)
+            if len(refs) < 2:
+                return True
+            active = await self._known_active_fingerprint()
+            if active is None or active not in [ref.public_fingerprint for ref in refs]:
+                return False
+            return not await self._finish_earlier_rotation(items, active)
+        except (APIError, VaultStateError, VaultUserError, OSError, VaultCustodyUnavailable):
+            logger.debug("pending key item cleanup skipped", exc_info=True)
+            return False
+
+    async def _known_active_fingerprint(self) -> Optional[str]:
+        """The active key's fingerprint from the marker, else one ``GET /keys/me``."""
+        marker = self._read_marker(await self._user_id())
+        if marker is not None:
+            return marker.fingerprint
+        record = await self._fetch_record()
+        return record.fingerprint if record is not None else None
+
+    async def _active_fingerprint_in_vault(self, items: AppKeyItems) -> str:
+        """The service's active key, required to be vault custody and held by this vault."""
+        record = await self._fetch_record()
+        if record is None or record.custody != CUSTODY_VAULT:
+            raise VaultCustodyUnavailable("Your Memory Sync key is not kept in your vault.")
+        held = [ref.public_fingerprint for ref in await items.list(MEMORY_KEY)]
+        if record.fingerprint not in held:
+            raise VaultCustodyUnavailable("Your vault does not hold your active Memory Sync key.")
+        return record.fingerprint
+
+    async def _finish_earlier_rotation(self, items: AppKeyItems, active: str) -> bool:
+        """Delete every item but the active key's; return ``True`` when one had to stay.
+
+        A non-active item is either a "next" key the service never saw or a
+        previous key.  Deleting is right for both, and safe: the service
+        refuses the delete of a key that is active or still has memory wrapped
+        to it.  A kept item makes a new rotation stop with ``item_type_exists``
+        (the service's own limit of two items per kind).
+        """
+        kept = False
+        for ref in await items.list(MEMORY_KEY):
+            if ref.public_fingerprint == active:
+                continue
+            kept = await self._delete_unless_in_use(items, ref.public_fingerprint) or kept
+        return kept
+
+    async def _delete_unless_in_use(self, items: AppKeyItems, fingerprint: str) -> bool:
+        """Delete one item; ``True`` when it was kept (still in use or not deletable now)."""
+        try:
+            await items.delete(MEMORY_KEY, fingerprint)
+        except APIError as exc:
+            if exc.code != _MEMORY_KEY_IN_USE:
+                logger.warning("could not delete a Memory Sync key item (%s)", exc.code)
+            return True
+        except (VaultStateError, VaultUserError, OSError):
+            logger.warning("could not delete a Memory Sync key item", exc_info=True)
+            return True
+        return False
+
+    async def _post_rotation(self, material: KeyMaterial, fingerprint: str, signer: Any) -> None:
+        await self._limiter.acquire(RateLimitKey.KEYS_ROTATE)
+        try:
+            await self._api.request_signed(
+                "POST", _KEYS_ROTATE_PATH,
+                json={
+                    "public_key": base64.b64encode(material.public_key).decode(),
+                    "fingerprint": fingerprint,
+                    "custody": CUSTODY_VAULT,
+                },
+                device=signer,
+            )
+        except RateLimitedError:
+            self._limiter.record_429(RateLimitKey.KEYS_ROTATE)
+            raise
+
+    @staticmethod
+    async def _run_upload(upload: RotationUploader, material: KeyMaterial) -> Optional[str]:
+        """The rotation is done once the service accepted the key; an upload problem is reported, not raised."""
+        try:
+            return await upload(material)
+        except Exception as exc:  # noqa: BLE001 — the key change already happened
+            logger.warning("re-upload after rotation failed (%s)", exc.__class__.__name__)
+            return "upload_failed"
 
     # ------------------------------------------------------------------
     # Local leftovers and marker
