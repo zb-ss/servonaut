@@ -471,6 +471,7 @@ A key the service sends that does not match its own fingerprint cannot be confir
 | `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
 | `custody_check_interval_hours` | `24` | A computer that unlocks Memory Sync from a local key file (an account not yet moved to the vault) asks the service at most this often whether the key has since moved to the vault, so a move made on another computer is noticed. `0` asks on every start. |
 | `vault_key_recheck_seconds` | `60` | How long the standalone MCP server and the relay wait before they look for your key in the vault again after a failed attempt. |
+| `keys_me_per_hour` | `20` | How many times per hour this computer may ask the service where your Memory Sync key is kept. When the limit is reached, Servonaut does not wait: it says so and tries again later. |
 
 Disabling sync on the Memory Sync screen sets `sync_disabled` to `true` in this section. While it is set, Memory Sync does not unlock on start-up, sign-in, vault unlock or opening a memory section, until you press **Enable Memory Sync** there. You normally never edit it by hand.
 
