@@ -46,7 +46,17 @@ PROVIDER_INFO = {
     "retention_text": "The provider keeps prompts and answers for 30 days.",
     "supports_zdr": False,
 }
-FAILURE_REASON = "decryption_failed"
+FAILURE_REASON = "dek_invalid"
+
+
+def _parse_timestamp(value: Optional[str]) -> Optional[dt.datetime]:
+    """An RFC 3339 timestamp, or ``None`` for anything else (such as an envelope id)."""
+    if not isinstance(value, str) or "T" not in value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _now() -> str:
@@ -155,28 +165,41 @@ class SummaryCloud:
             return outcome
         previous = self._newest_success(instance_id)
         job = self._run_job(instance_id, consent, outcome, "envelope_keys" if keys is not None else "passphrase")
-        return 200, {
+        return 202, {
             "status": "queued", "message": "Summary queued",
             "previous_summary_id": previous["result"]["id"] if previous else None,
             "queued_at": job["queued_at"], "poll_after_seconds": 1,
         }
 
     def latest(self, instance_id: str, after: Optional[str]) -> tuple[int, dict[str, Any]]:
+        """``after`` is either a queued_at timestamp or an envelope id.
+
+        Only the timestamp form reports a failed job (200 with the reason); the
+        id form never returns a failed body. 202 means pending.
+        """
+        since = _parse_timestamp(after)
         with self._lock:
             mine = [j for j in self._jobs
                     if j["instance_id"] == instance_id and j["user_id"] == self._user_id()]
+            if since is not None:
+                # One-second precision, inclusive, like the service.
+                mine = [j for j in mine if _parse_timestamp(j["queued_at"]).replace(microsecond=0) >= since.replace(microsecond=0)]
             if not mine:
-                return _refusal(404, "not_found", "No summary")
+                return (202, {"status": "pending", "poll_after_seconds": 1}) if since is not None \
+                    else _refusal(404, "not_found", "No summary")
             job = mine[-1]
             if job["status"] == "failed":
-                return 200, {"status": "failed", "reason": job["reason"]}
+                if since is None:
+                    return 202, {"status": "pending", "previous_summary_id": job["previous_id"],
+                                 "poll_after_seconds": 1}
+                return 200, {"status": "failed", "reason": job["reason"], "failed_at": job["queued_at"]}
             if job["pending_polls"] > 0:
                 job["pending_polls"] -= 1
-                return 200, {"status": "pending", "previous_summary_id": job["previous_id"],
+                return 202, {"status": "pending", "previous_summary_id": job["previous_id"],
                              "poll_after_seconds": 1}
             result = copy.deepcopy(job["result"])
-        if after is not None and result["id"] == after:
-            return 200, {"status": "pending", "previous_summary_id": after, "poll_after_seconds": 1}
+        if since is None and after is not None and result["id"] == after:
+            return 202, {"status": "pending", "previous_summary_id": after, "poll_after_seconds": 1}
         return 200, result
 
     # -- helpers --------------------------------------------------------------

@@ -231,6 +231,7 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
             correlation_supported=True,
             previous_summary_id="dispatch-envelope",
             poll_after_seconds=0.25,
+            queued_at="2026-11-28T10:00:00+00:00",
         )
     )
     envelope = {
@@ -274,6 +275,7 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
         "server-1",
         previous_envelope_id="dispatch-envelope",
         initial_poll_after_seconds=0.25,
+        queued_at="2026-11-28T10:00:00+00:00",
     )
     retrieval_service.decrypt_envelope.assert_awaited_once_with(
         envelope,

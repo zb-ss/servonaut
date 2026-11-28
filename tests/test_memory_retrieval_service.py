@@ -495,6 +495,22 @@ def _sealed_wrap(dek: bytes, public_key: bytes) -> str:
     ).decode()
 
 
+def _sealed_envelope(
+    public_key: bytes, env_id: str, dek: bytes, plaintext: dict | None = None, **extra: Any,
+) -> Dict[str, Any]:
+    """A wire envelope whose ciphertext really opens under *dek* (sealed to *public_key*)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    body = json.dumps(plaintext if plaintext is not None else {"observed": {"cpu": 4}}).encode()
+    iv = b"\x07" * 12
+    sealed = AESGCM(dek).encrypt(iv, body, None)
+    return {
+        "id": env_id, "wrapped_dek": _sealed_wrap(dek, public_key),
+        "iv": base64.b64encode(iv).decode(), "tag": base64.b64encode(sealed[-16:]).decode(),
+        "ciphertext": base64.b64encode(sealed[:-16]).decode(), **extra,
+    }
+
+
 class TestEnvelopeKeys:
 
     def _service(self, build_envelopes=None):
@@ -521,8 +537,8 @@ class TestEnvelopeKeys:
         deks = {"os": bytes([1]) * 32, "services": bytes([2]) * 32}
         ids = {"os": "env-os", "services": "env-svc"}
         svc, _pair, api = self._service(lambda pair: {
-            f"/api/v1/memory/web-1/{m}/at/{ids[m]}": {
-                "id": ids[m], "wrapped_dek": _sealed_wrap(deks[m], pair.public_key)}
+            f"/api/v1/memory/web-1/{m}/at/{ids[m]}": _sealed_envelope(
+                pair.public_key, ids[m], deks[m], instance_id="web-1", module=m)
             for m in ids
         })
 
@@ -544,8 +560,7 @@ class TestEnvelopeKeys:
         from servonaut.services.memory.retrieval_service import StaleEnvelopes
 
         svc, _pair, _api = self._service(lambda pair: {
-            "/api/v1/memory/web-1/os/at/env-os": {
-                "id": "other", "wrapped_dek": _sealed_wrap(b"\x01" * 32, pair.public_key)},
+            "/api/v1/memory/web-1/os/at/env-os": _sealed_envelope(pair.public_key, "other", b"\x01" * 32),
         })
         with pytest.raises(StaleEnvelopes):
             asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
@@ -555,12 +570,52 @@ class TestEnvelopeKeys:
 
         foreign = generate_keypair()
         svc, _pair, _api = self._service(lambda _pair: {
-            "/api/v1/memory/web-1/os/at/env-os": {
-                "id": "env-os", "wrapped_dek": _sealed_wrap(b"\x01" * 32, foreign.public_key)},
+            "/api/v1/memory/web-1/os/at/env-os": _sealed_envelope(
+                foreign.public_key, "env-os", b"\x01" * 32),
         })
         with pytest.raises(MemoryBackendError) as caught:
             asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
         assert str(caught.value) == "envelope_key_unreadable"
+
+    @pytest.mark.parametrize("extra", [{"instance_id": "web-2"}, {"module": "services"}])
+    def test_envelope_naming_another_instance_or_module_is_refused(self, extra):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        svc, _pair, _api = self._service(lambda pair: {
+            "/api/v1/memory/web-1/os/at/env-os": _sealed_envelope(
+                pair.public_key, "env-os", b"\x01" * 32, **{"instance_id": "web-1", "module": "os", **extra}),
+        })
+        with pytest.raises(EnvelopeKeyError) as caught:
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+        assert caught.value.code == "envelope_mismatch"
+
+    def test_ciphertext_that_the_key_does_not_open_is_refused(self):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        def build(pair):
+            raw = _sealed_envelope(pair.public_key, "env-os", b"\x01" * 32)
+            raw["tag"] = base64.b64encode(b"\x00" * 16).decode()
+            return {"/api/v1/memory/web-1/os/at/env-os": raw}
+
+        svc, _pair, _api = self._service(build)
+        with pytest.raises(EnvelopeKeyError) as caught:
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+        assert caught.value.code == "envelope_key_unreadable"
+
+    @pytest.mark.parametrize("module, plaintext", [
+        ("os", {"unrelated": 1}), ("os", ["observed"]),
+        ("annotations", {"observed": {}}), ("findings", {"content": "x"}),
+    ])
+    def test_payload_of_the_wrong_shape_for_the_module_is_refused(self, module, plaintext):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        svc, _pair, _api = self._service(lambda pair: {
+            f"/api/v1/memory/web-1/{module}/at/env-1": _sealed_envelope(
+                pair.public_key, "env-1", b"\x01" * 32, plaintext),
+        })
+        with pytest.raises(EnvelopeKeyError) as caught:
+            asyncio.run(svc.envelope_keys("web-1", {module: "env-1"}))
+        assert caught.value.code == "envelope_mismatch"
 
     def test_ids_from_the_service_cannot_change_the_path(self):
         svc, _pair, api = self._service({})

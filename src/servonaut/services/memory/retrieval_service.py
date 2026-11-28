@@ -53,6 +53,29 @@ class StaleEnvelopes(MemoryBackendError):
         super().__init__("stale_envelopes")
 
 
+class EnvelopeKeyError(MemoryBackendError):
+    """A hosted-summary key could not be released; ``code`` picks the text people read."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _plaintext_fits_module(module: str, plaintext: Any) -> bool:
+    """Whether a decrypted payload has the shape that module's writers produce.
+
+    Probe modules carry ``observed``/``declared``/``raw_output``, annotations
+    carry ``content`` and findings carry ``findings`` (see the sync service).
+    """
+    if not isinstance(plaintext, dict):
+        return False
+    if module == "annotations":
+        return "content" in plaintext
+    if module == "findings":
+        return "findings" in plaintext
+    return any(key in plaintext for key in ("observed", "declared", "raw_output"))
+
+
 def _validate_instance_id(instance_id: str) -> None:
     """Reject reserved or malformed instance IDs before they reach the wire.
 
@@ -452,16 +475,49 @@ class MemoryRetrievalService:
             dek = None
             try:
                 dek = open_dek(raw.get("wrapped_dek", ""), private_key=private_key)
+                self._check_envelope_belongs(raw, dek, instance_id, module)
                 keys.append({
                     "envelope_id": envelope_id,
                     "dek": base64.b64encode(bytes(dek)).decode("ascii"),
                 })
             except CryptoError as exc:
-                raise MemoryBackendError("envelope_key_unreadable") from exc
+                raise EnvelopeKeyError("envelope_key_unreadable") from exc
             finally:
                 if dek is not None:
                     secure_zero(dek)
         return keys
+
+    @staticmethod
+    def _check_envelope_belongs(
+        raw: Dict[str, Any], dek: bytearray, instance_id: str, module: str
+    ) -> None:
+        """Refuse to release a key for an envelope that is not this instance's module.
+
+        Envelopes carry no associated data, and the plaintext does not name its
+        instance or module, so the binding is as strong as the format allows:
+        the service's own instance/module fields must agree with the request,
+        the ciphertext must open under this key, and the payload must have the
+        shape that module's writers produce. Residual risk: a hostile service
+        could still hand over another instance's envelope of the same module
+        that this user can open; the hosted summary then covers that memory
+        instead. Only envelopes the user's own key opens are ever reachable,
+        and AAD in the envelope format would close the gap.
+        """
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from servonaut.services.memory.crypto import validate_ciphertext, validate_iv, validate_tag
+
+        for field, expected in (("instance_id", instance_id), ("module", module)):
+            if field in raw and str(raw[field]) != expected:
+                raise EnvelopeKeyError("envelope_mismatch")
+        try:
+            iv = validate_iv(raw["iv"])
+            tag = validate_tag(raw["tag"])
+            ciphertext = validate_ciphertext(raw["ciphertext"])
+            plaintext = json.loads(AESGCM(bytes(dek)).decrypt(iv, ciphertext + tag, None))
+        except Exception as exc:  # noqa: BLE001 - any failure means the key does not open this envelope
+            raise EnvelopeKeyError("envelope_key_unreadable") from exc
+        if not _plaintext_fits_module(module, plaintext):
+            raise EnvelopeKeyError("envelope_mismatch")
 
     async def _fetch_envelope_at(
         self, instance_id: str, module: str, envelope_id: str

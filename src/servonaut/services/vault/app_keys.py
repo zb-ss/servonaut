@@ -49,9 +49,13 @@ class AppKeyItems:
 
     async def personal_vault_id(self, create: bool = False) -> str | None:
         """The personal vault's id; it is created only when *create* is set and the plan allows it."""
-        for vault in await self._vaults.list_vaults():
-            if vault.get("kind") == "personal" and vault.get("vault_id"):
-                return str(vault["vault_id"])
+        for row in await self._vaults.list_vaults():
+            if row.get("kind") != "personal" or not row.get("vault_id"):
+                continue
+            # The list row's label is unsigned; the verified vault's scope and owner decide.
+            vault = await self._vaults.get_vault(str(row["vault_id"]))
+            if self._items.is_own_personal_vault(vault):
+                return str(row["vault_id"])
         if not create or not self._can_create_personal_vault():
             return None
         created = await self._vaults.create_personal(PERSONAL_VAULT_NAME)

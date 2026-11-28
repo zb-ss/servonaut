@@ -878,7 +878,27 @@ class TestVaultMode:
         assert sync_service.has_cached_passphrase() is True
 
 
+async def _pass_gate() -> None:
+    return None
+
+
 class TestMoveKeyToVault:
+    def test_recovery_gate_runs_before_the_key_item_or_any_write(self, vault_service, items, mock_api):
+        self._setup(mock_api, [{"id": "p", "key_custody": "passphrase"}])
+
+        async def refuse() -> None:
+            raise RuntimeError("recovery key refused")
+
+        with pytest.raises(RuntimeError, match="recovery key refused"):
+            _run(vault_service.move_key_to_vault(recovery_gate=refuse))
+        assert items.created == 0
+        mock_api.post.assert_not_awaited()
+        mock_api.delete.assert_not_awaited()
+
+    def test_gate_is_required(self, vault_service):
+        with pytest.raises(TypeError):
+            _run(vault_service.move_key_to_vault())
+
     def _setup(self, mock_api, snapshots):
         state = {"snapshots": list(snapshots)}
 
@@ -900,7 +920,7 @@ class TestMoveKeyToVault:
         vault_service._cached_passphrase = PASS
         self._setup(mock_api, [{"id": "p", "key_custody": "passphrase"}])
         steps = []
-        report = _run(vault_service.move_key_to_vault(steps.append))
+        report = _run(vault_service.move_key_to_vault(steps.append, recovery_gate=_pass_gate))
         assert report == {"key_created": True, "pushed": True, "deleted": 2}
         assert steps == ["key", "snapshot", "cleanup"]
         mock_api.delete.assert_awaited_once_with("/api/v1/configs", params={"key_custody": "passphrase"})
@@ -908,7 +928,7 @@ class TestMoveKeyToVault:
         assert vault_service.has_cached_passphrase() is False
         # a re-run reuses the key and the snapshot
         posts = mock_api.post.await_count
-        report = _run(vault_service.move_key_to_vault())
+        report = _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
         assert report["key_created"] is False and report["pushed"] is False
         assert mock_api.post.await_count == posts
         assert items.created == 1
@@ -917,18 +937,18 @@ class TestMoveKeyToVault:
         self._setup(mock_api, [])
         mock_api.delete.side_effect = RuntimeError("network")
         with pytest.raises(RuntimeError):
-            _run(vault_service.move_key_to_vault())
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
         mock_api.delete.side_effect = None
         mock_api.delete.return_value = {"deleted": 1}
         posts = mock_api.post.await_count
-        report = _run(vault_service.move_key_to_vault())
+        report = _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
         assert report["pushed"] is False and report["deleted"] == 1
         assert mock_api.post.await_count == posts
 
     def test_locked_vault_raises_config_key_not_ready(self, mock_api, mock_config_manager):
         svc = ConfigSyncService(mock_api, mock_config_manager, key_items_provider=lambda: None)
         with pytest.raises(ConfigKeyError) as info:
-            _run(svc.move_key_to_vault())
+            _run(svc.move_key_to_vault(recovery_gate=_pass_gate))
         assert info.value.code == "config_key_not_ready"
         mock_api.delete.assert_not_awaited()
 
@@ -940,7 +960,7 @@ class TestMoveKeyToVault:
         self._setup(mock_api, [])
         mock_api.delete.side_effect = APIError(code="no_vault_snapshot", message="svc words", status=409)
         with pytest.raises(APIError) as info:
-            _run(vault_service.move_key_to_vault())
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
         from servonaut.services.memory.custody_errors import custody_error_message
         assert "Nothing was deleted" in custody_error_message(info.value)
         assert probe.exists() and vault_service.has_cached_passphrase()
@@ -951,7 +971,7 @@ class TestMoveKeyToVault:
         mock_api.get.return_value = {"snapshots": []}
         mock_api.post.side_effect = FeatureDisabledError(code="feature_disabled", message="x", status=503)
         with pytest.raises(FeatureDisabledError):
-            _run(vault_service.move_key_to_vault())
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
         mock_api.delete.assert_not_awaited()
 
 

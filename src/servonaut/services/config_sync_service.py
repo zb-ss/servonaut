@@ -12,7 +12,7 @@ import stat
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import ConfigSyncServiceInterface
 from . import config_crypto
@@ -151,10 +151,9 @@ class ConfigKeyError(config_crypto.DecryptionError):
     """A vault-key problem with the client's own text; ``code`` names the case."""
 
     def __init__(self, code: str, fallback: str = "The config sync key is not available.") -> None:
-        from types import SimpleNamespace
-        from servonaut.services.memory.custody_errors import custody_error_message
+        from servonaut.services.memory.custody_errors import custody_code_message
 
-        super().__init__(custody_error_message(SimpleNamespace(code=code)) or fallback)
+        super().__init__(custody_code_message(code) or fallback)
         self.code = code
 
 
@@ -399,9 +398,16 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         return await self._api.delete(f"/api/v1/configs/{snapshot_id}")
 
     async def move_key_to_vault(
-        self, progress: Optional[Callable[[str], None]] = None,
+        self,
+        progress: Optional[Callable[[str], None]] = None,
+        *,
+        recovery_gate: Callable[[], Awaitable[None]],
     ) -> dict:
         """Switch config sync to a vault-held key; safe to re-run at every step.
+
+        *recovery_gate* is awaited first, before the key item exists: the move
+        ends by deleting the passphrase snapshots, so the person must have
+        proven they can still recover the vault. It raises to stop the move.
 
         Order matters: the key item, then a snapshot under it, and only then
         the bulk delete of passphrase snapshots (the service refuses that
@@ -415,6 +421,7 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         items = self._key_items()
         if items is None:
             raise ConfigKeyError("config_key_not_ready")
+        await recovery_gate()
         say("key")
         had_key = bool(await items.list(CONFIG_KEY_ITEM))
         key_payload = await self._ensure_vault_key(items)

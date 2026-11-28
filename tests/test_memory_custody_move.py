@@ -468,3 +468,61 @@ async def test_no_secret_appears_in_the_report_or_errors(env):
     text = repr(report)
     for secret in (PASSPHRASE, RECOVERY_KEY, _b64(env.pair.private_key)):
         assert secret not in text
+
+
+async def test_a_caller_gate_replaces_the_prompt_and_still_runs_before_any_write(env):
+    gate_calls: list[int] = []
+
+    async def gate() -> None:
+        gate_calls.append(len(env.items.created))  # nothing may be written yet
+
+    report = await env.mover.run(
+        env.passphrase(PASSPHRASE), env.recovery(), env.steps.append, recovery_gate=gate,
+    )
+
+    assert report.outcome == "moved"
+    assert gate_calls == [0]
+    assert env.recovery_calls == 0  # the provider was never asked: the gate stood in for it
+
+
+async def test_a_refusing_caller_gate_writes_nothing(env):
+    async def gate() -> None:
+        raise MoveStopped("recovery_key_mismatch", "refused")
+
+    with pytest.raises(MoveStopped):
+        await env.mover.run(env.passphrase(PASSPHRASE), env.recovery(), recovery_gate=gate)
+
+    assert env.items.created == [] and env.passphrase_calls == 0
+    env.api.request_signed.assert_not_awaited()
+
+
+async def test_prove_recovery_is_public_and_checks_the_key(env):
+    await env.mover.prove_recovery(env.recovery())
+    assert env.recovery_calls == 1
+    env.vault.verify_recovery_key = AsyncMock(return_value=False)
+    with pytest.raises(MoveStopped) as stopped:
+        await env.mover.prove_recovery(env.recovery())
+    assert stopped.value.reason == "recovery_key_mismatch"
+
+
+async def test_read_back_of_another_users_key_item_is_a_mismatch(env):
+    original = env.items.read
+
+    async def read_other_owner(item_type, fingerprint):
+        payload = await original(item_type, fingerprint)
+        return None if payload is None else {**payload, "user_id": USER_ID + 1}
+
+    env.items.read = read_other_owner
+
+    with pytest.raises(MoveStopped) as stopped:
+        await env.run()
+
+    assert stopped.value.reason == "readback_mismatch"
+    env.api.request_signed.assert_not_awaited()
+
+
+async def test_custody_code_message_gives_the_shared_wording():
+    from servonaut.services.memory.custody_errors import custody_code_message
+
+    assert "your vault" in custody_code_message("device_signature_required")
+    assert custody_code_message("not_a_custody_code") is None

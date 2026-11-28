@@ -169,6 +169,23 @@ class VaultItemService:
             vault=vault,
         )
 
+    def is_own_personal_vault(self, vault: Mapping[str, Any]) -> bool:
+        """True only when the SIGNED scope and owner say this is the caller's personal vault.
+
+        The unsigned ``kind`` label is service-controlled, so it is never trusted
+        on its own: a relabelled team vault must not receive a Servonaut key.
+        """
+        identity = current_identity(self._vaults._identity_store)
+        user_id = getattr(identity, "user_id", None)
+        owner_user_id = vault.get("owner_user_id")
+        return (
+            vault.get("kind") == "personal"
+            and isinstance(user_id, int) and not isinstance(user_id, bool) and user_id >= 1
+            and isinstance(owner_user_id, int) and not isinstance(owner_user_id, bool)
+            and owner_user_id == user_id
+            and vault.get("scope") == f"user:{user_id}"
+        )
+
     async def _write_once(
         self,
         vault_id: str,
@@ -183,7 +200,7 @@ class VaultItemService:
             raise ValueError("unsupported vault item type")
         self._validate_payload(item_type, payload, payload.get("public_fingerprint"))
         vault = await self._vaults.get_vault(vault_id) if vault is None else vault
-        if item_type in APP_KEY_TYPES and vault.get("kind") != "personal":
+        if item_type in APP_KEY_TYPES and not self.is_own_personal_vault(vault):
             raise ValueError("Servonaut keys can only be stored in the personal vault")
         vault_key = self._vaults.open_my_grant(vault)
         identity = current_identity(self._vaults._identity_store)

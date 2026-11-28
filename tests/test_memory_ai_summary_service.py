@@ -623,6 +623,41 @@ class TestRunSummary:
             "Hosted summaries are not available for a key kept in the vault on this "
             "Servonaut service yet. Try again later.")
 
+    @pytest.mark.parametrize("ids", [
+        {"os": "env-os", "secrets_vault": "env-x"},  # not a known module
+        {"os": "env-os", "network": "env-net"},  # known, but not in the consent's modules
+        {"os": "env-os", "services": "env-svc", "disk": "env-disk"},  # more than consented
+    ])
+    def test_envelope_ids_outside_the_consented_modules_open_no_key(self, disclosed, mock_api, ids):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        self._consents(mock_api, {**_CONSENT_RESPONSE, "envelope_ids": ids})
+        retrieval = _retrieval()
+        with pytest.raises(EnvelopeKeyError) as caught:
+            _run_summary(disclosed, retrieval)
+        assert caught.value.code == "envelope_not_consented"
+        retrieval.envelope_keys.assert_not_awaited()
+        assert mock_api.post.await_count == 1  # nothing was dispatched
+        assert "approved" in summary_error_message(caught.value)
+
+    def test_requested_modules_bound_the_ids_even_when_the_consent_lists_more(self, disclosed, mock_api):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        self._consents(mock_api, {**_CONSENT_RESPONSE, "envelope_ids": {"os": "env-os", "services": "env-svc"}})
+        retrieval = _retrieval()
+        with pytest.raises(EnvelopeKeyError):
+            run(disclosed.run_summary(
+                "i-123", retrieval=retrieval, key_source=lambda: "vault",
+                passphrase_provider=AsyncMock(), modules=["os"],
+            ))
+        retrieval.envelope_keys.assert_not_awaited()
+
+    def test_unreadable_envelope_key_has_plain_text(self):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        text = summary_error_message(EnvelopeKeyError("envelope_key_unreadable"))
+        assert text and "envelope_key_unreadable" not in text
+
     def test_older_service_uses_passphrase_for_passphrase_custody(self, disclosed, mock_api):
         self._consents(mock_api, dict(_CONSENT_RESPONSE), _DISPATCH_RESPONSE.copy())
         retrieval = _retrieval()
@@ -679,6 +714,42 @@ class TestFailedStatus:
         assert summary_error_message(caught.value) == (
             "The summary could not be created (the memory could not be opened with "
             "the keys that were sent).")
+
+    QUEUED_AT = "2026-11-28T10:00:00+00:00"
+
+    def test_timestamp_poll_asks_after_queued_at_and_raises_on_failed_without_an_id(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.side_effect = [
+            {"status": "pending", "poll_after_seconds": 0.1},
+            {"status": "failed", "reason": "balance_exhausted", "failed_at": "2026-11-28T10:00:05+00:00"},
+        ]
+        with pytest.raises(SummaryFailed) as caught:
+            run(service.wait_for_new_summary("i-123", previous_envelope_id="old", queued_at=self.QUEUED_AT))
+        assert all(c.kwargs == {"params": {"after": self.QUEUED_AT}} for c in mock_api.get.await_args_list)
+        assert summary_error_message(caught.value) == (
+            "The summary could not be created (your AI balance ran out).")
+
+    def test_timestamp_poll_returns_the_envelope_even_when_it_has_the_previous_id(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.side_effect = [{}, {"id": "old", "module": "ai_summary"}]
+        result = run(service.wait_for_new_summary("i-123", previous_envelope_id="old", queued_at=self.QUEUED_AT))
+        assert result["id"] == "old"
+
+    def test_without_queued_at_the_poll_keeps_the_envelope_id_form(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.return_value = {"id": "new"}
+        run(service.wait_for_new_summary("i-123", previous_envelope_id="old"))
+        assert mock_api.get.await_args.kwargs == {"params": {"after": "old"}}
+
+    @pytest.mark.parametrize("reason", [
+        "request_expired", "consent_invalid", "account_suspended", "balance_exhausted",
+        "passphrase_invalid", "memory_key_custody_vault", "no_active_key", "nothing_to_summarise",
+        "dek_invalid", "stale_envelopes", "provider_error", "internal_error",
+    ])
+    def test_every_server_reason_has_its_own_text_without_the_code(self, reason):
+        text = summary_error_message(SummaryFailed(reason))
+        assert reason not in text
+        assert text != "The summary could not be created (the service reported a problem)."
 
     def test_unknown_reason_uses_the_generic_text_and_hides_the_code(self, service, mock_api, mock_config, caplog):
         self._config(mock_config)

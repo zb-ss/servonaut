@@ -88,7 +88,19 @@ class HostedSummaryUnavailable(MemoryBackendError):
 
 # Small on purpose: the service's failure codes are not final.
 _FAILURE_REASON_TEXT = {
+    "request_expired": "the request expired before it could run",
+    "consent_invalid": "your consent was no longer valid",
+    "account_suspended": "your account is suspended",
+    "balance_exhausted": "your AI balance ran out",
+    "passphrase_invalid": "the passphrase did not open your Memory Sync key",
+    "memory_key_custody_vault": "your Memory Sync key is kept in your vault and could not be used this way",
+    "no_active_key": "no active Memory Sync key was found",
+    "nothing_to_summarise": "there is no memory to summarise yet",
+    "dek_invalid": "the memory could not be opened with the keys that were sent",
     "decryption_failed": "the memory could not be opened with the keys that were sent",
+    "stale_envelopes": "the memory changed while the summary was being prepared",
+    "provider_error": "the AI provider reported a problem",
+    "internal_error": "the service had a problem",
 }
 _FAILURE_REASON_FALLBACK = "the service reported a problem"
 _HOSTED_UNAVAILABLE_TEXT = (
@@ -96,6 +108,8 @@ _HOSTED_UNAVAILABLE_TEXT = (
     "Servonaut service yet. Try again later."
 )
 _MAX_LOGGED_REASON = 64
+# Modules besides the probers that carry synced memory (notes and findings).
+_EXTRA_MODULES = frozenset({"annotations", "findings"})
 
 
 def summary_error_message(exc: BaseException) -> Optional[str]:
@@ -434,7 +448,8 @@ class AISummaryService:
             )
             try:
                 return await self._dispatch_for_consent(
-                    instance_id, consent, retrieval, key_source, passphrase_provider
+                    instance_id, consent, retrieval, key_source, passphrase_provider,
+                    requested_modules=modules,
                 )
             except StaleEnvelopes:
                 pass
@@ -454,8 +469,10 @@ class AISummaryService:
         retrieval: Any,
         key_source: Callable[[], Optional[str]],
         passphrase_provider: Callable[[], Awaitable[str]],
+        requested_modules: Optional[List[str]] = None,
     ) -> SummaryDispatchResult:
         if consent.envelope_ids:
+            check_envelope_ids(consent, requested_modules)
             keys = await retrieval.envelope_keys(instance_id, consent.envelope_ids)
             try:
                 return await self.dispatch_summary(
@@ -510,8 +527,14 @@ class AISummaryService:
         instance_id: str,
         previous_envelope_id: Optional[str] = None,
         initial_poll_after_seconds: Optional[float] = None,
+        queued_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Poll until a newly generated summary envelope is available.
+
+        With *queued_at* (the dispatch answer's timestamp) the poll asks for
+        ``after=<timestamp>``, the only form on which the service reports a
+        failed job; the first summary envelope it returns is this job's. Without
+        it (an older service) the poll compares envelope ids as before.
 
         Poll cadence and timeout come from config.memory. A prior stable
         envelope id prevents an older cached result from being mistaken for
@@ -564,7 +587,7 @@ class AISummaryService:
 
             latest = await self.get_latest_summary(
                 instance_id,
-                after=previous_envelope_id,
+                after=queued_at or previous_envelope_id,
             )
             next_delay = poll_interval
             if latest is None:
@@ -591,13 +614,38 @@ class AISummaryService:
                     next_delay = suggested_delay
                 continue
 
+            if queued_at and not latest.get("id"):
+                # A pending answer on the timestamp form (202) carries no envelope.
+                continue
             latest_id = str(latest.get("id", "") or "")
             if not latest_id:
                 raise MemoryBackendError(
                     "Hosted summary response has no stable envelope id"
                 )
-            if previous_envelope_id is None or latest_id != previous_envelope_id:
+            if queued_at or previous_envelope_id is None or latest_id != previous_envelope_id:
                 return latest
+
+
+def check_envelope_ids(consent: ConsentToken, requested_modules: Optional[List[str]]) -> None:
+    """Refuse envelope ids for modules the person did not approve.
+
+    The ids come from the service and each one leads to a data key being
+    opened, so they are held to the approved set: the modules the person asked
+    for (or, for "all", the consent's own list, or every known module), limited
+    to modules this client knows. Count and names are both checked.
+
+    Raises:
+        EnvelopeKeyError: ``envelope_not_consented`` when an id falls outside it.
+    """
+    from servonaut.services.memory.modules import default_module_names
+    from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+    known = set(default_module_names()) | _EXTRA_MODULES
+    wanted = set(requested_modules) if requested_modules else set(consent.modules)
+    approved = (wanted & known) if wanted else known
+    ids = consent.envelope_ids
+    if len(ids) > len(approved) or not set(ids) <= approved:
+        raise EnvelopeKeyError("envelope_not_consented")
 
 
 def _parse_envelope_ids(raw: Any) -> Dict[str, str]:

@@ -2507,6 +2507,8 @@ class MemoryScreen(WorkspaceScreen):
                         "poll_after_seconds",
                         None,
                     ),
+                    # An older service sends no timestamp: the poll then compares ids.
+                    queued_at=getattr(result, "queued_at", None) or None,
                 )
                 if envelope is None:
                     self.query_one("#memory-hosted-status", Static).update(

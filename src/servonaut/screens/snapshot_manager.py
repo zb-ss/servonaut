@@ -1,6 +1,7 @@
 """Snapshot manager screen — list, restore, rename, delete, push config snapshots."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.services import config_crypto
 from servonaut.services.memory.custody_errors import custody_error_message
+from servonaut.services.memory.custody_move import MoveAborted, prove_recovery_key
 
 logger = logging.getLogger(__name__)
 
@@ -693,18 +695,41 @@ class SnapshotManagerScreen(WorkspaceScreen):
         self._set_status("[dim]Moving the key to your vault…[/dim]")
         try:
             await sync.move_key_to_vault(
-                lambda step: self._set_status(f"[dim]{labels.get(step, 'Working…')}[/dim]")
+                lambda step: self._set_status(f"[dim]{labels.get(step, 'Working…')}[/dim]"),
+                recovery_gate=self._prove_recovery,
             )
             self.notify("Config sync key moved to your vault.", severity="information")
             self._moving_key = False
             await self._load_snapshots()
+        except MoveAborted:
+            self._set_status("[dim]Move cancelled. Nothing was changed.[/dim]")
+            self.notify("Move cancelled. Nothing was changed.", markup=False)
         except Exception as exc:
-            logger.error("Move key to vault failed: %s", exc)
+            logger.error("Move key to vault failed: %s", type(exc).__name__)
             text = custody_error_message(exc) or f"Could not move the key: {self._short_err(exc)}"
             self.notify(text, severity="error", markup=False)
             self._set_status(f"[$text-error]{escape(text)}[/$text-error]")
         finally:
             self._moving_key = False
+
+    async def _prove_recovery(self) -> None:
+        """Ask for the vault recovery key and check it before the move writes anything."""
+        from servonaut.screens.vault import VaultSecretPromptModal
+
+        future = asyncio.get_running_loop().create_future()
+        self.app.push_screen(
+            VaultSecretPromptModal(
+                "Confirm your recovery key",
+                "This move removes your old passphrase snapshots. Type your vault "
+                "recovery key to show you still have it. It is checked against your "
+                "vault and is not stored.",
+            ),
+            lambda result: future.done() or future.set_result(result),
+        )
+        recovery_key = await future
+        if recovery_key is None:
+            raise MoveAborted()
+        await prove_recovery_key(self.app.vault_command_service, lambda: recovery_key)
 
     @staticmethod
     def _format_date(value: Any) -> str:

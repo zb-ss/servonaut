@@ -24,14 +24,14 @@ import base64
 import binascii
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError, NotFoundError, RateLimitedError
 from servonaut.services.memory import crypto
-from servonaut.services.memory.custody_errors import custody_error_message
+from servonaut.services.memory.custody_errors import custody_code_message, custody_error_message
 from servonaut.services.memory.interfaces import KeyMaterial
 from servonaut.services.memory.key_custody import (
     CUSTODY_VAULT,
@@ -173,22 +173,28 @@ class MemoryCustodyMover:
         passphrase_provider: Callable[[], str],
         recovery_key_provider: Callable[[], str],
         progress: Optional[Progress] = None,
+        *,
+        recovery_gate: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> MoveReport:
         """Move the key; raises :class:`MoveStopped` (or :class:`MoveAborted`) when it cannot.
 
         The providers are plain blocking callables (a hidden prompt, a stdin
         line); they run off the event loop and only when the step needs them.
+        A caller that has already proven the recovery key in this run (the CLI
+        runs two moves behind one proof) passes its own *recovery_gate*, which
+        replaces the prompt.
         """
         say = progress or (lambda _step: None)
+        gate = recovery_gate or (lambda: self.prove_recovery(recovery_key_provider))
         try:
-            return await self._run(passphrase_provider, recovery_key_provider, say)
+            return await self._run(passphrase_provider, gate, say)
         except (APIError, VaultStateError, VaultUserError, *_TRANSPORT_ERRORS) as exc:
             raise self._stopped_from(exc) from exc
 
     async def _run(
         self,
         passphrase_provider: Callable[[], str],
-        recovery_key_provider: Callable[[], str],
+        recovery_gate: Callable[[], Awaitable[None]],
         say: Progress,
     ) -> MoveReport:
         say(STEP_PREFLIGHT)
@@ -202,7 +208,7 @@ class MemoryCustodyMover:
             report.outcome = OUTCOME_ALREADY_VAULT
         else:
             say(STEP_RECOVERY)
-            await self._recovery_gate(recovery_key_provider)
+            await recovery_gate()
             say(STEP_KEY)
             material = await self._private_key(record, passphrase_provider)
             say(STEP_ITEM)
@@ -261,17 +267,12 @@ class MemoryCustodyMover:
     # Step 3
     # ------------------------------------------------------------------
 
-    async def _recovery_gate(self, provider: Callable[[], str]) -> None:
-        recovery_key = await asyncio.to_thread(provider)
+    async def prove_recovery(self, provider: Callable[[], str]) -> None:
+        """Check the recovery key before anything is written; raises :class:`MoveStopped`."""
         try:
-            matches = await self._vault.verify_recovery_key(recovery_key)
-        except VaultUserError as exc:
-            # A typo or a non-key: the vault's own sentence says how it is wrong.
-            raise MoveStopped("recovery_key_invalid", str(exc)) from exc
-        finally:
-            del recovery_key
-        if not matches:
-            raise MoveStopped("recovery_key_mismatch", _MSG_RECOVERY_MISMATCH)
+            await prove_recovery_key(self._vault, provider)
+        except (APIError, VaultStateError, *_TRANSPORT_ERRORS) as exc:
+            raise self._stopped_from(exc) from exc
 
     # ------------------------------------------------------------------
     # Step 4
@@ -356,7 +357,7 @@ class MemoryCustodyMover:
         try:
             signer = self._vault.device_signer()
         except VaultUserError as exc:
-            message = custody_error_message(_CodeOnly("device_signature_required"))
+            message = custody_code_message("device_signature_required")
             raise MoveStopped("device_signature_required", message or _MSG_REFUSED) from exc
         await self._limiter.acquire(RateLimitKey.GENERAL)
         await self._api.request_signed(
@@ -407,12 +408,23 @@ class MemoryCustodyMover:
         return MoveStopped("unreachable", _MSG_UNREACHABLE)
 
 
-class _CodeOnly(Exception):
-    """A code-carrying stand-in so a locally detected condition reuses the shared wording."""
+async def prove_recovery_key(vault: Any, provider: Callable[[], str]) -> None:
+    """Ask for the vault recovery key and check it against the vault identity.
 
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
+    The one gate every key move passes before it writes anything (Memory Sync
+    and config sync, on every surface). The provider is a blocking callable and
+    runs off the event loop. Raises :class:`MoveStopped`.
+    """
+    recovery_key = await asyncio.to_thread(provider)
+    try:
+        matches = await vault.verify_recovery_key(recovery_key)
+    except VaultUserError as exc:
+        # A typo or a non-key: the vault's own sentence says how it is wrong.
+        raise MoveStopped("recovery_key_invalid", str(exc)) from exc
+    finally:
+        del recovery_key
+    if not matches:
+        raise MoveStopped("recovery_key_mismatch", _MSG_RECOVERY_MISMATCH)
 
 
 def _wrapped_from_record(record: KeyRecord) -> Any:
@@ -455,16 +467,18 @@ def _material_from_payload(
 
 
 def _same_key(stored: Optional[dict], material: KeyMaterial) -> bool:
-    """The vault copy equals the key we hold: public, private (via its public) and fingerprint."""
+    """The vault copy equals the key we hold: owner, public, private (via its public) and fingerprint."""
     if not isinstance(stored, dict):
         return False
     try:
         public = base64.b64decode(stored["public_key"], validate=True)
         private = base64.b64decode(stored["private_key"], validate=True)
+        owner = int(stored["user_id"])
     except (KeyError, TypeError, ValueError, binascii.Error):
         return False
     return (
-        public == material.public_key
+        owner == material.user_id
+        and public == material.public_key
         and private == material.private_key
         and _derive_public(private) == public
         and stored.get("public_fingerprint") == crypto.fingerprint(material.public_key)

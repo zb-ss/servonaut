@@ -212,7 +212,7 @@ def test_do_move_reports_progress_and_reloads():
     screen, _ = _move_screen(unlocked=True, snapshots=[])
     screen._load_snapshots = AsyncMock()
 
-    async def fake_move(progress):
+    async def fake_move(progress, *, recovery_gate):
         progress("key")
         progress("cleanup")
         return {"key_created": True, "pushed": True, "deleted": 2}
@@ -224,6 +224,57 @@ def test_do_move_reports_progress_and_reloads():
     assert screen.notify.call_args[0][0] == "Config sync key moved to your vault."
     screen._load_snapshots.assert_awaited_once()
     assert screen._moving_key is False
+
+
+def test_do_move_hands_the_recovery_gate_to_the_service():
+    screen, _ = _move_screen(unlocked=True, snapshots=[])
+    screen._load_snapshots = AsyncMock()
+    screen.sync.move_key_to_vault = AsyncMock(return_value={"key_created": True, "pushed": True, "deleted": 0})
+    asyncio.run(screen._do_move_key())
+    assert screen.sync.move_key_to_vault.call_args.kwargs["recovery_gate"] == screen._prove_recovery
+
+
+def _prove(screen, app, answer, verify):
+    """Run ``_prove_recovery`` with the prompt answered by *answer* and the vault check *verify*."""
+    app.vault_command_service.verify_recovery_key = verify
+
+    def push(modal, callback):
+        callback(answer)
+
+    app.push_screen = push
+    with patch.object(SnapshotManagerScreen, "app", new_callable=PropertyMock, return_value=app):
+        return asyncio.run(screen._prove_recovery())
+
+
+def test_recovery_gate_passes_when_the_vault_accepts_the_key():
+    screen, app = _move_screen(unlocked=True, snapshots=[])
+    verify = AsyncMock(return_value=True)
+    assert _prove(screen, app, "TEST-RECOVERY-KEY", verify) is None
+    verify.assert_awaited_once_with("TEST-RECOVERY-KEY")
+
+
+def test_recovery_gate_stops_on_a_wrong_key_and_on_cancel():
+    import pytest
+    from servonaut.services.memory.custody_move import MoveAborted, MoveStopped
+
+    screen, app = _move_screen(unlocked=True, snapshots=[])
+    with pytest.raises(MoveStopped) as stopped:
+        _prove(screen, app, "TEST-RECOVERY-KEY", AsyncMock(return_value=False))
+    assert stopped.value.reason == "recovery_key_mismatch"
+    with pytest.raises(MoveAborted):
+        _prove(screen, app, None, AsyncMock())
+
+
+def test_do_move_cancelled_prompt_changes_nothing_and_says_so():
+    from servonaut.services.memory.custody_move import MoveAborted
+
+    screen, _ = _move_screen(unlocked=True, snapshots=[])
+    screen._load_snapshots = AsyncMock()
+    screen.sync.move_key_to_vault = AsyncMock(side_effect=MoveAborted())
+    asyncio.run(screen._do_move_key())
+    assert screen.notify.call_args[0][0] == "Move cancelled. Nothing was changed."
+    assert screen.notify.call_args.kwargs.get("severity") is None
+    screen._load_snapshots.assert_not_awaited()
 
 
 def test_do_move_failure_shows_custody_text_with_markup_off():
