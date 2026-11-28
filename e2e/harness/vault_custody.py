@@ -158,3 +158,51 @@ def signed_call(
         })
     with httpx.Client(base_url=fake_cloud.url, verify=False, timeout=10) as client:
         return client.request(method, target, content=raw, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# Faults on the custody switch (``POST /keys/me/custody``)
+# ---------------------------------------------------------------------------
+
+
+class CustodySwitchFault:
+    """Make the next custody switch fail, or kill the client that sends it.
+
+    Installed in front of the fake's ``switch_custody``: the vault item write
+    and every other call stay normal, so a journey can stop a move exactly
+    between "item stored" and "service confirmed". ``refuse_once()`` answers
+    the next switch with the service's 503 (nothing changes on the fake);
+    ``kill_client_once(pid)`` SIGKILLs the process that sent it and answers
+    503 to nobody. Later switches pass through to the real route.
+    """
+
+    def __init__(self, memory: Any) -> None:
+        self._memory = memory
+        self._real = memory.switch_custody
+        self._next: Optional[tuple[str, Optional[int]]] = None
+        self.calls = 0
+
+    def install(self, monkeypatch: Any) -> "CustodySwitchFault":
+        monkeypatch.setattr(self._memory, "switch_custody", self)
+        return self
+
+    def refuse_once(self) -> None:
+        self._next = ("refuse", None)
+
+    def kill_client_once(self, pid: int) -> None:
+        self._next = ("kill", pid)
+
+    def __call__(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        self.calls += 1
+        action, self._next = self._next, None
+        if action is None:
+            return self._real(body)
+        if action[0] == "kill":
+            import os
+            import signal
+
+            os.kill(action[1], signal.SIGKILL)
+        return 503, {"error": {
+            "code": "feature_disabled",
+            "message": "Vault custody for Memory Sync keys is not available yet.",
+        }}
