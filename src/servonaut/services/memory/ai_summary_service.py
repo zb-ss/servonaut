@@ -23,9 +23,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from servonaut.services.memory.interfaces import (
     BackendMaintenance,
@@ -35,6 +35,7 @@ from servonaut.services.memory.interfaces import (
     ValidationFailed,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
+from servonaut.services.memory.retrieval_service import StaleEnvelopes
 
 if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
@@ -63,6 +64,53 @@ class ConsentNotConfirmedError(MemoryBackendError):
             "Call confirm_provider_disclosure_shown(instance_id) after showing "
             "the provider's retention_text to the user."
         )
+
+
+class SummaryFailed(MemoryBackendError):
+    """The service reported the hosted summary job as failed.
+
+    Attributes:
+        reason: The service's failure code. For logs only; people read
+            :func:`summary_error_message`.
+    """
+
+    def __init__(self, reason: str = "") -> None:
+        self.reason = reason
+        super().__init__("summary_failed")
+
+
+class HostedSummaryUnavailable(MemoryBackendError):
+    """A key kept in the vault cannot be used for hosted summaries on this service yet."""
+
+    def __init__(self) -> None:
+        super().__init__("hosted_summary_unavailable")
+
+
+# Small on purpose: the service's failure codes are not final.
+_FAILURE_REASON_TEXT = {
+    "decryption_failed": "the memory could not be opened with the keys that were sent",
+}
+_FAILURE_REASON_FALLBACK = "the service reported a problem"
+_HOSTED_UNAVAILABLE_TEXT = (
+    "Hosted summaries are not available for a key kept in the vault on this "
+    "Servonaut service yet. Try again later."
+)
+_MAX_LOGGED_REASON = 64
+
+
+def summary_error_message(exc: BaseException) -> Optional[str]:
+    """The text to show for a hosted-summary failure, or ``None`` for any other error.
+
+    Never includes a raw service code or service-provided text.
+    """
+    if isinstance(exc, SummaryFailed):
+        reason = _FAILURE_REASON_TEXT.get(exc.reason, _FAILURE_REASON_FALLBACK)
+        return f"The summary could not be created ({reason})."
+    if isinstance(exc, HostedSummaryUnavailable):
+        return _HOSTED_UNAVAILABLE_TEXT
+    from servonaut.services.memory.custody_errors import custody_error_message
+
+    return custody_error_message(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +144,15 @@ class ConsentToken:
         expires_at: Expiry timestamp.
         mode: Summary mode — ``"server_60s"`` | ``"client"`` | ``"off"``.
         modules: Module whitelist for this consent scope.
+        envelope_ids: Newest envelope id per module the summary covers; empty
+            for a service that does not list them.
     """
 
     token: str
     expires_at: datetime
     mode: str
     modules: List[str]
+    envelope_ids: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -272,6 +323,7 @@ class AISummaryService:
                 expires_at=datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")),
                 mode=data["mode"],
                 modules=data.get("modules") or [],
+                envelope_ids=_parse_envelope_ids(data.get("envelope_ids")),
             )
         except Exception as exc:
             raise _translate_api_error(exc) from exc
@@ -281,43 +333,49 @@ class AISummaryService:
         instance_id: str,
         consent_token: str,
         mode: str,
-        passphrase: str,
+        *,
+        envelope_keys: Optional[List[Dict[str, str]]] = None,
+        passphrase: Optional[str] = None,
     ) -> SummaryDispatchResult:
         """Dispatch an AI summary request to the server.
 
-        The passphrase is sent to the server so it can unwrap the private key
-        server-side for the 60-second window.  The server ``sodium_memzero``s
-        it after the worker runs.
+        Exactly one of ``envelope_keys`` (the data key of each consented
+        envelope) or ``passphrase`` (the legacy form: the service unwraps the
+        private key itself) is sent. Neither is retried on a token refresh, so
+        a secret is never sent twice by the client itself.
 
         Args:
             instance_id: Target instance identifier.
-            consent_token: JWT from ``request_consent_token``.
-            mode: Summary mode — must match the consent token's mode.
-            passphrase: User passphrase (for server-side key unwrap).
-
-        Returns:
-            A ``SummaryDispatchResult`` with status and message.
+            consent_token: JWT from ``request_consent_token`` (``.token``).
+            mode: Summary mode, which must match the consent token's mode.
+            envelope_keys: ``[{"envelope_id", "dek"}]``, ``dek`` base64.
+            passphrase: Memory Sync passphrase (legacy form).
 
         Raises:
+            ValueError: If not exactly one of the two is given.
             ConsentNotConfirmedError: If disclosure was not shown for ``instance_id``
                 this session — protects against headless replay of a cached token.
             UpsellRequired: If the plan doesn't include ``memory_ai_summary``.
             BackendMaintenance: On 503.
             ValidationFailed: On 422.
         """
+        if (envelope_keys is None) == (passphrase is None):
+            raise ValueError("Send exactly one of envelope_keys and passphrase")
         self._require_feature()
         if instance_id not in self._disclosure_confirmed:
             raise ConsentNotConfirmedError(instance_id)
         await self._rate_limiter.acquire(RateLimitKey.SUMMARY)
 
+        body: Dict[str, Any] = {"consent_token": consent_token, "mode": mode}
+        if envelope_keys is not None:
+            body["envelope_keys"] = envelope_keys
+        else:
+            body["passphrase"] = passphrase
+
         try:
             data = await self._api.post(
                 f"/api/v1/memory/summary/{instance_id}",
-                json={
-                    "consent_token": consent_token,
-                    "mode": mode,
-                    "passphrase": passphrase,
-                },
+                json=body,
                 retry_on_401=False,
             )
             previous_summary_id = data.get("previous_summary_id")
@@ -338,6 +396,84 @@ class AISummaryService:
             )
         except Exception as exc:
             raise _translate_api_error(exc) from exc
+
+    async def run_summary(
+        self,
+        instance_id: str,
+        *,
+        retrieval: Any,
+        key_source: Callable[[], Optional[str]],
+        passphrase_provider: Callable[[], Awaitable[str]],
+        mode: str = "server_60s",
+        modules: Optional[List[str]] = None,
+    ) -> SummaryDispatchResult:
+        """Ask for consent and dispatch a hosted summary; the order lives here.
+
+        1. A consent that lists ``envelope_ids`` is answered with the keys of
+           exactly those envelopes (any custody; Memory Sync must be unlocked).
+        2. A stale answer (``stale_envelopes`` or a vanished envelope) asks for
+           consent again and retries once, silently; a second one is raised.
+        3. A service that refuses the key form (503), or a consent without
+           ``envelope_ids``, falls back to the passphrase form for a
+           passphrase-custody key only; a vault key gets
+           :class:`HostedSummaryUnavailable`.
+
+        Args:
+            retrieval: The memory retrieval service (unlocked Memory Sync).
+            key_source: Returns ``"vault"`` or ``"passphrase"``.
+            passphrase_provider: Asked only for the passphrase fall-back.
+
+        Raises:
+            VaultCustodyLocked, StaleEnvelopes, HostedSummaryUnavailable and the
+            errors of the consent and dispatch calls.
+        """
+        stale_retried = False
+        while True:
+            consent = await self.request_consent_token(
+                instance_id, mode, modules, provider_ack=True
+            )
+            try:
+                return await self._dispatch_for_consent(
+                    instance_id, consent, retrieval, key_source, passphrase_provider
+                )
+            except StaleEnvelopes:
+                pass
+            except MemoryBackendError:
+                raise
+            except Exception as exc:
+                if getattr(exc, "code", None) != "stale_envelopes":
+                    raise
+            if stale_retried:
+                raise StaleEnvelopes()
+            stale_retried = True
+
+    async def _dispatch_for_consent(
+        self,
+        instance_id: str,
+        consent: ConsentToken,
+        retrieval: Any,
+        key_source: Callable[[], Optional[str]],
+        passphrase_provider: Callable[[], Awaitable[str]],
+    ) -> SummaryDispatchResult:
+        if consent.envelope_ids:
+            keys = await retrieval.envelope_keys(instance_id, consent.envelope_ids)
+            try:
+                return await self.dispatch_summary(
+                    instance_id, consent.token, consent.mode, envelope_keys=keys
+                )
+            except BackendMaintenance:
+                logger.info("Hosted summary: key form refused (feature disabled)")
+            finally:
+                keys.clear()
+        if key_source() != "passphrase":
+            raise HostedSummaryUnavailable()
+        passphrase = await passphrase_provider()
+        try:
+            return await self.dispatch_summary(
+                instance_id, consent.token, consent.mode, passphrase=passphrase
+            )
+        finally:
+            passphrase = ""
 
     async def get_latest_summary(
         self,
@@ -433,6 +569,10 @@ class AISummaryService:
             next_delay = poll_interval
             if latest is None:
                 continue
+            if latest.get("status") == "failed":
+                reason = str(latest.get("reason", "") or "")[:_MAX_LOGGED_REASON]
+                logger.warning("Hosted summary failed: reason=%r", reason)
+                raise SummaryFailed(reason)
             if latest.get("status") == "pending":
                 pending_previous_id = latest.get("previous_summary_id")
                 if (
@@ -458,6 +598,13 @@ class AISummaryService:
                 )
             if previous_envelope_id is None or latest_id != previous_envelope_id:
                 return latest
+
+
+def _parse_envelope_ids(raw: Any) -> Dict[str, str]:
+    """``{module: envelope id}`` from the consent answer; empty when absent or malformed."""
+    if not isinstance(raw, dict):
+        return {}
+    return {str(m): str(e) for m, e in raw.items() if m and e}
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +634,9 @@ def _translate_api_error(exc: Exception) -> Exception:
     if isinstance(exc, FeatureDisabledError):
         return BackendMaintenance()
     if isinstance(exc, ValidationFailedError):
+        if (exc.details or {}).get("field") == "envelope_keys":
+            # Kept as is: the custody wording is picked from the field.
+            return exc
         errors = []
         if exc.details:
             errors = exc.details.get("errors", [])

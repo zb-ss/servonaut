@@ -45,6 +45,13 @@ def _memory_service(summary: str = "# Local summary\n\nLocal facts.") -> MagicMo
     return service
 
 
+def _unlocked_memory_sync(app: App) -> None:
+    """Give the host app the public unlock surface the summary flow uses."""
+    app.memory_sync_service = SimpleNamespace(key_source="vault")
+    app.unlock_memory_sync_for_summary = AsyncMock(return_value=True)
+    app.request_memory_passphrase = AsyncMock(return_value="placeholder-passphrase")
+
+
 class _MemorySummaryApp(App):
     """Minimal app host exposing the services consumed by MemoryScreen."""
 
@@ -217,10 +224,7 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
     ai_summary_service.get_latest_summary = AsyncMock(
         return_value={"id": "old-envelope"}
     )
-    ai_summary_service.request_consent_token = AsyncMock(
-        return_value=SimpleNamespace(token="consent-placeholder", mode="server_60s")
-    )
-    ai_summary_service.dispatch_summary = AsyncMock(
+    ai_summary_service.run_summary = AsyncMock(
         return_value=SimpleNamespace(
             status="queued",
             message="queued",
@@ -246,7 +250,7 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
         ai_summary_service=ai_summary_service,
         retrieval_service=retrieval_service,
     )
-    app._prompt_memory_passphrase = AsyncMock(return_value="placeholder-passphrase")
+    _unlocked_memory_sync(app)
 
     async with app.run_test(headless=True) as pilot:
         await pilot.pause(0.2)
@@ -261,6 +265,11 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
         assert isinstance(app.screen, MemorySummaryScreen)
         assert app.screen._summary.startswith("# Hosted summary")
 
+    # No passphrase dialog: the key form needs none, and the screen no longer
+    # reaches for the app's private prompt.
+    app.request_memory_passphrase.assert_not_awaited()
+    ai_summary_service.run_summary.assert_awaited_once()
+    assert "passphrase" not in ai_summary_service.run_summary.await_args.kwargs
     ai_summary_service.wait_for_new_summary.assert_awaited_once_with(
         "server-1",
         previous_envelope_id="dispatch-envelope",
@@ -271,3 +280,110 @@ async def test_hosted_summary_result_is_decrypted_and_displayed() -> None:
         expected_instance_id="server-1",
         expected_module="ai_summary",
     )
+
+
+def _hosted_service(*, run_summary: AsyncMock, wait: AsyncMock | None = None) -> MagicMock:
+    service = MagicMock()
+    service.get_provider_info = AsyncMock(
+        return_value=ProviderInfo(
+            provider_name="Example AI",
+            retention_days=0,
+            retention_text="The provider retains this request for zero days.",
+            supports_zdr=True,
+        )
+    )
+    service.get_latest_summary = AsyncMock(return_value=None)
+    service.run_summary = run_summary
+    service.wait_for_new_summary = wait or AsyncMock(return_value=None)
+    return service
+
+
+async def _run_hosted_flow(app: App, pilot) -> list[str]:
+    """Run the flow through the consent dialog; return the toast texts."""
+    app.notify = MagicMock()
+    await pilot.pause(0.2)
+    await app.screen._do_ai_summary_flow("server-1")
+    await pilot.pause(0.1)
+    await pilot.click("#confirm_yes_btn")
+    for _ in range(50):
+        await pilot.pause(0.02)
+    return [str(c.args[0]) for c in app.notify.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_consent_dialog_says_keys_not_passphrase_are_sent() -> None:
+    service = _hosted_service(run_summary=AsyncMock())
+    app = _MemorySummaryApp(ai_summary_service=service)
+    _unlocked_memory_sync(app)
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        await app.screen._do_ai_summary_flow("server-1")
+        await pilot.pause(0.1)
+        text = " ".join(str(w.render()) for w in app.screen.query(Static))
+        assert (
+            "Servonaut sends the keys for the memory being summarised, "
+            "not your Memory Sync key or passphrase." in text
+        )
+
+
+def _failure_cases() -> list:
+    from servonaut.services.memory.ai_summary_service import (
+        HostedSummaryUnavailable,
+        SummaryFailed,
+    )
+    from servonaut.services.memory.interfaces import VaultCustodyLocked
+    from servonaut.services.memory.retrieval_service import StaleEnvelopes
+
+    return [
+        (SummaryFailed("decryption_failed"),
+         "The summary could not be created (the memory could not be opened with the keys that were sent)."),
+        (SummaryFailed("brand_new_code"),
+         "The summary could not be created (the service reported a problem)."),
+        (HostedSummaryUnavailable(),
+         "Hosted summaries are not available for a key kept in the vault on this "
+         "Servonaut service yet. Try again later."),
+        (StaleEnvelopes(), "Memory changed while the summary was being prepared. Try again."),
+        (VaultCustodyLocked("vault_locked"),
+         "Your Memory Sync key is kept in your vault. Unlock or add this device to "
+         "your vault to use Memory Sync here."),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, expected", _failure_cases())
+async def test_hosted_summary_failures_show_plain_text(error, expected) -> None:
+    service = _hosted_service(run_summary=AsyncMock(side_effect=error))
+    app = _MemorySummaryApp(ai_summary_service=service)
+    _unlocked_memory_sync(app)
+    async with app.run_test(headless=True) as pilot:
+        toasts = await _run_hosted_flow(app, pilot)
+    assert expected in toasts
+    # The raw code never reaches the user.
+    assert not any("brand_new_code" in t or "decryption_failed" in t for t in toasts)
+
+
+@pytest.mark.asyncio
+async def test_hosted_summary_stops_when_memory_sync_stays_locked() -> None:
+    service = _hosted_service(run_summary=AsyncMock())
+    app = _MemorySummaryApp(ai_summary_service=service)
+    _unlocked_memory_sync(app)
+    app.unlock_memory_sync_for_summary = AsyncMock(return_value=False)
+    async with app.run_test(headless=True) as pilot:
+        await _run_hosted_flow(app, pilot)
+    service.run_summary.assert_not_awaited()
+    app.request_memory_passphrase.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_passphrase_fallback_is_a_cancel_not_an_error() -> None:
+    async def run_summary(instance_id, *, passphrase_provider, **_kw):
+        await passphrase_provider()
+
+    service = _hosted_service(run_summary=AsyncMock(side_effect=run_summary))
+    app = _MemorySummaryApp(ai_summary_service=service)
+    _unlocked_memory_sync(app)
+    app.request_memory_passphrase = AsyncMock(side_effect=RuntimeError("cancelled"))
+    async with app.run_test(headless=True) as pilot:
+        toasts = await _run_hosted_flow(app, pilot)
+    assert "Hosted summary cancelled." in toasts
+    assert not any(t.startswith("Hosted summary failed") for t in toasts)

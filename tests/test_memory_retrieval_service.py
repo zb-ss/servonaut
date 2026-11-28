@@ -481,3 +481,113 @@ class TestVaultCustodyRecord:
         with pytest.raises(VaultCustodyLocked):
             await svc._ensure_keypair()
         provider.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# envelope_keys (hosted summaries send the data key of each consented envelope)
+# ---------------------------------------------------------------------------
+
+def _sealed_wrap(dek: bytes, public_key: bytes) -> str:
+    import nacl.public as nacl_public
+
+    return base64.b64encode(
+        nacl_public.SealedBox(nacl_public.PublicKey(public_key)).encrypt(dek)
+    ).decode()
+
+
+class TestEnvelopeKeys:
+
+    def _service(self, build_envelopes=None):
+        """Service with a fresh key; ``build_envelopes(pair)`` gives path -> envelope."""
+        from servonaut.services.memory.crypto import generate_keypair
+
+        pair = generate_keypair()
+        envelopes = build_envelopes(pair) if build_envelopes else {}
+
+        async def get(path, **_kw):
+            envelope = envelopes.get(path)
+            if envelope is None:
+                raise NotFoundError(code="not_found", message="gone", status=404)
+            return envelope
+
+        api = _make_api_client()
+        api.get = AsyncMock(side_effect=get)
+        svc = _make_service(api)
+        svc._self_pubkey = pair.public_key
+        svc._self_privkey = pair.private_key
+        return svc, pair, api
+
+    def test_reads_exactly_the_named_envelopes(self):
+        deks = {"os": bytes([1]) * 32, "services": bytes([2]) * 32}
+        ids = {"os": "env-os", "services": "env-svc"}
+        svc, _pair, api = self._service(lambda pair: {
+            f"/api/v1/memory/web-1/{m}/at/{ids[m]}": {
+                "id": ids[m], "wrapped_dek": _sealed_wrap(deks[m], pair.public_key)}
+            for m in ids
+        })
+
+        keys = asyncio.run(svc.envelope_keys("web-1", ids))
+
+        assert [k["envelope_id"] for k in keys] == ["env-os", "env-svc"]
+        assert [base64.b64decode(k["dek"]) for k in keys] == [deks["os"], deks["services"]]
+        assert api.get.await_count == 2
+        assert all("/at/" in c.args[0] for c in api.get.await_args_list)
+
+    def test_missing_envelope_is_stale(self):
+        from servonaut.services.memory.retrieval_service import StaleEnvelopes
+
+        svc, _pair, _api = self._service({})
+        with pytest.raises(StaleEnvelopes):
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+
+    def test_returned_id_must_match(self):
+        from servonaut.services.memory.retrieval_service import StaleEnvelopes
+
+        svc, _pair, _api = self._service(lambda pair: {
+            "/api/v1/memory/web-1/os/at/env-os": {
+                "id": "other", "wrapped_dek": _sealed_wrap(b"\x01" * 32, pair.public_key)},
+        })
+        with pytest.raises(StaleEnvelopes):
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+
+    def test_unreadable_wrap_raises_without_key_material(self):
+        from servonaut.services.memory.crypto import generate_keypair
+
+        foreign = generate_keypair()
+        svc, _pair, _api = self._service(lambda _pair: {
+            "/api/v1/memory/web-1/os/at/env-os": {
+                "id": "env-os", "wrapped_dek": _sealed_wrap(b"\x01" * 32, foreign.public_key)},
+        })
+        with pytest.raises(MemoryBackendError) as caught:
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+        assert str(caught.value) == "envelope_key_unreadable"
+
+    def test_ids_from_the_service_cannot_change_the_path(self):
+        svc, _pair, api = self._service({})
+        with pytest.raises(MemoryBackendError):
+            asyncio.run(svc.envelope_keys("web-1", {"os": "../keys/me"}))
+        api.get.assert_not_awaited()
+
+    def test_empty_set_is_stale(self):
+        from servonaut.services.memory.retrieval_service import StaleEnvelopes
+
+        svc, _pair, _api = self._service({})
+        with pytest.raises(StaleEnvelopes):
+            asyncio.run(svc.envelope_keys("web-1", {}))
+
+    def test_vault_locked_never_prompts(self):
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+
+        api = _make_api_client(get_return={
+            "public_key": base64.b64encode(b"\x01" * 32).decode(),
+            "fingerprint": "f" * 64, "custody": "vault", "wrapped_private_key": None,
+        })
+        svc = MemoryRetrievalService(
+            api_client=api, crypto=MagicMock(), passphrase_provider=AsyncMock())
+        with pytest.raises(VaultCustodyLocked):
+            asyncio.run(svc.envelope_keys("web-1", {"os": "env-os"}))
+        svc._passphrase_provider.assert_not_awaited()
+
+
+async def _async_value(value):
+    return value

@@ -44,6 +44,15 @@ _LRU_MAX = 10
 _LRU_TTL_SECONDS = 60.0
 
 
+class StaleEnvelopes(MemoryBackendError):
+    """The memory on the service no longer matches the envelopes a consent named."""
+
+    code = "stale_envelopes"
+
+    def __init__(self) -> None:
+        super().__init__("stale_envelopes")
+
+
 def _validate_instance_id(instance_id: str) -> None:
     """Reject reserved or malformed instance IDs before they reach the wire.
 
@@ -406,6 +415,70 @@ class MemoryRetrievalService:
             raise self._map_403(exc) from exc
         except NotFoundError as exc:
             raise self._map_404(exc) from exc
+
+    async def envelope_keys(
+        self, instance_id: str, envelope_ids: Dict[str, str]
+    ) -> List[Dict[str, str]]:
+        """Data keys of exactly the named envelopes, for a hosted summary.
+
+        Fetches each envelope by id, checks that the service returned that
+        envelope for that module, opens the caller's own wrap and returns
+        ``{"envelope_id", "dek"}`` with the key as base64. The private key
+        never leaves this service, and every data-key buffer is zeroed once
+        encoded. Keys are not cached.
+
+        Raises:
+            StaleEnvelopes: An envelope is gone, or is not the one asked for.
+            VaultCustodyLocked: Memory Sync's key is in the vault, which is locked.
+        """
+        import base64
+        from servonaut.services.memory.crypto import CryptoError, open_dek, secure_zero
+
+        _validate_instance_id(instance_id)
+        if not envelope_ids:
+            raise StaleEnvelopes()
+        await self._ensure_key_material()
+        private_key = self._self_privkey
+        if private_key is None:
+            raise MemoryBackendError("memory_locked")
+        keys: List[Dict[str, str]] = []
+        for module, envelope_id in sorted(envelope_ids.items()):
+            # Both come from the service and end up in a URL path.
+            if not (INSTANCE_ID_RE.fullmatch(str(module)) and INSTANCE_ID_RE.fullmatch(str(envelope_id))):
+                raise MemoryBackendError("invalid_envelope")
+            raw = await self._fetch_envelope_at(instance_id, module, envelope_id)
+            if str(raw.get("id", "")) != envelope_id:
+                raise StaleEnvelopes()
+            dek = None
+            try:
+                dek = open_dek(raw.get("wrapped_dek", ""), private_key=private_key)
+                keys.append({
+                    "envelope_id": envelope_id,
+                    "dek": base64.b64encode(bytes(dek)).decode("ascii"),
+                })
+            except CryptoError as exc:
+                raise MemoryBackendError("envelope_key_unreadable") from exc
+            finally:
+                if dek is not None:
+                    secure_zero(dek)
+        return keys
+
+    async def _fetch_envelope_at(
+        self, instance_id: str, module: str, envelope_id: str
+    ) -> Dict[str, Any]:
+        """One envelope by id; a missing one means the memory changed."""
+        try:
+            await self._rate_limiter.acquire(RateLimitKey.GENERAL)
+            raw = await self._api.get(
+                f"/api/v1/memory/{instance_id}/{module}/at/{envelope_id}"
+            )
+        except ForbiddenEntitlementError as exc:
+            raise self._map_403(exc) from exc
+        except NotFoundError as exc:
+            raise StaleEnvelopes() from exc
+        if not isinstance(raw, dict):
+            raise MemoryBackendError("invalid_envelope")
+        return raw
 
     async def get_snapshot(self, instance_id: str, module: str, snapshot_id: str) -> DecryptedEnvelope:
         """GET /api/v1/memory/{instance_id}/{module}/at/{snapshot_id}."""

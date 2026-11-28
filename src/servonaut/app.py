@@ -2971,6 +2971,45 @@ class ServonautApp(App):
                 )
         return result.passphrase
 
+    async def unlock_memory_sync_for_summary(self) -> bool:
+        """Have Memory Sync unlocked for a hosted summary; ``True`` when it is.
+
+        A vault key unlocks silently; a passphrase account gets the usual
+        dialog; a vault key with a locked vault gets the explanation and no
+        dialog. Whatever stops the unlock is reported to the user here.
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None:
+            return False
+        if not sync.is_configured:
+            # An explicit request, so an earlier dismissal does not apply.
+            self._memory_sync_prompt_skipped = False
+            await self.prompt_memory_sync_unlock()
+        if sync.is_configured:
+            self._propagate_memory_key_material()
+            return True
+        if getattr(self, "_memory_sync_prompt_skipped", False):
+            return False  # the user closed the dialog; already told
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+        from servonaut.services.memory.sync_service import VaultUnlock
+
+        if await sync.unlock_from_vault() is VaultUnlock.VAULT_LOCKED:
+            self._notify_vault_custody_locked(VaultCustodyLocked("vault_locked"))
+        else:
+            self.notify(
+                "Memory Sync is locked. Open Memory Sync to unlock it, then try again.",
+                severity="warning", markup=False,
+            )
+        return False
+
+    async def request_memory_passphrase(self, mode: str = "unlock") -> str:
+        """Ask for the Memory Sync passphrase (the hosted-summary fall-back).
+
+        Raises:
+            RuntimeError: If the user cancels the dialog.
+        """
+        return await self._prompt_memory_passphrase(mode)
+
     def pointer_gesture_started(self) -> None:
         """Start a fresh pointer-gesture window for TextArea auto-copy."""
         changed = getattr(self, "_changed_selection_editors", None)

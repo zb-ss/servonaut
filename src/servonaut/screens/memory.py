@@ -54,6 +54,7 @@ from servonaut.screens.memory_authored import (
     shared_findings,
     shared_notes_text,
 )
+from servonaut.services.memory.ai_summary_service import summary_error_message
 from servonaut.services.memory.notes import notes_for_display, notes_template
 from servonaut.services.memory.trust_notices import FINDINGS_READER_NOTICE
 from servonaut.services.memory.provider import instance_provider
@@ -291,6 +292,10 @@ class PinKeyModal(ModalScreen[Optional[str]]):
 # ---------------------------------------------------------------------------
 # SimpleConfirmModal
 # ---------------------------------------------------------------------------
+
+
+class _SummaryCancelled(Exception):
+    """The user closed the passphrase dialog of the hosted-summary fall-back."""
 
 
 class SimpleConfirmModal(ModalScreen[bool]):
@@ -2434,6 +2439,8 @@ class MemoryScreen(WorkspaceScreen):
             Content.styled("AI Provider:", "bold"), " ",
             literal_text(provider_info.provider_name), "\n\n",
             literal_text(provider_info.retention_text), "\n\n",
+            "Servonaut sends the keys for the memory being summarised, not your "
+            "Memory Sync key or passphrase.", "\n\n",
             "Do you consent to submitting server memory data to this provider?",
         )
 
@@ -2447,7 +2454,8 @@ class MemoryScreen(WorkspaceScreen):
             try:
                 previous = await ai_service.get_latest_summary(instance_id)
                 previous_id = None
-                if previous is not None:
+                # A failed or pending answer is a job status, not an envelope.
+                if previous is not None and "status" not in previous:
                     previous_id = str(previous.get("id", "") or "")
                     if not previous_id:
                         raise RuntimeError(
@@ -2462,39 +2470,23 @@ class MemoryScreen(WorkspaceScreen):
                 )
                 return
 
-            try:
-                consent_token = await ai_service.request_consent_token(
-                    instance_id=instance_id,
-                    mode="server_60s",
-                    modules=None,
-                    provider_ack=True,
-                )
-            except Exception as exc:
-                logger.error("Consent token failed: %s", exc)
-                self.app.notify(
-                    f"Consent token failed: {exc}",
-                    severity="error",
-                    markup=False,
-                )
-                return
+            if not await self.app.unlock_memory_sync_for_summary():
+                return  # the unlock path already told the user why
 
-            try:
-                passphrase = await self.app._prompt_memory_passphrase()
-            except RuntimeError:
-                self.app.notify("Hosted summary cancelled.", severity="information")
-                return
+            async def passphrase_provider() -> str:
+                try:
+                    return await self.app.request_memory_passphrase("unlock")
+                except RuntimeError as exc:
+                    raise _SummaryCancelled() from exc
 
             try:
                 self.app.notify("Dispatching hosted AI summary…")
-                try:
-                    result = await ai_service.dispatch_summary(
-                        instance_id=instance_id,
-                        consent_token=consent_token,
-                        mode=consent_token.mode,
-                        passphrase=passphrase,
-                    )
-                finally:
-                    passphrase = ""
+                result = await ai_service.run_summary(
+                    instance_id,
+                    retrieval=self.app.memory_retrieval_service,
+                    key_source=lambda: self.app.memory_sync_service.key_source,
+                    passphrase_provider=passphrase_provider,
+                )
                 if getattr(result, "correlation_supported", False):
                     # The dispatch response atomically identifies the envelope
                     # that was current when this job was queued. Prefer it to
@@ -2530,13 +2522,15 @@ class MemoryScreen(WorkspaceScreen):
                     envelope,
                     provider_name=provider_info.provider_name,
                 )
+            except _SummaryCancelled:
+                self.app.notify("Hosted summary cancelled.", severity="information")
             except Exception as exc:
-                logger.error("Hosted AI summary failed: %s", exc, exc_info=True)
+                logger.error("Hosted AI summary failed: %s", type(exc).__name__)
                 self.query_one("#memory-hosted-status", Static).update(
                     "[$text-error]● Hosted summary · Failed[/$text-error]"
                 )
                 self.app.notify(
-                    f"Hosted summary failed: {exc}",
+                    summary_error_message(exc) or f"Hosted summary failed: {exc}",
                     severity="error",
                     markup=False,
                 )
