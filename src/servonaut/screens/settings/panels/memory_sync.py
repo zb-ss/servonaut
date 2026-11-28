@@ -136,7 +136,7 @@ class MemorySyncPanel(SettingsPanel):
                 Static(
                     "These settings are stored on your servonaut.dev account, "
                     "not in config.json. Set up the encryption keypair via "
-                    "☁ Memory Sync in the sidebar before editing here.",
+                    "Fleet memory → Sync before editing here.",
                     id="msync_info_note",
                     classes="note",
                 ),
@@ -205,7 +205,7 @@ class MemorySyncPanel(SettingsPanel):
         if not self._is_enrolled():
             self._disable_widgets(
                 "Memory Sync is locked on this device. "
-                "Open ☁ Memory Sync from the sidebar and click "
+                "Open Fleet memory → Sync and click "
                 "Unlock Memory Sync (you will be asked for your passphrase), "
                 "then return here to manage these settings."
             )

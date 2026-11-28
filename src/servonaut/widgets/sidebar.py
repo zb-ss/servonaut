@@ -546,7 +546,12 @@ class Sidebar(Widget):
                 pass
 
         # Auto-expand: only the section containing the active button stays open.
-        if active_id:
+        # Settings sits in #sidebar-bottom outside any section, so keep Fleet
+        # expanded to leave Instances one click away.
+        if active_id == "nav_settings":
+            for section in self.query(SidebarSection):
+                section.collapsed = section.id != "section_fleet"
+        elif active_id:
             for section in self.query(SidebarSection):
                 section.collapsed = not section.contains_button(active_id)
             # On a short terminal an active entry inside #sidebar-scroll can

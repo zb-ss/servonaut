@@ -186,6 +186,15 @@ class TestListAvailableKeys(TestSSHService):
         keys = ssh_service.list_available_keys()
         assert len(keys) == 1
 
+    def test_excludes_public_and_cert_files(self, ssh_service):
+        (ssh_service._ssh_dir / 'id_ed25519').touch()
+        (ssh_service._ssh_dir / 'id_ed25519.pub').touch()
+        (ssh_service._ssh_dir / 'id_ed25519-cert.pub').touch()
+        (ssh_service._ssh_dir / 'deploy.pem').touch()
+        keys = ssh_service.list_available_keys()
+        names = {Path(k).name for k in keys}
+        assert names == {'id_ed25519', 'deploy.pem'}
+
     def test_empty_dir(self, ssh_service):
         assert ssh_service.list_available_keys() == []
 

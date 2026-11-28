@@ -771,7 +771,7 @@ class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
             body=DialogContent(
                 Static(
                     "Select one imported key to connect to a matching team server. "
-                    "Personal servers stay manual: open the server and choose Use vault key. "
+                    "Use a server's Use vault key action to bind an imported key to personal or shared servers. "
                     "No server binding or Bitwarden reference will change until you confirm later steps."
                 ),
                 SelectionList(*self._options({0}), id="vault_import_bind_list"),
@@ -3358,24 +3358,23 @@ class VaultScreen(WorkspaceScreen):
         try:
             async with self._busy('Refreshing the vault…'):
                 vaults = await _invoke(service, "list_vaults")
+                self._vaults = [dict(row) for row in vaults or []]
+                self._table_mode = "vaults"
+                self._render_vaults()
+                for row, vault in enumerate(self._vaults):
+                    if vault.get("vault_id") == vault_id:
+                        self.query_one("#vault_table", DataTable).move_cursor(row=row)
+                        break
+                if imported_count > 0 and any(
+                    isinstance(reference, Mapping) and reference.get("source") == "ssh"
+                    for reference in references
+                ):
+                    self._status(f"{message} Next: use Bind to server or Auto-bind keys to attach this key to a server.")
+                    self._next_action = "vault_bind_key"
+                else:
+                    self._status(message)
         except Exception as exc:
             self._status(f"{message} Vault metadata could not be refreshed ({vault_failure_reason(exc)}).")
-        else:
-            self._vaults = [dict(row) for row in vaults or []]
-            self._table_mode = "vaults"
-            self._render_vaults()
-            for row, vault in enumerate(self._vaults):
-                if vault.get("vault_id") == vault_id:
-                    self.query_one("#vault_table", DataTable).move_cursor(row=row)
-                    break
-            if imported_count > 0 and any(
-                isinstance(reference, Mapping) and reference.get("source") == "ssh"
-                for reference in references
-            ):
-                self._status(f"{message} Next: use Bind to server or Auto-bind keys to attach this key to a server.")
-                self._next_action = "vault_bind_key"
-            else:
-                self._status(message)
         if any(
             isinstance(reference, Mapping) and reference.get("source") == "bitwarden"
             for reference in references

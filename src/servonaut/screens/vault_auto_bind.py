@@ -50,7 +50,15 @@ from servonaut.widgets.dialogs import (
 logger = logging.getLogger(__name__)
 
 # Held back while the review loads or the keys are being bound.
-_ACTIONS = ("#auto_bind_apply", "#auto_bind_fetch_keys", "#auto_bind_all", "#auto_bind_none", "#auto_bind_trust")
+_ACTIONS = (
+    "#auto_bind_apply",
+    "#auto_bind_fetch_keys",
+    "#auto_bind_all",
+    "#auto_bind_none",
+    "#auto_bind_trust",
+    "#auto_bind_create_vault",
+    "#auto_bind_import_key",
+)
 
 INTRO = (
     "Each of your servers gets the key from your personal vault that is named like its "
@@ -638,18 +646,21 @@ class VaultAutoBindScreen(WorkspaceScreen):
 
             options = self._build_picker_options()
             if not options:
-                message = (
-                    "You have no personal vault yet: create one on the Vault screen and import your SSH keys into it."
-                )
-                if not_offered:
-                    message += " Team vaults not offered: " + "; ".join(not_offered) + "."
                 if callable(getattr(service, "creatable_vaults", None)):
                     try:
                         creatable = await service.creatable_vaults(vaults)
                         self._bridge_creatable = [dict(opt) for opt in creatable if isinstance(opt, Mapping)]
                     except Exception:
                         self._bridge_creatable = []
-                self._set_bridge_buttons(show_create=bool(self._bridge_creatable))
+                can_create = bool(self._bridge_creatable)
+                message = (
+                    "You have no personal vault yet: use Create vault below and import your SSH keys."
+                    if can_create
+                    else "You have no personal vault yet: create a vault and import your SSH keys into it."
+                )
+                if not_offered:
+                    message += " Team vaults not offered: " + "; ".join(not_offered) + "."
+                self._set_bridge_buttons(show_create=can_create)
                 self._status(message)
                 return
 
@@ -666,7 +677,7 @@ class VaultAutoBindScreen(WorkspaceScreen):
             if self._selected_target == "personal":
                 if not personal_vault_id:
                     self._status(
-                        "You have no personal vault yet: create one on the Vault screen and import your SSH keys into it."
+                        "You have no personal vault yet: create a personal vault and import your SSH keys into it."
                     )
                     return
                 self._vault_id = personal_vault_id
@@ -690,12 +701,15 @@ class VaultAutoBindScreen(WorkspaceScreen):
                 self._status(f"Could not read your vault's SSH keys ({vault_failure_reason(exc)}).")
                 return
             if not keys:
-                self._set_bridge_buttons(show_import=bool(self._vault_id and callable(getattr(service, "import_keys", None))))
+                can_import = bool(self._vault_id and callable(getattr(service, "import_keys", None)))
+                self._set_bridge_buttons(show_import=can_import)
                 if self._team:
                     clean_team = self.scrub_for_display(self._team_name or self._team)
-                    self._status(f"Team vault for {clean_team} has no SSH key yet: import keys with Import SSH on the Vault screen.")
+                    suffix = "use Import SSH key below." if can_import else "import keys first."
+                    self._status(f"Team vault for {clean_team} has no SSH key yet: {suffix}")
                 else:
-                    self._status("Your personal vault has no SSH key yet: import your keys with Import SSH on the Vault screen.")
+                    suffix = "use Import SSH key below." if can_import else "import keys first."
+                    self._status(f"Your personal vault has no SSH key yet: {suffix}")
                 return
             self._busy.say(job, "Checking each server's vault key, login and trusted host keys…")
             try:

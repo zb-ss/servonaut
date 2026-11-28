@@ -26,6 +26,7 @@ from textual.widgets import Button, Static
 
 from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS
 from servonaut.screens.settings.base import SettingsPanel
+from servonaut.widgets.sidebar import is_nav_route_visible
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,25 @@ class BackupsPanel(SettingsPanel):
     # Lifecycle — nothing to load; snapshot baseline is the empty dict
     # ------------------------------------------------------------------
 
+    def on_mount(self) -> None:
+        self._sync_snapshots_button()
+
     def load(self) -> None:
         """No config fields to populate; snapshot the (empty) baseline."""
+        self._sync_snapshots_button()
         self._snapshot_now()
+
+    def _sync_snapshots_button(self) -> None:
+        """Hide Manage snapshots for signed-out or unentitled accounts."""
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            return
+        try:
+            self.query_one("#backups_open_snapshots", Button).display = is_nav_route_visible(
+                self.app, "nav_sync_config"
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Panel contract — no editable fields, always clean
@@ -151,6 +168,13 @@ class BackupsPanel(SettingsPanel):
         """Push SnapshotManagerScreen, gated on config_sync entitlement and service."""
         auth = getattr(self.app, "auth_service", None)
         sync = getattr(self.app, "config_sync_service", None)
+        if auth is not None and not getattr(auth, "is_authenticated", False):
+            self.app.notify(
+                "Sign in to manage config snapshots.",
+                severity="warning",
+                markup=False,
+            )
+            return
         if sync is None or (auth is not None and not auth.has_feature("config_sync")):
             self.app.notify(
                 "Config sync is not available on this plan.",

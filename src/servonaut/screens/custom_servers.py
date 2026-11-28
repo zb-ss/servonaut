@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import partial
+from pathlib import Path
 from typing import Any, Optional
 
 from rich.text import Text
@@ -150,15 +151,18 @@ class CustomServersScreen(WorkspaceScreen):
     CustomServersScreen #custom_post_save_row {
         height: auto;
         margin: 1 0;
-        padding: 1;
+        padding: 0 1;
         border: round $border-blurred;
         background: transparent;
-        align: left middle;
     }
     CustomServersScreen #custom_post_save_text {
-        width: 1fr;
+        width: 100%;
         height: auto;
         color: $text-muted;
+    }
+    CustomServersScreen .custom_post_save_actions {
+        width: 100%;
+        height: auto;
     }
     CustomServersScreen #btn_edit_server {
         width: auto;
@@ -172,7 +176,7 @@ class CustomServersScreen(WorkspaceScreen):
     CustomServersScreen #btn_custom_share_team {
         width: auto;
         min-width: 0;
-        margin-left: 1;
+        margin: 0 1 0 0;
     }
     """
 
@@ -218,11 +222,12 @@ class CustomServersScreen(WorkspaceScreen):
                             classes="custom-record-note",
                         )
                     yield BusyIndicator(id="custom_busy")
-                    with Horizontal(id="custom_post_save_row"):
+                    with Vertical(id="custom_post_save_row"):
                         yield Static("", id="custom_post_save_text", markup=False)
-                        yield Button("Open server", variant="primary", id="btn_custom_open_server")
-                        yield Button("Bind vault key", id="btn_custom_bind_vault")
-                        yield Button("Share with team", id="btn_custom_share_team")
+                        with Horizontal(classes="custom_post_save_actions"):
+                            yield Button("Open server", variant="primary", compact=True, id="btn_custom_open_server")
+                            yield Button("Bind vault key", compact=True, id="btn_custom_bind_vault")
+                            yield Button("Share with team", compact=True, id="btn_custom_share_team")
                     with Container(id="add_form"):
                         yield Static("Server details", classes="custom-section-title")
                         yield Static("Connection", classes="custom-form-group-title")
@@ -301,9 +306,23 @@ class CustomServersScreen(WorkspaceScreen):
             select.set_options([])
             return
         ssh_svc = getattr(self.app, "ssh_service", None)
+        from servonaut.services.ssh_host_keys import home_relative
+
         keys = ssh_svc.list_available_keys() if ssh_svc is not None and hasattr(ssh_svc, "list_available_keys") else []
-        select.set_options([(k, k) for k in keys])
-        select.display = bool(keys)
+        options: list[tuple[str, str]] = []
+        check_perms = getattr(ssh_svc, "check_key_permissions", None) if ssh_svc is not None else None
+        for raw_key in keys:
+            shown = home_relative(str(raw_key))
+            label = shown
+            if callable(check_perms) and Path(str(raw_key)).expanduser().exists():
+                try:
+                    if not check_perms(str(raw_key)):
+                        label = f"{shown} (insecure permissions: expected 0600)"
+                except Exception:
+                    pass
+            options.append((label, shown))
+        select.set_options(options)
+        select.display = bool(options)
 
     def _setup_table(self) -> None:
         """Configure DataTable columns."""
@@ -420,10 +439,32 @@ class CustomServersScreen(WorkspaceScreen):
             extras_area.text = ""
 
         self.query_one("#input_name", Input).focus()
+        if getattr(self, "is_attached", False):
+            self.call_after_refresh(self._scroll_form_top)
+
+    def _scroll_form_top(self) -> None:
+        form = self.query_one("#add_form")
+        if form.display:
+            form.scroll_visible(animate=False, top=True)
+            name_input = self.query_one("#input_name", Input)
+            name_input.scroll_visible(animate=False, top=True)
+            name_input.focus()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "select_custom_ssh_key" and isinstance(event.value, str) and event.value:
             self.query_one("#input_ssh_key", Input).value = event.value
+            ssh_svc = getattr(self.app, "ssh_service", None)
+            check_perms = getattr(ssh_svc, "check_key_permissions", None) if ssh_svc is not None else None
+            if callable(check_perms) and Path(event.value).expanduser().exists():
+                try:
+                    if not check_perms(event.value):
+                        self.app.notify(
+                            f"{event.value} has overly open permissions; run chmod 600 on it.",
+                            severity="warning",
+                            markup=False,
+                        )
+                except Exception:
+                    pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "custom_servers_table":
@@ -521,31 +562,12 @@ class CustomServersScreen(WorkspaceScreen):
             self.query_one("#input_port", Input).focus()
             return
 
-        server = CustomServer(
-            name=name,
-            host=host,
-            username=username,
-            ssh_key=ssh_key,
-            port=port,
-            provider=provider,
-            group=group,
-            extra_ssh_options=extra_ssh_options,
-        )
-
-        # Demo mode: what the operator typed on camera renders as typed.
-        if self.app.demo_mode and self.app.redaction_service:
-            self.app.redaction_service.keep_as_authored(
-                name, host, username, ssh_key, provider, group,
-            )
-
         editing_name = getattr(self, "_editing_name", None)
-        existing_old = (
-            self.app.custom_server_service.get_server(editing_name)
-            if editing_name
-            else None
-        )
+        svc = self.app.custom_server_service
+        existing_raw = svc.get_server(editing_name) if editing_name else None
+        existing_old = existing_raw if isinstance(existing_raw, CustomServer) else None
         if editing_name is None:
-            if self.app.custom_server_service.get_server(name) is not None:
+            if isinstance(svc.get_server(name), CustomServer):
                 self.app.notify(
                     f"Custom server '{name}' already exists. Select it and press Edit to modify it.",
                     severity="error",
@@ -554,7 +576,7 @@ class CustomServersScreen(WorkspaceScreen):
                 self.query_one("#input_name", Input).focus()
                 return
         elif editing_name != name:
-            if self.app.custom_server_service.get_server(name) is not None:
+            if isinstance(svc.get_server(name), CustomServer):
                 self.app.notify(f"Custom server '{name}' already exists", severity="error", markup=False)
                 self.query_one("#input_name", Input).focus()
                 return
@@ -818,7 +840,8 @@ class CustomServersScreen(WorkspaceScreen):
         share_btn.display = False
         row = self.query_one("#custom_post_save_row")
         row.display = True
-        self.call_after_refresh(row.scroll_visible, animate=False)
+        if getattr(self, "is_attached", False):
+            self.call_after_refresh(self._reveal_post_save_row)
         self.query_one("#btn_custom_open_server", Button).focus()
         if can_team:
             self.run_worker(
@@ -826,6 +849,14 @@ class CustomServersScreen(WorkspaceScreen):
                 group="custom_share_gate",
                 exclusive=True,
             )
+
+    def _reveal_post_save_row(self) -> None:
+        row = self.query_one("#custom_post_save_row")
+        if row.display:
+            row.scroll_visible(animate=False, top=True)
+            btn = self.query_one("#btn_custom_open_server", Button)
+            if btn.display:
+                btn.focus()
 
     async def _probe_post_save_share_teams(self) -> None:
         from servonaut.screens._team_share import resolve_manageable_teams

@@ -148,7 +148,7 @@ class LoginScreen(WorkspaceScreen):
     DEFAULT_CSS = """
     LoginScreen #login_sync_row {
         height: auto;
-        margin: 1 0 0 0;
+        margin: 0;
         background: transparent;
     }
     LoginScreen #btn_login_sync_config {
@@ -267,11 +267,12 @@ class LoginScreen(WorkspaceScreen):
                             Static("[bold]Signed-in account[/bold]", classes="account_section_heading"),
                             Static("", id="account_info"),
                             Static("", id="plan_info"),
-                            ActionRow(
+                            Horizontal(
                                 ActionButton(
                                     "Manage config snapshots",
                                     id="btn_login_sync_config",
                                     tooltip="Push or pull encrypted config snapshots across devices",
+                                    compact=True,
                                 ),
                                 id="login_sync_row",
                             ),

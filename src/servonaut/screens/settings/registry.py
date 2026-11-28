@@ -115,7 +115,7 @@ PANELS: List[PanelSpec] = [
         id='vault',
         title="Vault",
         group="Access & connections",
-        keywords=["vault", "identity", "recovery", "grant", "verification", "ssh agent"],
+        keywords=["vault", "team", "team vault", "identity", "recovery", "grant", "verification", "ssh agent"],
         factory=_panel("vault", "VaultPanel"),
     ),
     PanelSpec(

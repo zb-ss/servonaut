@@ -81,7 +81,7 @@ def test_app_on_user_logout_resets_vault_available_and_refreshes_sidebar() -> No
     sidebar.refresh_auth_gates.assert_called_once_with()
 
 
-def test_fleet_filter_includes_folded_shared_rows_under_team_chip_o4() -> None:
+def test_fleet_filter_includes_folded_shared_rows_under_team_chip() -> None:
     own_shared = {"id": "i-1", "provider": "aws", "state": "running"}
     cloud_only = {"id": "i-2", "is_hetzner": True, "provider": "hetzner", "state": "running"}
     team_only = {"id": "s-3", "is_shared": True, "provider": "Team", "state": "unknown"}
@@ -99,7 +99,7 @@ def test_fleet_filter_includes_folded_shared_rows_under_team_chip_o4() -> None:
     assert counts.providers["shared"] == 2
 
 
-def test_fleet_values_shows_team_name_only_on_shared_rows_o3() -> None:
+def test_fleet_values_shows_team_name_only_on_shared_rows() -> None:
     own_vals = instance_values({"id": "i-1", "name": "web-1", "team_name": "Ops"})
     assert "team_name" not in own_vals
     shared_vals = instance_values({"id": "s-1", "name": "web-1", "is_shared": True, "team_name": "Ops"})
@@ -244,6 +244,13 @@ async def test_team_management_fourth_vault_column_and_onboarding_strip() -> Non
                 "region": "us-east-1",
                 "credential_binding": {"source": "servonaut_vault"},
             },
+            {
+                "id": "s3",
+                "name": "app-3",
+                "hostname": "10.0.1.3",
+                "region": "eu-west-1",
+                "credential_binding": {"source": "servonaut_vault", "key_name": "deploy"},
+            },
         ]),
         list_team_configs=AsyncMock(return_value=[]),
         get_team_agent_rules=AsyncMock(return_value={}),
@@ -279,13 +286,24 @@ async def test_team_management_fourth_vault_column_and_onboarding_strip() -> Non
         tbl = screen.query_one("#servers_table", DataTable)
         for _ in range(40):
             await pilot.pause()
-            if screen._has_team_detail and tbl.row_count == 2:
+            if screen._has_team_detail and tbl.row_count == 3:
                 break
         assert [str(c.label.plain) for c in tbl.columns.values()] == ["Name", "Hostname", "Region", "Vault key"]
         assert str(tbl.get_row_at(0)[3]) == "Not bound"
         assert str(tbl.get_row_at(1)[3]) == "Bound"
+        assert str(tbl.get_row_at(2)[3]) == "Bound: deploy"
         assert screen.query_one("#btn_bind_shared_key", Button).display is True
         assert screen.query_one("#team_onboarding_strip").display is True
+
+        # Narrow resize keeps onboarding prose legible and avoids sideways scroll.
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.query_one("#team_onboarding_text", Static).region.width >= 35
+        assert tbl.max_scroll_x == 0
+
+        screen.query_one("#btn_team_onboarding_dismiss", Button).scroll_visible(animate=False, immediate=True)
+        await pilot.pause()
         await pilot.click("#btn_team_onboarding_dismiss")
         assert screen.query_one("#team_onboarding_strip").display is False
 
@@ -350,18 +368,167 @@ async def test_vault_bind_modal_inline_create_and_import_and_default_selection()
 
 
 @pytest.mark.asyncio
-async def test_instance_list_launch_ssh_resolves_bw_ref_o1() -> None:
-    screen = object.__new__(InstanceListScreen)
-    mock_app = SimpleNamespace(
-        bw_ssh_config_service=object(),
-        team_service=None,
-        ssh_service=MagicMock(),
+async def test_instance_list_quick_ssh_follows_resolution_chain() -> None:
+    from servonaut.config.schema import AppConfig, ConnectionProfile
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.ssh_ref_resolver import ResolvedSshRef
+
+    def _build_app(instance: dict, *, authenticated: bool = True, team_rows_list: list | None = None):
+        screen = object.__new__(InstanceListScreen)
+        ssh_service = MagicMock()
+        ssh_service.get_key_path.return_value = None
+        ssh_service.discover_key.return_value = None
+        ssh_service.build_ssh_command.side_effect = lambda **kw: ["ssh", kw.get("host", "1.1.1.1")]
+        terminal_service = MagicMock()
+        terminal_service.launch_ssh_in_terminal.return_value = True
+        team_svc = MagicMock()
+        team_svc.list_teams = AsyncMock(return_value=[{"slug": "ops", "name": "Ops"}])
+        cfg_mgr = MagicMock()
+        cfg_mgr.get.return_value = AppConfig(default_username="ubuntu")
+        conn_svc = ConnectionService(cfg_mgr)
+        mock_app = SimpleNamespace(
+            auth_service=SimpleNamespace(is_authenticated=authenticated),
+            bw_ssh_config_service=object() if authenticated else None,
+            team_service=team_svc if authenticated else None,
+            vault_command_service=None,
+            vault_available=False,
+            vault_lease_cache=None,
+            connection_service=conn_svc,
+            config_manager=cfg_mgr,
+            ssh_service=ssh_service,
+            terminal_service=terminal_service,
+            instances=[instance, *(team_rows_list or [])],
+            demo_mode=False,
+            notify=MagicMock(),
+            _team_cache=None,
+        )
+        return screen, mock_app, ssh_service, terminal_service, team_svc
+
+    base_instance = {"id": "i-1", "name": "web-1", "provider": "aws", "state": "running", "public_ip": "1.1.1.1"}
+    conn = {"host": "1.1.1.1", "username": "ubuntu", "key_path": None, "proxy_args": [], "port": None, "extra_options": [], "profile": None}
+
+    # 1. CA tier forwards cert + private agent + known_hosts; no list_teams without team twin.
+    screen, mock_app, ssh_service, terminal_service, team_svc = _build_app(base_instance)
+    ca_res = SimpleNamespace(
+        source="ca",
+        identity_agent="/tmp/agent.sock",
+        identity_file="/tmp/ca.pub",
+        certificate_path="/tmp/ca-cert.pub",
+        known_hosts_path="/tmp/kh",
+        login_user="deploy",
+        lease=None,
     )
-    resolved = SimpleNamespace(source="personal", item_id="bw-item-1")
     with (
         patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
-        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=({}, resolved))),
-        patch("servonaut.screens.instance_list.resolve_bw_ssh_key_path", AsyncMock(return_value="/tmp/bw-key")),
+        patch.object(screen, "_set_action_busy_note"),
+        patch.object(screen, "_maybe_show_memory_prompt"),
+        patch.object(screen, "_maybe_pull_annotations"),
+        patch.object(screen, "_sync_memory_note"),
+        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(base_instance, ca_res))),
     ):
-        result = await screen._resolve_bw_key_if_configured({"id": "i-1"})
-    assert result == "/tmp/bw-key"
+        await screen._launch_ssh(base_instance, base_instance, conn)
+    team_svc.list_teams.assert_not_awaited()
+    assert ssh_service.build_ssh_command.call_args.kwargs["certificate_file"] == "/tmp/ca-cert.pub"
+    assert ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] == "/tmp/agent.sock"
+    terminal_service.launch_ssh_in_terminal.assert_called_once()
+
+    # 2. Vault tier forwards native agent + identity_file + known_hosts.
+    screen, mock_app, ssh_service, terminal_service, _ = _build_app(base_instance)
+    vault_res = SimpleNamespace(
+        source="vault",
+        identity_agent="/tmp/v.sock",
+        identity_file="/tmp/v.pub",
+        certificate_path=None,
+        known_hosts_path="/tmp/vkh",
+        login_user="ops",
+        lease=None,
+    )
+    with (
+        patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+        patch.object(screen, "_set_action_busy_note"),
+        patch.object(screen, "_maybe_show_memory_prompt"),
+        patch.object(screen, "_maybe_pull_annotations"),
+        patch.object(screen, "_sync_memory_note"),
+        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(base_instance, vault_res))),
+    ):
+        await screen._launch_ssh(base_instance, base_instance, conn)
+    assert ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] == "/tmp/v.sock"
+    assert ssh_service.build_ssh_command.call_args.kwargs["username"] == "ops"
+
+    # 3. Personal & team Bitwarden tiers use resolve_bw_ssh_key_path; shared twin supplies teams.
+    for tier, extra in (("personal", []), ("team", [{"id": "s-1", "is_shared": True, "instance_id": "i-1", "team_slug": "ops", "team_name": "Ops"}])):
+        screen, mock_app, ssh_service, terminal_service, team_svc = _build_app(base_instance, team_rows_list=extra)
+        bw_res = ResolvedSshRef(source=tier, item_id=f"bw-{tier}")
+        with (
+            patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+            patch.object(screen, "_set_action_busy_note"),
+            patch.object(screen, "_maybe_show_memory_prompt"),
+            patch.object(screen, "_maybe_pull_annotations"),
+            patch.object(screen, "_sync_memory_note"),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(extra[0] if extra else base_instance, bw_res))),
+            patch("servonaut.screens._vault_bind.resolve_bw_ssh_key_path", AsyncMock(return_value=f"/tmp/{tier}.pem")),
+        ):
+            await screen._launch_ssh(base_instance, base_instance, conn)
+        assert ssh_service.build_ssh_command.call_args.kwargs["key_path"] == f"/tmp/{tier}.pem"
+        if tier == "team":
+            team_svc.list_teams.assert_awaited_once()
+
+    # 4. Local fallback tier fills key_path when conn lacks one.
+    screen, mock_app, ssh_service, _, _ = _build_app(base_instance)
+    local_res = ResolvedSshRef(source="local", local_key_path="/home/user/.ssh/id_ed25519")
+    with (
+        patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+        patch.object(screen, "_set_action_busy_note"),
+        patch.object(screen, "_maybe_show_memory_prompt"),
+        patch.object(screen, "_maybe_pull_annotations"),
+        patch.object(screen, "_sync_memory_note"),
+        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(base_instance, local_res))),
+    ):
+        await screen._launch_ssh(base_instance, base_instance, conn)
+    assert ssh_service.build_ssh_command.call_args.kwargs["key_path"] == "/home/user/.ssh/id_ed25519"
+
+    # 5. Resolver failure notifies error and aborts terminal launch.
+    screen, mock_app, _, terminal_service, _ = _build_app(base_instance)
+    with (
+        patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+        patch.object(screen, "_set_action_busy_note"),
+        patch.object(screen, "_sync_memory_note"),
+        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(side_effect=RuntimeError("vault locked"))),
+    ):
+        await screen._launch_ssh(base_instance, base_instance, conn)
+    terminal_service.launch_ssh_in_terminal.assert_not_called()
+    assert mock_app.notify.call_args.kwargs["severity"] == "error"
+
+    # 6. Signed-out action_ssh_connect takes sync fast path and notifies error on refused SSH options.
+    screen, mock_app, _, terminal_service, _ = _build_app(base_instance, authenticated=False)
+    mock_app.connection_service = MagicMock()
+    mock_app.connection_service.resolve_profile.return_value = ConnectionProfile(name="p", extra_ssh_options=["ProxyCommand=/bin/bad"])
+    mock_app.connection_service.get_target_host.return_value = "1.1.1.1"
+    mock_app.connection_service.get_proxy_args.return_value = []
+    from servonaut.utils.ssh_option_policy import SSHOptionRefused
+    mock_app.connection_service.get_extra_options.side_effect = SSHOptionRefused("Refused: ProxyCommand")
+    table = MagicMock()
+    table.get_selected_instance.return_value = base_instance
+    mock_app.run_worker = MagicMock()
+    with (
+        patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+        patch.object(screen, "query_one", return_value=table),
+    ):
+        screen.action_ssh_connect()
+    mock_app.run_worker.assert_not_called()
+    assert mock_app.notify.call_args.kwargs["severity"] == "error"
+
+    # Clean signed-out sync connect launches synchronously without queuing a worker.
+    screen, mock_app, _, terminal_service, _ = _build_app(base_instance, authenticated=False)
+    table = MagicMock()
+    table.get_selected_instance.return_value = base_instance
+    mock_app.run_worker = MagicMock()
+    with (
+        patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)),
+        patch.object(screen, "query_one", return_value=table),
+        patch.object(screen, "_maybe_show_memory_prompt"),
+        patch.object(screen, "_maybe_pull_annotations"),
+    ):
+        screen.action_ssh_connect()
+    mock_app.run_worker.assert_not_called()
+    terminal_service.launch_ssh_in_terminal.assert_called_once()

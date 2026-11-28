@@ -25,6 +25,7 @@ from textual.widgets import Button, Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.forms import setting_row
+from servonaut.widgets.sidebar import is_nav_route_visible
 from servonaut.widgets._layout_refit import LayoutRefitMixin
 
 logger = logging.getLogger(__name__)
@@ -161,8 +162,18 @@ class BwSshPanel(SettingsPanel):
             self._hide_form()
         except Exception:
             pass
+        self._sync_vault_button_visibility()
         self._load_bw_ssh_config()
         self._refresh_session_status()
+
+    def _sync_vault_button_visibility(self) -> None:
+        """Show Open SSH vault only when the user is signed in and entitled."""
+        try:
+            self.query_one("#btn_bw_open_vault", Button).display = is_nav_route_visible(
+                self.app, "nav_bw_vault"
+            )
+        except Exception:
+            pass
 
     def load(self) -> None:
         """Snapshot current widget state (no config.json fields to load here).
@@ -172,6 +183,7 @@ class BwSshPanel(SettingsPanel):
         class dirty-tracker has a baseline; it will always reflect "empty
         form" until the worker populates the inputs and we snapshot again.
         """
+        self._sync_vault_button_visibility()
         self._snapshot_now()
 
     def current_values(self) -> Dict[str, Any]:
@@ -268,6 +280,8 @@ class BwSshPanel(SettingsPanel):
             return
         if button_id == "btn_bw_open_vault":
             event.stop()
+            if not is_nav_route_visible(self.app, "nav_bw_vault"):
+                return
             from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
 
             self.app.push_screen(BwVaultManagerScreen())

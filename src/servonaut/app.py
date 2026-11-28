@@ -1147,9 +1147,27 @@ class ServonautApp(App):
                 severity="error", timeout=20, markup=False,
             )
 
+    def _refresh_navigation_and_tab_gates(self) -> None:
+        """Refresh mounted sidebar auth/feature gates and FleetMemory tab gates."""
+        for screen in list(getattr(self, "screen_stack", ())):
+            for sidebar in screen.query("Sidebar"):
+                refresh = getattr(sidebar, "refresh_auth_gates", None)
+                if callable(refresh):
+                    refresh()
+            refresh_tabs = getattr(screen, "refresh_tab_gates", None)
+            if callable(refresh_tabs):
+                refresh_tabs()
+
     def _on_sign_in_ended(self) -> None:
         """Tell the user once that the service no longer accepts this sign-in."""
+        from servonaut.screens._team_share import clear_cached_teams
+
         self._sign_in_ended_notice_at = time.monotonic()
+        self.vault_update_required = False
+        self.vault_available = False
+        self._personal_vault_bound_ids = set()
+        clear_cached_teams(self)
+        self._refresh_navigation_and_tab_gates()
         try:
             self.notify(
                 "Your Servonaut sign-in has ended. Sign in again from Account / login.",
@@ -1176,13 +1194,10 @@ class ServonautApp(App):
             self.workers.cancel_group(self, "vault_background")
         self.vault_update_required = False
         self.vault_available = False
+        self._personal_vault_bound_ids = set()
         self._cached_teams = None
         self._cached_teams_service = None
-        for screen in list(getattr(self, "screen_stack", ())):
-            for sidebar in screen.query("Sidebar"):
-                refresh = getattr(sidebar, "refresh_auth_gates", None)
-                if callable(refresh):
-                    refresh()
+        self._refresh_navigation_and_tab_gates()
         # Config-sync session
         if getattr(self, "config_sync_service", None) is not None:
             self.config_sync_service.clear_session()
@@ -3908,6 +3923,7 @@ class ServonautApp(App):
             return
         from servonaut.widgets.chat_panel import ChatPanel
 
+        self._refresh_navigation_and_tab_gates()
         for screen in list(self.screen_stack):
             for panel in screen.query(ChatPanel):
                 panel._update_quota_footer()

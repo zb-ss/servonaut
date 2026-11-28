@@ -94,10 +94,7 @@ vault and preferred over local `~/.ssh` discovery. Requirements and behavior:
 
 ## Vault manager (fleet view)
 
-The sidebar entry **🗝 BW SSH Vault** opens a manager screen — the same
-"manager panel" shape the cloud providers have. It lists the SSH-key items in
-your Servonaut folder, joined with **which servers reference each key** and that
-server's last verify status (green = verified, red = failed, — = none).
+Open the manager from **Secrets** (`b` — *Bitwarden SSH vault*), **Settings → Bitwarden SSH → Open SSH vault**, or the command palette (*Go to BW SSH vault*). It uses the same "manager panel" shape as the cloud providers and lists the SSH-key items in your Servonaut folder, joined with **which servers reference each key** and that server's last verify status (green = verified, red = failed, — = none).
 
 From the manager you can:
 

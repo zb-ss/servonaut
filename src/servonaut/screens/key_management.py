@@ -164,16 +164,18 @@ class KeyManagementScreen(WorkspaceScreen):
             select.set_options([])
             return
         rows = real_fleet_rows(self.app) or []
-        options: list[tuple[str, str]] = []
+        options: list[tuple[Content, str]] = []
         seen: set[str] = set()
         for row in rows:
+            if row.get("is_custom") or row.get("is_shared"):
+                continue
             sid = str(row.get("id") or "")
             if not sid or sid in seen:
                 continue
             seen.add(sid)
             name = str(row.get("name") or sid)
             label = f"{name} ({sid})" if name != sid else sid
-            options.append((label, sid))
+            options.append((literal(label), sid))
         select.set_options(options)
         select.display = bool(options)
 
@@ -294,12 +296,24 @@ class KeyManagementScreen(WorkspaceScreen):
                 return self.app.redaction_service.redact_key_name(x)
             return x
 
+        from pathlib import Path
+        from servonaut.services.ssh_host_keys import home_relative
+
         # Add keys
         self._available_key_paths = {}
+        check_perms = getattr(self.app.ssh_service, "check_key_permissions", None)
         if keys:
             for key_path in keys:
-                row_key = table.add_row(_k(key_path))
-                self._available_key_paths[row_key] = key_path
+                shown = home_relative(str(key_path))
+                suffix = ""
+                if callable(check_perms) and Path(str(key_path)).expanduser().exists():
+                    try:
+                        if not check_perms(str(key_path)):
+                            suffix = " (insecure perms: expected 0600)"
+                    except Exception:
+                        pass
+                row_key = table.add_row(_k(shown) + suffix)
+                self._available_key_paths[row_key] = shown
         else:
             table.add_row("[dim]No SSH keys found in ~/.ssh/[/dim]")
 
@@ -327,6 +341,19 @@ class KeyManagementScreen(WorkspaceScreen):
             mapping_field.value = key_path
             mapping_field.focus()
             self.notify("Filled per-server override key path.", severity="information")
+        from pathlib import Path
+
+        check_perms = getattr(self.app.ssh_service, "check_key_permissions", None)
+        if callable(check_perms) and Path(key_path).expanduser().exists():
+            try:
+                if not check_perms(key_path):
+                    self.notify(
+                        f"Warning: {key_path} has overly open permissions; run chmod 600.",
+                        severity="warning",
+                        markup=False,
+                    )
+            except Exception:
+                pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
@@ -410,7 +437,11 @@ class KeyManagementScreen(WorkspaceScreen):
             self._load_instance_mappings()
             self.query_one("#input_mapping_instance", Input).value = ""
             self.query_one("#input_mapping_key", Input).value = ""
-            self.notify(f"Key mapping added: {instance_id} → {key_path}", severity="information")
+            self.notify(
+                f"Key mapping added: {instance_id} → {key_path}",
+                severity="information",
+                markup=False,
+            )
         except Exception as e:
             self.notify(f"Error adding key mapping: {e}", severity="error", markup=False)
 

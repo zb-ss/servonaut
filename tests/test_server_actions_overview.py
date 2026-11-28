@@ -165,18 +165,18 @@ async def test_ovh_extras_have_their_own_card_after_the_diagnostics(size) -> Non
 
 
 ACTION_TABLE = [
-    ("btn_browse", "1", "action_action_1"),
-    ("btn_command", "2", "action_action_2"),
-    ("btn_ssh", "3", "action_action_3"),
-    ("btn_scp", "4", "action_action_4"),
+    ("btn_browse", "b", "action_action_1"),
+    ("btn_command", "c", "action_action_2"),
+    ("btn_ssh", "s", "action_action_3"),
+    ("btn_scp", "t", "action_action_4"),
     ("btn_scan", "5", "action_action_5"),
-    ("btn_logs", "6", "action_action_6"),
+    ("btn_logs", "l", "action_action_6"),
     ("btn_ai_analysis", "7", "action_action_7"),
     ("btn_ban_ip", "8", "action_action_8"),
     ("btn_memory", "m", "action_open_memory"),
     ("btn_db_creds", "d", "action_scan_db_creds"),
     ("btn_findings", "f", "action_open_findings"),
-    ("btn_live", "l", "action_toggle_live"),
+    ("btn_live", "w", "action_toggle_live"),
     ("btn_manage_ssh_ref", "r", "action_manage_ssh_ref"),
     ("btn_verify_ssh", "v", "action_verify_ssh"),
     ("btn_use_vault_key", "u", "action_use_vault_key"),
@@ -314,12 +314,12 @@ async def test_live_poll_label_follows_the_poller() -> None:
         label = lambda: screen.query_one("#btn_live", ActionButton).label.plain  # noqa: E731
         assert label().startswith("Start monitoring")
         with patch("servonaut.screens.server_actions.format_live_stats", lambda stats: "stats"):
-            await pilot.press("l")
+            await pilot.press("w")
             await wait_until(lambda: label().startswith("Stop monitoring"))
-            await pilot.press("l")
+            await pilot.press("w")
             await wait_until(lambda: label().startswith("Start monitoring"))
             service.mode = "fail"
-            await pilot.press("l")
+            await pilot.press("w")
             await wait_until(lambda: label().startswith("Start monitoring") and not screen._live_on)
 
 

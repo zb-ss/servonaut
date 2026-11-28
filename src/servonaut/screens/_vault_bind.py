@@ -60,12 +60,52 @@ async def apply_vault_binding(
             login=login,
             host_keys=host_keys,
         )
+        bound = getattr(app, "_personal_vault_bound_ids", None)
+        if not isinstance(bound, set):
+            bound = set()
+            try:
+                app._personal_vault_bound_ids = bound
+            except Exception:
+                pass
+        if server:
+            bound.add(server)
     leases = getattr(app, "vault_lease_cache", None)
     if leases is not None:
         leases.forget(instance)
         if own is not None:
             leases.forget(own)
     return dict(result) if isinstance(result, Mapping) else {}
+
+
+def remember_team_vault_binding(
+    app: Any,
+    target: Mapping[str, Any],
+    result: object,
+) -> Optional[dict[str, Any]]:
+    """Update cached shared-server rows when a team vault key binding succeeds."""
+    if not isinstance(result, Mapping):
+        return None
+    binding = result.get("credential_binding", result)
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("source") != "servonaut_vault"
+        or binding.get("valid") is not True
+        or not binding.get("signature")
+    ):
+        return None
+    from servonaut.screens._demo_resolve import replace_instances, team_rows
+
+    saved = dict(binding)
+    rows = team_rows(app)
+    target_id = (target.get("team_slug"), target.get("id"))
+    for row in rows:
+        if (row.get("team_slug"), row.get("id")) != target_id:
+            continue
+        row["credential_binding"] = dict(saved)
+        if saved.get("login_user"):
+            row["login_user"] = saved["login_user"]
+    replace_instances(app, "shared", rows)
+    return saved
 
 
 def format_vault_bind_error(exc: Exception) -> str:

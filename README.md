@@ -139,7 +139,7 @@ After setup, launch with `servonaut` and walk me through the key features, inclu
 *Instance list — AWS, Hetzner, OVH, and custom servers merged into one view*
 
 ![Sidebar with full feature set](docs/screenshots/instances-sidebar.png)
-*Sidebar reveals Fleet Memory, Memory Sync, Secrets, Settings, and per-provider management for OVH and Hetzner*
+*Sidebar reveals Fleet, Access, Monitoring, Activity, and provider management for AWS, OVH, and Hetzner*
 
 ![AI Chat Assistant](docs/screenshots/instances-chat.png)
 *Built-in AI assistant with MCP server integration — chat with local providers or hosted Servonaut AI*
@@ -195,7 +195,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 ### Memory & secrets
 
 - **Server memory** — persistent per-server cache of OS / runtime / service / web-stack / log / database / container / git / disk facts; optional background fleet auto-scan. → [docs](docs/memory.md)
-- **Memory Sync** *(Solo+)* — end-to-end-encrypted backup of fleet memory to servonaut.dev (X25519 + AES-256-GCM, your passphrase), with drift detection, cross-device history, and optional auto-sync. `☁ Memory Sync` in the sidebar.
+- **Memory Sync** *(Solo+)* — end-to-end-encrypted backup of fleet memory to servonaut.dev (X25519 + AES-256-GCM, your passphrase), with drift detection, cross-device history, and optional auto-sync. Open **Fleet memory** → **Sync** tab.
 - **Database credential vault** *(Solo+)* — scan a server for the DB credentials its apps already use, store the password in your secret vault under a per-site label, and let the `db_*` tools resolve it by name — no password in config or agent context. → [docs](docs/db-credential-vault.md)
 
 ### Agents & automation (MCP)
@@ -294,42 +294,39 @@ Jump to [MCP Server for AI Agents](#mcp-server-for-ai-agents).
 
 ### What You Can Do
 
-The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers in one searchable table). The collapsible left sidebar groups everything else by purpose:
+The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers in one searchable table). The collapsible left sidebar groups workflows by purpose:
 
-**Core**
-- **📋 Instances** — search and SSH the unified fleet
-- **💻 Custom Servers** — add / edit / remove non-AWS servers (DigitalOcean, on-prem, etc.)
-- **🔑 SSH Keys** — configure default and per-instance keys
+**Fleet**
+- **📋 Instances** — search, filter, and SSH the unified fleet
+- **💻 Custom servers** — add / edit / remove non-cloud SSH hosts
+- **🛡 Teams** — shared server inventory, team configs, and team vault key binding (Teams)
 
-**Logs & Security**
-- **📊 CloudWatch** — browse AWS log groups with Top IPs analysis, action filter (All/Allowed/Blocked), IP geolocation, AbuseIPDB lookup
-- **🔒 IP Ban Manager** — ban IPs via WAF, Security Groups, or NACLs
+**Access**
+- **🔑 Local SSH keys** — configure default and per-instance local SSH keys
+- **🔒 Vault** — native encrypted SSH key vaults and auto-bind (signed-in)
+- **📜 SSH certificates** — team SSH CA certificates (Vault + Teams SSH CA)
+- **🗝 Secrets** — Bitwarden secret provider, DB credential vault, and BW SSH vault (`b`)
+
+**Monitoring**
+- **🧠 Fleet memory** — workspace with **Fleet**, **Sync** *(Solo+)*, **Drift** *(Teams)*, and **Export** *(Teams)* tabs
+- **🛡 Findings** — proactive-monitoring inbox across your fleet *(Solo+)*
+- **☁ CloudWatch** — browse AWS log groups with Top IPs and IP geolocation
+- **🔒 IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs
+
+**Activity**
 - **🔍 CloudTrail** — audit AWS API activity with filters
 
-**Tools**
-- **🧠 Fleet Memory** — scan / refresh / inspect the AI-queryable fact cache, with an optional scheduled background auto-scan (bulk scans run in the background and survive leaving the panel)
-- **☁ Memory Sync** — encrypted backup of fleet memory across devices (Solo+)
-- **🛡 Findings** — proactive-monitoring inbox: scan, review, and triage server-detected issues fleet-wide (Solo+; Free shows an upgrade card)
-- **🔄 Sync Config** — encrypted config snapshots (Solo+)
-- **🔧 Settings** — configuration, scan rules, AI provider, AbuseIPDB key
+**Cloud providers** (AWS, OVH, Hetzner — visible when configured)
+- **AWS / OVH / Hetzner** — instance lifecycle, provider SSH keys, DNS zones, IP management, block storage, billing, and object storage
 
-**OVH** (visible when configured)
-- **⚙ Manage** — table of OVH instances with state-aware lifecycle toolbar (Create / Start / Stop / Reboot / Delete)
-- **🔑 SSH Keys** — project-level SSH key registry (the one the create wizard injects from)
-- DNS Zones · IP Management · Block Storage · Billing
+**Account & Settings**
+- Account / Login (with encrypted **Config snapshots** for Solo+), Bug reports, and pinned **⚙ Settings** (including **Backups** & **Bitwarden SSH**)
 
-**Hetzner** (visible when configured)
-- **⚙ Manage** — table of Hetzner servers with full lifecycle toolbar (Create / Power on / Shutdown / Reboot / Delete)
-- **🔑 SSH Keys** — Hetzner Cloud project SSH key registry
+**Server Actions** — clicking any instance row opens a per-instance dashboard: the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`W`), and the action rail covers:
 
-**Account**
-- Login · Teams · Bug Reports
-
-**Server Actions** — clicking any instance row opens a per-instance dashboard: the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), and the action rail covers:
-
-- Browse Files (inline) · Run Command · SSH Connect · SCP Transfer
-- View Scan Results · View Logs (`tail -f`) · AI Analysis · Monitoring (`F`)
-- Ban IP · Manage/Verify SSH Ref
+- SSH connect (`s`) · Run command (`c`) · Browse files (`b`) · SCP transfer (`t`)
+- Stream logs (`l` / `tail -f`) · AI log analysis (`a`) · Keyword scan (`5`) · Ban IP (`8`)
+- Use vault key (`u`) · Manage/Verify SSH Ref (`r` / `v`)
 
 **SCP Transfer** copies files and folders in either direction. Use **Browse...**
 beside Source or Destination to pick a path, or type a path to rename the copy.
@@ -517,16 +514,16 @@ credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
 
 - **Config sync** — push/pull an encrypted snapshot of your
   `config.json` between machines. The passphrase never leaves your
-  client; the server only sees ciphertext. Sidebar entry `🔄 Sync
-  Config` opens the snapshot manager directly (Pull Latest / Push New
-  / Restore / Rename / Delete).
+  client; the server only sees ciphertext. Open **Account → Manage config
+  snapshots** (or **Settings → Backups**) for Pull Latest / Push New /
+  Restore / Rename / Delete.
 - **MCP relay** — a Mercure SSE channel that lets AI agents and
   team-mates dispatch MCP tool calls to this machine. While the relay
   is connected, `https://servonaut.dev/account` reports your CLI as
   online, and hosted agents can reach it.
 - **Memory Sync (Solo+)** — encrypted fleet memory backup with drift
-  detection. Open the `☁ Memory Sync` sidebar entry, click *Unlock
-  Memory Sync*, and enter a passphrase. The same screen handles
+  detection. Open **Fleet memory → Sync** tab, click *Unlock
+  Memory Sync*, and enter a passphrase. The same tab handles
   first-time enrolment AND post-restart unlock — your private key is
   wrapped with the passphrase locally, so the server never sees it.
   After unlock, click *Sync now* to push every cached server's memory

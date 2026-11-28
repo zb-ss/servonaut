@@ -71,7 +71,7 @@ _FINDINGS_SHOWN_MAX = 99
 _CLOSED_FINDING_STATUSES = ("resolved", "suppressed")
 
 # Footer keys that appear only on a wide terminal.
-_WIDE_FOOTER_KEYS = ("6", "8")
+_WIDE_FOOTER_KEYS = ("l", "8")
 
 # The cards stack into one column when the content column is narrower than this.
 _STACK_CARDS_BELOW = 96
@@ -419,6 +419,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self._vault_choices: list[dict[str, str]] = []
         self._key_choices: list[dict[str, str]] = []
         self._keys_for: str | None = None
+        self._keys_load_seq: int = 0
         self._message = ""
         self._match_text = ""
         # The key the dialog chose by name; the hint saying why goes once another is chosen.
@@ -689,9 +690,29 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
 
     async def _load_vaults(self, *, select_vault_id: str | None = None) -> None:
         select = self.query_one("#vault_bind_vault", Select)
+        self._creatable_vaults = []
         try:
             with self._busy.running("Loading your vaults…", hold=_BIND_BUTTON):
                 choices = await self._service.vault_choices(team=self._team)
+                if self._can_create_vaults():
+                    try:
+                        vaults = await self._service.list_vaults()
+                        creatable = await self._service.creatable_vaults(vaults)
+                        if self._team:
+                            creatable = [
+                                opt for opt in creatable
+                                if isinstance(opt, Mapping) and opt.get("team") == self._team
+                            ]
+                        else:
+                            creatable = [
+                                opt for opt in creatable
+                                if isinstance(opt, Mapping) and opt.get("team") is None
+                            ]
+                        self._creatable_vaults = [
+                            dict(opt) for opt in creatable if isinstance(opt, Mapping)
+                        ]
+                    except Exception:
+                        logger.debug("Could not check creatable vaults from bind modal", exc_info=True)
         except Exception as exc:
             from servonaut.services.vault.errors import vault_failure_reason
 
@@ -699,16 +720,6 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             select.prompt = "Vaults could not be loaded"
             self._say(f"Could not load your vaults ({vault_failure_reason(exc)}).")
             return
-        self._creatable_vaults = []
-        if self._can_create_vaults():
-            try:
-                vaults = await self._service.list_vaults()
-                creatable = await self._service.creatable_vaults(vaults)
-                if self._team:
-                    creatable = [opt for opt in creatable if isinstance(opt, Mapping) and opt.get("team") == self._team]
-                self._creatable_vaults = [dict(opt) for opt in creatable if isinstance(opt, Mapping)]
-            except Exception:
-                logger.debug("Could not check creatable vaults from bind modal", exc_info=True)
         vault_actions = self.query_one("#vault_bind_vault_actions", Horizontal)
         create_btn = self.query_one("#vault_bind_create_vault", Button)
         vault_actions.set_class(not self._creatable_vaults, "-hidden")
@@ -716,14 +727,17 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         if not choices:
             select.prompt = "No vault available"
             self.query_one("#vault_bind_key_actions", Horizontal).add_class("-hidden")
-            self._say(
-                f"Team {self._team} has no vault you can read yet: an owner or admin creates it, "
-                "or grants your access, on the Vault screen."
-                if self._team else (
-                    "No vault holds keys your own servers can use yet: "
-                    "create your personal vault on the Vault screen first."
+            if self._team:
+                msg = (
+                    f"Team {self._team} has no vault you can read yet: "
+                    + ("use Create vault below." if self._creatable_vaults else "an owner or admin must create it first.")
                 )
-            )
+            else:
+                msg = (
+                    "No vault holds keys your own servers can use yet: "
+                    + ("use Create vault below." if self._creatable_vaults else "create your personal vault first.")
+                )
+            self._say(msg)
             if self._creatable_vaults:
                 create_btn.focus()
             return
@@ -750,6 +764,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             select.focus()
 
     async def _load_keys(self, vault_id: str, *, select_item_id: str | None = None) -> None:
+        self._keys_load_seq += 1
+        seq = self._keys_load_seq
         self._keys_for = vault_id
         self._key_choices = []
         self._matched_item = None
@@ -771,6 +787,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             ):
                 choices = await self._service.ssh_key_choices(vault_id=vault_id)
         except Exception as exc:
+            if seq != self._keys_load_seq:
+                return
             from servonaut.services.vault.errors import vault_failure_reason
 
             select.prompt = "SSH keys could not be loaded"
@@ -779,9 +797,14 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             self.query_one("#vault_bind_vault", Select).clear()
             self._say(f"Could not load the SSH keys ({vault_failure_reason(exc)}). Choose the vault again to retry.")
             return
+        if seq != self._keys_load_seq:
+            return
         if not choices:
             select.prompt = "No SSH key in this vault"
-            self._say("This vault has no SSH key yet: import one with Import SSH on the Vault screen.")
+            self._say(
+                "This vault has no SSH key yet: "
+                + ("use Import SSH key below." if can_import else "import an SSH key first.")
+            )
             if can_import:
                 import_btn.disabled = False
                 import_btn.variant = "primary"
@@ -851,7 +874,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
                 self._service,
                 vault_id,
                 session_service=getattr(self.app, "bw_session_service", None),
-                vault_name=vault_name,
+                vault_name=self.scrub_for_display(vault_name),
             )
         )
         if not isinstance(summary, Mapping):
@@ -1098,26 +1121,27 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
     # them on a wide terminal (see ``_sync_footer_keys``). Every other key works
     # but stays out of the footer.
     BINDINGS = [
-        Binding("1", "action_1", "Browse", show=True),
-        Binding("2", "action_2", "Command", show=True),
-        Binding("3", "action_3", "SSH", show=True),
-        Binding("4", "action_4", "SCP", show=True),
+        Binding("s", "action_3", "SSH", show=True),
+        Binding("c", "action_2", "Command", show=True),
+        Binding("b", "action_1", "Browse", show=True),
+        Binding("t", "action_4", "SCP", show=True),
+        Binding("1", "action_1", "Browse", show=False),
+        Binding("2", "action_2", "Command", show=False),
+        Binding("3", "action_3", "SSH", show=False),
+        Binding("4", "action_4", "SCP", show=False),
         Binding("5", "action_5", "Keyword scan", show=False),
         Binding("6", "action_6", "Logs", show=False),
         Binding("7", "action_7", "AI analysis", show=False),
         Binding("8", "action_8", "Ban IP", show=False),
-        Binding("s", "action_3", "SSH", show=False),
-        Binding("c", "action_2", "Command", show=False),
-        Binding("b", "action_1", "Browse", show=False),
-        Binding("t", "action_4", "SCP", show=False),
         Binding("a", "action_7", "AI analysis", show=False),
         Binding("k", "manage_ssh_ref", "SSH ref", show=False),
         Binding("S", "share_with_team", "Share with team", show=False),
         Binding("m", "open_memory", "Memory", show=False),
         Binding("d", "scan_db_creds", "Scan DB", show=False),
         Binding("f", "open_findings", "Findings", show=False),
-        Binding("l", "toggle_live", "Monitoring", show=False),
-        Binding("L", "toggle_live", "Monitoring", show=False),
+        Binding("l", "action_6", "Logs", show=False),
+        Binding("w", "toggle_live", "Monitoring", show=False),
+        Binding("W", "toggle_live", "Monitoring", show=False),
         Binding("R", "refresh_live", "Refresh stats", show=False),
         Binding("r", "manage_ssh_ref", "SSH ref", show=False),
         Binding("v", "verify_ssh", "Verify SSH", show=False),
@@ -1210,8 +1234,21 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         if not self.is_attached:
             return
         try:
-            btn = self.query_one("#btn_share_team", ActionButton)
-            btn.display = bool(manageable)
+            row = self.query_one("#card_identity ActionRow", ActionRow)
+            existing = next(iter(self.query("#btn_share_team")), None)
+            if manageable:
+                if existing is None:
+                    await row.mount(
+                        ActionButton(
+                            "Share with team",
+                            "S",
+                            short="Share",
+                            id="btn_share_team",
+                            tooltip=_tip("btn_share_team"),
+                        )
+                    )
+            elif existing is not None:
+                await existing.remove()
             self._sync_compact_buttons()
         except NoMatches:
             pass
@@ -1245,7 +1282,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # A team's shared server shows no instance ID, so there is nothing to copy.
         if self._instance.get('is_shared') is True or not self._instance.get('id'):
             self.query_one("#btn_copy_id").display = False
-        self.query_one("#btn_share_team", ActionButton).display = False
         if self._can_share_with_team():
             self.run_worker(
                 self._probe_manageable_teams(), group="team_share_gate", exclusive=True
@@ -1314,10 +1350,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 yield ActionRow(
                     ActionButton("← Fleet", "esc", short="← Fleet", id="btn_back", tooltip=_tip("btn_back")),
                     Static("", classes="sa-toolbar-spacer"),
-                    ActionButton("SSH connect", "3", id="btn_ssh", role="primary", tooltip=_tip("btn_ssh")),
-                    ActionButton("Run command", "2", short="Command", id="btn_command", tooltip=_tip("btn_command")),
-                    ActionButton("Browse files", "1", short="Browse", id="btn_browse", tooltip=_tip("btn_browse")),
-                    ActionButton("SCP transfer", "4", short="SCP", id="btn_scp", tooltip=_tip("btn_scp")),
+                    ActionButton("SSH connect", "s", id="btn_ssh", role="primary", tooltip=_tip("btn_ssh")),
+                    ActionButton("Run command", "c", short="Command", id="btn_command", tooltip=_tip("btn_command")),
+                    ActionButton("Browse files", "b", short="Browse", id="btn_browse", tooltip=_tip("btn_browse")),
+                    ActionButton("SCP transfer", "t", short="SCP", id="btn_scp", tooltip=_tip("btn_scp")),
                     id="action_buttons",
                     prefer_one_line=True,
                 )
@@ -1330,7 +1366,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                                 Static(identity, id="server_identity"),
                                 ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id", tooltip=_tip("btn_copy_id")),
                                 ActionButton("Copy summary", id="btn_copy_summary", tooltip=_tip("btn_copy_summary")),
-                                ActionButton("Share with team", short="Share", id="btn_share_team", tooltip=_tip("btn_share_team")),
                             ),
                             _card(
                                 "card_network",
@@ -1345,7 +1380,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                             _card(
                                 "card_live",
                                 Static(self._live_stats_idle_text(), id="live_stats"),
-                                ActionButton("Start monitoring", "l", id="btn_live", tooltip=_tip("btn_live")),
+                                ActionButton("Start monitoring", "w", id="btn_live", tooltip=_tip("btn_live")),
                                 ActionButton("Refresh", id="btn_live_refresh", tooltip=_tip("btn_live_refresh")),
                             ),
                             _card(
@@ -1360,7 +1395,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                         Vertical(
                             Static("[bold]Diagnostics & security[/bold]", classes="sa-card-title"),
                             _card_actions(
-                                ActionButton("Stream logs", "6", short="Logs", id="btn_logs", tooltip=_tip("btn_logs")),
+                                ActionButton("Stream logs", "l", short="Logs", id="btn_logs", tooltip=_tip("btn_logs")),
                                 ActionButton("AI log analysis", "7", short="AI analysis", id="btn_ai_analysis", tooltip=_tip("btn_ai_analysis")),
                                 ActionButton("Keyword scan", "5", id="btn_scan", tooltip=_tip("btn_scan")),
                                 ActionButton("Ban IP…", "8", id="btn_ban_ip", role="error", tooltip=_tip("btn_ban_ip")),
@@ -1889,7 +1924,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         return (
             "[bold]Live via SSH[/bold]  [dim]Off[/dim]\n\n"
             "[dim]CPU, memory, load, disk and uptime appear here.\n"
-            "Press [b]l[/b] to start monitoring over SSH.[/dim]"
+            "Press [b]w[/b] to start monitoring over SSH.[/dim]"
         )
 
     def action_toggle_live(self) -> None:
@@ -1911,7 +1946,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self._live_on = True
         self._sync_live_button()
         try:
-            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press l to cancel.[/dim]")
+            self.query_one("#live_stats", Static).update("[bold]Live via SSH[/bold]\n\n[$text-accent]Connecting…[/$text-accent]\n[dim]Press w to cancel.[/dim]")
         except Exception:  # noqa: BLE001
             pass
         self.run_worker(
@@ -2003,7 +2038,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 self._set_live_text(format_live_stats(stats))
         except LiveStatsError as exc:
             self._set_live_text(Content.assemble(
-                literal(str(exc), "$text-error"), "\n", Content.styled("Press l to retry.", "dim"),
+                literal(str(exc), "$text-error"), "\n", Content.styled("Press w to retry.", "dim"),
             ))
             self._live_on = False
             self._sync_live_button()
@@ -2011,7 +2046,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             logger.warning("Live stats poll failed: %s", type(exc).__name__, exc_info=True)
             self._set_live_text(Content.assemble(
                 literal("The poll failed. See the log for details.", "$text-error"),
-                "\n", Content.styled("Press l to retry.", "dim"),
+                "\n", Content.styled("Press w to retry.", "dim"),
             ))
             self._live_on = False
             self._sync_live_button()
@@ -2389,6 +2424,18 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                 severity="warning",
                 markup=False,
             )
+            if (
+                not hint
+                and getattr(self, "is_attached", False)
+                and hasattr(self, "_busy")
+                and not getattr(self.app, "demo_mode", False)
+            ):
+                if getattr(self.app, "vault_available", False):
+                    self.action_use_vault_key()
+                else:
+                    from servonaut.screens.key_management import KeyManagementScreen
+
+                    self.app.push_screen(KeyManagementScreen())
             return
 
         # ------------------------------------------------------------------
@@ -3038,26 +3085,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         self, target: dict[str, Any], result: object,
     ) -> None:
         """Keep the team's row current without changing the own row's credential."""
-        if not isinstance(result, Mapping):
-            return
-        binding = result.get("credential_binding", result)
-        # This cache is authoritative for SSH: a write receipt must not replace it.
-        if (
-            not isinstance(binding, Mapping) or binding.get("source") != _VAULT_SOURCE
-            or binding.get("valid") is not True or not binding.get("signature")
-        ):
-            return
-        binding = dict(binding)
-        rows = team_rows(self.app)
-        target_id = (target.get("team_slug"), target.get("id"))
-        for row in rows:
-            if (row.get("team_slug"), row.get("id")) != target_id:
-                continue
-            row["credential_binding"] = binding
-            if binding.get("login_user"):
-                row["login_user"] = binding["login_user"]
-        replace_instances(self.app, "shared", rows)
-        if self._instance.get("is_shared") is True:
+        from servonaut.screens._vault_bind import remember_team_vault_binding
+
+        binding = remember_team_vault_binding(self.app, target, result)
+        if binding is not None and self._instance.get("is_shared") is True:
             self._instance["credential_binding"] = binding
 
     async def _manage_ssh_ref_flow(self) -> None:

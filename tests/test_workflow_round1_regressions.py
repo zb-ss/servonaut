@@ -232,7 +232,7 @@ async def test_server_actions_share_with_team_updates_shared_fleet_handles_error
         await app.push_screen(member_actions)
         await pilot.pause()
         await member_actions.workers.wait_for_complete()
-        assert member_actions.query_one("#btn_share_team", Button).display is False
+        assert not member_actions.query("#btn_share_team")
 
 
 @pytest.mark.asyncio

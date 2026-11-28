@@ -956,7 +956,7 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes a hard-coded 'Live stats: connecting…' status string "
                    "— code-controlled constant, no server data."),
     AllowlistEntry("screens/server_actions.py", "_stop_live_stats", "update",
-                   "Writes the hard-coded idle text ('Live stats: off — press L…') "
+                   "Writes the hard-coded idle text ('Live stats: off — press w…') "
                    "— code-controlled constant, no server data."),
 
     # ---------------------------------------------------------------------------

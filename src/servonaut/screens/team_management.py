@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, List, Optional, Tuple
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widget import Widget
@@ -22,11 +23,15 @@ from textual.widgets.selection_list import Selection
 from servonaut.utils.markup import cell, with_bold_values
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._batch_status import failure_details
-from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
+from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, connection_instance, real_fleet_rows, refuse_unresolved
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.bulk_action import BulkActionModal
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal
-from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error
+from servonaut.screens._vault_bind import (
+    apply_vault_binding,
+    format_vault_bind_error,
+    remember_team_vault_binding,
+)
 from servonaut.widgets.dialogs import (
     DialogActions,
     DialogBody,
@@ -50,8 +55,10 @@ from servonaut.services.team_rules_view import (
     agent_rules_lines,
     agent_rules_view,
 )
+from servonaut.utils.text_fit import cut
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.busy_indicator import BusyIndicator
+from servonaut.widgets.planned_table import PlannedTable, plannable_width
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
@@ -163,18 +170,21 @@ class TeamManagementScreen(WorkspaceScreen):
         padding: 0 1;
         border: round $border-blurred;
         background: transparent;
-        align: left middle;
     }
     TeamManagementScreen #team_onboarding_text {
-        width: 1fr;
+        width: 100%;
         height: auto;
         color: $text-muted;
+    }
+    TeamManagementScreen .team_onboarding_actions {
+        width: 100%;
+        height: auto;
     }
     TeamManagementScreen #btn_team_onboarding_go,
     TeamManagementScreen #btn_team_onboarding_dismiss {
         width: auto;
         min-width: 0;
-        margin-left: 1;
+        margin: 0 1 0 0;
     }
     TeamManagementScreen #share_empty_actions,
     TeamManagementScreen #pull_config_refused_actions {
@@ -213,6 +223,7 @@ class TeamManagementScreen(WorkspaceScreen):
         # Custom-server names the open push form offers (ticked or not).
         self._push_server_names: list[str] = []
         self._server_busy = False
+        self._binding_shared_key = False
         self._loaded_team_slug: Optional[str] = None
         self._team_load_generation = 0
         self._has_team_detail = False
@@ -220,6 +231,8 @@ class TeamManagementScreen(WorkspaceScreen):
         self._share_form_username = ("", "")
         self._onboarding_dismissed = False
         self._onboarding_action = "share"
+        self._rendered_servers: list[dict] = []
+        self._last_server_col_widths: tuple[int, ...] | None = None
 
     # ------------------------------------------------------------------
     # Compose
@@ -333,14 +346,17 @@ class TeamManagementScreen(WorkspaceScreen):
                         Container(
                             Static("[bold]Shared servers[/bold]", id="section_servers", classes="section_header"),
                             Static("Connect to a shared server or review the hosts available to this team.", classes="team_section_hint"),
-                            Horizontal(
+                            Vertical(
                                 Static("", id="team_onboarding_text"),
-                                Button("Share server", variant="primary", id="btn_team_onboarding_go"),
-                                Button("Dismiss", variant="default", id="btn_team_onboarding_dismiss"),
+                                Horizontal(
+                                    Button("Share server", variant="primary", compact=True, id="btn_team_onboarding_go"),
+                                    Button("Dismiss", variant="default", compact=True, id="btn_team_onboarding_dismiss"),
+                                    classes="team_onboarding_actions",
+                                ),
                                 id="team_onboarding_strip",
                             ),
                             BusyIndicator(id="team_servers_busy"),
-                            DataTable(id="servers_table"),
+                            PlannedTable(id="servers_table"),
                             Horizontal(
                                 Button("Connect", variant="success", id="btn_connect_shared"),
                                 Button("Share server", variant="primary", id="btn_share"),
@@ -543,6 +559,8 @@ class TeamManagementScreen(WorkspaceScreen):
         servers_tbl = self.query_one("#servers_table", DataTable)
         servers_tbl.cursor_type = "row"
         servers_tbl.add_columns("Name", "Hostname", "Region", "Vault key")
+        if isinstance(servers_tbl, PlannedTable):
+            servers_tbl.set_plan_handler(self._replan_servers_table)
 
         configs_tbl = self.query_one("#configs_table", DataTable)
         configs_tbl.cursor_type = "row"
@@ -1014,6 +1032,8 @@ class TeamManagementScreen(WorkspaceScreen):
         self._loaded_team_slug = None
         self._current_team_role = None
         self._shared_servers = []
+        self._rendered_servers = []
+        self._last_server_col_widths = None
         self._members = []
         self._team_configs = []
         for selector in ("#servers_table", "#members_table", "#configs_table"):
@@ -1638,38 +1658,118 @@ class TeamManagementScreen(WorkspaceScreen):
         form.display = True
 
     @staticmethod
-    def _shared_key_status(server: dict) -> str:
+    def _shared_key_status(server: dict, *, redactor: Any = None) -> str:
         if (server.get("ssh_ca") or {}).get("enrolled"):
             return "SSH CA"
         binding = server.get("credential_binding")
         if isinstance(binding, dict) and binding.get("source") == "servonaut_vault":
-            return "Bound"
+            raw_label = str(
+                binding.get("key_name")
+                or binding.get("item_name")
+                or binding.get("label")
+                or binding.get("name")
+                or ""
+            ).strip()
+            if raw_label and redactor is not None:
+                raw_label = redactor.redact_key_name(raw_label)
+            key_label = terminal_safe(raw_label) if raw_label else ""
+            return f"Bound: {key_label}" if key_label else "Bound"
         return "Not bound"
 
-    def _populate_servers_table(self, servers: list[dict]) -> None:
-        table = self.query_one("#servers_table", DataTable)
-        table.clear()
+    def _plan_server_columns(
+        self, raw_rows: list[tuple[str, str, str, str]], available: int,
+    ) -> tuple[tuple[int, int, int, int], bool]:
+        headers = ("Name", "Hostname", "Region", "Vault key")
+        widths = [
+            max([cell_len(headers[i])] + [cell_len(row[i]) for row in raw_rows])
+            for i in range(4)
+        ]
+        natural_total = sum(widths) + 8
+        if available < 35 or natural_total <= available:
+            return (widths[0], widths[1], widths[2], widths[3]), False
 
-        def _name(x: str) -> str:
-            # Server names are identifiers — use redact_name for deterministic substitution.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_name(x)
-            return x
+        budget = max(sum(cell_len(h) for h in headers), available - 8)
+        shrink_stages = (
+            (1, 15), (0, 14), (3, 12), (2, 10),
+            (2, 6), (3, 9), (1, 10), (0, 6),
+            (1, 8), (0, 4),
+        )
+        for col_idx, floor in shrink_stages:
+            overflow = sum(widths) - budget
+            if overflow <= 0:
+                break
+            lowest = min(widths[col_idx], floor)
+            widths[col_idx] -= min(overflow, widths[col_idx] - lowest)
+        return (widths[0], widths[1], widths[2], widths[3]), True
 
-        def _host(x: str) -> str:
-            # Hostnames may be IPs or DNS names — scrub_stream handles both.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
-            return x
-
+    def _raw_server_rows(
+        self, servers: list[dict], redactor: Any = None,
+    ) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
         for server in servers:
-            table.add_row(
-                cell(terminal_safe(_name(server.get("name", "")))),
-                # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
-                cell(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
-                cell(terminal_safe(server.get("region", "") or "")),
-                cell(self._shared_key_status(server)),
-            )
+            name = terminal_safe(server.get("name", ""))
+            # Server names are identifiers — use redact_name for deterministic substitution.
+            if redactor is not None:
+                name = redactor.redact_name(name)
+            # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
+            host = terminal_safe(server.get("hostname") or server.get("host", ""))
+            # Hostnames may be IPs or DNS names — scrub_stream handles both.
+            if redactor is not None:
+                host = redactor.scrub_stream(host)
+            region = terminal_safe(server.get("region", "") or "")
+            vault_status = self._shared_key_status(server, redactor=redactor)
+            rows.append((name, host, region, vault_status))
+        return rows
+
+    def _replan_servers_table(self) -> None:
+        if (
+            not self._rendered_servers
+            or self.has_class("-chat-replace")
+            or not self.query_one("#team_management_container").display
+        ):
+            return
+        table = self.query_one("#servers_table", DataTable)
+        available = plannable_width(table) if isinstance(table, DataTable) else 0
+        if available < 35:
+            return
+        redactor = (
+            self.app.redaction_service
+            if (self.app.demo_mode and self.app.redaction_service)
+            else None
+        )
+        raw_rows = self._raw_server_rows(self._rendered_servers, redactor)
+        widths, _ = self._plan_server_columns(raw_rows, available)
+        if widths != self._last_server_col_widths:
+            self._populate_servers_table(self._rendered_servers)
+
+    def _populate_servers_table(self, servers: list[dict]) -> None:
+        self._rendered_servers = list(servers)
+        table = self.query_one("#servers_table", DataTable)
+        redactor = None
+        if self.app.demo_mode and self.app.redaction_service:
+            redactor = self.app.redaction_service
+        raw_rows = self._raw_server_rows(servers, redactor)
+        available = plannable_width(table) if isinstance(table, DataTable) else 0
+        widths, needs_fit = self._plan_server_columns(raw_rows, available)
+        self._last_server_col_widths = widths
+
+        if isinstance(table, DataTable):
+            saved_row = table.cursor_row
+            table.clear(columns=True)
+            table.add_columns("Name", "Hostname", "Region", "Vault key")
+        else:
+            saved_row = 0
+            table.clear()
+
+        for row in raw_rows:
+            if needs_fit:
+                formatted = tuple(cell(cut(val, widths[idx])) for idx, val in enumerate(row))
+            else:
+                formatted = tuple(cell(val) for val in row)
+            table.add_row(*formatted)
+
+        if isinstance(table, DataTable) and table.row_count:
+            table.move_cursor(row=min(max(saved_row, 0), table.row_count - 1))
 
     # ------------------------------------------------------------------
     # Button handler
@@ -2055,11 +2155,32 @@ class TeamManagementScreen(WorkspaceScreen):
 
     def _matching_own_row(self, shared_row: dict) -> Optional[dict]:
         target_id = str(shared_row.get("instance_id") or "")
-        if not target_id:
-            return None
-        for row in real_fleet_rows(self.app) or []:
-            if row.get("is_shared") is not True and str(row.get("id") or "") == target_id:
-                return dict(row)
+        rows = [row for row in (real_fleet_rows(self.app) or []) if row.get("is_shared") is not True]
+        if target_id:
+            for row in rows:
+                if str(row.get("id") or "") == target_id:
+                    return dict(row)
+        host = str(shared_row.get("hostname") or shared_row.get("host") or "").strip()
+        name = str(shared_row.get("name") or "").strip()
+        if host:
+            host_matches = [
+                row for row in rows
+                if host in {
+                    str(row.get(k) or "").strip()
+                    for k in ("public_ip", "private_ip", "host", "hostname")
+                    if row.get(k)
+                }
+            ]
+            if len(host_matches) == 1:
+                return dict(host_matches[0])
+            if name:
+                for row in host_matches:
+                    if str(row.get("name") or "").strip() == name:
+                        return dict(row)
+        if name:
+            name_matches = [row for row in rows if str(row.get("name") or "").strip() == name]
+            if len(name_matches) == 1:
+                return dict(name_matches[0])
         return None
 
     def _offer_post_share_bind(self, slug: str, hostname: str, name: str) -> None:
@@ -2101,7 +2222,7 @@ class TeamManagementScreen(WorkspaceScreen):
         )
 
     def _action_bind_shared_key(self) -> None:
-        if self._server_busy:
+        if self._server_busy or self._binding_shared_key:
             return
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
@@ -2115,6 +2236,10 @@ class TeamManagementScreen(WorkspaceScreen):
         self._start_bind_row(row)
 
     def _start_bind_row(self, row: dict) -> None:
+        if self._binding_shared_key:
+            return
+        if refuse_unresolved(self.app, row):
+            return
         self.run_worker(self._bind_shared_server_row(row), group="vault", exclusive=True)
 
     async def _bind_shared_server_row(self, row: dict) -> None:
@@ -2122,20 +2247,45 @@ class TeamManagementScreen(WorkspaceScreen):
         if service is None:
             self.notify("Vault services are unavailable.", severity="warning", markup=False)
             return
+        if refuse_unresolved(self.app, row):
+            return
         from servonaut.screens.server_actions import VaultBindingModal
 
-        own = self._matching_own_row(row)
-        values = await self.app.push_screen_wait(VaultBindingModal(service, row, own_instance=own))
-        if not values:
-            return
+        real = connection_instance(self.app, row)
+        own = self._matching_own_row(real)
+        self._binding_shared_key = True
         try:
-            await apply_vault_binding(self.app, service, row, values, own=own)
-        except Exception as exc:
-            self.notify(f"Vault key binding failed: {format_vault_bind_error(exc)}", severity="error", markup=False)
-            return
-        self.notify("Team vault SSH key bound.", markup=False)
-        if self._current_team_slug:
-            await self._load_team_detail(self._current_team_slug)
+            bind_btn = self.query_one("#btn_bind_shared_key", Button)
+        except Exception:
+            bind_btn = None
+        if bind_btn is not None:
+            bind_btn.disabled = True
+        try:
+            values = await self.app.push_screen_wait(VaultBindingModal(service, real, own_instance=own))
+            if not values:
+                return
+            indicator = None
+            try:
+                indicator = self.query_one("#team_servers_busy", BusyIndicator)
+                indicator.start("Binding team vault SSH key…")
+            except Exception:
+                pass
+            try:
+                result = await apply_vault_binding(self.app, service, real, values, own=own)
+            except Exception as exc:
+                self.notify(f"Vault key binding failed: {format_vault_bind_error(exc)}", severity="error", markup=False)
+                return
+            finally:
+                if indicator is not None:
+                    indicator.stop()
+            remember_team_vault_binding(self.app, real, result)
+            self.notify("Team vault SSH key bound.", markup=False)
+            if self._current_team_slug:
+                await self._load_team_detail(self._current_team_slug)
+        finally:
+            self._binding_shared_key = False
+            if bind_btn is not None and bind_btn.is_mounted:
+                bind_btn.disabled = False
 
     def _action_push_config(self) -> None:
         """Open the push-config form. Only owners/admins reach this button."""
@@ -2389,6 +2539,24 @@ class TeamManagementScreen(WorkspaceScreen):
             for line in failure_details(self.app, failed):
                 self.notify(line, severity="error", markup=False)
         await self._load_team_detail(slug)
+        if succeeded > 0 and getattr(self.app, "vault_available", False):
+            shared_candidates = [
+                (
+                    str(result.payload.get("hostname") or result.payload.get("host") or ""),
+                    str(result.payload.get("name") or ""),
+                )
+                for result in results
+                if result.status == SHARED
+            ]
+            for host_cand, name_cand in shared_candidates:
+                if any(
+                    (s.get("hostname") == host_cand or s.get("host") == host_cand)
+                    and (not name_cand or s.get("name") == name_cand)
+                    and self._shared_key_status(s) == "Not bound"
+                    for s in self._shared_servers
+                ):
+                    self.app.call_later(self._offer_post_share_bind, slug, host_cand, name_cand)
+                    break
 
     def _submit_share_server(self) -> None:
         """Submit the share form: build payload from selected instance."""
