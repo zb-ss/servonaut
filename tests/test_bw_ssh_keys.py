@@ -314,7 +314,10 @@ class TestKeyFileCache:
     def test_a_rotated_key_gets_a_new_path_and_the_old_one_goes_after_the_grace(self):
         clock = _Clock()
         rotated = KEY_BODY.replace("dummy-body", "rotated-body")
-        resolver = MagicMock(resolve_ssh_key=MagicMock(side_effect=[KEY_BODY, rotated]))
+        # The rotated key stays rotated: the applies past its TTL read it again.
+        # (An exhausted side_effect list would raise StopIteration in the worker
+        # thread, which Python 3.10 cannot hand to the awaiting future: a hang.)
+        resolver = MagicMock(resolve_ssh_key=MagicMock(side_effect=[KEY_BODY, rotated, rotated, rotated]))
         provider = self._ttl_provider(resolver, clock, superseded_grace_seconds=100)
         old = _run(provider.apply(CONN, INSTANCE))["key_path"]
         clock.now += 31
