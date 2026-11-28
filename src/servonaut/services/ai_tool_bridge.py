@@ -32,6 +32,7 @@ import inspect
 import json
 import logging
 import math
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
@@ -53,7 +54,7 @@ from servonaut.models.relay_messages import (
     CommandType,
 )
 from servonaut.config.schema import DEFAULT_CHAT_READONLY_COMMANDS
-from servonaut.mcp.audit import AuditOutcome, record_outcomes
+from servonaut.mcp.audit import AuditOutcome, audit_call_context, record_outcomes
 from servonaut.mcp.guards import check_standard_command, render_standard_command
 from servonaut.services.ai_split_turns import prompt_deadline
 from servonaut.services.team_rules import TEAM_RULE_REASON, is_team_refusal
@@ -739,6 +740,7 @@ class AIToolBridge(_FloorDangerousMixin):
         ip_ban_service: Optional["IPBanService"] = None,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         audit_source: str = "ai_chat",
+        audit_origin: str = "",
         confirm_timeout: Optional[Callable[[], Any]] = None,
         readonly_commands: Optional[Callable[[], Any]] = None,
     ) -> None:
@@ -755,6 +757,11 @@ class AIToolBridge(_FloorDangerousMixin):
         # trail's origin discrimination intact when the same bridge
         # machinery serves both flows.
         self._audit_source = audit_source
+        # Finer-grained execution surface ("ui", "relay", "proactive").
+        self._audit_origin = (
+            audit_origin
+            or ("proactive" if audit_source == "proactive" else "ui")
+        )
         # Zero-argument getter for the confirmation deadline in seconds,
         # read per call so config edits apply live. ``None`` = no
         # deadline (policy callbacks that answer immediately).
@@ -1135,6 +1142,7 @@ class AIToolBridge(_FloorDangerousMixin):
                 False,
                 reason,
                 source=self._audit_source,
+                origin=self._audit_origin,
                 conversation_id=call.conversation_id,
                 tool_call_id=call.tool_call_id,
                 server_tier=server_tier,
@@ -1331,9 +1339,18 @@ class AIToolBridge(_FloorDangerousMixin):
                 call.tool, dropped_args,
             )
 
+        captured_telemetry: Dict[str, Any] = {}
         try:
-            with record_outcomes() as outcomes:
+            with audit_call_context(
+                origin=self._audit_origin,
+                source=self._audit_source,
+                suppress_writes=True,
+            ) as call_ctx, record_outcomes() as outcomes:
                 output = await handler(**accepted_args)
+                captured_telemetry = dict(call_ctx.extras)
+                captured_telemetry["duration_ms"] = max(
+                    0, int((time.monotonic() - call_ctx.started_at) * 1000),
+                )
         except TypeError as exc:
             # Still reachable: a missing required argument, or a value of
             # a shape the handler body rejects. Surface it so the model
@@ -1382,7 +1399,11 @@ class AIToolBridge(_FloorDangerousMixin):
         else:
             reason = "ok_local"
         self._audit_tool_call(
-            call, result, allowed=status != "denied", reason=reason,
+            call,
+            result,
+            allowed=status != "denied",
+            reason=reason,
+            extra_telemetry=captured_telemetry,
         )
         return result
 
@@ -1649,6 +1670,7 @@ class AIToolBridge(_FloorDangerousMixin):
         *,
         allowed: bool,
         reason: str,
+        extra_telemetry: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Single audit row per :meth:`handle_tool_call` invocation.
 
@@ -1658,6 +1680,8 @@ class AIToolBridge(_FloorDangerousMixin):
         replay the round-trip from the audit log alone.
         """
         extras: Dict[str, Any] = {}
+        if extra_telemetry:
+            extras.update(extra_telemetry)
         if call.readonly_check:
             ran = reason == "ok"
             extras["readonly_check"] = (
@@ -1673,6 +1697,7 @@ class AIToolBridge(_FloorDangerousMixin):
                 allowed,
                 reason,
                 source=self._audit_source,
+                origin=self._audit_origin,
                 conversation_id=call.conversation_id,
                 tool_call_id=call.tool_call_id,
                 guard_level=call.guard_level,

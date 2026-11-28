@@ -229,7 +229,7 @@ class ChatToolExecutor:
             connection_service=connection_service,
             scp_service=SCPService(ssh_config=config.ssh),
             guard=_CommandGuard(mcp_config, config_manager),
-            audit=AuditTrail(mcp_config.audit_path),
+            audit=AuditTrail(mcp_config.audit_path, default_origin="ui"),
             ovh_service=ovh_service,
             bw_ssh_config_service=bw_ssh_config_service,
         )

@@ -18,6 +18,7 @@ from typing import Any, Deque, Dict, List, Mapping, Optional
 
 from servonaut.config.accounts import PROVIDER_TITLES, primary_label
 from servonaut.config.schema import MCPConfig
+from servonaut.mcp.audit import update_call_context
 from servonaut.utils.endpoints import EndpointOverrideError
 from servonaut.mcp.db_staging import (
     DEFAULT_MAX_TOKENS as DEFAULT_STAGING_MAX_TOKENS,
@@ -228,6 +229,31 @@ def _seconds(value: Any, default: float, *, allow_zero: bool = False) -> float:
 def _instance_key(instance: Dict[str, Any]) -> str:
     """Canonical key a db_profile is stored under: the instance id (name if none)."""
     return str(instance.get('id') or instance.get('name') or '')
+
+
+def _target_audit_info(
+    instance: Mapping[str, Any],
+    conn: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compact target metadata for audit entries (omits empty fields)."""
+    info: Dict[str, Any] = {}
+    for key in ('id', 'name', 'provider', 'account', 'region'):
+        val = str(instance.get(key) or '').strip()
+        if val:
+            info[key] = val
+    host = ""
+    if conn is not None:
+        host = str(conn.get('host') or '').strip()
+    if not host:
+        host = str(
+            instance.get('public_ip')
+            or instance.get('private_ip')
+            or instance.get('host')
+            or ''
+        ).strip()
+    if host:
+        info['host'] = host
+    return info
 
 
 def _sanitize_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -1078,34 +1104,39 @@ class ServonautTools:
             return await self._run_command_via_ssm(instance, command, args)
 
         # --- SSH (ssh / auto) ------------------------------------------
+        ssh_meta: Dict[str, Any] = {
+            'transport_used': 'ssh',
+            'target': _target_audit_info(instance),
+        }
         (
             output,
             conn_failed,
             timed_out,
             failure_reason,
             key_source,
-        ) = await self._run_command_via_ssh(instance, command)
+        ) = await self._run_command_via_ssh(instance, command, audit_meta=ssh_meta)
         # Audit extra only when the vault key was used — local-key rows keep
         # their existing shape (no churn for the common case).
-        key_extras = {'key_source': key_source} if key_source else {}
+        key_extras: Dict[str, Any] = {'key_source': key_source} if key_source else {}
+        run_extras: Dict[str, Any] = {**ssh_meta, **key_extras}
 
         # A command timeout means the host WAS reachable — the command simply
         # ran past the budget. Surface the message and stop; no SSM fallback.
         if timed_out:
             self._audit.log(
-                'run_command', args, '', False, 'command_timeout', **key_extras,
+                'run_command', args, '', False, 'command_timeout', **run_extras,
             )
             return output  # already contains the human-readable timeout message
 
         if failure_reason:
             self._audit.log(
-                'run_command', args, '', False, failure_reason, **key_extras,
+                'run_command', args, '', False, failure_reason, **run_extras,
             )
             return output
 
         if not conn_failed:
             result = f"{output}\n[transport_used: ssh]"
-            self._audit.log('run_command', args, result, True, **key_extras)
+            self._audit.log('run_command', args, result, True, **run_extras)
             return result
 
         # SSH connection failed (host not reachable / sshd refused).
@@ -1116,7 +1147,7 @@ class ServonautTools:
                 "transport='ssm'."
             )
             self._audit.log(
-                'run_command', args, '', False, 'ssh_conn_failed', **key_extras,
+                'run_command', args, '', False, 'ssh_conn_failed', **run_extras,
             )
             return msg
 
@@ -1133,7 +1164,7 @@ class ServonautTools:
             )
             self._audit.log(
                 'run_command', args, '', False,
-                'native_vault_ssh_conn_failed', **key_extras,
+                'native_vault_ssh_conn_failed', **run_extras,
             )
             return msg
 
@@ -1141,7 +1172,7 @@ class ServonautTools:
         if not is_aws:
             self._audit.log(
                 'run_command', args, '', False, 'ssh_conn_failed_non_aws',
-                **key_extras,
+                **run_extras,
             )
             return (
                 "Error: SSH connection failed and SSM fallback is AWS-only "
@@ -1256,7 +1287,10 @@ class ServonautTools:
             stdout=stdout,
         )
 
-    async def _run_command_via_ssh(self, instance: Dict, command: str):
+    async def _run_command_via_ssh(
+        self, instance: Dict, command: str,
+        audit_meta: Optional[Dict[str, Any]] = None,
+    ):
         """Run via SSH and classify transport, timeout, and auth failures.
 
         Four distinct outcomes (``key_source`` is ``'bw_personal'`` when the
@@ -1274,6 +1308,8 @@ class ServonautTools:
                 message = f"Error: {self._vault_update_message(update)}"
                 return (message, False, False, 'client_update_required', None)
             raise
+        if audit_meta is not None:
+            audit_meta['target'] = _target_audit_info(instance, conn)
         key_source = conn.get('key_source')
         # Everything after the vault key hits disk runs INSIDE the try so the
         # finally deletes the temp key even when the command builder or a
@@ -1285,6 +1321,9 @@ class ServonautTools:
                 await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
             stdout, stderr = output
+            rc = ssh_returncode(output)
+            if audit_meta is not None and isinstance(rc, int):
+                audit_meta['exit_code'] = rc
             if used_agent_fallback:
                 key_source = 'ssh_agent'
         except asyncio.TimeoutError:
@@ -1348,6 +1387,12 @@ class ServonautTools:
         prefix = "[SSH unreachable — fell back to SSM]\n" if ssh_fell_back else ""
         region = instance.get('region') or ''
         aws_id = instance.get('id', '')
+        ssm_extras: Dict[str, Any] = {
+            'transport_used': 'ssm',
+            'target': _target_audit_info(instance),
+        }
+        if ssh_fell_back:
+            ssm_extras['ssh_fell_back'] = True
         try:
             # Systems Manager runs in the account the instance belongs to.
             ssm = SSMService(self._aws_context_for(instance))
@@ -1355,15 +1400,20 @@ class ServonautTools:
                 aws_id, command, region=region, timeout=60,
             )
         except Exception as e:  # noqa: BLE001
-            self._audit.log('run_command', args, '', False, f"ssm_error: {e}")
+            self._audit.log('run_command', args, '', False, f"ssm_error: {e}", **ssm_extras)
             return f"{prefix}Error (SSM): {e}"
+
+        if res.get("command_id"):
+            ssm_extras['ssm_command_id'] = res["command_id"]
+        if isinstance(res.get("exit_code"), int):
+            ssm_extras['exit_code'] = res["exit_code"]
 
         if not res.get("ok"):
             err = res.get("error") or f"status {res.get('status', '?')}"
             out = f"{prefix}Error (SSM): {err}"
             if res.get("stderr"):
                 out += f"\nSTDERR:\n{res['stderr']}"
-            self._audit.log('run_command', args, '', False, f"ssm: {err}")
+            self._audit.log('run_command', args, '', False, f"ssm: {err}", **ssm_extras)
             return out
 
         output = res.get("stdout", "")
@@ -1373,7 +1423,7 @@ class ServonautTools:
         if res.get("stderr"):
             output += f"\nSTDERR:\n{res['stderr']}"
         result = f"{prefix}{output}\n[transport_used: ssm]"
-        self._audit.log('run_command', args, result, True)
+        self._audit.log('run_command', args, result, True, **ssm_extras)
         return result
 
     async def get_logs(self, instance_id: str, log_path: str = "/var/log/syslog", lines: int = 100) -> str:
@@ -1504,8 +1554,16 @@ class ServonautTools:
         if stderr:
             output += f"\nSTDERR:\n{stderr_text}"
 
-        self._audit.log('get_server_info', args, output, True, **key_extras)
-        if ssh_returncode(ssh_output) == 0:
+        rc = ssh_returncode(ssh_output)
+        info_extras: Dict[str, Any] = {
+            'transport_used': 'ssh',
+            'target': _target_audit_info(instance, conn),
+            **key_extras,
+        }
+        if isinstance(rc, int):
+            info_extras['exit_code'] = rc
+        self._audit.log('get_server_info', args, output, True, **info_extras)
+        if rc == 0:
             return MCPDisplayText(output)
         return output
 
@@ -1615,7 +1673,13 @@ class ServonautTools:
             elif stderr:
                 result += f"\n{stderr}"
 
-        self._audit.log('transfer_file', args, result, returncode == 0, **key_extras)
+        scp_extras: Dict[str, Any] = {
+            'transport_used': 'scp',
+            'target': _target_audit_info(instance, conn),
+            'exit_code': returncode,
+            **key_extras,
+        }
+        self._audit.log('transfer_file', args, result, returncode == 0, **scp_extras)
         return result
 
     def _provider_refusal(
@@ -6301,8 +6365,13 @@ class ServonautTools:
         tag their audit rows the same way run_command / transfer_file do.
         """
         conn, cleanup = await self._resolve_connection_with_vault(instance)
-        if audit_extras is not None and conn.get('key_source'):
-            audit_extras['key_source'] = conn['key_source']
+        target_info = _target_audit_info(instance, conn)
+        update_call_context(transport_used='ssh', target=target_info)
+        if audit_extras is not None:
+            audit_extras.setdefault('transport_used', 'ssh')
+            audit_extras.setdefault('target', target_info)
+            if conn.get('key_source'):
+                audit_extras['key_source'] = conn['key_source']
         # Command build stays INSIDE the try — an exception there must still
         # trigger the temp-key cleanup in the finally.
         try:
@@ -6310,6 +6379,11 @@ class ServonautTools:
                 await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
             stdout, stderr = output
+            rc = ssh_returncode(output)
+            if isinstance(rc, int):
+                update_call_context(exit_code=rc)
+                if audit_extras is not None:
+                    audit_extras['exit_code'] = rc
             if used_agent_fallback and audit_extras is not None:
                 audit_extras['key_source'] = 'ssh_agent'
         finally:

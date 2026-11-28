@@ -807,6 +807,7 @@ class RelayManager:
                 servonaut_tools=getattr(app, "servonaut_tools", None),
                 ip_ban_service=getattr(app, "ip_ban_service", None),
                 audit_source="proactive",
+                audit_origin="proactive",
             )
         except Exception as exc:  # noqa: BLE001 — probes degrade to errors
             logger.debug("Probe bridge init skipped: %s", exc)

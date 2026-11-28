@@ -1104,10 +1104,18 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Local validation messages for a new theme file name: fixed "
                    "text plus the name the user is typing, which is limited to "
                    "[a-z0-9-] — no server, account or service data."),
-    # Note: _render_buckets_table, _render_objects_table, _update_breadcrumb,
-    # and _generate_presigned_url no longer need allowlist entries because
-    # scrub() and scrub_name() are public method names (no leading underscore)
-    # that the AST lint detects directly as scrub* guards.
+    # agent_activity.py — header/summary and pager only display numeric counts,
+    # elapsed ms, and fixed enum labels (origins, transport names, command
+    # categories); table rows and detail text scrub through scrub_text().
+    AllowlistEntry("screens/agent_activity.py", "_render_header_and_summary", "update",
+                   "Renders numeric call counts, query latency, and fixed enum "
+                   "labels (origin, transport, command category) — no hosts or PII."),
+    AllowlistEntry("screens/agent_activity.py", "_update_pager", "update",
+                   "Renders page index and total match count ('Page X of Y') — "
+                   "numeric pagination chrome only."),
+    AllowlistEntry("screens/agent_activity.py", "_set_loading_state", "update",
+                   "Writes static 'Loading activity...' status text only — "
+                   "no user or server data."),
 ]
 
 # Build a fast lookup set: (relative_file_path, func_name, attr_name)

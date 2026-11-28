@@ -1975,7 +1975,8 @@ class TestTeamKeyOnAnOwnServer:
         ("describe_ingress_path", {}),
         ("db_setup_scan", {}),
     ])
-    def test_version_refusal_audits_ssh_tools(self, monkeypatch, name, arguments):
+    def test_version_refusal_audits_ssh_tools(self, monkeypatch, tmp_path, name, arguments):
+        from servonaut.mcp.audit import AuditTrail
         from servonaut.mcp.server import _dispatch_tool
         from servonaut.services import ingress_path_service
         from servonaut.services.api_client import ClientUpdateRequiredError
@@ -1985,6 +1986,7 @@ class TestTeamKeyOnAnOwnServer:
         tools = make_tools(
             guard_level=GuardLevel.DANGEROUS, vault_runtime=runtime, instances=SAMPLE_INSTANCES[:1],
         )
+        tools._audit = AuditTrail(str(tmp_path / "mcp_audit.jsonl"))
         if name == "describe_ingress_path":
             monkeypatch.setattr(ingress_path_service.IngressPathService, "describe", AsyncMock())
             monkeypatch.setattr(ingress_path_service, "format_ingress_path", lambda *_args, **_kwargs: "Topology")
@@ -1996,10 +1998,10 @@ class TestTeamKeyOnAnOwnServer:
         assert "Update to 99.0.0" in result.text
         if name == "describe_ingress_path":
             assert result.text.startswith("Topology")
-        assert _audit_reasons(tools) == ["client_update_required"]
-        assert tools._audit.log.call_count == 1
-        assert tools._audit.log.call_args.args[0] == name
-        assert tools._audit.log.call_args.args[3] is False
+        rows = tools._audit.read_recent(10)
+        assert [row["reason"] for row in rows] == ["client_update_required"]
+        assert rows[0]["tool"] == name
+        assert rows[0]["allowed"] is False
         runtime.resolve_ssh.assert_awaited_once()
         tools._ssh_service.build_ssh_command.assert_not_called()
         tools._scp_service.execute_transfer.assert_not_awaited()

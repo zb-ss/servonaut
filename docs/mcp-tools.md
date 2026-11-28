@@ -66,7 +66,7 @@ Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_
   - A `|` written as a quoted or escaped word of its own (`grep '|' file`) is refused; use `dangerous` for it. A `|` inside a longer quoted word (`grep 'a|b' file`) is fine.
 - `dangerous` — everything except a hard-coded blocklist (`rm -rf`, `shutdown`, `dd`, ...).
 
-Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, arguments, success flag, and short reason code on early returns.
+Every call is logged to `~/.servonaut/mcp_audit.jsonl` (configured via `mcp.audit_path`; must be a regular file, as symlinks are skipped with `O_NOFOLLOW`) with a timestamp, origin (`mcp`, `ui`, `relay`, `proactive`, `cli`), arguments, transport, success flag, and short reason code on early returns. Browse the log in the TUI under **Account → Agent activity** or from the CLI with `servonaut mcp audit --since 24h`.
 
 ### Team shared servers
 

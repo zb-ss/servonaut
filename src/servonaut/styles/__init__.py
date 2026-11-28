@@ -95,4 +95,5 @@ CSS_FILES = [
     _S / "components/action_button.tcss",
     _S / "screens/credential_workspaces.tcss",
     _S / "screens/ai_choice_dialogs.tcss",
+    _S / "screens/agent_activity.tcss",
 ]

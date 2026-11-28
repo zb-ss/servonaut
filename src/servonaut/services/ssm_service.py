@@ -63,6 +63,7 @@ class SSMService:
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "ok": False, "status": "", "stdout": "", "stderr": "", "error": "",
+            "command_id": "", "exit_code": None,
         }
         kwargs = {"region_name": region} if region else {}
         try:
@@ -88,6 +89,7 @@ class SSMService:
         if not command_id:
             result["error"] = "send_command returned no CommandId"
             return result
+        result["command_id"] = command_id
 
         deadline = time.monotonic() + max(10, int(timeout))
         poll_interval = 1.0
@@ -110,6 +112,9 @@ class SSMService:
             if status in _TERMINAL:
                 result["stdout"] = (inv.get("StandardOutputContent", "") or "")[:_MAX_OUTPUT]
                 result["stderr"] = (inv.get("StandardErrorContent", "") or "")[:_MAX_OUTPUT]
+                response_code = inv.get("ResponseCode")
+                if isinstance(response_code, int):
+                    result["exit_code"] = response_code
                 result["ok"] = status == "Success"
                 if not result["ok"] and not result["error"]:
                     result["error"] = f"command status: {status}"

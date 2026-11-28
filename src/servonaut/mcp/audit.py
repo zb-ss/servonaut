@@ -13,15 +13,17 @@ On rotation the live file is renamed ``mcp_audit.jsonl.1``; existing
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from servonaut.utils.logging_setup import warn_stderr
 
@@ -57,6 +59,67 @@ _recorded_outcomes: ContextVar[Optional[List[AuditOutcome]]] = ContextVar(
 )
 
 
+@dataclass
+class AuditCallContext:
+    """Ambient provenance and execution telemetry for one tool invocation.
+
+    Set at the dispatch boundary (MCP stdio server or AI tool bridge) so every
+    ``AuditTrail.log`` call automatically receives ``origin``, ``source``,
+    ``client``, ``session_id``, and ``duration_ms`` without modifying every
+    tool call site.
+    """
+
+    origin: str = ""
+    source: str = ""
+    client: str = ""
+    session_id: str = ""
+    started_at: float = field(default_factory=time.monotonic)
+    suppress_writes: bool = False
+    logged_count: int = 0
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+_call_context: ContextVar[Optional[AuditCallContext]] = ContextVar(
+    "servonaut_audit_call_context", default=None,
+)
+
+
+@contextmanager
+def audit_call_context(
+    *,
+    origin: str = "",
+    source: str = "",
+    client: str = "",
+    session_id: str = "",
+    suppress_writes: bool = False,
+) -> Iterator[AuditCallContext]:
+    """Attach provenance and timing metadata to audit rows written in this block."""
+    ctx = AuditCallContext(
+        origin=origin,
+        source=source,
+        client=client,
+        session_id=session_id,
+        started_at=time.monotonic(),
+        suppress_writes=suppress_writes,
+    )
+    token = _call_context.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _call_context.reset(token)
+
+
+def update_call_context(**extras: Any) -> None:
+    """Attach execution telemetry (e.g. ``transport_used``, ``exit_code``, ``target``)
+    to the active audit call context, if any."""
+    ctx = _call_context.get()
+    if ctx is None:
+        return
+    for key, value in extras.items():
+        if value is not None and value != "":
+            ctx.extras[key] = value
+
+
 @contextmanager
 def record_outcomes() -> Iterator[List[AuditOutcome]]:
     """Collect the outcome of every audit row written inside the block.
@@ -75,15 +138,28 @@ def record_outcomes() -> Iterator[List[AuditOutcome]]:
 
 
 class AuditTrail:
-    def __init__(self, audit_path: str, *, warn_to_stderr: bool = False) -> None:
+    def __init__(
+        self,
+        audit_path: str,
+        *,
+        warn_to_stderr: bool = False,
+        default_origin: str = "",
+    ) -> None:
         self._path = Path(audit_path).expanduser()
         self._warn_to_stderr = warn_to_stderr
+        self._default_origin = default_origin
         self._warned_unavailable = False
         self._writes_since_check = 0
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             if warn_to_stderr:
-                flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
+                flags = (
+                    os.O_APPEND
+                    | os.O_CREAT
+                    | os.O_WRONLY
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
                 descriptor = os.open(self._path, flags, 0o600)
                 os.close(descriptor)
         except (OSError, ValueError) as error:
@@ -91,12 +167,35 @@ class AuditTrail:
                 raise
             self._warn_unavailable(error)
 
+    @property
+    def path(self) -> Path:
+        """Resolved path to the live JSONL audit log."""
+        return self._path
+
     def _warn_unavailable(self, error: Exception) -> None:
+        is_symlink = isinstance(error, OSError) and getattr(error, "errno", None) == errno.ELOOP
         if not self._warn_to_stderr:
-            logger.error("Failed to write audit log: %s", error)
+            if not self._warned_unavailable:
+                self._warned_unavailable = True
+                if is_symlink:
+                    logger.warning(
+                        "MCP audit log path %s is a symlink; skipping write "
+                        "(configure mcp.audit_path to a regular file).",
+                        self._path,
+                    )
+                else:
+                    logger.error("Failed to write audit log: %s", error)
+            else:
+                logger.error("Failed to write audit log: %s", error)
         elif not self._warned_unavailable:
             self._warned_unavailable = True
-            warn_stderr("servonaut: MCP audit log is unavailable. Tool activity may go unrecorded.")
+            if is_symlink:
+                warn_stderr(
+                    "servonaut: MCP audit log path is a symlink and was skipped "
+                    "(configure mcp.audit_path to a regular file)."
+                )
+            else:
+                warn_stderr("servonaut: MCP audit log is unavailable. Tool activity may go unrecorded.")
 
     def log(
         self,
@@ -128,7 +227,14 @@ class AuditTrail:
                 compatible: future surfaces can add metadata without
                 breaking older audit readers.
         """
-        entry = {
+        ctx = _call_context.get()
+        effective_source = source or (ctx.source if ctx is not None else "")
+        effective_origin = str(
+            extras.get("origin")
+            or (ctx.origin if ctx is not None else "")
+            or self._default_origin
+        )
+        entry: Dict[str, Any] = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'tool': tool,
             'args': args,
@@ -136,19 +242,52 @@ class AuditTrail:
             'reason': reason,
             'result_length': len(result) if result else 0,
         }
-        if source:
-            entry['source'] = source
+        if effective_source:
+            entry['source'] = effective_source
+        if effective_origin:
+            entry['origin'] = effective_origin
+
+        if ctx is not None:
+            if ctx.client and 'client' not in extras:
+                entry['client'] = ctx.client
+            if ctx.session_id and 'session_id' not in extras:
+                entry['session_id'] = ctx.session_id
+            if 'duration_ms' not in extras:
+                entry['duration_ms'] = max(0, int((time.monotonic() - ctx.started_at) * 1000))
+            for key, value in ctx.extras.items():
+                if key not in entry and key not in extras:
+                    entry[key] = value
+
         # Surplus kwargs land last so they can't accidentally clobber the
         # canonical fields above.
         for key, value in extras.items():
-            if key not in entry:
+            if key not in entry and value is not None:
                 entry[key] = value
         outcomes = _recorded_outcomes.get()
         if outcomes is not None:
             outcomes.append(AuditOutcome(tool, bool(allowed), str(reason or "")))
+
+        if ctx is not None:
+            ctx.logged_count += 1
+            if ctx.suppress_writes:
+                # Forward execution telemetry and inner outcome captured by a
+                # local tool call (e.g. ServonautTools called from AIToolBridge)
+                # so the single outer audit row preserves distinct failure/refusal
+                # reasons and transport/target telemetry.
+                if ctx.extras.get('tool_allowed') is not False:
+                    ctx.extras['tool_allowed'] = bool(allowed)
+                    if reason:
+                        ctx.extras['tool_reason'] = str(reason)
+                for telemetry_key in (
+                    'transport_used', 'ssh_fell_back', 'ssm_command_id',
+                    'exit_code', 'target', 'key_source',
+                ):
+                    if telemetry_key in entry:
+                        ctx.extras[telemetry_key] = entry[telemetry_key]
+                return
+
         try:
-            with open(self._path, 'a') as f:
-                f.write(json.dumps(entry) + '\n')
+            self._append_line(json.dumps(entry) + '\n')
         except (OSError, TypeError, ValueError, RecursionError) as error:
             self._warn_unavailable(error)
             return
@@ -160,6 +299,19 @@ class AuditTrail:
                 self._maybe_rotate()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("MCP audit rotation skipped: %s", exc)
+
+    def _append_line(self, line: str) -> None:
+        """Append one line atomically with 0o600 permissions and O_NOFOLLOW."""
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | no_follow
+        fd = os.open(str(self._path), flags, 0o600)
+        try:
+            f = os.fdopen(fd, 'a', encoding='utf-8')
+        except Exception:
+            os.close(fd)
+            raise
+        with f:
+            f.write(line)
 
     def read_recent(self, count: int = 50) -> List[Dict]:
         """Read recent audit entries."""
