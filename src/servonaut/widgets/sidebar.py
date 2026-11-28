@@ -69,16 +69,6 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "BugReportScreen": "nav_bug_report",
 }
 
-# Routes reachable from the command palette or secondary hubs rather than top-level rail slots.
-_PALETTE_ONLY_NAV_IDS: tuple[str, ...] = (
-    "nav_sync_config",
-    "nav_memory_sync",
-    "nav_bw_vault",
-    "nav_drift",
-    "nav_memory_export",
-)
-
-
 def _provider_available(app, provider: str) -> bool:
     """Whether *provider* has a usable account (any account, not only the
     primary one). Hosts without the check fall back to the default service."""
@@ -97,6 +87,52 @@ def _aws_switched_on(app) -> bool:
         return aws_enabled(manager.get()) if manager is not None else True
     except Exception:  # noqa: BLE001 — a stand-in host must never hide AWS
         return True
+
+
+def is_nav_route_visible(app, target_id: str) -> bool:
+    """Single source of truth for Sidebar and Command Palette route visibility."""
+    auth = getattr(app, "auth_service", None)
+    is_auth = bool(auth and getattr(auth, "is_authenticated", False))
+    sync_svc = getattr(app, "memory_sync_service", None)
+    sync_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
+    aws_on = _aws_switched_on(app)
+
+    if target_id == "nav_aws_s3":
+        return bool(aws_on and getattr(app, "aws_object_storage_service", None) is not None)
+    if target_id.startswith(("nav_aws", "nav_cloudwatch", "nav_ip_ban", "nav_cloudtrail")):
+        return aws_on
+    if target_id == "nav_ovh_s3":
+        return getattr(app, "ovh_object_storage_service", None) is not None
+    if target_id.startswith("nav_ovh"):
+        return _provider_available(app, "ovh")
+    if target_id == "nav_hetzner_s3":
+        return getattr(app, "hetzner_object_storage_service", None) is not None
+    if target_id.startswith("nav_hetzner"):
+        return _provider_available(app, "hetzner")
+    if target_id == "nav_vault":
+        return bool(
+            getattr(app, "vault_available", False)
+            or getattr(app, "vault_update_required", False)
+        )
+    if target_id == "nav_ca":
+        return bool(
+            getattr(app, "vault_available", False)
+            and auth
+            and auth.has_feature("ssh_ca")
+        )
+    if target_id == "nav_teams":
+        return bool(auth and auth.has_feature("team_workspaces"))
+    if target_id == "nav_sync_config":
+        return bool(is_auth and auth.has_feature("config_sync"))
+    if target_id == "nav_bw_vault":
+        return bool(is_auth and auth.has_feature("secrets_management"))
+    if target_id == "nav_drift":
+        return bool(auth and auth.has_feature("memory_drift") and sync_configured)
+    if target_id == "nav_memory_export":
+        return bool(
+            auth and auth.has_feature("memory_compliance_export") and sync_configured
+        )
+    return True
 
 
 class _NavigationButton(Button):
@@ -448,8 +484,7 @@ class Sidebar(Widget):
 
     def refresh_auth_gates(self) -> None:
         """Re-apply auth/entitlement gating (Team section and Vault/CA items)."""
-        auth = getattr(self.app, "auth_service", None)
-        has_teams = bool(auth and auth.has_feature("team_workspaces"))
+        has_teams = is_nav_route_visible(self.app, "nav_teams")
         try:
             self.query_one("#section_team", SidebarSection).display = has_teams
         except NoMatches:
@@ -467,13 +502,9 @@ class Sidebar(Widget):
             pass
 
     def _show_vault_navigation(self, _changed: object) -> None:
-        available = bool(getattr(self.app, "vault_available", False))
-        update_required = bool(getattr(self.app, "vault_update_required", False))
-        auth = getattr(self.app, "auth_service", None)
-        has_ca = bool(auth and auth.has_feature("ssh_ca"))
         visibility = {
-            "nav_vault": available or update_required,
-            "nav_ca": available and has_ca,
+            "nav_vault": is_nav_route_visible(self.app, "nav_vault"),
+            "nav_ca": is_nav_route_visible(self.app, "nav_ca"),
         }
         for button_id, visible in visibility.items():
             try:

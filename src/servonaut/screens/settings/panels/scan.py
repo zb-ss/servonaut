@@ -340,6 +340,12 @@ class ScanPanel(SettingsPanel):
 
         if btn_id == "btn_scan_run_global":
             event.stop()
+            if self.is_dirty():
+                self.notify(
+                    "Save your scan rule changes before scanning all servers.",
+                    severity="warning",
+                )
+                return
             run_scan = getattr(self.app, "_run_global_scan", None)
             if callable(run_scan):
                 run_scan()

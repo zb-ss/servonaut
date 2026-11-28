@@ -325,15 +325,25 @@ class TestCustomServersRefreshRedacts:
 
 
 class TestPaletteNavigation:
+    _CONSOLIDATED_PALETTE_TARGETS = frozenset({
+        "nav_sync_config",
+        "nav_memory_sync",
+        "nav_bw_vault",
+        "nav_drift",
+        "nav_memory_export",
+    })
+
     def test_every_target_is_a_sidebar_button(self) -> None:
-        import re
         from pathlib import Path
+        import re
         import servonaut.widgets.sidebar as sidebar_module
 
         source = Path(sidebar_module.__file__).read_text(encoding="utf-8")
-        sidebar_ids = set(re.findall(r'"(nav_[a-z0-9_]+)"', source))
+        # Only actual SidebarButton definitions inside Sidebar.compose (excluding _SCREEN_TO_NAV / helpers).
+        compose_body = source.split("def compose(self)", 1)[1].split("def on_mount(self)", 1)[0]
+        sidebar_ids = set(re.findall(r'"(nav_[a-z0-9_]+)"', compose_body))
         for _, target_id, _ in ServonautApp._PALETTE_NAVIGATION:
-            assert target_id in sidebar_ids, target_id
+            assert target_id in sidebar_ids or target_id in self._CONSOLIDATED_PALETTE_TARGETS, target_id
 
     def test_commands_post_navigation_messages(self) -> None:
         from servonaut.widgets.sidebar import Sidebar

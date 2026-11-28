@@ -105,7 +105,7 @@ async def test_optional_account_routes_keep_entitlement_and_sync_gates(
             route: sidebar.query_one(f"#{route}", Button).display for route in expected
         } == expected
         palette_titles = {c.title for c in app.get_system_commands(app.screen)}
-        assert ("Go to Sync config" in palette_titles) is True
+        assert ("Go to Sync config" in palette_titles) is entitled
         assert ("Go to Memory Sync" in palette_titles) is True
         assert ("Go to Drift events" in palette_titles) is (entitled and configured)
         assert ("Go to Memory export" in palette_titles) is (entitled and configured)

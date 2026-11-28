@@ -48,7 +48,7 @@ from servonaut.widgets.dialogs import (
 )
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.screens._busy_work import BusyJob, BusyWork
-from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error, resolve_bw_ssh_key_path
+from servonaut.screens._vault_bind import resolve_bw_ssh_key_path
 from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
 from servonaut.screens._demo_resolve import (
     connection_instance,
@@ -56,10 +56,12 @@ from servonaut.screens._demo_resolve import (
     fleet_rows,
     display_username,
     hide_login,
+    reconcile_team_memory,
     refuse_unresolved,
     replace_instances,
     team_rows,
 )
+from servonaut.services.team_sharing import server_share_defaults
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
 
@@ -976,6 +978,88 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         })
 
 
+class TeamTargetModal(ModalScreen[Optional[dict[str, Any]]]):
+    """Pick an owner/admin team when sharing a server."""
+
+    DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#team_target_select"
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    TeamTargetModal #team_target_modal {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: round $primary;
+        background: transparent;
+        padding: 1 2;
+    }
+    TeamTargetModal #team_target_title { text-style: bold; }
+    TeamTargetModal #team_target_text { margin-top: 1; height: auto; }
+    TeamTargetModal #team_target_select { width: 100%; margin-top: 1; }
+    TeamTargetModal #team_target_cancel,
+    TeamTargetModal #team_target_confirm { width: auto; min-width: 12; }
+    """
+
+    def __init__(self, teams: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self._teams = [dict(t) for t in teams]
+
+    def _select_options(self) -> list[tuple[Text, int]]:
+        from servonaut.services.vault.display import terminal_safe
+
+        return [
+            (
+                Text(terminal_safe(display_text(self.app, str(t.get("name") or t.get("slug") or "")))),
+                index,
+            )
+            for index, t in enumerate(self._teams)
+        ]
+
+    def compose(self) -> ComposeResult:
+        options = self._select_options()
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Share server with a team[/bold]", id="team_target_title"),
+            body=DialogBody(
+                Static(
+                    "Choose the team where you are an owner or admin.",
+                    id="team_target_text",
+                )
+            ),
+            status=Select(
+                options,
+                value=0 if options else Select.BLANK,
+                allow_blank=not bool(options),
+                id="team_target_select",
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="team_target_cancel"),
+                Button("Continue", variant="primary", id="team_target_confirm"),
+            ),
+            id="team_target_modal",
+        )
+
+    def refresh_after_demo_toggle(self) -> None:
+        select = self.query_one("#team_target_select", Select)
+        kept = select.value
+        select.set_options(self._select_options())
+        if isinstance(kept, int) and 0 <= kept < len(self._teams):
+            select.value = kept
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "team_target_confirm":
+            self.dismiss(None)
+            return
+        index = self.query_one("#team_target_select", Select).value
+        self.dismiss(
+            self._teams[index] if isinstance(index, int) and 0 <= index < len(self._teams) else None
+        )
+
+
 class _ActionsBody(LayoutRefitMixin, Vertical):
     """The content column; tells the screen when its own width changes.
 
@@ -1100,6 +1184,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # server. Personal bindings are not part of the row (only a team's
         # shared servers carry theirs), so it is looked up after mount.
         self._vault_binding_source: Optional[str] = None
+        self._manageable_teams: Optional[list[dict[str, Any]]] = None
 
     def _can_share_with_team(self) -> bool:
         if self._instance.get("is_shared") is True:
@@ -1111,6 +1196,31 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             and auth.has_feature("team_workspaces")
             and getattr(self.app, "team_service", None) is not None
         )
+
+    async def _probe_manageable_teams(self) -> None:
+        team_svc = getattr(self.app, "team_service", None)
+        if team_svc is None:
+            return
+        try:
+            teams = await team_svc.list_teams()
+        except Exception:
+            return
+        manageable = [
+            dict(t)
+            for t in (teams or [])
+            if isinstance(t, Mapping)
+            and str(t.get("role") or "").lower() in {"owner", "admin"}
+            and t.get("slug")
+        ]
+        self._manageable_teams = manageable
+        if not self.is_attached:
+            return
+        try:
+            btn = self.query_one("#btn_share_team", ActionButton)
+            btn.display = bool(manageable)
+            self._sync_compact_buttons()
+        except NoMatches:
+            pass
 
     def on_mount(self) -> None:
         """Focus the first action button and populate the detail pane."""
@@ -1141,9 +1251,10 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # A team's shared server shows no instance ID, so there is nothing to copy.
         if self._instance.get('is_shared') is True or not self._instance.get('id'):
             self.query_one("#btn_copy_id").display = False
+        self.query_one("#btn_share_team", ActionButton).display = False
         if self._can_share_with_team():
-            self.query_one("#card_identity .sa-card-actions", ActionRow).mount(
-                ActionButton("Share with team", short="Share", id="btn_share_team", tooltip=_tip("btn_share_team"))
+            self.run_worker(
+                self._probe_manageable_teams(), group="team_share_gate", exclusive=True
             )
         self._sync_compact_buttons()
         self._sync_vault_button_role()
@@ -1225,6 +1336,7 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
                                 Static(identity, id="server_identity"),
                                 ActionButton("Copy instance ID", short="Copy ID", id="btn_copy_id", tooltip=_tip("btn_copy_id")),
                                 ActionButton("Copy summary", id="btn_copy_summary", tooltip=_tip("btn_copy_summary")),
+                                ActionButton("Share with team", short="Share", id="btn_share_team", tooltip=_tip("btn_share_team")),
                             ),
                             _card(
                                 "card_network",
@@ -2651,6 +2763,13 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
     def action_share_with_team(self) -> None:
         """Share this server directly with a team via Teams service."""
+        if self._busy.holds("#btn_share_team"):
+            self.app.notify(
+                "Sharing this server with a team is still in progress: wait for it to finish.",
+                severity="warning",
+                markup=False,
+            )
+            return
         if self._refuse_if_unresolved():
             return
         if self._instance.get("is_shared") is True:
@@ -2670,39 +2789,46 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
 
     async def _share_with_team_flow(self, team_svc: Any) -> None:
         from servonaut.screens.team_share_confirm import ShareServersConfirmModal
-        from servonaut.services.shared_servers import replace_shared_instances
+        from servonaut.services.shared_servers import load_shared_servers
         from servonaut.services.team_service import SHARED
         from servonaut.services.team_sharing import share_candidates, share_payload
 
-        try:
-            teams = await team_svc.list_teams()
-        except Exception as exc:
-            self.app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
-            return
-        manageable = [
-            t for t in (teams or [])
-            if isinstance(t, Mapping) and (t.get("role") or "").lower() in {"owner", "admin"} and t.get("slug")
-        ]
+        teams: Optional[list[dict[str, Any]]] = None
+        manageable = self._manageable_teams
+        if manageable is None:
+            try:
+                with self._busy.running("Loading teams…", hold=("#btn_share_team",)):
+                    raw_teams = await team_svc.list_teams()
+            except Exception as exc:
+                self.app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
+                return
+            teams = [dict(t) for t in (raw_teams or []) if isinstance(t, Mapping)]
+            manageable = [
+                t for t in teams
+                if str(t.get("role") or "").lower() in {"owner", "admin"} and t.get("slug")
+            ]
+            self._manageable_teams = manageable
         if not manageable:
             self.app.notify("Only team owners or admins can share servers.", severity="warning")
             return
         team = manageable[0]
         if len(manageable) > 1:
-            options = [(str(t.get("name") or t["slug"]), dict(t)) for t in manageable]
-            from servonaut.screens.vault import VaultServerTargetModal
-
-            picked = await self.app.push_screen_wait(VaultServerTargetModal(options, team_mode=True))
+            picked = await self.app.push_screen_wait(TeamTargetModal(manageable))
             if not isinstance(picked, Mapping):
                 return
-            team = picked
+            team = dict(picked)
         slug = str(team["slug"])
         team_name = str(team.get("name") or slug)
         try:
-            shared = await team_svc.list_shared_servers(slug)
+            with self._busy.running("Checking shared inventory…", hold=("#btn_share_team",)):
+                shared = await team_svc.list_shared_servers(slug)
         except Exception as exc:
             self.app.notify(f"Could not read shared servers ({exc}).", severity="error", markup=False)
             return
-        own = connection_instance(self.app, self._instance)
+        own = server_share_defaults(
+            getattr(self.app, "connection_service", None),
+            connection_instance(self.app, self._instance),
+        )
         to_share, skipped_existing, skipped_no_ip = share_candidates([own], shared or [])
         if not to_share:
             if skipped_existing:
@@ -2720,15 +2846,19 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         )
         if not chosen:
             return
-        results = await team_svc.push_servers(slug, [share_payload(row) for row in chosen])
+        try:
+            with self._busy.running("Sharing server with team…", hold=("#btn_share_team",)):
+                results = await team_svc.push_servers(slug, [share_payload(row) for row in chosen])
+                if any(r.status == SHARED for r in results):
+                    shared_state = await load_shared_servers(team_svc, teams)
+                    replace_instances(self.app, "shared", shared_state.rows)
+                    reconcile_team_memory(self.app)
+        except Exception as exc:
+            self.app.notify(f"Could not share server: {exc}", severity="error", markup=False)
+            return
         if any(r.status == SHARED for r in results):
-            try:
-                updated_shared = await team_svc.list_shared_servers(slug)
-                replace_shared_instances(self.app, team, updated_shared or [])
-                if self.is_mounted:
-                    self._render_server_info()
-            except Exception:
-                pass
+            if self.is_mounted:
+                self._render_server_info()
             self.app.notify(f"Shared with team {team_name}.", markup=False)
         else:
             err = next((r.error for r in results if getattr(r, "error", None)), "unknown error")

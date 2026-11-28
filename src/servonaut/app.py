@@ -3119,7 +3119,7 @@ class ServonautApp(App):
         """Textual command palette entries: built-ins, navigation, settings, and quick tasks."""
         from textual.app import SystemCommand
         from servonaut.screens.settings.registry import PANELS
-        from servonaut.widgets.sidebar import Sidebar, _aws_switched_on
+        from servonaut.widgets.sidebar import Sidebar, _aws_switched_on, is_nav_route_visible
 
         yield from super().get_system_commands(screen)
         if (not isinstance(screen, ModalScreen) and not self._navigation_hold_reason()
@@ -3143,44 +3143,10 @@ class ServonautApp(App):
                     self.request_apt_restart,
                 )
 
-        auth = getattr(self, "auth_service", None)
-        is_auth = bool(auth and auth.is_authenticated)
-        has_ca = bool(auth and auth.has_feature("ssh_ca"))
-        has_secrets = bool(auth and auth.has_feature("secrets_management"))
-        sync_svc = getattr(self, "memory_sync_service", None)
-        sync_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
         aws_on = _aws_switched_on(self)
 
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
-            if target_id == "nav_aws_s3" and (not aws_on or getattr(self, "aws_object_storage_service", None) is None):
-                continue
-            if target_id.startswith(("nav_aws", "nav_cloudwatch", "nav_ip_ban", "nav_cloudtrail")) and not aws_on:
-                continue
-            if target_id.startswith("nav_ovh"):
-                has_ovh_s3 = getattr(self, "ovh_object_storage_service", None) is not None
-                has_ovh_compute = self.provider_available("ovh")
-                if target_id == "nav_ovh_s3" and not has_ovh_s3:
-                    continue
-                if target_id != "nav_ovh_s3" and not has_ovh_compute:
-                    continue
-            if target_id.startswith("nav_hetzner"):
-                has_hz_s3 = getattr(self, "hetzner_object_storage_service", None) is not None
-                has_hz_compute = self.provider_available("hetzner")
-                if target_id == "nav_hetzner_s3" and not has_hz_s3:
-                    continue
-                if target_id != "nav_hetzner_s3" and not has_hz_compute:
-                    continue
-            if target_id == "nav_vault" and not (self.vault_available or self.vault_update_required):
-                continue
-            if target_id == "nav_ca" and not (self.vault_available and has_ca):
-                continue
-            if target_id == "nav_bw_vault" and not (is_auth and has_secrets):
-                continue
-            if target_id == "nav_drift" and not (auth and auth.has_feature("memory_drift") and sync_configured):
-                continue
-            if target_id == "nav_memory_export" and not (
-                auth and auth.has_feature("memory_compliance_export") and sync_configured
-            ):
+            if not is_nav_route_visible(self, target_id):
                 continue
             yield SystemCommand(
                 f"Go to {title}",
@@ -3691,8 +3657,6 @@ class ServonautApp(App):
         elif target_id == "nav_keys":
             from servonaut.screens.key_management import KeyManagementScreen
             self.switch_screen(KeyManagementScreen())
-        elif target_id == "nav_scan":
-            self._run_global_scan()
         elif target_id == "nav_memory":
             from servonaut.screens.fleet_memory import FleetMemoryScreen
             self.switch_screen(FleetMemoryScreen())
@@ -3846,9 +3810,35 @@ class ServonautApp(App):
             self.exit()
 
     def _run_global_scan(self) -> None:
-        """Run keyword scan across every server not known to be stopped."""
-        self.notify("Starting scan of all servers...", severity="information")
-        self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
+        """Confirm then run keyword scan across every server not known to be stopped."""
+        from servonaut.screens.scan_confirm import GlobalScanConfirmModal
+        from servonaut.services.scan_service import is_scannable
+
+        instances = self.instances
+        if not instances:
+            self.notify("No instances loaded. Load instances first.", severity="warning")
+            return
+
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
+            return
+
+        def _on_confirm(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            self.notify(
+                f"Starting keyword scan across {len(targets)} servers...",
+                severity="information",
+            )
+            self.run_worker(
+                self._do_global_scan(),
+                name="global_scan",
+                group="global_scan",
+                exclusive=True,
+            )
+
+        self.push_screen(GlobalScanConfirmModal(len(targets)), callback=_on_confirm)
 
     async def _do_global_scan(self) -> None:
         """Worker: scan every server not known to be stopped for keywords.

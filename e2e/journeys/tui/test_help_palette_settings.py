@@ -34,6 +34,10 @@ VAULT_DISCOVERY_PATH = "/api/v1/vault/identity/me"
 
 VAULT_PALETTE_DESTINATIONS = {
     "Go to Vault": "VaultScreen",
+}
+
+TEAMS_CA_PALETTE_DESTINATIONS = {
+    "Go to Vault": "VaultScreen",
     "Go to SSH certificates": "CaScreen",
 }
 
@@ -114,12 +118,30 @@ async def test_vault_sidebar_entries_appear_on_the_open_screen_after_discovery(t
         fake_cloud.release(VAULT_DISCOVERY_PATH)
         await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
         await t.wait_until(
-            lambda: t.nav_reachable("nav_vault") and t.nav_reachable("nav_ca"),
-            desc="Vault entries in the sidebar already on screen",
+            lambda: t.nav_reachable("nav_vault"),
+            desc="Vault entry in the sidebar already on screen",
         )
+        assert not t.nav_reachable("nav_ca")
         assert t.screen is first
         await t.nav("nav_vault")
         await t.wait_for_screen("VaultScreen")
+
+
+async def test_teams_ssh_certificate_palette_and_sidebar_routes(tui, seed, fake_cloud):
+    fake_cloud.configure(plan="teams")
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+    seed_session(seed.home, fake_cloud)
+
+    async with tui(size=(100, 30)) as t:
+        await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
+        await t.wait_until(
+            lambda: t.nav_reachable("nav_vault") and t.nav_reachable("nav_ca"),
+            desc="Vault and SSH certificate entries visible for Teams user",
+        )
+        for command, screen in TEAMS_CA_PALETTE_DESTINATIONS.items():
+            await t.palette(command)
+            await t.wait_for_screen(screen)
 
 
 async def test_vault_palette_entries_are_hidden_when_vault_is_unavailable(tui, seed):

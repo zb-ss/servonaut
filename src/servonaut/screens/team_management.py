@@ -690,19 +690,9 @@ class TeamManagementScreen(WorkspaceScreen):
 
     def _share_defaults(self, instance: dict) -> dict:
         """Share only a server's own login or an explicitly matched rule login."""
-        result = dict(instance)
-        connection = getattr(self.app, "connection_service", None)
-        profile = connection.resolve_profile(instance) if connection is not None else None
-        from servonaut.services.connection_service import rule_username
+        from servonaut.services.team_sharing import server_share_defaults
 
-        own_username = instance.get("username") if instance.get("is_custom") is True else ""
-        result["username"] = instance.get("login_user") or rule_username(instance, profile) or own_username or ""
-        result["port"] = instance.get("port") or 22
-        # Behind a bastion, members are let in from inside the network only.
-        _public, private = address_choices(instance)
-        if private and getattr(profile, "bastion_host", None):
-            result[SHARE_ADDRESS] = private
-        return result
+        return server_share_defaults(getattr(self.app, "connection_service", None), instance)
 
     def _share_inventory(self) -> list[dict]:
         rows = real_fleet_rows(self.app)
@@ -2039,7 +2029,7 @@ class TeamManagementScreen(WorkspaceScreen):
     def _open_connection_settings(self) -> None:
         open_settings = getattr(self.app, "open_settings_screen", None)
         if callable(open_settings):
-            open_settings(initial_panel="connections")
+            open_settings("connections")
             return
         from servonaut.screens.settings import SettingsScreen
 

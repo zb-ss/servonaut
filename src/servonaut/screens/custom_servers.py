@@ -2,22 +2,129 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from collections.abc import Mapping
+from functools import partial
+from typing import Any, Optional
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
+from textual.screen import ModalScreen
 
 from servonaut.widgets.action_button import ActionButton, ActionRow
+from servonaut.widgets.dialogs import (
+    DialogActions,
+    DialogBody,
+    DialogFrame,
+    DialogNotificationSpace,
+)
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static, TextArea
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import real_fleet_rows, reconcile_team_memory, replace_instances
+from servonaut.screens._demo_resolve import (
+    display_text,
+    real_fleet_rows,
+    reconcile_team_memory,
+    replace_instances,
+    team_rows,
+)
 from servonaut.screens._vault_bind import apply_vault_binding, format_vault_bind_error
 from servonaut.utils.markup import cell
+
+
+class _CustomRenameConfirmModal(ModalScreen[bool]):
+    """Confirm renaming a custom server when linked state cannot move automatically."""
+
+    DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#custom_rename_cancel"
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    _CustomRenameConfirmModal #custom_rename_modal {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: round $warning;
+        background: transparent;
+        padding: 1 2;
+    }
+    _CustomRenameConfirmModal #custom_rename_title {
+        text-style: bold;
+        color: $text-warning;
+    }
+    _CustomRenameConfirmModal #custom_rename_body {
+        margin-top: 1;
+        height: auto;
+    }
+    _CustomRenameConfirmModal #custom_rename_cancel,
+    _CustomRenameConfirmModal #custom_rename_confirm {
+        width: auto;
+        min-width: 12;
+    }
+    """
+
+    def __init__(self, old_name: str, new_name: str, consequences: list[str]) -> None:
+        super().__init__()
+        self._old_name = old_name
+        self._new_name = new_name
+        self._consequences = list(consequences)
+
+    def _body_text(self, *, redacted: bool) -> Text:
+        if redacted and self.app.redaction_service:
+            old_shown = self.app.redaction_service.redact_name(self._old_name)
+            new_shown = self.app.redaction_service.redact_name(self._new_name)
+            items = [self.app.redaction_service.scrub_stream(display_text(self.app, item)) for item in self._consequences]
+        else:
+            old_shown = self._old_name
+            new_shown = self._new_name
+            items = list(self._consequences)
+        lines = [
+            f"Renaming {old_shown} to {new_shown} migrates local key overrides, "
+            "memory opt-outs, custom log paths, DB scan roots, and keyword results.",
+            "",
+            "These linked references will not follow automatically:",
+            *[f"  • {item}" for item in items],
+        ]
+        return Text("\n".join(lines))
+
+    def _render_body(self) -> None:
+        if self.app.demo_mode and self.app.redaction_service:
+            text = self._body_text(redacted=True)
+        else:
+            text = self._body_text(redacted=False)
+        self.query_one("#custom_rename_body", Static).update(text)
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield DialogNotificationSpace()
+        yield DialogFrame(
+            heading=Static("[bold]Confirm server rename[/bold]", id="custom_rename_title"),
+            body=DialogBody(
+                Static(
+                    self._body_text(redacted=bool(self.app.demo_mode and self.app.redaction_service)),
+                    id="custom_rename_body",
+                )
+            ),
+            actions=DialogActions(
+                Button("Cancel", id="custom_rename_cancel"),
+                Button("Rename anyway", variant="primary", id="custom_rename_confirm"),
+            ),
+            severity="warning",
+            size="compact",
+            id="custom_rename_modal",
+        )
+
+    def refresh_after_demo_toggle(self) -> None:
+        self._render_body()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "custom_rename_confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class CustomServersScreen(WorkspaceScreen):
@@ -199,7 +306,7 @@ class CustomServersScreen(WorkspaceScreen):
         table.cursor_type = "row"
         table.add_columns("Name", "Host", "Port", "Username", "Key", "Provider", "Group")
 
-    def _populate_table(self) -> None:
+    def _populate_table(self, select_name: Optional[str] = None) -> None:
         """Populate DataTable with current custom servers.
 
         Demo mode routes every cell through the same per-field redactors
@@ -209,14 +316,29 @@ class CustomServersScreen(WorkspaceScreen):
         group names have no stream rule and would render verbatim.
         """
         table = self.query_one("#custom_servers_table", DataTable)
+        prev_row = table.cursor_row
         table.clear()
 
         redaction = None
         if self.app.demo_mode and self.app.redaction_service:
             redaction = self.app.redaction_service
 
-        for server in self.app.custom_server_service.list_servers():
+        servers = list(self.app.custom_server_service.list_servers())
+        for server in servers:
             table.add_row(*(cell(value) for value in self._display_row(server, redaction)))
+
+        if not servers:
+            return
+        target_row = None
+        if select_name is not None:
+            for idx, server in enumerate(servers):
+                if server.name == select_name:
+                    target_row = idx
+                    break
+        if target_row is None and isinstance(prev_row, int) and prev_row >= 0:
+            target_row = min(prev_row, len(servers) - 1)
+        if target_row is not None:
+            table.move_cursor(row=target_row)
 
     @staticmethod
     def _display_row(server: CustomServer, redaction) -> tuple:
@@ -412,25 +534,259 @@ class CustomServersScreen(WorkspaceScreen):
             )
 
         editing_name = getattr(self, "_editing_name", None)
-        if editing_name and editing_name != name:
-            existing = self.app.custom_server_service.get_server(name)
-            if existing is not None:
-                self.app.notify(f"Custom server '{name}' already exists", severity="error", markup=False)
+        existing_old = (
+            self.app.custom_server_service.get_server(editing_name)
+            if editing_name
+            else None
+        )
+        if editing_name is None:
+            if self.app.custom_server_service.get_server(name) is not None:
+                self.app.notify(
+                    f"Custom server '{name}' already exists. Select it and press Edit to modify it.",
+                    severity="error",
+                    markup=False,
+                )
+                self.query_one("#input_name", Input).focus()
                 return
+        elif editing_name != name:
+            if self.app.custom_server_service.get_server(name) is not None:
+                self.app.notify(f"Custom server '{name}' already exists", severity="error", markup=False)
+                self.query_one("#input_name", Input).focus()
+                return
+
+        server = CustomServer(
+            name=name,
+            host=host,
+            username=username,
+            ssh_key=ssh_key,
+            port=port,
+            provider=provider,
+            group=group,
+            tags=dict(existing_old.tags) if existing_old is not None else {},
+            extra_ssh_options=extra_ssh_options,
+        )
+
+        # Demo mode: what the operator typed on camera renders as typed.
+        if self.app.demo_mode and self.app.redaction_service:
+            self.app.redaction_service.keep_as_authored(
+                name, host, username, ssh_key, provider, group,
+            )
+
+        if editing_name and editing_name != name:
+            sync_consequences = self._rename_orphan_consequences(editing_name, server, existing_old)
+            needs_vault_check = bool(
+                getattr(self.app, "vault_available", False)
+                or callable(getattr(getattr(self.app, "vault_command_service", None), "personal_binding", None))
+            )
+            if sync_consequences or needs_vault_check:
+                self.run_worker(
+                    self._confirm_and_commit_rename(editing_name, server, existing_old, sync_consequences),
+                    group="custom_server_save",
+                    exclusive=True,
+                )
+                return
+
+        self._commit_save_server(editing_name, server)
+
+    def _rename_orphan_consequences(
+        self,
+        old_name: str,
+        new_server: CustomServer,
+        old_server: Optional[CustomServer],
+    ) -> list[str]:
+        """Return user-visible descriptions of links referencing *old_name* that cannot follow."""
+        from servonaut.utils.match_utils import matches_conditions
+
+        consequences: list[str] = []
+        old_id = f"custom-{old_name}"
+        svc = self.app.custom_server_service
+        old_dict = (
+            svc.to_instance_dict(old_server)
+            if old_server is not None and hasattr(svc, "to_instance_dict")
+            else {
+                "id": old_id,
+                "name": old_name,
+                "public_ip": new_server.host,
+                "private_ip": new_server.host,
+                "provider": new_server.provider or "custom",
+                "group": new_server.group,
+                "tags": dict(new_server.tags),
+                "is_custom": True,
+            }
+        )
+        new_dict = (
+            svc.to_instance_dict(new_server)
+            if hasattr(svc, "to_instance_dict")
+            else {
+                **old_dict,
+                "id": f"custom-{new_server.name}",
+                "name": new_server.name,
+            }
+        )
+
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
+        if config is not None:
+            broken_conn = [
+                rule.name or "(unnamed rule)"
+                for rule in (getattr(config, "connection_rules", None) or [])
+                if matches_conditions(old_dict, rule.match_conditions)
+                and not matches_conditions(new_dict, rule.match_conditions)
+            ]
+            if broken_conn:
+                consequences.append(
+                    f"Connection rules ({', '.join(broken_conn)}) match '{old_name}' and will stop matching."
+                )
+            broken_scan = [
+                rule.name or "(unnamed rule)"
+                for rule in (getattr(config, "scan_rules", None) or [])
+                if matches_conditions(old_dict, rule.match_conditions)
+                and not matches_conditions(new_dict, rule.match_conditions)
+            ]
+            if broken_scan:
+                consequences.append(
+                    f"Scan rules ({', '.join(broken_scan)}) match '{old_name}' and will stop matching."
+                )
+            keyed_names = {old_name.casefold(), old_id.casefold()}
+            db_matches = [
+                prof.name or prof.instance
+                for prof in (getattr(config, "db_profiles", None) or [])
+                if str(getattr(prof, "instance", "")).casefold() in keyed_names
+            ]
+            if db_matches:
+                consequences.append(
+                    f"Database profiles ({', '.join(db_matches)}) target '{old_name}' and must be updated."
+                )
+
+        shared_teams = [
+            str(row.get("team_name") or row.get("team_slug") or "team")
+            for row in (team_rows(self.app) or [])
+            if str(row.get("instance_id") or "") == old_id
+        ]
+        if shared_teams:
+            consequences.append(
+                f"Team shared server entries in {', '.join(shared_teams)} keep their original server record."
+            )
+        return consequences
+
+    async def _confirm_and_commit_rename(
+        self,
+        old_name: str,
+        new_server: CustomServer,
+        old_server: Optional[CustomServer],
+        base_consequences: list[str],
+    ) -> None:
+        consequences = list(base_consequences)
+        vault_svc = getattr(self.app, "vault_command_service", None)
+        old_row = {
+            "id": f"custom-{old_name}",
+            "name": old_name,
+            "is_custom": True,
+            "provider": (old_server.provider if old_server else new_server.provider) or "custom",
+            "public_ip": old_server.host if old_server else new_server.host,
+            "private_ip": old_server.host if old_server else new_server.host,
+        }
+        has_personal_lookup = callable(getattr(vault_svc, "personal_binding", None))
+        if has_personal_lookup:
             try:
-                self.app.custom_server_service.add_server(server)
-                self.app.custom_server_service.remove_server(editing_name)
+                binding = await vault_svc.personal_binding(old_row)
+            except Exception:
+                binding = None
+                if getattr(self.app, "vault_available", False):
+                    consequences.insert(
+                        0,
+                        f"Any personal Vault key binding for '{old_name}' won't follow; rebind after renaming.",
+                    )
+            else:
+                if isinstance(binding, Mapping) and binding:
+                    consequences.insert(
+                        0,
+                        f"The personal Vault key binding for '{old_name}' won't follow; rebind after renaming.",
+                    )
+        elif getattr(self.app, "vault_available", False):
+            consequences.insert(
+                0,
+                f"Any personal Vault key binding for '{old_name}' won't follow; rebind after renaming.",
+            )
+
+        if consequences:
+            confirmed = await self.app.push_screen_wait(
+                _CustomRenameConfirmModal(old_name, new_server.name, consequences)
+            )
+            if not confirmed:
+                return
+        self._commit_save_server(old_name, new_server)
+
+    def _migrate_local_rename_state(self, old_name: str, new_name: str) -> None:
+        """Move local-only state keyed by *old_name* / ``custom-<old_name>``."""
+        old_id = f"custom-{old_name}"
+        new_id = f"custom-{new_name}"
+        config_manager = getattr(self.app, "config_manager", None)
+        if config_manager is not None:
+            config = config_manager.get()
+            dirty = False
+            key_pairs = ((old_id, new_id), (old_name, new_name))
+            instance_keys = getattr(config, "instance_keys", None)
+            if isinstance(instance_keys, dict):
+                if old_id in instance_keys:
+                    val = instance_keys.pop(old_id)
+                    instance_keys.setdefault(new_id, val)
+                    dirty = True
+                if old_name in instance_keys:
+                    val = instance_keys.pop(old_name)
+                    instance_keys.setdefault(new_name, val)
+                    dirty = True
+            mem = getattr(config, "memory", None)
+            overrides = getattr(mem, "per_server_overrides", None) if mem is not None else None
+            if isinstance(overrides, dict):
+                for src, dst in key_pairs:
+                    if src in overrides:
+                        val = overrides.pop(src)
+                        overrides.setdefault(dst, val)
+                        dirty = True
+            for attr in ("log_viewer_custom_paths", "db_scan_roots"):
+                mapping = getattr(config, attr, None)
+                if isinstance(mapping, dict):
+                    for src, dst in key_pairs:
+                        if src in mapping:
+                            val = mapping.pop(src)
+                            mapping.setdefault(dst, val)
+                            dirty = True
+            if dirty:
+                config_manager.save(config)
+        keyword_store = getattr(self.app, "keyword_store", None)
+        rename_kw = getattr(keyword_store, "rename_server_id", None)
+        if callable(rename_kw):
+            rename_kw(old_id, new_id)
+
+    def _commit_save_server(self, editing_name: Optional[str], server: CustomServer) -> None:
+        svc = self.app.custom_server_service
+        name = server.name
+        if editing_name and editing_name != name:
+            try:
+                updated = svc.update_server(editing_name, server)
+                if not updated:
+                    svc.add_server(server)
+                    svc.remove_server(editing_name)
             except ValueError as e:
                 self.app.notify(str(e), severity="error", markup=False)
                 return
-        elif not self.app.custom_server_service.update_server(name, server):
+            self._migrate_local_rename_state(editing_name, name)
+        elif editing_name:
+            if not svc.update_server(editing_name, server):
+                try:
+                    svc.add_server(server)
+                except ValueError as e:
+                    self.app.notify(str(e), severity="error", markup=False)
+                    return
+        else:
             try:
-                self.app.custom_server_service.add_server(server)
+                svc.add_server(server)
             except ValueError as e:
                 self.app.notify(str(e), severity="error", markup=False)
                 return
 
-        self._populate_table()
+        self._populate_table(select_name=name)
         self._refresh_app_instances()
         self._hide_form()
         self._show_post_save_row(name)
@@ -442,14 +798,51 @@ class CustomServersScreen(WorkspaceScreen):
     def _show_post_save_row(self, name: str) -> None:
         self._last_saved_name = name
         auth_svc = getattr(self.app, "auth_service", None)
-        can_team = bool(auth_svc is not None and getattr(auth_svc, "is_authenticated", False) and auth_svc.has_feature("team_workspaces"))
+        can_team = bool(
+            auth_svc is not None
+            and getattr(auth_svc, "is_authenticated", False)
+            and auth_svc.has_feature("team_workspaces")
+            and getattr(self.app, "team_service", None) is not None
+        )
         can_vault = bool(getattr(self.app, "vault_available", False) and getattr(self.app, "vault_command_service", None) is not None)
         self.query_one("#custom_post_save_text", Static).update(
             "Server saved. Choose your next step:"
         )
         self.query_one("#btn_custom_bind_vault", Button).display = can_vault
-        self.query_one("#btn_custom_share_team", Button).display = can_team
-        self.query_one("#custom_post_save_row").display = True
+        share_btn = self.query_one("#btn_custom_share_team", Button)
+        share_btn.display = False
+        row = self.query_one("#custom_post_save_row")
+        row.display = True
+        self.call_after_refresh(row.scroll_visible, animate=False)
+        self.query_one("#btn_custom_open_server", Button).focus()
+        if can_team:
+            self.run_worker(
+                self._probe_post_save_share_teams(),
+                group="custom_share_gate",
+                exclusive=True,
+            )
+
+    async def _probe_post_save_share_teams(self) -> None:
+        team_svc = getattr(self.app, "team_service", None)
+        if team_svc is None:
+            return
+        try:
+            teams = await team_svc.list_teams()
+        except Exception:
+            return
+        manageable = [
+            dict(t)
+            for t in (teams or [])
+            if isinstance(t, Mapping)
+            and str(t.get("role") or "").lower() in {"owner", "admin"}
+            and t.get("slug")
+        ]
+        if not self.is_mounted:
+            return
+        try:
+            self.query_one("#btn_custom_share_team", Button).display = bool(manageable)
+        except Exception:
+            pass
 
     def _saved_display_row(self) -> Optional[dict]:
         name = self._last_saved_name
@@ -511,9 +904,86 @@ class CustomServersScreen(WorkspaceScreen):
         self.run_worker(_flow(), group="vault", exclusive=True)
 
     def _share_saved_server_team(self) -> None:
-        from servonaut.screens.team_management import TeamManagementScreen
+        team_svc = getattr(self.app, "team_service", None)
+        row = self._saved_real_row()
+        if team_svc is None:
+            self.app.notify("Team services are unavailable.", severity="warning")
+            return
+        if row is None:
+            self.app.notify("Save the server first before sharing it.", severity="warning")
+            return
 
-        self.app.switch_screen(TeamManagementScreen())
+        async def _flow() -> None:
+            from servonaut.screens.server_actions import TeamTargetModal
+            from servonaut.screens.team_share_confirm import ShareServersConfirmModal
+            from servonaut.services.shared_servers import load_shared_servers
+            from servonaut.services.team_service import SHARED
+            from servonaut.services.team_sharing import (
+                server_share_defaults,
+                share_candidates,
+                share_payload,
+            )
+
+            try:
+                teams = await team_svc.list_teams()
+            except Exception as exc:
+                self.app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
+                return
+            all_teams = [dict(t) for t in (teams or []) if isinstance(t, Mapping)]
+            manageable = [
+                t for t in all_teams
+                if str(t.get("role") or "").lower() in {"owner", "admin"} and t.get("slug")
+            ]
+            if not manageable:
+                self.app.notify("Only team owners or admins can share servers.", severity="warning")
+                return
+            team = manageable[0]
+            if len(manageable) > 1:
+                picked = await self.app.push_screen_wait(TeamTargetModal(manageable))
+                if not isinstance(picked, Mapping):
+                    return
+                team = dict(picked)
+            slug = str(team["slug"])
+            team_name = str(team.get("name") or slug)
+            try:
+                shared = await team_svc.list_shared_servers(slug)
+            except Exception as exc:
+                self.app.notify(f"Could not read shared servers ({exc}).", severity="error", markup=False)
+                return
+            candidate = server_share_defaults(getattr(self.app, "connection_service", None), row)
+            to_share, skipped_existing, skipped_no_ip = share_candidates([candidate], shared or [])
+            if not to_share:
+                if skipped_existing:
+                    self.app.notify(f"Already shared with {team_name}.", severity="information", markup=False)
+                else:
+                    self.app.notify("This server has no routable IP address to share.", severity="warning")
+                return
+            chosen = await self.app.push_screen_wait(
+                ShareServersConfirmModal(
+                    team_name,
+                    to_share,
+                    skipped_existing=skipped_existing,
+                    skipped_no_address=skipped_no_ip,
+                )
+            )
+            if not chosen:
+                return
+            try:
+                results = await team_svc.push_servers(slug, [share_payload(item) for item in chosen])
+                if any(r.status == SHARED for r in results):
+                    shared_state = await load_shared_servers(team_svc, all_teams)
+                    replace_instances(self.app, "shared", shared_state.rows)
+                    reconcile_team_memory(self.app)
+            except Exception as exc:
+                self.app.notify(f"Could not share server: {exc}", severity="error", markup=False)
+                return
+            if any(r.status == SHARED for r in results):
+                self.app.notify(f"Shared with team {team_name}.", markup=False)
+            else:
+                err = next((r.error for r in results if getattr(r, "error", None)), "unknown error")
+                self.app.notify(f"Could not share server: {err}", severity="error", markup=False)
+
+        self.run_worker(_flow(), group="team_share", exclusive=True)
 
     def _refresh_app_instances(self) -> None:
         """Replace the custom-server rows in ``app.instances``.

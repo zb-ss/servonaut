@@ -648,9 +648,22 @@ class InstanceListScreen(WorkspaceScreen):
             self._release_team_memory_hold()
 
     def on_screen_resume(self) -> None:
-        """Keep "Updated 12 s ago" current without waiting for a refresh."""
+        """Refresh updated timer and reload fleet rows if mutated on a pushed screen."""
         if self._updated_timer is None:
             self._updated_timer = self.set_interval(1.0, self._sync_updated)
+        self._sync_from_app_instances()
+
+    def _sync_from_app_instances(self) -> None:
+        current_gen = getattr(self.app, "_fleet_generation", None)
+        app_rows = list(getattr(self.app, "instances", None) or [])
+        seen_gen = getattr(self, "_seen_fleet_generation", None)
+        if seen_gen == current_gen and app_rows == getattr(self, "_instances", []):
+            return
+        self._seen_fleet_generation = current_gen
+        self._instances = app_rows
+        self._update_table()
+        self._update_status_bar()
+        self._sync_empty_fleet()
 
     def _load_on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
@@ -680,6 +693,7 @@ class InstanceListScreen(WorkspaceScreen):
         # Use instances already loaded by app.on_mount(), or try cache directly
         if self.app.instances:
             self._instances = self.app.instances
+            self._seen_fleet_generation = getattr(self.app, "_fleet_generation", None)
             self._update_table()
             self._update_status_bar()
             logger.info("Loaded %d instances from app cache (age: %s)",
@@ -689,6 +703,7 @@ class InstanceListScreen(WorkspaceScreen):
             stale_data = aws.get_cached_instances() if aws is not None else []
             if stale_data:
                 self._instances = replace_instances(self.app, None, stale_data)
+                self._seen_fleet_generation = getattr(self.app, "_fleet_generation", None)
                 self._update_table()
                 self._update_status_bar()
                 logger.info("Loaded %d instances from cache file (age: %s)",
@@ -710,6 +725,7 @@ class InstanceListScreen(WorkspaceScreen):
             hetzner = self.app.provider_inventory("hetzner")
             if hetzner is not None and not hetzner.is_cache_fresh():
                 self._fetch_hetzner_instances()
+            self._sync_empty_fleet()
             return
 
         # Cache is stale or empty — fetch in background or foreground
@@ -2196,12 +2212,15 @@ class InstanceListScreen(WorkspaceScreen):
             event.stop()
             from servonaut.screens.custom_servers import CustomServersScreen
 
-            self.app.push_screen(CustomServersScreen(open_add_form=True))
+            self.app.push_screen(
+                CustomServersScreen(open_add_form=True),
+                callback=lambda _res: self._sync_from_app_instances(),
+            )
         elif btn_id == "btn_empty_cloud_settings":
             event.stop()
             open_settings = getattr(self.app, "open_settings_screen", None)
             if callable(open_settings):
-                open_settings(initial_panel="aws")
+                open_settings("aws")
             else:
                 from servonaut.screens.settings import SettingsScreen
 
@@ -2312,7 +2331,10 @@ class InstanceListScreen(WorkspaceScreen):
             if choice == "custom":
                 from servonaut.screens.custom_servers import CustomServersScreen
 
-                self.app.push_screen(CustomServersScreen(open_add_form=True))
+                self.app.push_screen(
+                    CustomServersScreen(open_add_form=True),
+                    callback=lambda _res: self._sync_from_app_instances(),
+                )
             elif choice == "aws":
                 from servonaut.screens.aws_create import AWSCreateScreen
 
