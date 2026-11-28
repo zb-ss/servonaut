@@ -154,7 +154,9 @@ async def test_bootstrap_offline_shows_a_plain_message(tmp_path) -> None:
 # --- A2: the lookup never waits for the limiter -------------------------------
 
 def _fill_keys_me(limiter: RateLimiter) -> None:
-    for _ in range(3):
+    """Use up the whole ``/keys/me`` window, whatever size it is configured to."""
+    capacity = limiter._limits[RateLimitKey.KEYS_ME].capacity
+    for _ in range(capacity):
         limiter._timestamps[RateLimitKey.KEYS_ME].append(__import__("time").monotonic())
 
 

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from e2e.harness.fake_cloud.routes_memory_summary import FAILURE_REASON, SummaryCloud
+
+pytestmark = [pytest.mark.e2e_pr]
 
 QUEUED = "2026-11-28T10:00:00.400000+00:00"
 
