@@ -2041,3 +2041,85 @@ def test_personal_binding_refusal_is_reported_on_stderr(capsys) -> None:
         "Vault operation failed (this Servonaut service only lets your own servers use keys "
         "from your personal vault)." in capsys.readouterr().err
     )
+
+
+# --- Servonaut key items (Memory Sync, config sync) -------------------------------
+
+def _run_with_service(service_class, *argv: str) -> int:
+    vault.set_vault_service_factory(service_class)
+    try:
+        return vault.handle_vault_command(_parser().parse_args(["vault", *argv]))
+    finally:
+        vault.set_vault_service_factory(None)
+
+
+def _app_key_rows() -> list[dict]:
+    return [
+        {"item_id": "m-1", "type": "memory_key", "revision": 1, "public_fingerprint": "a" * 64},
+        {"item_id": "c-1", "type": "config_sync_key", "revision": 2, "public_fingerprint": "b" * 64},
+        {"item_id": "s-1", "type": "secret", "revision": 3, "public_fingerprint": None},
+    ]
+
+
+@pytest.mark.parametrize("names", [False, True])
+def test_items_list_labels_servonaut_keys_in_both_modes(capsys, names) -> None:
+    class Service:
+        async def list_items(self, *, vault_id, include_deleted=False):
+            return {"data": _app_key_rows()}
+
+        async def ssh_key_choices(self, **_kwargs):
+            return []
+
+    argv = ["--json", "items", "--vault", VAULT_ID] + (["--names"] if names else [])
+    assert _run_with_service(Service, *argv) == 0
+
+    rows = {row["item_id"]: row for row in json.loads(capsys.readouterr().out)["data"]}
+    assert rows["m-1"]["name"] == "Servonaut Memory Sync key"
+    assert rows["c-1"]["name"] == "Servonaut config sync key"
+    assert "name" not in rows["s-1"] or rows["s-1"]["name"] is None
+
+
+def test_items_list_human_output_shows_the_labels(capsys) -> None:
+    class Service:
+        async def list_items(self, *, vault_id, include_deleted=False):
+            return {"data": _app_key_rows()}
+
+    assert _run_with_service(Service, "items", "--vault", VAULT_ID) == 0
+
+    out = capsys.readouterr().out
+    assert "Servonaut Memory Sync key" in out and "Servonaut config sync key" in out
+
+
+def test_show_reveal_of_a_servonaut_key_is_refused_with_its_fixed_text(capsys) -> None:
+    from servonaut.services.vault.errors import APP_KEY_NOT_SHOWN, VaultUserError
+
+    class Service:
+        close = MagicMock()
+
+        async def show_item(self, **kwargs):
+            assert kwargs["reveal"] is True
+            raise VaultUserError(APP_KEY_NOT_SHOWN)
+
+    assert _run_with_service(Service, "show", "m-1", "--vault", VAULT_ID, "--reveal", "--yes") == 1
+
+    err = capsys.readouterr().err
+    assert "holds a Servonaut key and cannot be shown" in err
+
+
+@pytest.mark.parametrize("code,text", [
+    ("memory_key_in_use", "still in use"),
+    ("config_key_in_use", "snapshots still use it"),
+    ("item_type_exists", "current and a next key"),
+    ("device_signature_required", "unlock or add this device"),
+])
+def test_cli_reports_the_client_text_for_servonaut_key_refusals(capsys, code, text) -> None:
+    class Service:
+        close = MagicMock()
+
+        async def list_items(self, **_kwargs):
+            raise APIError(code=code, message="The service's own wording.", status=409)
+
+    assert _run_with_service(Service, "items", "--vault", VAULT_ID) == 1
+
+    err = capsys.readouterr().err
+    assert text in err and "own wording" not in err

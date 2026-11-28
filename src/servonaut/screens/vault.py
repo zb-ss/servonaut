@@ -44,8 +44,9 @@ from servonaut.services.vault.display import (
     strip_terminal_controls, terminal_safe,
 )
 from servonaut.services.vault.errors import (
-    VaultKeyInUse, VaultRecoveryNotConfirmed, loggable_failure, vault_failure_reason,
+    APP_KEY_NOT_SHOWN, VaultKeyInUse, VaultRecoveryNotConfirmed, loggable_failure, vault_failure_reason,
 )
+from servonaut.services.vault.items import APP_KEY_LABELS
 from servonaut.services.vault.duplicates import copy_state, created_time, duplicate_copies
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.filterable_selection import SortOrder
@@ -1367,6 +1368,8 @@ class VaultScreen(WorkspaceScreen):
             table.move_cursor(row=chosen)
 
     def _item_name_cell(self, row: Mapping[str, Any]) -> Text | str:
+        if row.get("type") in APP_KEY_LABELS:
+            return cell(APP_KEY_LABELS[row["type"]])
         if row.get("type") != "ssh_key":
             return ""
         text = self._key_display_name(str(row.get("item_id") or ""))
@@ -1687,7 +1690,12 @@ class VaultScreen(WorkspaceScreen):
         ]
 
     def _item_facts(self, row: Mapping[str, Any]) -> list[Content]:
-        title = self._key_display_name(str(row.get("item_id") or "")) if row.get("type") == "ssh_key" else row.get("type") or "unsupported"
+        if row.get("type") in APP_KEY_LABELS:
+            title = APP_KEY_LABELS[row["type"]]
+        elif row.get("type") == "ssh_key":
+            title = self._key_display_name(str(row.get("item_id") or ""))
+        else:
+            title = row.get("type") or "unsupported"
         return [
             Content.styled(self.scrub_text(title), "bold"),
             self._fact("Type", row.get("type") or "unsupported"),
@@ -2205,6 +2213,9 @@ class VaultScreen(WorkspaceScreen):
             return
         item_id = str(item.get("item_id") or "")
         if not item_id:
+            return
+        if item.get("type") in APP_KEY_LABELS:
+            self.app.notify(APP_KEY_NOT_SHOWN.capitalize() + ".", severity="warning", markup=False)
             return
 
         async def reveal_after_confirmation(confirmed: bool) -> None:

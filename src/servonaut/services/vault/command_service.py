@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as datetime_module
+import hmac
 import logging
 import os
 import platform as platform_module
@@ -30,6 +31,7 @@ from servonaut.services.team_service import TeamService
 from servonaut.utils.validation import ValidationError
 
 from . import crypto
+from .app_keys import AppKeyItems
 from .auto_bind import is_personal_server
 from .binding_reads import BindingReadsPaused, PersonalBindingReads
 from .bindings import BindingDestinationChangedError, VaultBindingService
@@ -38,6 +40,7 @@ from .ca_pins import CaPins
 from .ca_enrollment import CaEnrollmentExecutor, EnrollmentResult, deliver_krl, enrollment_error_code
 from .display import terminal_safe
 from .errors import (
+    APP_KEY_NOT_SHOWN,
     NO_LOCAL_IDENTITY,
     RECOVERY_KEY_NOT_A_KEY,
     RECOVERY_KEY_NOT_THIS_IDENTITY,
@@ -65,7 +68,7 @@ from .errors import (
 from .grant_processor import GrantProcessor
 from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError, device_platform
 from .identity_store import IdentityStore
-from .items import VaultItemService, clean_item_name
+from .items import APP_KEY_TYPES, VaultItemService, clean_item_name
 from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
@@ -289,6 +292,7 @@ class VaultCommandService:
         self.pins = RosterPins(self._load_pins, self._save_pins)
         self.vaults = TeamVaultClient(api, self.store, self.pins, self.state)
         self.items = VaultItemService(api, self.vaults)
+        self.app_keys = AppKeyItems(self.vaults, self.items, self.can_create_personal_vault)
         self.grants = GrantProcessor(self.vaults, strict_verification=settings.strict_verification)
         self.rotation = RotationService(self.vaults, self.items, strict_verification=settings.strict_verification)
         self.bindings = VaultBindingService(api, self.vaults)
@@ -315,6 +319,9 @@ class VaultCommandService:
         # Bumped by every own-server binding made here (see binding_generation).
         self._binding_generation = 0
         self._pending_identity_reset: PendingIdentityReset | None = None
+        self._unlock_listeners: list[Callable[[], Any]] = []
+        # The identity object last announced to the listeners: a new object means a new unlock.
+        self._announced_identity: Any = None
         self._device_pending_events: list[dict[str, Any]] = []
         self._device_pending_callback: Callable[[Mapping[str, Any]], Any] | None = None
         self._enrollment_requested_callback: Callable[[Mapping[str, Any]], Any] | None = None
@@ -447,6 +454,7 @@ class VaultCommandService:
         local = self.store.identity
         if local is None:
             return
+        self._announce_unlock(local)
         marker = {"user_id": local.user_id, "identity_id": local.identity_id, "device_id": local.device.device_id}
         try:
             state = self.state.load()
@@ -456,6 +464,66 @@ class VaultCommandService:
             self.state.save(state)
         except Exception:  # noqa: BLE001 — only a hint for a later message; never block vault use
             logger.debug("Could not record local vault custody", exc_info=True)
+
+    def add_unlock_listener(self, listener: Callable[[], Any]) -> None:
+        """Call *listener* (no arguments) each time this facade goes from locked to unlocked.
+
+        A listener that is registered while the vault is already unlocked is
+        not called for that unlock; it hears the next one.
+        """
+        self._unlock_listeners.append(listener)
+
+    def _announce_unlock(self, local: Any) -> None:
+        if local is self._announced_identity:
+            return
+        self._announced_identity = local
+        for listener in list(self._unlock_listeners):
+            try:
+                listener()
+            except Exception:  # noqa: BLE001 — a failing listener must not block vault use
+                logger.debug("A vault unlock listener failed", exc_info=True)
+
+    def device_signer(self) -> Any:
+        """This device's request signer, for features that sign their own service calls."""
+        if self.store.identity is None:
+            raise VaultUserError(NO_LOCAL_IDENTITY)
+        return self.store.signer()
+
+    async def has_remote_identity(self) -> bool:
+        """Whether the account has a vault identity at the service (on any device)."""
+        remote = await self.identity.status()
+        return isinstance(remote, Mapping) and isinstance(remote.get("identity"), Mapping)
+
+    async def verify_recovery_key(self, recovery_key: str) -> bool:
+        """Whether *recovery_key* opens the service's recovery copy of this device's identity.
+
+        Read-only: nothing is written anywhere.  A key that is not even well
+        formed raises a user error that says how it is wrong; a well-formed
+        key that belongs to another identity or was replaced gives False.
+        """
+        local = self.store.identity
+        if local is None:
+            raise VaultUserError(NO_LOCAL_IDENTITY)
+        _check_recovery_key(recovery_key)
+        wrap = await self.identity.fetch_recovery_wrap()
+        try:
+            blob = base64.b64decode(str(wrap["blob"]), validate=True)
+            plain = crypto.open_wrap(
+                crypto.recovery_kek(crypto.parse_recovery_key(recovery_key), local.identity_id), blob,
+                crypto.wrap_aad("recovery", local.identity_id, local.user_id, local.fingerprint_raw),
+            )
+        except crypto.IntegrityError:
+            return False
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VaultStateError("the recovery copy at the service could not be read") from exc
+        try:
+            signing_seed, encryption_secret = crypto.decode_bundle(plain)
+        except ValueError as exc:
+            raise VaultStateError("the recovery copy at the service could not be read") from exc
+        recovered = crypto.identity_fingerprint(
+            crypto.public_from_seed(signing_seed), crypto.x25519_public(encryption_secret),
+        )
+        return hmac.compare_digest(recovered, local.fingerprint_raw)
 
     @property
     def poll_interval_seconds(self) -> int:
@@ -1121,6 +1189,8 @@ class VaultCommandService:
 
     async def show_item(self, *, vault_id: str, item_id: str, reveal: bool) -> dict[str, Any]:
         item = await self.items.get_item(vault_id, item_id)
+        if reveal and item.get("type") in APP_KEY_TYPES:
+            raise VaultUserError(APP_KEY_NOT_SHOWN)
         if not reveal:
             return {key: value for key, value in item.items() if key not in {"ciphertext", "nonce", "content_signature", "wrapped_item_key", "wrap_signature"}}
         vault = await self.vaults.get_vault(vault_id)

@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
+import hmac
 import inspect
 import json
+import re
 import secrets
+from datetime import datetime
 from urllib.parse import urlencode
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -22,8 +27,18 @@ from .team_vault_client import (
 )
 
 
-_ITEM_TYPES = {"ssh_key", "secret", "connection_extra", "break_glass", "host_pins"}
+MEMORY_KEY = "memory_key"
+CONFIG_SYNC_KEY = "config_sync_key"
+# Keys other Servonaut features keep in the personal vault: never shown, renamed or deleted by hand.
+APP_KEY_TYPES = frozenset({MEMORY_KEY, CONFIG_SYNC_KEY})
+APP_KEY_LABELS = {
+    MEMORY_KEY: "Servonaut Memory Sync key",
+    CONFIG_SYNC_KEY: "Servonaut config sync key",
+}
+_ITEM_TYPES = {"ssh_key", "secret", "connection_extra", "break_glass", "host_pins"} | APP_KEY_TYPES
 _SSH_TYPES = {"ssh_key", "break_glass"}
+_FINGERPRINT_HEX = re.compile(r"[0-9a-f]{64}")
+CONFIG_KEY_ID_LABEL = b"servonaut-config-sync-key-id-v1"
 _ITEM_NAME_MAX = 200
 
 
@@ -77,6 +92,9 @@ class VaultItemService:
 
     def read_item(self, vault: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, Any]:
         """Verify the current trust rule and decrypt a complete item response."""
+        # Checked first: a team vault must not even be opened for these items.
+        if item.get("type") in APP_KEY_TYPES and vault.get("kind") != "personal":
+            raise VaultStateError("Servonaut keys are only read from the personal vault")
         self._vaults.verify_vault(vault)
         vault_key = self._vaults.open_my_grant(vault)
         item_id = str(item["item_id"])
@@ -165,6 +183,8 @@ class VaultItemService:
             raise ValueError("unsupported vault item type")
         self._validate_payload(item_type, payload, payload.get("public_fingerprint"))
         vault = await self._vaults.get_vault(vault_id) if vault is None else vault
+        if item_type in APP_KEY_TYPES and vault.get("kind") != "personal":
+            raise ValueError("Servonaut keys can only be stored in the personal vault")
         vault_key = self._vaults.open_my_grant(vault)
         identity = current_identity(self._vaults._identity_store)
         revision = expected_revision + 1
@@ -333,6 +353,9 @@ class VaultItemService:
 
     @staticmethod
     def _validate_payload(item_type: str, payload: Mapping[str, Any], fingerprint: Any) -> None:
+        if item_type in APP_KEY_TYPES:
+            _validate_app_key_payload(item_type, payload, fingerprint)
+            return
         if not isinstance(payload.get("name"), str) or not 1 <= len(payload["name"]) <= _ITEM_NAME_MAX:
             raise ValueError("vault item name must contain 1 to 200 characters")
         if not isinstance(payload.get("notes", ""), str) or len(payload.get("notes", "")) > 4000:
@@ -352,3 +375,57 @@ class VaultItemService:
                 raise ValueError("SSH item key_type must match the OpenSSH public key")
         elif fingerprint is not None:
             raise ValueError("only SSH vault items may carry a public fingerprint")
+
+
+def _b64_exact(value: Any, length: int, field: str) -> bytes:
+    """Decode strict base64 of exactly *length* bytes; the message never holds the value."""
+    try:
+        raw = base64.b64decode(value, validate=True) if isinstance(value, str) else b""
+    except (binascii.Error, ValueError):
+        raw = b""
+    if len(raw) != length:
+        raise ValueError(f"Servonaut key {field} must be base64 of {length} bytes")
+    return raw
+
+
+def _validate_app_key_payload(item_type: str, payload: Mapping[str, Any], fingerprint: Any) -> None:
+    """Check a Memory Sync or config sync key payload against its own fingerprint.
+
+    Messages name the field only, never a value, because the payload holds key material.
+    """
+    if payload.get("v") != 1 or isinstance(payload.get("v"), bool):
+        raise ValueError("Servonaut key payload version is not supported")
+    name = payload.get("name")
+    if not isinstance(name, str) or not 1 <= len(name) <= _ITEM_NAME_MAX:
+        raise ValueError("vault item name must contain 1 to 200 characters")
+    if not isinstance(fingerprint, str) or not _FINGERPRINT_HEX.fullmatch(fingerprint):
+        raise ValueError("Servonaut key fingerprint must be 64 lowercase hex characters")
+    if payload.get("public_fingerprint") != fingerprint:
+        raise ValueError("Servonaut key fingerprint does not match the item")
+    created_at = payload.get("created_at")
+    try:
+        datetime.fromisoformat(created_at.replace("Z", "+00:00") if isinstance(created_at, str) else "")
+    except ValueError as exc:
+        raise ValueError("Servonaut key created_at must be an ISO timestamp") from exc
+    if item_type == MEMORY_KEY:
+        _validate_memory_key(payload, fingerprint)
+    else:
+        _validate_config_sync_key(payload, fingerprint)
+
+
+def _validate_memory_key(payload: Mapping[str, Any], fingerprint: str) -> None:
+    user_id = payload.get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1:
+        raise ValueError("Servonaut Memory Sync key user_id must be a positive integer")
+    public_key = _b64_exact(payload.get("public_key"), 32, "public_key")
+    private_key = _b64_exact(payload.get("private_key"), 32, "private_key")
+    if not hmac.compare_digest(hashlib.sha256(public_key).hexdigest(), fingerprint):
+        raise ValueError("Servonaut Memory Sync key fingerprint does not match its public key")
+    if not hmac.compare_digest(crypto.x25519_public(private_key), public_key):
+        raise ValueError("Servonaut Memory Sync key private key does not match its public key")
+
+
+def _validate_config_sync_key(payload: Mapping[str, Any], fingerprint: str) -> None:
+    key = _b64_exact(payload.get("key"), 32, "key")
+    if not hmac.compare_digest(hmac.new(key, CONFIG_KEY_ID_LABEL, hashlib.sha256).hexdigest(), fingerprint):
+        raise ValueError("Servonaut config sync key id does not match its key")
