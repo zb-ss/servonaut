@@ -32,6 +32,7 @@ import inspect
 import json
 import logging
 import math
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
@@ -1347,6 +1348,9 @@ class AIToolBridge(_FloorDangerousMixin):
             ) as call_ctx, record_outcomes() as outcomes:
                 output = await handler(**accepted_args)
                 captured_telemetry = dict(call_ctx.extras)
+                captured_telemetry["duration_ms"] = max(
+                    0, int((time.monotonic() - call_ctx.started_at) * 1000),
+                )
         except TypeError as exc:
             # Still reachable: a missing required argument, or a value of
             # a shape the handler body rejects. Surface it so the model

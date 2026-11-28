@@ -119,10 +119,22 @@
     width: auto;
 }
 
+/* Compact 3-column grid at narrow widths (e.g. 100x30): 2 rows of filters +
+   1 compact action row. Keep the table + inspector side-by-side at 100 cols
+   so both get full vertical height (~10+ table rows instead of 2). */
+AgentActivityScreen.-content-narrow #aa_summary_bar {
+    margin-bottom: 0;
+}
+
 AgentActivityScreen.-content-narrow #aa_filters {
-    grid-size: 2 4;
-    grid-columns: 1fr 1fr;
-    min-width: 50;
+    grid-size: 3 3;
+    grid-columns: 1fr 1fr 1fr;
+    min-width: 54;
+    margin-bottom: 0;
+}
+
+AgentActivityScreen.-content-narrow #aa_filters Label {
+    display: none;
 }
 
 AgentActivityScreen.-content-narrow #aa_filter_search {
@@ -130,9 +142,14 @@ AgentActivityScreen.-content-narrow #aa_filter_search {
 }
 
 AgentActivityScreen.-content-narrow #aa_filter_actions {
-    column-span: 2;
+    column-span: 3;
     margin: 0;
     align: left middle;
+}
+
+AgentActivityScreen.-short #aa_filter_actions ActionButton {
+    height: 1;
+    border: none;
 }
 
 #aa_workspace {
@@ -196,20 +213,30 @@ AgentActivityScreen.-content-narrow #aa_filter_actions {
     border-title-color: $text-accent;
 }
 
-AgentActivityScreen.-content-narrow #aa_workspace {
+AgentActivityScreen.-narrow #aa_workspace {
     layout: vertical;
-    min-height: 14;
+    min-height: 10;
+}
+
+AgentActivityScreen.-narrow #aa_results {
+    width: 100%;
+    height: 3fr;
+    min-height: 6;
+    margin: 0;
+}
+
+AgentActivityScreen.-narrow #aa_detail {
+    width: 100%;
+    height: 2fr;
+    min-height: 4;
 }
 
 AgentActivityScreen.-content-narrow #aa_results {
-    width: 100%;
-    height: 3fr;
-    margin: 0 0 1 0;
+    width: 3fr;
 }
 
 AgentActivityScreen.-content-narrow #aa_detail {
-    width: 100%;
-    height: 2fr;
+    width: 2fr;
 }
 
 AgentActivityScreen.-short #aa_heading {

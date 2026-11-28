@@ -1113,6 +1113,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/agent_activity.py", "_update_pager", "update",
                    "Renders page index and total match count ('Page X of Y') — "
                    "numeric pagination chrome only."),
+    AllowlistEntry("screens/agent_activity.py", "_set_loading_state", "update",
+                   "Writes static 'Loading activity...' status text only — "
+                   "no user or server data."),
 ]
 
 # Build a fast lookup set: (relative_file_path, func_name, attr_name)

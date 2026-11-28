@@ -299,8 +299,13 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
     return tools
 
 
+_MAX_CLIENT_LABEL_LEN = 64
+
+
 def _extract_mcp_client_label(server) -> str:
-    """Best-effort client name/version from the active MCP session."""
+    """Best-effort bounded single-line client name/version from the active MCP session."""
+    from servonaut.utils.markup import single_line_text
+
     try:
         req_ctx = server.request_context
         session = getattr(req_ctx, "session", None)
@@ -308,13 +313,17 @@ def _extract_mcp_client_label(server) -> str:
         info = getattr(params, "clientInfo", None)
         if info is None:
             return ""
-        name = str(getattr(info, "name", "") or "").strip()
-        version = str(getattr(info, "version", "") or "").strip()
-        if name and version:
-            return f"{name}/{version}"
-        return name
+        name = single_line_text(str(getattr(info, "name", "") or "")).strip()
+        version = single_line_text(str(getattr(info, "version", "") or "")).strip()
+        label = f"{name}/{version}" if (name and version) else name
+        return label[:_MAX_CLIENT_LABEL_LEN]
     except Exception:  # noqa: BLE001 — lookup outside active request context
         return ""
+
+
+def _fallback_audit_args(arguments: dict) -> dict:
+    """Safe argument metadata for dispatch fallback rows: names only, never values."""
+    return {"argument_names": sorted(str(k) for k in arguments.keys())}
 
 
 async def _dispatch_tool(
@@ -355,31 +364,22 @@ async def _dispatch_tool(
 
     audit = getattr(tools, "_audit", None)
     safe_args = arguments if isinstance(arguments, dict) else {}
-    audit_log_fn = getattr(audit, "log", None)
-    before_mock_calls = getattr(audit_log_fn, "call_count", None)
-
-    def _already_audited() -> bool:
-        if call_ctx.logged_count > 0:
-            return True
-        if isinstance(before_mock_calls, int):
-            current = getattr(audit_log_fn, "call_count", before_mock_calls)
-            return current > before_mock_calls
-        return False
+    safe_client = str(client or "")[:_MAX_CLIENT_LABEL_LEN]
 
     with audit_call_context(
         origin="mcp",
         source="mcp",
-        client=client,
+        client=safe_client,
         session_id=session_id,
     ) as call_ctx:
         if name not in TOOL_SCHEMAS:
             if audit is not None:
-                audit.log(name, safe_args, "", False, "unknown_tool")
+                audit.log(name, _fallback_audit_args(safe_args), "", False, "unknown_tool")
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
         handler = getattr(tools, name, None)
         if handler is None:
             if audit is not None:
-                audit.log(name, safe_args, "", False, "handler_unavailable")
+                audit.log(name, _fallback_audit_args(safe_args), "", False, "handler_unavailable")
             return [TextContent(type="text", text=f"Tool handler not available: {name}")]
         refusal = getattr(tools, "refusal", None)
         refused = refusal(name) if callable(refusal) else None
@@ -391,15 +391,18 @@ async def _dispatch_tool(
             result = await handler(**safe_args)
         except Exception as exc:  # noqa: BLE001 — keep the stdio session alive
             if update := find_client_update_required(exc):
-                if audit is not None and not _already_audited():
-                    audit.log(name, safe_args, "", False, "client_update_required")
+                if audit is not None and call_ctx.logged_count == 0:
+                    audit.log(
+                        name, _fallback_audit_args(safe_args), "", False,
+                        "client_update_required",
+                    )
                 message = format_update_required_message(update, client_kind="mcp")
                 return [TextContent(type="text", text=f"Error: {message[:500]}")]
             # Log the full traceback for diagnosis and bound the returned error.
             logger.exception("MCP tool %r raised", name)
-            if audit is not None and not _already_audited():
+            if audit is not None and call_ctx.logged_count == 0:
                 audit.log(
-                    name, safe_args, "", False,
+                    name, _fallback_audit_args(safe_args), "", False,
                     f"exception:{type(exc).__name__}: {str(exc)[:160]}",
                 )
             return [TextContent(

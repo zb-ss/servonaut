@@ -799,7 +799,10 @@ class RelayExecutors:
             if self._audit is None:
                 from servonaut.mcp.audit import AuditTrail
 
-                self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
+                self._audit = AuditTrail(
+                    self._config_manager.get().mcp.audit_path,
+                    default_origin="relay",
+                )
             self._audit.log(
                 tool_name, args, '', False, reason,
                 source='relay', request_id=request.id,
@@ -813,7 +816,10 @@ class RelayExecutors:
             if self._audit is None:
                 from servonaut.mcp.audit import AuditTrail
 
-                self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
+                self._audit = AuditTrail(
+                    self._config_manager.get().mcp.audit_path,
+                    default_origin="relay",
+                )
             self._audit.log(
                 call.tool, dict(call.args), '', False, reason,
                 source='ai_chat', conversation_id=call.conversation_id,

@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from servonaut.mcp.audit import AuditTrail, audit_call_context
+from servonaut.mcp.audit_classifier import enrich_entry_metadata
+from servonaut.mcp.audit_query import AuditFilter, AuditQueryService
 from servonaut.mcp.guards import GuardLevel
 from servonaut.mcp.server import _dispatch_tool
 from servonaut.services.ai_tool_bridge import AIToolBridge, ToolCall
@@ -21,7 +23,7 @@ def _run(coro):
 
 
 class TestAuditCallContextAndSecurity:
-    def test_context_attaches_origin_client_session_and_duration(self, tmp_path):
+    def test_context_attaches_origin_client_session_duration_without_persisting_classifier(self, tmp_path):
         audit_file = tmp_path / "mcp_audit.jsonl"
         trail = AuditTrail(str(audit_file))
 
@@ -37,20 +39,26 @@ class TestAuditCallContextAndSecurity:
                 exit_code=0,
             )
 
-        rows = trail.read_recent(10)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["origin"] == "mcp"
-        assert row["source"] == "mcp"
-        assert row["client"] == "claude-code/1.2"
-        assert row["session_id"] == "sess1234"
-        assert isinstance(row["duration_ms"], int) and row["duration_ms"] >= 0
-        assert row["transport_used"] == "ssh"
-        assert row["exit_code"] == 0
-        assert row["op_class"] == "remote_command"
-        assert row["remote_exec"] is True
-        assert row["command_category"] == "readonly_inspect"
-        assert row["command_stems"] == ["uptime"]
+        raw_rows = trail.read_recent(10)
+        assert len(raw_rows) == 1
+        raw = raw_rows[0]
+        assert raw["origin"] == "mcp"
+        assert raw["source"] == "mcp"
+        assert raw["client"] == "claude-code/1.2"
+        assert raw["session_id"] == "sess1234"
+        assert isinstance(raw["duration_ms"], int) and raw["duration_ms"] >= 0
+        assert raw["transport_used"] == "ssh"
+        assert raw["exit_code"] == 0
+        # Classifier fields are computed at read time only, not persisted on disk.
+        assert "op_class" not in raw
+        assert "command_category" not in raw
+        assert "command_stems" not in raw
+
+        enriched = enrich_entry_metadata(raw)
+        assert enriched["op_class"] == "remote_command"
+        assert enriched["remote_exec"] is True
+        assert enriched["command_category"] == "readonly_inspect"
+        assert enriched["command_stems"] == ["uptime"]
 
     def test_default_origin_marks_ui_calls(self, tmp_path):
         audit_file = tmp_path / "mcp_audit.jsonl"
@@ -59,7 +67,7 @@ class TestAuditCallContextAndSecurity:
         row = trail.read_recent(1)[0]
         assert row["origin"] == "ui"
 
-    def test_file_created_with_0600_and_refuses_symlink(self, tmp_path):
+    def test_file_created_with_0600_and_refuses_symlink_with_warning(self, tmp_path, caplog):
         audit_file = tmp_path / "mcp_audit.jsonl"
         trail = AuditTrail(str(audit_file))
         trail.log("whoami", {}, "user", True)
@@ -73,30 +81,37 @@ class TestAuditCallContextAndSecurity:
             symlink_path = tmp_path / "evil_audit.jsonl"
             symlink_path.symlink_to(target)
             sym_trail = AuditTrail(str(symlink_path))
-            sym_trail.log("whoami", {}, "user", True)
+            with caplog.at_level("WARNING"):
+                sym_trail.log("whoami", {}, "user", True)
             assert target.read_text() == "do-not-touch"
+            assert any("symlink" in rec.message.lower() for rec in caplog.records)
 
 
 class TestDispatchBoundaryAudit:
-    def test_unknown_tool_and_unhandled_exception_are_audited(self, tmp_path):
+    def test_fallback_rows_log_argument_names_only_and_cap_client_label(self, tmp_path):
         audit_file = tmp_path / "mcp_audit.jsonl"
         tools = make_tools(guard_level=GuardLevel.STANDARD, instances=SAMPLE_INSTANCES[:1])
         tools._audit = AuditTrail(str(audit_file))
 
-        # 1. Unknown tool
+        long_client = "x" * 200
+
+        # 1. Unknown tool with sensitive values must only log argument names
         _run(_dispatch_tool(
-            tools, "nonexistent_tool", {"foo": "bar"},
-            client="cursor/0.5", session_id="s-01",
+            tools, "nonexistent_tool", {"body": "super-secret-token", "headers": {"Authorization": "Bearer abc"}},
+            client=long_client, session_id="s-01",
         ))
 
-        # 2. Unhandled exception inside a real tool
-        async def exploding_whoami():
+        # 2. Unhandled exception inside api_request must NOT leak body/headers values
+        async def exploding_api_request(**_kwargs):
             raise RuntimeError("boom-network")
 
-        tools.whoami = exploding_whoami
+        tools.api_request = exploding_api_request
         _run(_dispatch_tool(
-            tools, "whoami", {},
-            client="cursor/0.5", session_id="s-01",
+            tools,
+            "api_request",
+            {"method": "POST", "path": "/secret", "body": {"password": "do-not-log"}},
+            client="cursor/0.5",
+            session_id="s-01",
         ))
 
         rows = tools._audit.read_recent(10)
@@ -105,12 +120,15 @@ class TestDispatchBoundaryAudit:
         assert rows[0]["allowed"] is False
         assert rows[0]["reason"] == "unknown_tool"
         assert rows[0]["origin"] == "mcp"
-        assert rows[0]["client"] == "cursor/0.5"
+        assert len(rows[0]["client"]) == 64
+        assert rows[0]["args"] == {"argument_names": ["body", "headers"]}
+        assert "super-secret-token" not in json.dumps(rows[0])
 
-        assert rows[1]["tool"] == "whoami"
+        assert rows[1]["tool"] == "api_request"
         assert rows[1]["allowed"] is False
         assert rows[1]["reason"].startswith("exception:RuntimeError")
-        assert rows[1]["session_id"] == "s-01"
+        assert rows[1]["args"] == {"argument_names": ["body", "method", "path"]}
+        assert "do-not-log" not in json.dumps(rows[1])
 
 
 class TestRunCommandTransportAndTargetTelemetry:
@@ -139,7 +157,7 @@ class TestRunCommandTransportAndTargetTelemetry:
         assert "[transport_used: ssh]" in res[0].text
         rows = tools._audit.read_recent(5)
         assert len(rows) == 1
-        row = rows[0]
+        row = enrich_entry_metadata(rows[0])
         assert row["origin"] == "mcp"
         assert row["transport_used"] == "ssh"
         assert row["exit_code"] == 0
@@ -187,7 +205,7 @@ class TestRunCommandTransportAndTargetTelemetry:
         assert "[transport_used: ssm]" in res[0].text
         rows = tools._audit.read_recent(5)
         assert len(rows) == 1
-        row = rows[0]
+        row = enrich_entry_metadata(rows[0])
         assert row["origin"] == "mcp"
         assert row["transport_used"] == "ssm"
         assert row["ssh_fell_back"] is True
@@ -197,7 +215,7 @@ class TestRunCommandTransportAndTargetTelemetry:
         assert row["command_category"] == "readonly_inspect"
 
 
-class TestBridgeOriginAndDeduplication:
+class TestBridgeOriginAndInnerReasonPreservation:
     @pytest.mark.parametrize("origin,source", [
         ("ui", "ai_chat"),
         ("relay", "ai_chat"),
@@ -235,3 +253,56 @@ class TestBridgeOriginAndDeduplication:
         assert rows[0]["origin"] == origin
         assert rows[0]["source"] == source
         assert rows[0]["tool_call_id"] == "tc-dedup-1"
+        assert rows[0]["tool_allowed"] is True
+
+    def test_ai_tool_bridge_preserves_inner_failure_reason_and_matches_denied_filter(self, tmp_path):
+        audit_file = tmp_path / "mcp_audit.jsonl"
+        trail = AuditTrail(str(audit_file))
+        tools = make_tools(guard_level=GuardLevel.STANDARD, instances=SAMPLE_INSTANCES[:1])
+        tools._audit = trail
+
+        # Simulate an inner local tool failing with a distinct reason (command_timeout).
+        async def failing_disk_usage(instance_id: str) -> str:
+            trail.log(
+                "disk_usage",
+                {"instance_id": instance_id},
+                "",
+                False,
+                "command_timeout",
+                transport_used="ssh",
+            )
+            return "command timed out after 60s"
+
+        tools.disk_usage = failing_disk_usage
+        bridge = AIToolBridge(
+            api_client=MagicMock(),
+            relay_executors=MagicMock(),
+            mcp_audit=trail,
+            confirm_callback=AsyncMock(return_value=True),
+            auth_service=MagicMock(),
+            servonaut_tools=tools,
+            audit_source="ai_chat",
+            audit_origin="ui",
+        )
+
+        call = ToolCall(
+            tool_call_id="tc-timeout-1",
+            tool="disk_usage",
+            args={"instance_id": "i-abc123"},
+            guard_level="readonly",
+            conversation_id="conv-2",
+        )
+        res = _run(bridge.handle_tool_call(call))
+        assert res.status == "error"
+
+        rows = trail.read_recent(10)
+        assert len(rows) == 1
+        assert rows[0]["origin"] == "ui"
+        assert rows[0]["tool_allowed"] is False
+        assert rows[0]["tool_reason"] == "command_timeout"
+        assert rows[0]["transport_used"] == "ssh"
+
+        # Failed chat call MUST appear under the "denied / failed" filter!
+        page = AuditQueryService(audit_file).query(AuditFilter(scope="denied"))
+        assert page.total_matches == 1
+        assert page.entries[0]["tool_reason"] == "command_timeout"

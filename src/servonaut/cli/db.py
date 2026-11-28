@@ -156,7 +156,7 @@ def _build_tools():
         connection_service=ConnectionService(config_manager),
         scp_service=SCPService(ssh_config=config.ssh),
         guard=guard,
-        audit=AuditTrail(config.mcp.audit_path),
+        audit=AuditTrail(config.mcp.audit_path, default_origin="cli"),
         secret_provider=secret_provider,
         hetzner_service=accounts.default_service("hetzner"),
         ovh_service=accounts.default_service("ovh"),

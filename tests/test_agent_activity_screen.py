@@ -12,17 +12,9 @@ from textual.widgets import DataTable, Input, Select, Static
 
 from servonaut.config.schema import AppConfig
 from servonaut.screens.agent_activity import AgentActivityScreen
+from servonaut.services.redaction_service import RedactionService
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.sidebar import Sidebar
-
-
-class _DemoRedactor:
-    def redact_text(self, text: str) -> str:
-        return (
-            text.replace("prod-web-1", "demo-host-1")
-            .replace("10.0.1.5", "192.0.2.1")
-            .replace("i-0abc1234", "i-demo0001")
-        )
 
 
 def _seed_audit(path: Path) -> None:
@@ -31,7 +23,7 @@ def _seed_audit(path: Path) -> None:
         {
             "timestamp": (now - timedelta(minutes=25)).isoformat(),
             "tool": "run_command",
-            "args": {"instance_id": "i-0abc1234", "command": "uptime", "transport": "auto"},
+            "args": {"instance_id": "i-0abc1234567890def", "command": "uptime && echo '[ bold]safe'", "transport": "auto"},
             "allowed": True,
             "reason": "",
             "result_length": 64,
@@ -44,12 +36,19 @@ def _seed_audit(path: Path) -> None:
             "ssh_fell_back": True,
             "ssm_command_id": "cmd-ssm-42",
             "exit_code": 0,
-            "target": {"id": "i-0abc1234", "name": "prod-web-1", "host": "10.0.1.5", "provider": "aws", "region": "eu-west-1"},
+            "target": {
+                "id": "i-0abc1234567890def",
+                "name": "prod-web-1",
+                "host": "10.0.1.5",
+                "provider": "aws",
+                "account": "acme-prod",
+                "region": "eu-west-1",
+            },
         },
         {
             "timestamp": (now - timedelta(minutes=15)).isoformat(),
             "tool": "run_command",
-            "args": {"instance_id": "i-0abc1234", "command": "sudo systemctl restart nginx", "transport": "ssh"},
+            "args": {"instance_id": "i-0abc1234567890def", "command": "sudo systemctl restart nginx", "transport": "ssh"},
             "allowed": False,
             "reason": "team_rule",
             "result_length": 0,
@@ -57,12 +56,12 @@ def _seed_audit(path: Path) -> None:
             "source": "ai_chat",
             "conversation_id": "conv-99",
             "duration_ms": 4,
-            "target": {"id": "i-0abc1234", "name": "prod-web-1", "host": "10.0.1.5"},
+            "target": {"id": "i-0abc1234567890def", "name": "prod-web-1", "host": "10.0.1.5"},
         },
         {
             "timestamp": (now - timedelta(minutes=5)).isoformat(),
             "tool": "docker_stats",
-            "args": {"instance_id": "i-0abc1234"},
+            "args": {"instance_id": "i-0abc1234567890def"},
             "allowed": True,
             "reason": "",
             "result_length": 420,
@@ -71,7 +70,7 @@ def _seed_audit(path: Path) -> None:
             "duration_ms": 340,
             "transport_used": "ssh",
             "exit_code": 0,
-            "target": {"id": "i-0abc1234", "name": "prod-web-1", "host": "10.0.1.5"},
+            "target": {"id": "i-0abc1234567890def", "name": "prod-web-1", "host": "10.0.1.5"},
         },
     ]
     with open(path, "w", encoding="utf-8") as fh:
@@ -95,7 +94,7 @@ class _AuditHostApp(App):
         self.relay_state = None
         self.vault_available = False
         self.demo_mode = demo
-        self.redaction_service = _DemoRedactor() if demo else None
+        self.redaction_service = RedactionService()
         self.copied: list[str] = []
 
     def provider_available(self, _provider: str) -> bool:
@@ -109,7 +108,7 @@ class _AuditHostApp(App):
 
 
 class TestAgentActivityScreen:
-    def test_sidebar_placement_and_filtering(self, tmp_path):
+    def test_sidebar_placement_filtering_and_markup_safety(self, tmp_path):
         audit_file = tmp_path / "mcp_audit.jsonl"
         _seed_audit(audit_file)
 
@@ -122,8 +121,9 @@ class TestAgentActivityScreen:
 
                 screen = app.screen
                 assert isinstance(screen, AgentActivityScreen)
+                # Mount must only kick off a single initial scan (not one per Select).
+                assert screen._query_generation == 1
 
-                # Verify sidebar places Agent activity under Account and highlights it.
                 sidebar = screen.query_one(Sidebar)
                 account_section = sidebar.query_one("#section_account")
                 nav_btn = account_section.query_one("#nav_agent_activity")
@@ -135,7 +135,7 @@ class TestAgentActivityScreen:
 
                 # Filter Origin = UI
                 screen.query_one("#aa_select_origin", Select).value = "ui"
-                await pilot.pause()
+                await pilot.pause(0.15)
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 assert table.row_count == 1
@@ -143,7 +143,7 @@ class TestAgentActivityScreen:
                 assert "systemctl restart nginx" in detail_text
                 assert "team_rule" in detail_text
 
-                # Reset + filter Transport = SSM
+                # Reset + filter Transport = SSM (also verifies `[ bold]safe` renders safely)
                 screen.action_clear_filters()
                 await pilot.pause()
                 await app.workers.wait_for_complete()
@@ -151,13 +151,14 @@ class TestAgentActivityScreen:
                 assert table.row_count == 3
 
                 screen.query_one("#aa_select_transport", Select).value = "ssm"
-                await pilot.pause()
+                await pilot.pause(0.15)
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 assert table.row_count == 1
                 ssm_detail = str(screen.query_one("#aa_detail_text", Static).render())
                 assert "cmd-ssm-42" in ssm_detail
                 assert "fell back to SSM" in ssm_detail
+                assert "[ bold]safe" in ssm_detail
 
                 # Copy JSON shortcut works
                 screen.action_copy_detail()
@@ -178,7 +179,7 @@ class TestAgentActivityScreen:
 
         asyncio.run(_run_case())
 
-    def test_demo_mode_redacts_targets_and_detail(self, tmp_path):
+    def test_demo_mode_redacts_targets_ids_accounts_and_copy(self, tmp_path):
         audit_file = tmp_path / "mcp_audit.jsonl"
         _seed_audit(audit_file)
 
@@ -189,10 +190,32 @@ class TestAgentActivityScreen:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
 
-                detail_text = str(app.screen.query_one("#aa_detail_text", Static).render())
+                screen = app.screen
+                # Select the SSM row which has name, id, host, and account populated.
+                screen.query_one("#aa_select_transport", Select).value = "ssm"
+                await pilot.pause(0.15)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+
+                detail_text = str(screen.query_one("#aa_detail_text", Static).render())
                 assert "prod-web-1" not in detail_text
                 assert "10.0.1.5" not in detail_text
-                assert "demo-host-1" in detail_text
+                assert "i-0abc1234567890def" not in detail_text
+                assert "acme-prod" not in detail_text
+
+                screen.action_copy_detail()
+                assert len(app.copied) == 1
+                assert "prod-web-1" not in app.copied[0]
+                assert "10.0.1.5" not in app.copied[0]
+                assert "i-0abc1234567890def" not in app.copied[0]
+                assert "acme-prod" not in app.copied[0]
+
+                # Live demo toggle redraws unredacted data cleanly.
+                app.demo_mode = False
+                screen.refresh_after_demo_toggle()
+                await pilot.pause()
+                detail_after = str(screen.query_one("#aa_detail_text", Static).render())
+                assert "prod-web-1" in detail_after
 
         asyncio.run(_run_case())
 

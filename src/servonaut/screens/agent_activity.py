@@ -1,6 +1,6 @@
 """Read-only Agent Activity audit browser screen for Servonaut.
 
-Displays local MCP, UI chat, relay, and proactive agent tool calls from
+Displays local MCP, UI chat, relay, proactive, and CLI tool calls from
 ``~/.servonaut/mcp_audit.jsonl`` (and rotated ``.1`` … ``.5`` archives)
 with filtering by time range, origin, remote scope, command category,
 transport (SSH / SSM / SCP), and free-text search.
@@ -12,11 +12,11 @@ import functools
 import json
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Input, Label, Select, Static
 
@@ -28,12 +28,14 @@ from servonaut.mcp.audit_classifier import (
     CMD_PACKAGE_DEPLOY,
     CMD_READONLY_INSPECT,
     CMD_SERVICE_CONTROL,
+    CMD_UNKNOWN,
     CMD_USER_PRIVILEGE,
     OP_CLOUD_API,
     OP_LOCAL_OR_META,
     OP_REMOTE_DB,
     OP_REMOTE_PROBE,
     OP_REMOTE_TRANSFER,
+    is_entry_failed_or_denied,
 )
 from servonaut.mcp.audit_query import (
     AuditFilter,
@@ -46,11 +48,13 @@ from servonaut.mcp.audit_query import (
     parse_timestamp,
 )
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.markup import cell, literal
 from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 _PAGE_SIZE = 100
+_SELECT_DEBOUNCE_SECONDS = 0.06
 _SEARCH_DEBOUNCE_SECONDS = 0.18
 
 _TIME_OPTIONS: List[Tuple[str, str]] = [
@@ -66,9 +70,11 @@ _TIME_OPTIONS: List[Tuple[str, str]] = [
 _ORIGIN_OPTIONS: List[Tuple[str, str]] = [
     ("All origins", ""),
     ("MCP (external)", "mcp"),
-    ("UI (Chat)", "ui"),
+    ("UI (chat)", "ui"),
     ("Relay", "relay"),
     ("Proactive", "proactive"),
+    ("CLI", "cli"),
+    ("Unknown", "unknown"),
 ]
 
 _SCOPE_OPTIONS: List[Tuple[str, str]] = [
@@ -87,6 +93,7 @@ _CATEGORY_OPTIONS: List[Tuple[str, str]] = [
     ("Network / firewall", CMD_NETWORK_FIREWALL),
     ("User / privilege", CMD_USER_PRIVILEGE),
     ("Other mutating", CMD_OTHER_MUTATING),
+    ("Unknown / dynamic", CMD_UNKNOWN),
     ("Blocked", CMD_BLOCKED),
     ("Remote probe", OP_REMOTE_PROBE),
     ("File transfer (SCP)", OP_REMOTE_TRANSFER),
@@ -108,6 +115,8 @@ _ORIGIN_DISPLAY: Dict[str, str] = {
     "ui": "UI",
     "relay": "Relay",
     "proactive": "Proactive",
+    "cli": "CLI",
+    "unknown": "Unknown",
 }
 
 _CATEGORY_SHORT: Dict[str, str] = {
@@ -118,6 +127,7 @@ _CATEGORY_SHORT: Dict[str, str] = {
     CMD_NETWORK_FIREWALL: "net/fw",
     CMD_USER_PRIVILEGE: "priv/user",
     CMD_OTHER_MUTATING: "mutating",
+    CMD_UNKNOWN: "unknown",
     CMD_BLOCKED: "blocked",
     OP_REMOTE_PROBE: "probe",
     OP_REMOTE_TRANSFER: "scp",
@@ -128,7 +138,7 @@ _CATEGORY_SHORT: Dict[str, str] = {
 
 
 class AgentActivityScreen(WorkspaceScreen):
-    """Read-only browser for MCP, UI chat, relay, and proactive agent activity."""
+    """Read-only browser for MCP, UI chat, relay, proactive, and CLI agent activity."""
 
     CHAT_REFLOW = True
     CHAT_MIN_CONTENT_WIDTH = 80
@@ -144,7 +154,7 @@ class AgentActivityScreen(WorkspaceScreen):
         Binding("p", "prev_page", "Prev", show=True),
     ]
 
-    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (90, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     def __init__(self, *, audit_path: Optional[str] = None) -> None:
@@ -153,8 +163,10 @@ class AgentActivityScreen(WorkspaceScreen):
         self._current_page: int = 0
         self._page_result: Optional[AuditQueryPage] = None
         self._selected_entry: Optional[Dict[str, Any]] = None
-        self._suppress_filter_events: bool = False
-        self._search_timer: Optional[Timer] = None
+        # Suppress initial Select.Changed notifications fired during mount so
+        # only a single initial scan runs.
+        self._suppress_filter_events: bool = True
+        self._filter_timer: Optional[Timer] = None
         self._query_generation: int = 0
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -226,9 +238,9 @@ class AgentActivityScreen(WorkspaceScreen):
                         id="aa_filter_transport",
                     ),
                     Vertical(
-                        Label("Search (host, command, tool, client, reason)"),
+                        Label("Search"),
                         Input(
-                            placeholder="e.g. prod-web, systemctl, ssm, claude-code...",
+                            placeholder="Host, command, tool, client, or reason...",
                             id="aa_search_input",
                         ),
                         id="aa_filter_search",
@@ -266,13 +278,18 @@ class AgentActivityScreen(WorkspaceScreen):
         self.query_one("#aa_detail").border_title = "Selected call"
         table = self.query_one("#aa_table", DataTable)
         table.add_columns(
-            "Time", "Origin", "Status", "Via", "Target", "Type", "Command / Tool",
+            "Time", "Origin", "Status", "Via", "Target", "Type", "Command / tool",
         )
         table.cursor_type = "row"
+        # Let mount-time Select.Changed events drain before enabling live filter triggers.
+        self.call_after_refresh(self._finish_mount_init)
         self._schedule_load(reset_page=True)
 
+    def _finish_mount_init(self) -> None:
+        self._suppress_filter_events = False
+
     # ------------------------------------------------------------------
-    # Query execution (non-blocking worker)
+    # Query execution (non-blocking worker with mid-scan cancellation)
     # ------------------------------------------------------------------
 
     def _audit_path(self) -> str:
@@ -305,7 +322,18 @@ class AgentActivityScreen(WorkspaceScreen):
             denied_only=(scope_val == "denied"),
         )
 
+    def _debounce_load(self, delay: float) -> None:
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+        self._filter_timer = self.set_timer(
+            delay,
+            lambda: self._schedule_load(reset_page=True),
+        )
+
     def _schedule_load(self, *, reset_page: bool = False) -> None:
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
         if reset_page:
             self._current_page = 0
         self._query_generation += 1
@@ -313,12 +341,24 @@ class AgentActivityScreen(WorkspaceScreen):
         flt = self._build_filter()
         page = self._current_page
         audit_path = self._audit_path()
+
+        self._set_loading_state(True)
         self.run_worker(
             functools.partial(self._load_entries, audit_path, flt, page, generation),
             group="agent_activity_load",
             exclusive=True,
             exit_on_error=False,
         )
+
+    def _set_loading_state(self, loading: bool) -> None:
+        if not self.is_mounted:
+            return
+        if loading:
+            self.query_one("#aa_context", Static).update("Loading activity...")
+        try:
+            self.query_one("#aa_table", DataTable).loading = loading
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _load_entries(
         self,
@@ -328,27 +368,108 @@ class AgentActivityScreen(WorkspaceScreen):
         generation: int,
     ) -> None:
         service = AuditQueryService(audit_path)
-        result = await asyncio.to_thread(
-            service.query, flt, page=page, page_size=_PAGE_SIZE,
-        )
-        if generation != self._query_generation or not self.is_mounted:
+        try:
+            result = await asyncio.to_thread(
+                service.query,
+                flt,
+                page=page,
+                page_size=_PAGE_SIZE,
+                cancel_check=lambda: generation != self._query_generation,
+            )
+        finally:
+            if generation == self._query_generation and self.is_mounted:
+                try:
+                    self.query_one("#aa_table", DataTable).loading = False
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if generation != self._query_generation or result.summary.cancelled or not self.is_mounted:
             return
         self._page_result = result
         self._render_page(result)
 
     # ------------------------------------------------------------------
-    # Rendering
+    # Demo-mode redaction & theme helpers
     # ------------------------------------------------------------------
 
+    def _redactor(self):
+        if getattr(self.app, "demo_mode", False):
+            return getattr(self.app, "redaction_service", None)
+        return None
+
     def scrub_text(self, text: str) -> str:
-        """Redact sensitive text when demo mode is active."""
+        """Redact free text (IPs, hostnames, EC2 IDs, ARNs, emails, paths) in demo mode."""
         if not text:
             return text
-        if getattr(self.app, "demo_mode", False):
-            redactor = getattr(self.app, "redaction_service", None)
-            if redactor is not None:
-                return redactor.redact_text(text)
-        return text
+        redactor = self._redactor()
+        if redactor is None:
+            return text
+        scrub_stream = getattr(redactor, "scrub_stream", None)
+        if callable(scrub_stream):
+            return scrub_stream(text)
+        return redactor.redact_text(text)
+
+    def scrub_target(self, target: Mapping[str, Any]) -> Dict[str, Any]:
+        """Redact structured target metadata fields in demo mode."""
+        redactor = self._redactor()
+        if redactor is None:
+            return dict(target)
+        out: Dict[str, Any] = {}
+        for k, v in target.items():
+            if not v:
+                continue
+            s = str(v)
+            if k == "name" and hasattr(redactor, "redact_name"):
+                out[k] = redactor.redact_name(s)
+            elif k == "id" and hasattr(redactor, "redact_instance_id"):
+                out[k] = redactor.redact_instance_id(s)
+            elif k == "host":
+                if hasattr(redactor, "redact_host"):
+                    out[k] = redactor.redact_host(s)
+                elif hasattr(redactor, "redact_hostname"):
+                    out[k] = redactor.redact_hostname(s)
+                else:
+                    out[k] = self.scrub_text(s)
+            elif k == "account" and hasattr(redactor, "redact_account_label"):
+                out[k] = redactor.redact_account_label(s)
+            else:
+                out[k] = self.scrub_text(s)
+        return out
+
+    def _scrub_entry_for_display(self, entry: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return a deep-scrubbed copy of *entry* suitable for JSON inspector & copy."""
+        redactor = self._redactor()
+        if redactor is None:
+            return dict(entry)
+
+        def _scrub_value(val: Any, key: str = "") -> Any:
+            if isinstance(val, Mapping):
+                if key == "target":
+                    return self.scrub_target(val)
+                return {k: _scrub_value(v, str(k)) for k, v in val.items()}
+            if isinstance(val, list):
+                return [_scrub_value(item) for item in val]
+            if isinstance(val, str):
+                if key in ("instance_id", "identifier") and hasattr(redactor, "redact_instance_id"):
+                    return redactor.redact_instance_id(val)
+                if key == "host" and hasattr(redactor, "redact_host"):
+                    return redactor.redact_host(val)
+                if key == "account" and hasattr(redactor, "redact_account_label"):
+                    return redactor.redact_account_label(val)
+                return self.scrub_text(val)
+            return val
+
+        return _scrub_value(entry)
+
+    def _theme_color(self, token: str, *, bold: bool = False) -> str:
+        """Resolve a Textual theme variable to a Rich style string."""
+        variables = getattr(self.app, "theme_variables", None) or {}
+        color = variables.get(token) or ""
+        if bold and color:
+            return f"bold {color}"
+        if bold:
+            return "bold"
+        return color
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw already-loaded audit rows and inspector after toggling demo mode."""
@@ -360,6 +481,10 @@ class AgentActivityScreen(WorkspaceScreen):
             self._selected_entry = selected
             self._render_detail(selected)
 
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
     def _render_page(self, result: AuditQueryPage) -> None:
         summary = result.summary
         self._render_header_and_summary(summary)
@@ -369,13 +494,13 @@ class AgentActivityScreen(WorkspaceScreen):
 
         for idx, entry in enumerate(result.entries):
             table.add_row(
-                self._fmt_time(entry),
+                cell(self._fmt_time(entry)),
                 self._fmt_origin_cell(entry),
                 self._fmt_status_cell(entry),
                 self._fmt_transport_cell(entry),
-                escape(self.scrub_text(self._fmt_short_target(entry))),
+                cell(self.scrub_text(self._fmt_short_target(entry))),
                 self._fmt_category_cell(entry),
-                escape(self.scrub_text(self._fmt_command_col(entry))),
+                cell(self.scrub_text(self._fmt_command_col(entry))),
                 key=str(idx),
             )
 
@@ -386,12 +511,13 @@ class AgentActivityScreen(WorkspaceScreen):
             self._render_detail(result.entries[0])
         else:
             self._selected_entry = None
-            empty_msg = (
-                "No audit entries match the current filters."
-                if AuditQueryService(self._audit_path()).log_files()
-                else "No MCP / agent activity has been recorded yet."
-            )
-            self.query_one("#aa_detail_text", Static).update(self.scrub_text(empty_msg))
+            if summary.read_errors:
+                empty_msg = "Audit log warning:\n" + "\n".join(summary.read_errors)
+            elif AuditQueryService(self._audit_path()).log_files():
+                empty_msg = "No audit entries match the current filters."
+            else:
+                empty_msg = "No MCP / agent activity has been recorded yet."
+            self.query_one("#aa_detail_text", Static).update(literal(self.scrub_text(empty_msg)))
 
     def _render_header_and_summary(self, summary: AuditSummary) -> None:
         ssh_n = summary.by_transport.get("ssh", 0)
@@ -412,11 +538,13 @@ class AgentActivityScreen(WorkspaceScreen):
             context_parts.append(" / ".join(t_parts))
         if summary.denied:
             context_parts.append(f"{summary.denied} denied/err")
+        if summary.read_errors:
+            context_parts.append(f"{len(summary.read_errors)} log warning(s)")
         context_parts.append(f"{summary.elapsed_ms:.1f}ms")
-        self.query_one("#aa_context", Static).update(" · ".join(context_parts))
+        self.query_one("#aa_context", Static).update(literal(" · ".join(context_parts)))
 
         origin_bits = []
-        for key in ("mcp", "ui", "relay", "proactive"):
+        for key in ("mcp", "ui", "relay", "proactive", "cli", "unknown"):
             count = summary.by_origin.get(key, 0)
             if count:
                 origin_bits.append(f"{_ORIGIN_DISPLAY[key]}: {count}")
@@ -426,8 +554,15 @@ class AgentActivityScreen(WorkspaceScreen):
         cat_bits = [f"{_CATEGORY_SHORT.get(k, k)}: {v}" for k, v in cat_items]
         cat_text = " · ".join(cat_bits) if cat_bits else "none"
 
-        bar_text = f"[bold]Origins: [/bold]{escape(origin_text)}   |   [bold]Types: [/bold]{escape(cat_text)}"
-        self.query_one("#aa_summary_bar", Static).update(bar_text)
+        self.query_one("#aa_summary_bar", Static).update(
+            Content.assemble(
+                literal("Origins: ", "bold"),
+                literal(origin_text),
+                literal("   |   "),
+                literal("Types: ", "bold"),
+                literal(cat_text),
+            )
+        )
 
     def _update_pager(self, result: AuditQueryPage) -> None:
         total_pages = result.total_pages
@@ -436,7 +571,7 @@ class AgentActivityScreen(WorkspaceScreen):
             if total_pages > 0
             else "0 matches"
         )
-        self.query_one("#aa_page_info", Static).update(page_label)
+        self.query_one("#aa_page_info", Static).update(literal(page_label))
         self.query_one("#aa_btn_prev", ActionButton).disabled = result.page <= 0
         self.query_one("#aa_btn_next", ActionButton).disabled = (
             total_pages == 0 or result.page >= total_pages - 1
@@ -449,14 +584,19 @@ class AgentActivityScreen(WorkspaceScreen):
             return str(entry.get("timestamp") or "-")[:11]
         return ts.strftime("%m-%d %H:%M")
 
-    @staticmethod
-    def _fmt_short_target(entry: Mapping[str, Any], *, max_len: int = 16) -> str:
+    def _fmt_short_target(self, entry: Mapping[str, Any], *, max_len: int = 16) -> str:
         target = entry.get("target")
         label = ""
         if isinstance(target, Mapping):
-            label = str(target.get("name") or target.get("id") or target.get("host") or "").strip()
+            scrubbed = self.scrub_target(target)
+            label = str(scrubbed.get("name") or scrubbed.get("id") or scrubbed.get("host") or "").strip()
         if not label:
-            label = entry_target_label(entry)
+            raw_lbl = entry_target_label(entry)
+            redactor = self._redactor()
+            if redactor is not None and raw_lbl != "-" and hasattr(redactor, "redact_instance_id"):
+                label = redactor.redact_instance_id(raw_lbl)
+            else:
+                label = raw_lbl
         if len(label) > max_len:
             return label[: max_len - 1] + "…"
         return label
@@ -474,111 +614,108 @@ class AgentActivityScreen(WorkspaceScreen):
             return combined[: max_len - 1] + "…"
         return combined
 
-    @staticmethod
-    def _fmt_origin_cell(entry: Mapping[str, Any]) -> Text:
-        origin = str(entry.get("origin") or "mcp").lower()
+    def _fmt_origin_cell(self, entry: Mapping[str, Any]) -> Text:
+        origin = str(entry.get("origin") or "unknown").lower()
         label = _ORIGIN_DISPLAY.get(origin, origin)
-        style_map = {
-            "mcp": "bold cyan",
-            "ui": "bold green",
-            "relay": "bold magenta",
-            "proactive": "bold yellow",
+        token_map = {
+            "mcp": ("text-accent", True),
+            "ui": ("text-success", True),
+            "relay": ("primary", True),
+            "proactive": ("text-warning", True),
+            "cli": ("text-secondary", False),
+            "unknown": ("text-muted", False),
         }
-        return Text(label, style=style_map.get(origin, ""))
+        token, bold = token_map.get(origin, ("text-muted", False))
+        return cell(label, style=self._theme_color(token, bold=bold))
 
-    @staticmethod
-    def _fmt_status_cell(entry: Mapping[str, Any]) -> Text:
+    def _fmt_status_cell(self, entry: Mapping[str, Any]) -> Text:
         allowed = bool(entry.get("allowed", True))
+        tool_allowed = entry.get("tool_allowed")
+        status_field = str(entry.get("status") or "").lower()
         rc = entry.get("exit_code")
-        if not allowed:
-            return Text("DENY", style="bold red")
+        if not allowed or status_field == "denied":
+            return cell("DENY", style=self._theme_color("text-error", bold=True))
+        if tool_allowed is False or status_field in ("error", "timeout"):
+            return cell("ERR", style=self._theme_color("text-error", bold=True))
         if isinstance(rc, int) and rc != 0:
-            return Text(f"rc={rc}", style="bold yellow")
-        return Text("OK", style="green")
+            return cell(f"rc={rc}", style=self._theme_color("text-warning", bold=True))
+        return cell("OK", style=self._theme_color("text-success"))
 
-    @staticmethod
-    def _fmt_transport_cell(entry: Mapping[str, Any]) -> Text:
+    def _fmt_transport_cell(self, entry: Mapping[str, Any]) -> Text:
         via = str(entry.get("transport_used") or "-")
         if entry.get("ssh_fell_back"):
-            return Text("ssm*", style="bold yellow")
+            return cell("ssm*", style=self._theme_color("text-warning", bold=True))
         if via == "ssm":
-            return Text("ssm", style="cyan")
+            return cell("ssm", style=self._theme_color("text-accent"))
         if via == "ssh":
-            return Text("ssh", style="green")
+            return cell("ssh", style=self._theme_color("text-success"))
         if via == "scp":
-            return Text("scp", style="magenta")
-        return Text(via, style="dim")
+            return cell("scp", style=self._theme_color("primary"))
+        return cell(via, style=self._theme_color("text-muted"))
 
-    @staticmethod
-    def _fmt_category_cell(entry: Mapping[str, Any]) -> Text:
+    def _fmt_category_cell(self, entry: Mapping[str, Any]) -> Text:
         cat = str(entry.get("command_category") or entry.get("op_class") or "-")
         short = _CATEGORY_SHORT.get(cat, cat)
         if cat == CMD_BLOCKED:
-            return Text(short, style="bold red")
-        if cat in (CMD_FILE_WRITE, CMD_USER_PRIVILEGE, CMD_NETWORK_FIREWALL, CMD_SERVICE_CONTROL):
-            return Text(short, style="yellow")
+            return cell(short, style=self._theme_color("text-error", bold=True))
+        if cat in (CMD_FILE_WRITE, CMD_USER_PRIVILEGE, CMD_NETWORK_FIREWALL, CMD_SERVICE_CONTROL, CMD_UNKNOWN):
+            return cell(short, style=self._theme_color("text-warning"))
         if cat == CMD_READONLY_INSPECT:
-            return Text(short, style="green")
-        return Text(short, style="dim")
-
-    @staticmethod
-    def _fmt_duration(entry: Mapping[str, Any]) -> str:
-        dur = entry.get("duration_ms")
-        if not isinstance(dur, (int, float)):
-            return "-"
-        if dur >= 1000:
-            return f"{dur / 1000.0:.1f}s"
-        return f"{int(dur)}ms"
+            return cell(short, style=self._theme_color("text-success"))
+        return cell(short, style=self._theme_color("text-muted"))
 
     def _render_detail(self, entry: Mapping[str, Any]) -> None:
-        lines: List[str] = []
+        parts: List[Any] = []
 
-        def _row(label: str, value: Any) -> None:
+        def _row(label: str, value: Any, *, scrub_val: bool = True) -> None:
             if value is None or value == "":
                 return
-            lines.append(f"[bold]{escape(label)}: [/bold]{escape(self.scrub_text(str(value)))}")
+            text = self.scrub_text(str(value)) if scrub_val else str(value)
+            parts.append(Content.assemble(literal(f"{label}: ", "bold"), literal(text), "\n"))
 
-        _row("Timestamp", entry.get("timestamp"))
-        origin = str(entry.get("origin") or "mcp")
+        _row("Timestamp", entry.get("timestamp"), scrub_val=False)
+        origin = str(entry.get("origin") or "unknown")
         origin_text = _ORIGIN_DISPLAY.get(origin, origin)
         if entry.get("source") and entry.get("source") != origin:
             origin_text += f" (source={entry['source']})"
-        _row("Origin", origin_text)
+        _row("Origin", origin_text, scrub_val=False)
         _row("Client", entry.get("client"))
         _row("Session ID", entry.get("session_id"))
         _row("Conversation", entry.get("conversation_id"))
-        _row("Tool", entry.get("tool"))
+        _row("Tool", entry.get("tool"), scrub_val=False)
 
-        allowed = bool(entry.get("allowed", True))
-        status_str = "Allowed (OK)" if allowed else "Denied / Failed"
+        failed = is_entry_failed_or_denied(entry)
+        status_str = "Denied / failed" if failed else "Allowed (OK)"
         if isinstance(entry.get("exit_code"), int):
             status_str += f"  [exit_code={entry['exit_code']}]"
-        _row("Status", status_str)
+        _row("Status", status_str, scrub_val=False)
         _row("Reason", entry.get("reason"))
+        if entry.get("tool_reason") and entry.get("tool_reason") != entry.get("reason"):
+            _row("Tool reason", entry.get("tool_reason"))
         if isinstance(entry.get("duration_ms"), (int, float)):
-            _row("Duration", f"{int(entry['duration_ms'])} ms")
-        _row("Result length", f"{entry.get('result_length', 0)} chars")
+            _row("Duration", f"{int(entry['duration_ms'])} ms", scrub_val=False)
+        _row("Result length", f"{entry.get('result_length', 0)} chars", scrub_val=False)
 
         via = entry.get("transport_used")
         if via:
             via_str = str(via)
             if entry.get("ssh_fell_back"):
                 via_str += " (SSH unreachable -> fell back to SSM)"
-            _row("Transport", via_str)
-        _row("SSM Command ID", entry.get("ssm_command_id"))
-        _row("Key source", entry.get("key_source"))
+            _row("Transport", via_str, scrub_val=False)
+        _row("SSM command ID", entry.get("ssm_command_id"))
+        _row("Key source", entry.get("key_source"), scrub_val=False)
 
         target = entry.get("target")
         if isinstance(target, Mapping) and target:
-            t_bits = [
-                f"{k}={v}"
-                for k, v in target.items()
-                if v
-            ]
-            _row("Target", ", ".join(t_bits))
+            scrubbed_target = self.scrub_target(target)
+            t_bits = [f"{k}={v}" for k, v in scrubbed_target.items() if v]
+            _row("Target", ", ".join(t_bits), scrub_val=False)
         else:
             lbl = entry_target_label(entry)
             if lbl != "-":
+                redactor = self._redactor()
+                if redactor is not None and hasattr(redactor, "redact_instance_id"):
+                    lbl = redactor.redact_instance_id(lbl)
                 _row("Target", lbl)
 
         cat = entry.get("command_category") or entry.get("op_class")
@@ -586,23 +723,29 @@ class AgentActivityScreen(WorkspaceScreen):
             cat_str = str(cat)
             if entry.get("used_sudo"):
                 cat_str += " (sudo)"
-            _row("Command type", cat_str)
+            _row("Command type", cat_str, scrub_val=False)
         stems = entry.get("command_stems")
         if isinstance(stems, list) and stems:
-            _row("Command stems", ", ".join(str(s) for s in stems))
+            _row("Command stems", ", ".join(str(s) for s in stems), scrub_val=False)
 
         args = entry.get("args")
         if isinstance(args, Mapping) and args.get("command"):
-            lines.append("")
-            lines.append("[bold]Command:[/bold]")
-            lines.append(escape(self.scrub_text(str(args["command"]))))
+            parts.append(Content.assemble(
+                "\n",
+                literal("Command:\n", "bold"),
+                literal(self.scrub_text(str(args["command"]))),
+                "\n",
+            ))
 
-        lines.append("")
-        lines.append("[bold]Raw JSON:[/bold]")
-        raw_json = json.dumps(entry, indent=2, default=str)
-        lines.append(escape(self.scrub_text(raw_json)))
+        scrubbed_entry = self._scrub_entry_for_display(entry)
+        raw_json = json.dumps(scrubbed_entry, indent=2, default=str)
+        parts.append(Content.assemble(
+            "\n",
+            literal("Raw JSON:\n", "bold"),
+            literal(raw_json),
+        ))
 
-        self.query_one("#aa_detail_text", Static).update("\n".join(lines))
+        self.query_one("#aa_detail_text", Static).update(Content.assemble(*parts))
 
     # ------------------------------------------------------------------
     # Events & Actions
@@ -618,23 +761,15 @@ class AgentActivityScreen(WorkspaceScreen):
             "aa_select_category",
             "aa_select_transport",
         }:
-            self._schedule_load(reset_page=True)
+            self._debounce_load(_SELECT_DEBOUNCE_SECONDS)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._suppress_filter_events or event.input.id != "aa_search_input":
             return
-        if self._search_timer is not None:
-            self._search_timer.stop()
-        self._search_timer = self.set_timer(
-            _SEARCH_DEBOUNCE_SECONDS,
-            lambda: self._schedule_load(reset_page=True),
-        )
+        self._debounce_load(_SEARCH_DEBOUNCE_SECONDS)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "aa_search_input":
-            if self._search_timer is not None:
-                self._search_timer.stop()
-                self._search_timer = None
             self._schedule_load(reset_page=True)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -699,7 +834,8 @@ class AgentActivityScreen(WorkspaceScreen):
         if self._selected_entry is None:
             self.notify("No entry selected.", severity="warning")
             return
-        raw = self.scrub_text(json.dumps(self._selected_entry, indent=2, default=str))
+        scrubbed = self._scrub_entry_for_display(self._selected_entry)
+        raw = json.dumps(scrubbed, indent=2, default=str)
         copy_fn = getattr(self.app, "copy_to_clipboard", None)
         if callable(copy_fn):
             copy_fn(raw)

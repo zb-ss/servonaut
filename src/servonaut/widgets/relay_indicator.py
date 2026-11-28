@@ -393,7 +393,7 @@ def _build_mcp_tools_for_this_app(app):
         connection_service=app.connection_service,
         scp_service=app.scp_service,
         guard=CommandGuard(cfg.mcp, app.config_manager),
-        audit=AuditTrail(cfg.mcp.audit_path),
+        audit=AuditTrail(cfg.mcp.audit_path, default_origin="ui"),
         auth_service=app.auth_service,
         memory_service=getattr(app, "memory_service", None),
         shared_memory_reader=getattr(app, "shared_memory_reader", None),

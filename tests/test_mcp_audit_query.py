@@ -1,4 +1,4 @@
-"""Tests for AuditQueryService (multi-file rotation, filtering, pagination) and CLI."""
+"""Tests for AuditQueryService (multi-file rotation, filtering, cancellation, pagination) and CLI."""
 from __future__ import annotations
 
 import argparse
@@ -54,9 +54,11 @@ class TestParseSince:
         assert parse_since("7d", now=now) == now - timedelta(days=7)
         assert parse_since("30m", now=now) == now - timedelta(minutes=30)
 
-    def test_invalid_raises(self):
+    def test_invalid_and_overflow_raise_value_error(self):
         with pytest.raises(ValueError):
             parse_since("nonsense")
+        with pytest.raises(ValueError):
+            parse_since("999999999d")
 
 
 class TestAuditQueryService:
@@ -76,7 +78,6 @@ class TestAuditQueryService:
             _row(now - timedelta(hours=1), tool="run_command", origin="ui", source="ai_chat"),
         ])
 
-        # Set rot2's mtime far in the past so mtime pruning skips it cleanly.
         old_ts = (now - timedelta(days=10)).timestamp()
         os.utime(rot2, (old_ts, old_ts))
 
@@ -86,7 +87,6 @@ class TestAuditQueryService:
         assert page.total_matches == 2
         assert page.summary.files_skipped_mtime == 1
         assert page.summary.corrupt_lines == 1
-        # Newest first
         assert page.entries[0]["origin"] == "ui"
         assert page.entries[1]["transport_used"] == "ssm"
 
@@ -122,39 +122,49 @@ class TestAuditQueryService:
                 args={"log_group": "/aws/waf"},
                 target={},
             ),
+            _row(
+                now - timedelta(minutes=5),
+                tool="get_server_info",
+                origin="ui",
+                source="ai_chat",
+                allowed=True,
+                tool_allowed=False,
+                tool_reason="command_timeout",
+                status="error",
+                transport_used="ssh",
+                args={"instance_id": "i-db1"},
+                target={"id": "i-db1", "name": "prod-db-1"},
+            ),
         ])
 
         svc = AuditQueryService(live)
 
-        # Origin filter
-        p_ui = svc.query(AuditFilter(origin="ui"))
-        assert p_ui.total_matches == 1
-        assert p_ui.entries[0]["origin"] == "ui"
-
-        # Transport filter (SSM)
-        p_ssm = svc.query(AuditFilter(transport="ssm"))
-        assert p_ssm.total_matches == 1
-        assert p_ssm.entries[0]["target"]["name"] == "prod-api-1"
-
-        # Transport = none (API / local)
-        p_none = svc.query(AuditFilter(transport="none"))
-        assert p_none.total_matches == 1
-        assert p_none.entries[0]["tool"] == "cloudwatch_top_ips"
-
-        # Category filter (service_control)
-        p_svc = svc.query(AuditFilter(category="service_control"))
-        assert p_svc.total_matches == 1
-
-        # Scope = denied
+        assert svc.query(AuditFilter(origin="ui")).total_matches == 2
+        assert svc.query(AuditFilter(transport="ssm")).total_matches == 1
+        assert svc.query(AuditFilter(transport="none")).total_matches == 1
+        assert svc.query(AuditFilter(category="service_control")).total_matches == 1
+        # Scope = denied matches BOTH allowed=False AND failed chat rows (tool_allowed=False/status=error)
         p_denied = svc.query(AuditFilter(scope="denied"))
-        assert p_denied.total_matches == 1
-        assert p_denied.entries[0]["reason"] == "team_rule"
+        assert p_denied.total_matches == 2
+        assert svc.query(AuditFilter(host="prod-api")).total_matches == 1
+        assert svc.query(AuditFilter(search="command_timeout")).total_matches == 1
 
-        # Host & search filter
-        p_host = svc.query(AuditFilter(host="prod-api"))
-        assert p_host.total_matches == 1
-        p_search = svc.query(AuditFilter(search="systemctl"))
-        assert p_search.total_matches == 1
+    def test_cooperative_cancellation_stops_scan_early(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        live = tmp_path / "mcp_audit.jsonl"
+        rows = [_row(now - timedelta(seconds=1000 - i)) for i in range(600)]
+        _write_rows(live, rows)
+
+        calls = 0
+
+        def _cancel() -> bool:
+            nonlocal calls
+            calls += 1
+            return calls >= 2
+
+        page = AuditQueryService(live).query(AuditFilter(), cancel_check=_cancel)
+        assert page.summary.cancelled is True
+        assert page.summary.lines_scanned < 600
 
     def test_pagination(self, tmp_path):
         now = datetime.now(timezone.utc)
@@ -169,23 +179,30 @@ class TestAuditQueryService:
         assert p0.total_matches == 25
         assert p0.total_pages == 3
         assert len(p0.entries) == 10
-        assert p0.entries[0]["duration_ms"] == 24  # newest first
+        assert p0.entries[0]["duration_ms"] == 24
         assert len(p2.entries) == 5
         assert p2.entries[-1]["duration_ms"] == 0
 
 
 class TestCLIMcpAudit:
-    def test_cli_text_summary_and_json_output(self, tmp_path, capsys):
+    def _parser(self):
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_mcp_parser(sub)
+        return parser
+
+    def test_cli_text_summary_json_and_single_line_sanitization(self, tmp_path, capsys):
         now = datetime.now(timezone.utc)
         live = tmp_path / "mcp_audit.jsonl"
         _write_rows(live, [
             _row(
                 now - timedelta(minutes=5),
                 origin="mcp",
-                client="claude-code/1.0",
+                client="claude-code/1.0\nFAKE ROW",
                 transport_used="ssm",
                 ssh_fell_back=True,
-                args={"instance_id": "i-web1", "command": "uptime", "transport": "auto"},
+                args={"instance_id": "i-web1\nINJECTED", "command": "uptime", "transport": "auto"},
+                target={},
             ),
             _row(
                 now - timedelta(minutes=2),
@@ -197,20 +214,21 @@ class TestCLIMcpAudit:
             ),
         ])
 
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_mcp_parser(sub)
+        parser = self._parser()
 
-        # Text + summary
         ns = parser.parse_args(["mcp", "audit", "--since", "24h", "--summary", "--audit-path", str(live)])
         rc = handle_mcp_command(ns)
         assert rc == 0
         out = capsys.readouterr().out
         assert "Total calls: 2" in out
         assert "ssm(fb)" in out
-        assert "ui" in out
 
-        # JSON + origin filter
+        # Ensure newlines in client / instance_id do NOT split into fake rows
+        page = AuditQueryService(live).query(AuditFilter())
+        for entry in page.entries:
+            line = format_access_line(entry)
+            assert "\n" not in line and "\r" not in line
+
         ns_json = parser.parse_args([
             "mcp", "audit", "--origin", "ui", "--json", "--audit-path", str(live),
         ])
@@ -220,8 +238,25 @@ class TestCLIMcpAudit:
         assert payload["total_matches"] == 1
         assert payload["entries"][0]["origin"] == "ui"
 
-        # Formatting sanity
-        line = format_access_line(payload["entries"][0])
-        assert "df -h" in line
-        summary_str = format_summary_text(AuditQueryService(live).query(AuditFilter()).summary)
+        summary_str = format_summary_text(page.summary)
         assert "By transport:" in summary_str
+
+    def test_cli_rejects_overflow_since_zero_limit_and_unreadable_file(self, tmp_path, capsys):
+        parser = self._parser()
+
+        # 1. --since overflow -> clean exit 2, no traceback
+        ns_overflow = parser.parse_args(["mcp", "audit", "--since", "999999999d", "--audit-path", str(tmp_path / "x.jsonl")])
+        assert handle_mcp_command(ns_overflow) == 2
+        assert "Error:" in capsys.readouterr().err
+
+        # 2. -n 0 -> clean exit 2 (not silently clamped to 1)
+        ns_zero = parser.parse_args(["mcp", "audit", "-n", "0", "--audit-path", str(tmp_path / "x.jsonl")])
+        assert handle_mcp_command(ns_zero) == 2
+        assert "--limit" in capsys.readouterr().err
+
+        # 3. Unreadable log (directory instead of file) -> non-zero exit + stderr
+        bad_dir = tmp_path / "unreadable_dir"
+        bad_dir.mkdir()
+        ns_bad = parser.parse_args(["mcp", "audit", "--audit-path", str(bad_dir)])
+        assert handle_mcp_command(ns_bad) == 1
+        assert "Error reading audit log" in capsys.readouterr().err

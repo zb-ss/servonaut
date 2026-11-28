@@ -2,7 +2,7 @@
 
 Usage::
 
-    servonaut mcp audit [--since 24h] [--origin mcp|ui|relay|proactive]
+    servonaut mcp audit [--since 24h] [--origin mcp|ui|relay|proactive|cli|unknown]
                         [--remote-only] [--commands-only]
                         [--transport ssh|ssm|scp|none]
                         [--category readonly_inspect]
@@ -45,9 +45,9 @@ def add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     audit.add_argument(
         "--origin",
-        choices=["mcp", "ui", "relay", "proactive"],
+        choices=["mcp", "ui", "relay", "proactive", "cli", "unknown"],
         default="",
-        help="Filter by execution surface (mcp, ui, relay, proactive).",
+        help="Filter by execution surface (mcp, ui, relay, proactive, cli, unknown).",
     )
     audit.add_argument(
         "--remote-only",
@@ -68,7 +68,7 @@ def add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
     audit.add_argument(
         "--category",
         default="",
-        help="Filter by command/operation category (e.g. readonly_inspect, service_control, file_write, blocked).",
+        help="Filter by command/operation category (e.g. readonly_inspect, service_control, file_write, unknown, blocked).",
     )
     audit.add_argument(
         "--tool",
@@ -106,7 +106,7 @@ def add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
         "--limit",
         type=int,
         default=100,
-        help="Maximum rows to display (default: 100).",
+        help="Maximum rows to display (positive integer, default: 100).",
     )
     audit.add_argument(
         "--audit-path",
@@ -130,6 +130,10 @@ def handle_mcp_command(args: argparse.Namespace) -> int:
     """Execute ``servonaut mcp <subcommand>``."""
     if getattr(args, "mcp_command", None) != "audit":
         print("Unknown mcp subcommand.", file=sys.stderr)
+        return 2
+
+    if args.limit is None or int(args.limit) <= 0:
+        print("Error: --limit must be a positive integer.", file=sys.stderr)
         return 2
 
     try:
@@ -159,7 +163,14 @@ def handle_mcp_command(args: argparse.Namespace) -> int:
     )
 
     service = AuditQueryService(_resolve_audit_path(args))
-    page = service.query(flt, page=0, page_size=max(1, int(args.limit)))
+    page = service.query(flt, page=0, page_size=int(args.limit))
+
+    # Distinguish an unreadable log from an empty/no-match log.
+    if page.summary.read_errors:
+        for err in page.summary.read_errors:
+            print(f"Error reading audit log: {err}", file=sys.stderr)
+        if page.total_matches == 0 and page.summary.lines_scanned == 0:
+            return 1
 
     if args.as_json:
         payload = {
@@ -174,6 +185,7 @@ def handle_mcp_command(args: argparse.Namespace) -> int:
                 "by_category": page.summary.by_category,
                 "by_tool": page.summary.by_tool,
                 "by_target": page.summary.by_target,
+                "read_errors": page.summary.read_errors,
                 "elapsed_ms": page.summary.elapsed_ms,
             },
             "entries": page.entries,

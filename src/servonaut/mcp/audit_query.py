@@ -8,6 +8,8 @@ Designed to stay responsive even when the live log plus rotated archives
   opening them.
 - Reads each file backwards from EOF in 64 KiB chunks (O(chunk) memory) and
   stops early once entries fall below ``since``.
+- Supports cooperative cancellation via ``cancel_check`` so stale background
+  scans abort immediately when filters change.
 - Streams filter matching and summary aggregation, retaining only the
   requested page in memory.
 """
@@ -21,13 +23,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional
 
 from servonaut.mcp.audit import ROTATE_MAX_HISTORY
 from servonaut.mcp.audit_classifier import (
     OP_REMOTE_COMMAND,
     enrich_entry_metadata,
+    is_entry_failed_or_denied,
 )
+from servonaut.utils.markup import single_line_text
 
 # Chunk size for reverse file scanning (64 KiB).
 _REVERSE_CHUNK_BYTES = 64 * 1024
@@ -39,7 +43,10 @@ _MTIME_GRACE_SECONDS = 5.0
 # concurrent writes arriving slightly out of order never truncate the window.
 _EARLY_STOP_STREAK = 8
 
-# Fast regex/substring marker to locate `"timestamp": "..."` before json.loads.
+# How often (in scanned lines) to poll `cancel_check`.
+_CANCEL_CHECK_EVERY = 256
+
+# Fast substring marker to locate `"timestamp": "..."` before json.loads.
 _TS_MARKER = '"timestamp":'
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
@@ -51,7 +58,7 @@ class AuditFilter:
 
     since: Optional[datetime] = None
     until: Optional[datetime] = None
-    origin: str = ""      # "", "mcp", "ui", "relay", "proactive"
+    origin: str = ""      # "", "mcp", "ui", "relay", "proactive", "cli", "unknown"
     scope: str = "all"    # "all", "remote", "commands", "denied"
     category: str = ""    # command_category / op_class
     transport: str = ""   # "", "ssh", "ssm", "scp", "none"
@@ -76,7 +83,10 @@ class AuditSummary:
     by_target: Dict[str, int] = field(default_factory=dict)
     files_scanned: int = 0
     files_skipped_mtime: int = 0
+    lines_scanned: int = 0
     corrupt_lines: int = 0
+    read_errors: List[str] = field(default_factory=list)
+    cancelled: bool = False
     elapsed_ms: float = 0.0
 
 
@@ -114,7 +124,7 @@ def parse_since(spec: str, *, now: Optional[datetime] = None) -> Optional[dateti
     """Parse a relative window (``24h``, ``7d``, ``30m``, ``all``) or ISO date.
 
     Returns ``None`` for ``"all"`` or empty string.
-    Raises ``ValueError`` for unrecognized input.
+    Raises ``ValueError`` for unrecognized or out-of-range input.
     """
     raw = (spec or "").strip()
     if not raw or raw.lower() == "all":
@@ -126,16 +136,19 @@ def parse_since(spec: str, *, now: Optional[datetime] = None) -> Optional[dateti
         unit = m.group(2).lower()
         if amount <= 0:
             raise ValueError(f"Duration must be positive: {spec!r}")
-        if unit == "s":
-            return ref - timedelta(seconds=amount)
-        if unit == "m":
-            return ref - timedelta(minutes=amount)
-        if unit == "h":
-            return ref - timedelta(hours=amount)
-        if unit == "d":
-            return ref - timedelta(days=amount)
-        if unit == "w":
-            return ref - timedelta(weeks=amount)
+        try:
+            if unit == "s":
+                return ref - timedelta(seconds=amount)
+            if unit == "m":
+                return ref - timedelta(minutes=amount)
+            if unit == "h":
+                return ref - timedelta(hours=amount)
+            if unit == "d":
+                return ref - timedelta(days=amount)
+            if unit == "w":
+                return ref - timedelta(weeks=amount)
+        except OverflowError as exc:
+            raise ValueError(f"Time window out of range: {spec!r}") from exc
     dt = parse_timestamp(raw)
     if dt is not None:
         return dt
@@ -236,12 +249,12 @@ def entry_command_summary(entry: Mapping[str, Any], *, max_len: int = 160) -> st
                 break
         text = " ".join(parts)
 
-    if not entry.get("allowed", True):
-        reason = str(entry.get("reason") or "").strip()
+    if is_entry_failed_or_denied(entry):
+        reason = str(entry.get("tool_reason") or entry.get("reason") or "").strip()
         if reason:
             text = f"{text} [{reason}]" if text else f"[{reason}]"
 
-    text = " ".join(text.splitlines()).strip()
+    text = single_line_text(text).strip()
     if len(text) > max_len:
         return text[: max_len - 3] + "..."
     return text or "-"
@@ -266,7 +279,7 @@ class AuditQueryService:
     def log_files(self) -> List[Path]:
         """Return existing audit files ordered newest-to-oldest (live, .1, .2, ...)."""
         files: List[Path] = []
-        if self._path.exists():
+        if self._path.exists() or self._path.is_symlink():
             files.append(self._path)
         for idx in range(1, self._max_history + 1):
             candidate = self._path.with_name(self._path.name + f".{idx}")
@@ -280,6 +293,7 @@ class AuditQueryService:
         *,
         page: int = 0,
         page_size: int = 100,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AuditQueryPage:
         """Query matching entries across rotated files with bounded memory."""
         started = time.monotonic()
@@ -292,7 +306,6 @@ class AuditQueryService:
         since_dt = flt.since.astimezone(timezone.utc) if flt.since is not None else None
         until_dt = flt.until.astimezone(timezone.utc) if flt.until is not None else None
         since_epoch = since_dt.timestamp() if since_dt is not None else None
-        # Cheap lexicographic ISO-8601 floor for UTC timestamps when format matches.
         since_iso_prefix = since_dt.strftime("%Y-%m-%dT%H:%M:%S") if since_dt is not None else ""
 
         origin_flt = flt.origin.strip().lower()
@@ -315,17 +328,25 @@ class AuditQueryService:
         match_count = 0
         stop_all_files = False
 
+        if self._path.is_symlink():
+            summary.read_errors.append(
+                f"{self._path}: audit path is a symlink (writes are skipped; configure mcp.audit_path to a regular file)"
+            )
+
         for file_path in self.log_files():
             if stop_all_files:
                 break
-            if since_epoch is not None:
-                try:
-                    mtime = file_path.stat().st_mtime
-                except OSError:
-                    continue
-                if mtime < since_epoch - _MTIME_GRACE_SECONDS:
-                    summary.files_skipped_mtime += 1
-                    continue
+            if cancel_check is not None and cancel_check():
+                summary.cancelled = True
+                break
+            try:
+                st = file_path.stat()
+            except OSError as exc:
+                summary.read_errors.append(f"{file_path}: {exc}")
+                continue
+            if since_epoch is not None and st.st_mtime < since_epoch - _MTIME_GRACE_SECONDS:
+                summary.files_skipped_mtime += 1
+                continue
 
             summary.files_scanned += 1
             below_since_streak = 0
@@ -333,11 +354,20 @@ class AuditQueryService:
             try:
                 line_iter = _iter_lines_reverse(file_path)
                 for line in line_iter:
+                    summary.lines_scanned += 1
+                    if (
+                        cancel_check is not None
+                        and (summary.lines_scanned % _CANCEL_CHECK_EVERY == 0)
+                        and cancel_check()
+                    ):
+                        summary.cancelled = True
+                        stop_all_files = True
+                        break
+
                     # Fast timestamp cutoff check before full JSON deserialization.
                     if since_dt is not None:
                         ts_str = _extract_ts_prefix(line)
                         if ts_str is not None:
-                            # Fast path for standard UTC ISO strings (+00:00 / Z).
                             if (ts_str.endswith("+00:00") or ts_str.endswith("Z")) and len(ts_str) >= 19:
                                 if ts_str[:19] < since_iso_prefix:
                                     below_since_streak += 1
@@ -357,17 +387,14 @@ class AuditQueryService:
                                         continue
                                     below_since_streak = 0
 
-                    # Ultra-cheap raw-line pre-filters before full JSON parse.
-                    # Only apply checks that are guaranteed lossless even on legacy rows.
+                    # Lossless raw-line pre-filters before full JSON parse.
                     if tool_flt and tool_flt not in line.lower():
                         continue
                     if host_flt and host_flt not in line.lower():
                         continue
-                    if denied_only and '"allowed": false' not in line and '"allowed":false' not in line:
-                        continue
                     if transport_flt == "ssm" and "ssm" not in line.lower():
                         continue
-                    if origin_flt in ("proactive", "relay") and origin_flt not in line.lower():
+                    if origin_flt in ("proactive", "relay", "cli") and origin_flt not in line.lower():
                         continue
 
                     try:
@@ -407,14 +434,14 @@ class AuditQueryService:
 
                     # Update streaming counters.
                     summary.total += 1
-                    if entry.get("allowed", True):
-                        summary.allowed += 1
-                    else:
+                    if is_entry_failed_or_denied(entry):
                         summary.denied += 1
+                    else:
+                        summary.allowed += 1
                     if entry.get("remote_exec"):
                         summary.remote_exec += 1
 
-                    origin_val = str(entry.get("origin") or "mcp")
+                    origin_val = str(entry.get("origin") or "unknown")
                     by_origin[origin_val] += 1
 
                     transport_val = str(entry.get("transport_used") or "")
@@ -436,7 +463,8 @@ class AuditQueryService:
                     if start_idx <= match_count < end_idx:
                         page_entries.append(entry)
                     match_count += 1
-            except OSError:
+            except OSError as exc:
+                summary.read_errors.append(f"{file_path}: {exc}")
                 continue
 
         summary.by_origin = dict(by_origin)
@@ -469,7 +497,7 @@ def _matches_filter(
     search: str,
     denied_only: bool,
 ) -> bool:
-    if denied_only and entry.get("allowed", True):
+    if denied_only and not is_entry_failed_or_denied(entry):
         return False
 
     if origin and str(entry.get("origin") or "").lower() != origin:
@@ -533,6 +561,7 @@ def _full_search_blob(entry: Mapping[str, Any]) -> str:
         str(entry.get("origin") or ""),
         str(entry.get("client") or ""),
         str(entry.get("reason") or ""),
+        str(entry.get("tool_reason") or ""),
         str(entry.get("transport_used") or ""),
         str(entry.get("command_category") or ""),
         str(entry.get("ssm_command_id") or ""),
@@ -548,34 +577,38 @@ def _full_search_blob(entry: Mapping[str, Any]) -> str:
 
 
 def format_access_line(entry: Mapping[str, Any]) -> str:
-    """Format one audit entry as a compact, Apache-style single log line."""
+    """Format one audit entry as a compact, single-line Apache-style log entry."""
     ts = parse_timestamp(entry.get("timestamp"))
-    ts_str = ts.strftime("%Y-%m-%d %H:%M:%SZ") if ts else str(entry.get("timestamp") or "-")[:20]
+    ts_str = ts.strftime("%Y-%m-%d %H:%M:%SZ") if ts else single_line_text(str(entry.get("timestamp") or "-"))[:20]
 
-    origin = str(entry.get("origin") or "mcp")
-    client = str(entry.get("client") or "").strip()
+    origin = single_line_text(str(entry.get("origin") or "unknown"))
+    client = single_line_text(str(entry.get("client") or "")).strip()
     origin_col = f"{origin}:{client}" if client else origin
     if len(origin_col) > 22:
         origin_col = origin_col[:19] + "..."
 
     allowed = bool(entry.get("allowed", True))
+    tool_allowed = entry.get("tool_allowed")
+    status_field = str(entry.get("status") or "").lower()
     exit_code = entry.get("exit_code")
-    if not allowed:
+    if not allowed or status_field == "denied":
         status = "DENY"
+    elif tool_allowed is False or status_field in ("error", "timeout"):
+        status = "ERR"
     elif isinstance(exit_code, int) and exit_code != 0:
         status = f"RC={exit_code}"
     else:
         status = "OK"
 
-    tool = str(entry.get("tool") or "-")
-    transport = str(entry.get("transport_used") or "-")
+    tool = single_line_text(str(entry.get("tool") or "-"))
+    transport = single_line_text(str(entry.get("transport_used") or "-"))
     if entry.get("ssh_fell_back"):
         transport = f"{transport}(fb)"
-    target = entry_target_label(entry)
-    category = str(entry.get("command_category") or entry.get("op_class") or "-")
+    target = single_line_text(entry_target_label(entry))
+    category = single_line_text(str(entry.get("command_category") or entry.get("op_class") or "-"))
 
     dur = entry.get("duration_ms")
-    dur_str = f"{dur}ms" if isinstance(dur, (int, float)) else "-"
+    dur_str = f"{int(dur)}ms" if isinstance(dur, (int, float)) else "-"
     rc_str = f"rc={exit_code}" if isinstance(exit_code, int) else ""
 
     summary = entry_command_summary(entry, max_len=120)
@@ -613,10 +646,11 @@ def format_summary_text(summary: AuditSummary) -> str:
         lines.append(f"By category:   {cats}")
     if summary.by_target:
         top_targets = sorted(summary.by_target.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
-        targets = ", ".join(f"{k}={v}" for k, v in top_targets)
+        targets = ", ".join(f"{single_line_text(k)}={v}" for k, v in top_targets)
         lines.append(f"Top targets:   {targets}")
     lines.append(
         f"Query stats:   {summary.elapsed_ms:.1f}ms "
-        f"(files scanned={summary.files_scanned}, skipped_mtime={summary.files_skipped_mtime}, corrupt={summary.corrupt_lines})"
+        f"(files scanned={summary.files_scanned}, skipped_mtime={summary.files_skipped_mtime}, "
+        f"lines={summary.lines_scanned}, corrupt={summary.corrupt_lines})"
     )
     return "\n".join(lines)

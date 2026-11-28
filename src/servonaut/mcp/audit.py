@@ -13,6 +13,7 @@ On rotation the live file is renamed ``mcp_audit.jsonl.1``; existing
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -24,7 +25,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from servonaut.mcp.audit_classifier import classify_audit_entry, infer_origin
 from servonaut.utils.logging_setup import warn_stderr
 
 logger = logging.getLogger(__name__)
@@ -173,11 +173,29 @@ class AuditTrail:
         return self._path
 
     def _warn_unavailable(self, error: Exception) -> None:
+        is_symlink = isinstance(error, OSError) and getattr(error, "errno", None) == errno.ELOOP
         if not self._warn_to_stderr:
-            logger.error("Failed to write audit log: %s", error)
+            if not self._warned_unavailable:
+                self._warned_unavailable = True
+                if is_symlink:
+                    logger.warning(
+                        "MCP audit log path %s is a symlink; skipping write "
+                        "(configure mcp.audit_path to a regular file).",
+                        self._path,
+                    )
+                else:
+                    logger.error("Failed to write audit log: %s", error)
+            else:
+                logger.error("Failed to write audit log: %s", error)
         elif not self._warned_unavailable:
             self._warned_unavailable = True
-            warn_stderr("servonaut: MCP audit log is unavailable. Tool activity may go unrecorded.")
+            if is_symlink:
+                warn_stderr(
+                    "servonaut: MCP audit log path is a symlink and was skipped "
+                    "(configure mcp.audit_path to a regular file)."
+                )
+            else:
+                warn_stderr("servonaut: MCP audit log is unavailable. Tool activity may go unrecorded.")
 
     def log(
         self,
@@ -228,10 +246,6 @@ class AuditTrail:
             entry['source'] = effective_source
         if effective_origin:
             entry['origin'] = effective_origin
-        else:
-            inferred = infer_origin(entry)
-            if effective_source:
-                entry['origin'] = inferred
 
         if ctx is not None:
             if ctx.client and 'client' not in extras:
@@ -244,18 +258,8 @@ class AuditTrail:
                 if key not in entry and key not in extras:
                     entry[key] = value
 
-        # Deterministic remote/command classification (lightweight, pure Python).
-        classified = classify_audit_entry(tool, args, allowed=allowed, reason=reason)
-        entry['op_class'] = classified['op_class']
-        entry['remote_exec'] = classified['remote_exec']
-        entry['command_category'] = classified['command_category']
-        if classified['command_stems']:
-            entry['command_stems'] = classified['command_stems']
-        if classified['used_sudo']:
-            entry['used_sudo'] = True
-
         # Surplus kwargs land last so they can't accidentally clobber the
-        # canonical fields above (except explicit origin/classification already handled).
+        # canonical fields above.
         for key, value in extras.items():
             if key not in entry and value is not None:
                 entry[key] = value
@@ -266,9 +270,14 @@ class AuditTrail:
         if ctx is not None:
             ctx.logged_count += 1
             if ctx.suppress_writes:
-                # Forward execution telemetry captured by an inner tool call
-                # (e.g. ServonautTools called from AIToolBridge) so the single
-                # outer audit row carries transport_used / target / exit_code.
+                # Forward execution telemetry and inner outcome captured by a
+                # local tool call (e.g. ServonautTools called from AIToolBridge)
+                # so the single outer audit row preserves distinct failure/refusal
+                # reasons and transport/target telemetry.
+                if ctx.extras.get('tool_allowed') is not False:
+                    ctx.extras['tool_allowed'] = bool(allowed)
+                    if reason:
+                        ctx.extras['tool_reason'] = str(reason)
                 for telemetry_key in (
                     'transport_used', 'ssh_fell_back', 'ssm_command_id',
                     'exit_code', 'target', 'key_source',

@@ -1278,7 +1278,7 @@ def _fetch_backend_status():
         connection_service=None,
         scp_service=None,
         guard=CommandGuard(cfg.mcp, config_manager),
-        audit=AuditTrail(cfg.mcp.audit_path),
+        audit=AuditTrail(cfg.mcp.audit_path, default_origin="cli"),
         auth_service=auth,
         memory_service=None,
     )
