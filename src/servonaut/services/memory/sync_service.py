@@ -35,6 +35,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
@@ -190,6 +191,19 @@ def _validate_reserved(instance_id: str) -> None:
 async def _pause(seconds: float) -> None:
     """Sleep before a retry (a seam for tests)."""
     await asyncio.sleep(seconds)
+
+
+class LocalUnlock(str, Enum):
+    """How :meth:`MemorySyncService.unlock_local` ended."""
+
+    OK = "ok"
+    NO_CACHE = "no_cache"
+    #: The account could not be resolved (offline, signed out): try again later.
+    UNAVAILABLE = "unavailable"
+    #: The cache belongs to another account.
+    OTHER_ACCOUNT = "other_account"
+    #: The key derivation ran and the passphrase (or the cache) did not fit.
+    BAD_PASSPHRASE = "bad_passphrase"
 
 
 class MemorySyncService:
@@ -437,6 +451,85 @@ class MemorySyncService:
             return True
         except Exception:
             return False
+
+    async def unlock_from_local_cache(self, passphrase: str) -> bool:
+        """Unlock from the local keypair cache alone; ``True`` when it worked.
+
+        For processes that must read shared memory but may not change
+        anything (the standalone MCP server): unlike :meth:`bootstrap` this
+        never enrols a key, reads settings, registers servers or replays the
+        upload queue, and it never deletes or rewrites the cache. On any
+        failure nothing is set. See :meth:`unlock_local` for the reason.
+        """
+        return await self.unlock_local(passphrase) is LocalUnlock.OK
+
+    async def unlock_local(self, passphrase: str) -> "LocalUnlock":
+        """Like :meth:`unlock_from_local_cache`, but says why it failed.
+
+        Only :attr:`LocalUnlock.BAD_PASSPHRASE` comes after the slow key
+        derivation, so a caller that remembers failures can skip a repeat of
+        exactly that one.
+        """
+        if self.is_configured:
+            return LocalUnlock.OK
+        cached = self._read_key_cache()
+        if cached is None:
+            return LocalUnlock.NO_CACHE
+        try:
+            user_id = await self._auth_service.fetch_user_id()
+        except Exception as exc:  # noqa: BLE001 - a lookup failure is "try later"
+            logger.debug("unlock_local: user id lookup failed (%s)", type(exc).__name__)
+            return LocalUnlock.UNAVAILABLE
+        if user_id is None:
+            return LocalUnlock.UNAVAILABLE
+        cached_uid = cached.get("user_id")
+        # Same account binding as the bootstrap fast path, but a cache of
+        # another account is left alone here (the app owns clearing it).
+        if cached_uid is not None and int(cached_uid) != int(user_id):
+            return LocalUnlock.OTHER_ACCOUNT
+        # Argon2id takes about a second: keep it off the event loop.
+        unwrapped = await asyncio.to_thread(self._unwrap_cached_key, cached, passphrase)
+        if unwrapped is None:
+            return LocalUnlock.BAD_PASSPHRASE
+        public_key, private_key = unwrapped
+        if self.is_configured:
+            return LocalUnlock.OK
+        self._self_user_id = int(user_id)
+        self._self_pubkey = public_key
+        self._self_privkey = private_key
+        self._announce_key_material()
+        return LocalUnlock.OK
+
+    def _read_key_cache(self) -> Optional[Dict[str, Any]]:
+        """The parsed local keypair cache, or ``None`` when absent or unusable."""
+        if not _HAS_CRYPTO:
+            return None
+        try:
+            cached = json.loads(self._key_cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(cached, dict):
+            return None
+        if not cached.get("public_key") or not cached.get("wrapped_private_key"):
+            return None
+        return cached
+
+    def _unwrap_cached_key(
+        self, cached: Dict[str, Any], passphrase: str
+    ) -> Optional[Tuple[bytes, bytes]]:
+        """``(public, private)`` from the cache, or ``None`` (bad passphrase or cache)."""
+        import base64
+
+        try:
+            wrapped = WrappedPrivateKey.from_json(cached["wrapped_private_key"])
+            private_key = unwrap_private_key(wrapped, passphrase)
+            public_key = base64.b64decode(cached["public_key"])
+        except Exception:  # noqa: BLE001 - wrong passphrase, corrupt data: same answer
+            return None
+        derived = self._derive_public_key(private_key)
+        if derived is not None and derived != public_key:
+            return None
+        return public_key, private_key
 
     def set_key_mismatch_listener(self, fn: Callable[[], None]) -> None:
         """Register a callback fired when a cross-device key-rotation mismatch is detected.
