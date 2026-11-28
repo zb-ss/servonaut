@@ -3660,8 +3660,7 @@ class ServonautApp(App):
             from servonaut.screens.key_management import KeyManagementScreen
             self.switch_screen(KeyManagementScreen())
         elif target_id == "nav_memory":
-            from servonaut.screens.fleet_memory import FleetMemoryScreen
-            self.switch_screen(FleetMemoryScreen())
+            self._open_fleet_memory_tab("fleet")
         elif target_id == "nav_settings":
             from servonaut.screens.settings import SettingsScreen
             self.switch_screen(SettingsScreen())
@@ -3729,8 +3728,7 @@ class ServonautApp(App):
             from servonaut.screens.snapshot_manager import SnapshotManagerScreen
             self.switch_screen(SnapshotManagerScreen())
         elif target_id == "nav_memory_sync":
-            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
-            self.switch_screen(MemorySyncSetupScreen())
+            self._open_fleet_memory_tab("sync")
         elif target_id == "nav_secrets":
             from servonaut.screens.secrets import SecretsScreen
             self.switch_screen(SecretsScreen())
@@ -3749,11 +3747,9 @@ class ServonautApp(App):
             from servonaut.screens.findings import FindingsScreen
             self.switch_screen(FindingsScreen())
         elif target_id == "nav_drift":
-            from servonaut.screens.memory_drift import MemoryDriftScreen
-            self.switch_screen(MemoryDriftScreen())
+            self._open_fleet_memory_tab("drift")
         elif target_id == "nav_memory_export":
-            from servonaut.screens.memory_export import MemoryExportScreen
-            self.switch_screen(MemoryExportScreen())
+            self._open_fleet_memory_tab("export")
         elif target_id == "nav_bug_report":
             if self.bug_report_service is None:
                 self.notify(
@@ -3810,6 +3806,16 @@ class ServonautApp(App):
             self.switch_screen(ObjectStorageScreen(provider=provider))
         elif target_id == "nav_quit":
             self.exit()
+
+    def _open_fleet_memory_tab(self, tab: str) -> None:
+        """Show FleetMemoryScreen on *tab*, switching tabs in place if already active."""
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
+
+        screen = getattr(self, "screen", None)
+        if isinstance(screen, FleetMemoryScreen):
+            screen.activate_tab(tab)
+            return
+        self.switch_screen(FleetMemoryScreen(initial_tab=tab))
 
     def _run_global_scan(self) -> None:
         """Confirm then run keyword scan across every server not known to be stopped."""

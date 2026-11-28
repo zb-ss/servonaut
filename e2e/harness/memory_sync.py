@@ -49,8 +49,11 @@ def status(t: Any) -> str:
 async def open_memory_sync(t: Any) -> None:
     await t.nav("nav_memory")
     await t.wait_for_screen("FleetMemoryScreen")
-    await t.click("#memory_view_sync")
-    await t.wait_for_screen("MemorySyncSetupScreen")
+    await t.click("#--content-tab-mem_tab_sync")
+    await t.wait_until(
+        lambda: t.is_reachable(t.on_screen("#msync_status")),
+        desc="Memory Sync tab active",
+    )
 
 
 async def unlock(t: Any) -> None:

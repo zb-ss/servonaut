@@ -18,7 +18,6 @@ from servonaut.screens.server_actions import VaultBindingModal
 from servonaut.screens.team_management import TeamManagementScreen
 from servonaut.styles import CSS_FILES
 from servonaut.widgets.fleet_values import instance_values
-from servonaut.widgets.memory_views import MemoryViewsBar
 from servonaut.widgets.sidebar import Sidebar
 
 pytestmark = pytest.mark.usefixtures("navigation_open")
@@ -108,38 +107,75 @@ def test_fleet_values_shows_team_name_only_on_shared_rows_o3() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_views_bar_gates_drift_and_export_and_switches() -> None:
-    switched: list[str] = []
+async def test_fleet_memory_tabs_gate_drift_and_export_and_preserve_marks(tmp_path) -> None:
+    from textual.widgets import TabbedContent
 
-    class _BarHost(App):
-        def __init__(self, entitled: bool, configured: bool) -> None:
+    from servonaut.config.manager import ConfigManager
+    from servonaut.config.schema import AppConfig
+    from servonaut.screens.fleet_memory import FleetMemoryScreen
+    from servonaut.services.custom_server_service import CustomServerService
+
+    class _MemoryTabsHost(App):
+        CSS_PATH = CSS_FILES
+
+        def __init__(self, features: set[str], configured: bool) -> None:
             super().__init__()
+            cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+            cm.save(AppConfig())
+            self.config_manager = cm
+            self.custom_server_service = CustomServerService(cm)
+            self.instances = [{"id": "i-1", "name": "web-1", "provider": "aws", "state": "running"}]
+            self.demo_mode = False
+            self.redaction_service = None
+            self.memory_service = None
+            self.fleet_service = None
+            self.fleet_scan_service = None
+            self.shared_memory_reader = None
+            self.drift_service = None
+            self.export_service = None
             self.auth_service = SimpleNamespace(
-                is_authenticated=entitled,
-                has_feature=lambda _f: entitled,
+                is_authenticated=True,
+                has_feature=lambda feature: feature in features,
             )
-            self.memory_sync_service = SimpleNamespace(is_configured=configured)
+            self.memory_sync_service = SimpleNamespace(
+                is_configured=configured,
+                is_enrolled_locally=lambda: False,
+            )
+            self._memory_scan_controller = None
 
-        def switch_screen(self, screen) -> None:  # type: ignore[override]
-            switched.append(type(screen).__name__)
-
-        def on_mount(self) -> None:
-            class _S(Screen):
-                def compose(self) -> ComposeResult:
-                    yield MemoryViewsBar(active="fleet")
-
-            self.push_screen(_S())
-
-    app = _BarHost(entitled=False, configured=False)
-    async with app.run_test(size=(100, 30)) as pilot:
+    app = _MemoryTabsHost({"memory_sync", "memory_drift", "memory_compliance_export"}, False)
+    async with app.run_test(size=(160, 50)) as pilot:
+        base_screen = Screen()
+        await app.push_screen(base_screen)
+        screen = FleetMemoryScreen()
+        await app.push_screen(screen)
         await pilot.pause()
-        bar = app.screen.query_one(MemoryViewsBar)
-        assert bar.query_one("#memory_view_fleet").display is True
-        assert bar.query_one("#memory_view_sync").display is True
-        assert bar.query_one("#memory_view_drift").display is False
-        assert bar.query_one("#memory_view_export").display is False
-        await pilot.click("#memory_view_sync")
-        assert switched == ["MemorySyncSetupScreen"]
+
+        tabs = screen.query_one("#memory_tabs", TabbedContent)
+        assert tabs.get_tab("mem_tab_fleet").display is True
+        assert tabs.get_tab("mem_tab_sync").display is True
+        assert tabs.get_tab("mem_tab_drift").display is False
+        assert tabs.get_tab("mem_tab_export").display is False
+
+        screen._marked = frozenset({"row-1"})
+        screen.activate_tab("sync")
+        await pilot.pause()
+        assert tabs.active == "mem_tab_sync"
+
+        app.memory_sync_service.is_configured = True
+        screen.refresh_tab_gates()
+        await pilot.pause()
+        assert tabs.get_tab("mem_tab_drift").display is True
+        assert tabs.get_tab("mem_tab_export").display is True
+
+        screen.activate_tab("fleet")
+        await pilot.pause()
+        assert screen._marked == frozenset({"row-1"})
+
+        # Esc pops back to the caller screen rather than cycling sibling tabs.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is base_screen
 
 
 @pytest.mark.asyncio

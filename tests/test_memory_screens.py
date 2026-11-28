@@ -903,7 +903,7 @@ class TestSettingsScreenMemorySync:
         from dataclasses import replace
         from types import SimpleNamespace
 
-        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
 
         with patch(
             "servonaut.services.memory.passphrase_store.keyring_available",
@@ -931,7 +931,8 @@ class TestSettingsScreenMemorySync:
 
                 await pilot.click("#memory_manage_device_auto_unlock")
                 await pilot.pause()
-                assert isinstance(app.screen, MemorySyncSetupScreen)
+                assert isinstance(app.screen, FleetMemoryScreen)
+                assert app.screen._initial_tab == "sync"
 
                 app._config.memory = replace(
                     app._config.memory,

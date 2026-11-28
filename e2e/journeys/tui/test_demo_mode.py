@@ -572,9 +572,12 @@ async def _tour_sidebar(tour: Tour) -> None:
         await t.wait_for_screen(screen_name)
         await tour.check(screen_name)
         if screen_name == "FleetMemoryScreen":
-            await t.click("#memory_view_sync")
-            await t.wait_for_screen("MemorySyncSetupScreen")
-            await tour.check("MemorySyncSetupScreen")
+            await t.click("#--content-tab-mem_tab_sync")
+            await t.wait_until(
+                lambda: t.is_reachable(t.on_screen("#msync_status")),
+                desc="Memory Sync tab visible",
+            )
+            await tour.check("MemorySyncTab")
         if screen_name == "SecretsScreen":
             await t.press("b")
             await t.wait_for_screen("BwVaultManagerScreen")

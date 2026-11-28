@@ -182,6 +182,45 @@ class DriftDiffScreen(ModalScreen[None]):
         self.dismiss()
 
 
+def compose_drift_container(*, include_busy: bool = True, extra_classes: str = "") -> ComposeResult:
+    """Yield the Drift events body container, shared by screen and tabbed pane."""
+    children: list = []
+    if include_busy:
+        children.append(BusyIndicator(id="read_loading", classes="read-loading"))
+    children.extend(
+        [
+            Container(
+                Static(
+                    "[bold]Memory drift events[/bold]",
+                    id="drift-title",
+                    classes="screen-title",
+                ),
+                Static("", id="drift-filter-label"),
+                id="drift-context",
+            ),
+            Container(
+                Static("Event actions", classes="memory-secondary-heading"),
+                ActionRow(
+                    ActionButton("Refresh", "r", id="btn-drift-refresh"),
+                    ActionButton("View diff", "enter", id="btn-drift-diff"),
+                    ActionButton("Acknowledge", "a", short="Ack", id="btn-drift-ack"),
+                    ActionButton("Unacknowledged only", "u", short="Unack only", id="btn-drift-unack"),
+                    id="drift-actions",
+                ),
+                id="drift-tools",
+            ),
+            Container(
+                Static("Configuration changes · Enter opens the diff", classes="memory-secondary-heading"),
+                Static("", id="drift-empty-state", classes="hidden"),
+                DataTable(id="drift-table", zebra_stripes=True),
+                id="drift-records",
+            ),
+        ]
+    )
+    container_kwargs = {"classes": extra_classes} if extra_classes else {}
+    yield Container(*children, id="drift-container", **container_kwargs)
+
+
 class MemoryDriftScreen(WorkspaceScreen):
     """Screen for viewing and managing memory drift events.
 
@@ -229,44 +268,11 @@ class MemoryDriftScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        from servonaut.widgets.memory_views import MemoryViewsBar
-
         yield SafeHeader()
         yield WorkspaceControls("Memory drift")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
-            yield Container(
-                BusyIndicator(id="read_loading", classes="read-loading"),
-                Container(
-                    Static(
-                        "[bold]Memory drift events[/bold]",
-                        id="drift-title",
-                        classes="screen-title",
-                    ),
-                    Static("", id="drift-filter-label"),
-                    id="drift-context",
-                ),
-                MemoryViewsBar(active="drift"),
-                Container(
-                    Static("Event actions", classes="memory-secondary-heading"),
-                    ActionRow(
-                        ActionButton("Refresh", "r", id="btn-drift-refresh"),
-                        ActionButton("View diff", "enter", id="btn-drift-diff"),
-                        ActionButton("Acknowledge", "a", short="Ack", id="btn-drift-ack"),
-                        ActionButton("Unacknowledged only", "u", short="Unack only", id="btn-drift-unack"),
-                        id="drift-actions",
-                    ),
-                    id="drift-tools",
-                ),
-                Container(
-                    Static("Configuration changes · Enter opens the diff", classes="memory-secondary-heading"),
-                    Static("", id="drift-empty-state", classes="hidden"),
-                    DataTable(id="drift-table", zebra_stripes=True),
-                    id="drift-records",
-                ),
-                id="drift-container",
-                classes="workspace-content",
-            )
+            yield from compose_drift_container(include_busy=True, extra_classes="workspace-content")
         yield Footer()
 
     # ------------------------------------------------------------------

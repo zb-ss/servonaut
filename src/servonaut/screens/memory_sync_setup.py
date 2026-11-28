@@ -50,6 +50,30 @@ _BENEFITS_FREE = [
 ]
 
 
+def compose_sync_container(*, extra_classes: str = "") -> ComposeResult:
+    """Yield the shared Memory Sync heading + scrollable body container."""
+    kwargs = {"classes": extra_classes} if extra_classes else {}
+    yield Container(
+        Container(
+            Horizontal(
+                Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
+                Static("", id="msync_status"),
+                id="msync_heading_row",
+            ),
+            Static(
+                "[dim]Encrypted, AI-queryable backup of every server's "
+                "memory across your devices.[/dim]",
+                id="msync_subtitle",
+            ),
+            id="msync_context",
+        ),
+        # The body card swaps between explain / setup / locked / ready
+        VerticalScroll(id="msync_body"),
+        id="msync_container",
+        **kwargs,
+    )
+
+
 class MemorySyncSetupScreen(WorkspaceScreen):
     """Setup + status hub for the Memory Sync feature."""
 
@@ -68,32 +92,11 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        from servonaut.widgets.memory_views import MemoryViewsBar
-
         yield SafeHeader()
         yield WorkspaceControls("Memory sync")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
-            yield Container(
-                Container(
-                    Horizontal(
-                        Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
-                        Static("", id="msync_status"),
-                        id="msync_heading_row",
-                    ),
-                    Static(
-                        "[dim]Encrypted, AI-queryable backup of every server's "
-                        "memory across your devices.[/dim]",
-                        id="msync_subtitle",
-                    ),
-                    id="msync_context",
-                ),
-                MemoryViewsBar(active="sync"),
-                # The body card swaps between explain / setup / locked / ready
-                VerticalScroll(id="msync_body"),
-                id="msync_container",
-                classes="workspace-content",
-            )
+            yield from compose_sync_container(extra_classes="workspace-content")
         yield Footer()
 
     # ------------------------------------------------------------------
@@ -121,13 +124,9 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         """Rebuild the status card for the new demo-mode state."""
         self._render_state()
 
-    def _render_state(self) -> None:
-        from servonaut.widgets.memory_views import MemoryViewsBar
-
+    def _apply_sync_state(self) -> None:
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()
-        for bar in self.query(MemoryViewsBar):
-            bar.refresh_gates()
 
         auth = getattr(self.app, "auth_service", None)
         sync = getattr(self.app, "memory_sync_service", None)
@@ -166,6 +165,13 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             self._set_status(status_label, "$warning")
             body.mount(self._build_setup_card(auth))
 
+    def _render_state(self) -> None:
+        self._apply_sync_state()
+        if getattr(self, "is_attached", False):
+            refresh_tabs = getattr(self.screen, "refresh_tab_gates", None)
+            if callable(refresh_tabs):
+                refresh_tabs()
+
     def _set_status(self, text: str, color: str) -> None:
         widget = self.query_one("#msync_status", Static)
         widget.update(f"[{color}]{escape(text)}[/{color}]")
@@ -193,7 +199,8 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         )
 
     def _build_upsell_card(self, auth: Any) -> Container:
-        plan = (auth._token.plan if getattr(auth, "_token", None) else "free") or "free"
+        raw_plan = getattr(getattr(auth, "_token", None), "plan", None)
+        plan = raw_plan if isinstance(raw_plan, str) and raw_plan else "free"
         return Container(
             Container(
                 Static(
@@ -235,7 +242,8 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         )
 
     def _build_setup_card(self, auth: Any) -> Container:
-        plan = (auth._token.plan if getattr(auth, "_token", None) else "solo") or "solo"
+        raw_plan = getattr(getattr(auth, "_token", None), "plan", None)
+        plan = raw_plan if isinstance(raw_plan, str) and raw_plan else "solo"
         benefits = (
             _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
         )

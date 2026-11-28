@@ -82,8 +82,11 @@ async def _drift_after_reprobe(t, seed, fake_cloud) -> str:
     assert await sync_all(t) == "Synced 4 envelope(s)."
     assert len(fake_cloud.memory.envelopes(HOST.instance_id, "services")) == 2
     event_id = fake_cloud.memory.record_drift(HOST.instance_id, "services")
-    await t.click("#memory_view_drift")
-    await t.wait_for_screen("MemoryDriftScreen")
+    await t.click("#--content-tab-mem_tab_drift")
+    await t.wait_until(
+        lambda: t.is_reachable(t.on_screen("#drift-table")),
+        desc="Drift tab active",
+    )
     return event_id
 
 
@@ -169,7 +172,7 @@ async def test_drift_event_opens_its_decrypted_diff(tui, seed, fake_cloud, monke
         try:
             await t.wait_for_screen("DriftDiffScreen", timeout=3)
         except JourneyTimeout:
-            if t.stack_names()[-1] == "MemoryDriftScreen":
+            if t.stack_names()[-1] == "FleetMemoryScreen":
                 raise KnownGap(
                     "Enter on the highlighted drift event did not open its diff"
                 ) from None

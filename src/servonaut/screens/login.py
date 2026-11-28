@@ -333,8 +333,8 @@ class LoginScreen(WorkspaceScreen):
         the existing UX (sidebar nav, account info) is unchanged.
         """
         if self._return_to == "memory_sync":
-            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
-            self.app.switch_screen(MemorySyncSetupScreen())
+            from servonaut.screens.fleet_memory import FleetMemoryScreen
+            self.app.switch_screen(FleetMemoryScreen(initial_tab="sync"))
         elif self._return_to == "sync_config":
             # Same entitlement check the sidebar nav applies — a logged-in
             # Free user shouldn't bounce into a screen that immediately
