@@ -710,6 +710,29 @@ class MemoryKeyCustody:
         except Exception:  # noqa: BLE001
             logger.warning("could not reset the remember flags", exc_info=True)
 
+    def marker_says_vault(self, user_id: Optional[int]) -> bool:
+        """Whether the local marker records vault custody for *user_id* (no network, no writes)."""
+        if user_id is None:
+            return False
+        marker = self._read_marker(int(user_id))
+        return marker is not None and marker.custody == CUSTODY_VAULT
+
+    async def mark_vault_custody(self, material: KeyMaterial) -> None:
+        """Record that the active key is kept in the vault (after the service confirmed it).
+
+        Writable callers only. Overwrites an older marker that still says the
+        key is under a passphrase, which would otherwise be trusted at the
+        next start.
+        """
+        if not self._writable:
+            return
+        self._write_marker(CustodyMarker(
+            user_id=material.user_id, custody=CUSTODY_VAULT,
+            fingerprint=crypto.fingerprint(material.public_key),
+            public_key=base64.b64encode(material.public_key).decode(),
+            checked_at=self._now_iso(),
+        ))
+
     def clear_marker(self) -> None:
         """Delete the marker (sign-out). Writable callers only."""
         if not self._writable:

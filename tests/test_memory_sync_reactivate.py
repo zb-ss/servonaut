@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import servonaut.app as _app_module
 from servonaut.app import ServonautApp
 from servonaut.config.schema import AppConfig, MemoryConfig
 
@@ -95,11 +96,21 @@ def _make_stub(
         _propagate_memory_key_material=MagicMock(),
     )
 
-    # bootstrap_memory_cloud is always async
+    # bootstrap_memory_cloud is always async.
     if bootstrap_side_effect is not None:
         stub.bootstrap_memory_cloud = AsyncMock(side_effect=bootstrap_side_effect)
     else:
         stub.bootstrap_memory_cloud = AsyncMock(return_value=None)
+    stub.memory_key_custody = None
+    stub.vault_command_service = None
+    for name in (
+        "_memory_unlock_applies", "_after_memory_unlock",
+        "_notify_vault_custody_locked", "_forget_memory_passphrase_leftovers",
+    ):
+        setattr(stub, name, types.MethodType(getattr(ServonautApp, name), stub))
+    # The start-up custody pass: a passphrase account (False) by default, so
+    # the tests below exercise the remembered-passphrase path as before.
+    stub._unlock_memory_from_custody = AsyncMock(return_value=False)
 
     # Bind the real helper methods that the orchestration coroutines call on
     # ``self`` (the silent-unlock path was extracted out of the single
@@ -1321,3 +1332,198 @@ class TestStartupUnlockSurvivesItsCaller:
 
         assert sync.bootstrap.await_count == 2
         stub._propagate_memory_key_material.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Vault custody
+# ---------------------------------------------------------------------------
+
+
+def _vault_stub(
+    *,
+    enrolled_locally: bool = False,
+    marker_says_vault: bool = False,
+    vault_unlocked: bool = False,
+    key_source: str | None = "vault",
+    bootstrap_side_effect=None,
+) -> SimpleNamespace:
+    """A stub whose start-up custody pass is the real one."""
+    sync = _make_sync_service(enrolled_locally=enrolled_locally)
+    sync.key_source = key_source
+    sync.retry_pending_item_cleanup = AsyncMock(return_value=True)
+    sync.unlock_from_vault = AsyncMock()
+    stub = _make_stub(
+        sync_service=sync,
+        auth_service=_make_auth_service(),
+        bootstrap_side_effect=bootstrap_side_effect,
+    )
+    custody = MagicMock()
+    custody.marker_says_vault = MagicMock(return_value=marker_says_vault)
+    stub.memory_key_custody = custody
+    stub.vault_command_service = SimpleNamespace(is_unlocked=vault_unlocked)
+    stub._unlock_memory_from_custody = types.MethodType(
+        ServonautApp._unlock_memory_from_custody, stub
+    )
+    stub._try_silent_memory_unlock = AsyncMock(return_value=False)
+    stub._propagate_memory_key_material = MagicMock()
+    return stub
+
+
+class TestVaultCustodyStartup:
+    @pytest.mark.asyncio
+    async def test_marker_says_vault_unlocks_without_the_passphrase_path(self) -> None:
+        stub = _vault_stub(marker_says_vault=True)
+        await _run_reactivate(stub)
+        provider = stub.bootstrap_memory_cloud.call_args.kwargs["passphrase_provider"]
+        assert provider is _app_module._no_passphrase_at_startup
+        stub._try_silent_memory_unlock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_leftovers_are_cleared_once_after_a_vault_unlock(self) -> None:
+        stub = _vault_stub(marker_says_vault=True)
+        await _run_reactivate(stub)
+        await _run_reactivate(stub)
+        stub.memory_key_custody.forget_passphrase_leftovers.assert_called_once_with(
+            stub.memory_sync_service, stub.config_manager
+        )
+        assert stub.memory_sync_service.retry_pending_item_cleanup.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_cleanup_for_a_passphrase_key(self) -> None:
+        stub = _vault_stub(marker_says_vault=True, key_source="passphrase")
+        await _run_reactivate(stub)
+        stub.memory_key_custody.forget_passphrase_leftovers.assert_not_called()
+        stub.memory_sync_service.retry_pending_item_cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_open_vault_with_a_key_starts_the_shared_bootstrap(self) -> None:
+        from servonaut.services.memory.sync_service import VaultUnlock
+
+        stub = _vault_stub(vault_unlocked=True)
+        stub.memory_sync_service.unlock_from_vault.return_value = VaultUnlock.OK
+        await _run_reactivate(stub)
+        stub.memory_sync_service.lock.assert_called_once_with()
+        stub.bootstrap_memory_cloud.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_open_vault_without_a_key_never_enrols(self) -> None:
+        from servonaut.services.memory.sync_service import VaultUnlock
+
+        stub = _vault_stub(vault_unlocked=True)
+        stub.memory_sync_service.unlock_from_vault.return_value = VaultUnlock.NOT_VAULT
+        await _run_reactivate(stub)
+        stub.bootstrap_memory_cloud.assert_not_called()
+        stub._try_silent_memory_unlock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_locked_vault_ends_quietly(self) -> None:
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+
+        stub = _vault_stub(
+            marker_says_vault=True,
+            bootstrap_side_effect=VaultCustodyLocked("vault_locked"),
+        )
+        await _run_reactivate(stub)
+        stub.notify.assert_not_called()
+        stub._try_silent_memory_unlock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_passphrase_account_follows_the_remembered_passphrase(self) -> None:
+        def _provider_check(passphrase_provider=None):
+            raise _app_module._PassphraseCustodyNeeded("unlock")
+
+        stub = _vault_stub(enrolled_locally=True, bootstrap_side_effect=_provider_check)
+        await _run_reactivate(stub)
+        stub._try_silent_memory_unlock.assert_awaited_once()
+        stub.memory_key_custody.forget_passphrase_leftovers.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sentinel_provider_raises_instead_of_asking(self) -> None:
+        with pytest.raises(_app_module._PassphraseCustodyNeeded):
+            await _app_module._no_passphrase_at_startup("unlock")
+
+
+class TestVaultUnlockListener:
+    def _app(self, *, unlocked: bool) -> tuple[SimpleNamespace, MagicMock]:
+        vault = MagicMock()
+        vault.is_unlocked = unlocked
+        app = SimpleNamespace(run_worker=MagicMock(), _reactivate_memory_sync=MagicMock())
+        app._start_memory_unlock_after_vault_unlock = types.MethodType(
+            ServonautApp._start_memory_unlock_after_vault_unlock, app
+        )
+        return app, vault
+
+    def test_listener_starts_the_unlock_in_its_own_exclusive_group(self) -> None:
+        app, vault = self._app(unlocked=False)
+        ServonautApp._watch_vault_unlock_for_memory(app, vault)  # type: ignore[arg-type]
+        listener = vault.add_unlock_listener.call_args.args[0]
+        app.run_worker.assert_not_called()
+        listener()
+        kwargs = app.run_worker.call_args.kwargs
+        assert kwargs["group"] == "memory_vault_unlock"
+        assert kwargs["exclusive"] is True
+        app._reactivate_memory_sync.return_value.close()
+
+    def test_already_unlocked_vault_starts_the_unlock_at_once(self) -> None:
+        app, vault = self._app(unlocked=True)
+        ServonautApp._watch_vault_unlock_for_memory(app, vault)  # type: ignore[arg-type]
+        app.run_worker.assert_called_once()
+        app._reactivate_memory_sync.return_value.close()
+
+
+class TestVaultCustodyPrompt:
+    @pytest.mark.asyncio
+    async def test_locked_vault_notifies_once_and_opens_no_dialog(self) -> None:
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+
+        stub = _vault_stub(
+            marker_says_vault=True,
+            bootstrap_side_effect=VaultCustodyLocked("vault_locked"),
+        )
+        stub._prompt_memory_passphrase = AsyncMock()
+        stub._try_silent_memory_unlock = types.MethodType(
+            ServonautApp._try_silent_memory_unlock, stub
+        )
+        await _run_prompt(stub)
+        stub._prompt_memory_passphrase.assert_not_called()
+        stub.notify.assert_called_once()
+        message = stub.notify.call_args.args[0]
+        assert message.startswith("Your Memory Sync key is kept in your vault")
+        assert stub.notify.call_args.kwargs["markup"] is False
+        assert not getattr(stub, "_memory_sync_prompt_skipped", False)
+
+    @pytest.mark.asyncio
+    async def test_unenrolled_user_with_an_open_vault_is_not_prompted(self) -> None:
+        from servonaut.services.memory.sync_service import VaultUnlock
+
+        stub = _vault_stub(vault_unlocked=True)
+        stub.memory_sync_service.unlock_from_vault.return_value = VaultUnlock.NOT_VAULT
+        await _run_prompt(stub)
+        stub.bootstrap_memory_cloud.assert_not_called()
+        stub.notify.assert_not_called()
+
+
+class TestLogoutClearsVaultState:
+    def test_marker_deleted_and_remember_expiry_cleared(self) -> None:
+        memory = MemoryConfig(
+            sync_remember_device=True, sync_remember_expires_at="2030-01-01T00:00:00+00:00"
+        )
+        config_manager = MagicMock()
+        config_manager.get.return_value = _make_config(memory)
+        custody = MagicMock()
+        app = SimpleNamespace(
+            relay_manager=None,
+            vault_command_service=None,
+            config_sync_service=None,
+            memory_sync_service=MagicMock(),
+            memory_key_custody=custody,
+            config_manager=config_manager,
+            _memory_leftovers_cleared=True,
+        )
+        with patch("servonaut.services.memory.passphrase_store.clear_passphrase"):
+            ServonautApp.on_user_logout(app)  # type: ignore[arg-type]
+        custody.clear_marker.assert_called_once_with()
+        updated = config_manager.update.call_args.kwargs["memory"]
+        assert updated.sync_remember_device is False
+        assert updated.sync_remember_expires_at == ""
+        assert app._memory_leftovers_cleared is False
