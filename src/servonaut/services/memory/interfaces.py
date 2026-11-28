@@ -750,3 +750,25 @@ class RateLimited(MemoryBackendError):
         self.endpoint = endpoint
         self.retry_after_s = retry_after_s
         super().__init__()
+
+
+class VaultCustodyLocked(MemoryBackendError):
+    """The Memory Sync key is kept in the vault and the vault cannot give it up here.
+
+    Raised when the vault is locked, absent from this device, or the service
+    refused a key write because the device is not part of the vault. Callers
+    must not fall back to a passphrase prompt.
+
+    Attributes:
+        reason: Short machine-readable cause (``"vault_locked"``,
+            ``"needs_vault_device"``, ``"device_signature_required"``,
+            ``"memory_key_custody_vault"``).
+    """
+
+    def __init__(self, reason: str = "vault_locked") -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class VaultCustodyUnavailable(MemoryBackendError):
+    """Where the key is kept could not be determined or read (service or vault failure)."""
