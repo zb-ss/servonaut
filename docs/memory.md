@@ -13,6 +13,7 @@ This document covers the full user-facing contract.  For implementation details,
 - [TUI reference](#tui-reference)
 - [MCP tools for AI agents](#mcp-tools-for-ai-agents)
 - [Chat integration](#chat-integration)
+- [Memory Sync](#memory-sync)
 - [Configuration](#configuration)
 - [Secret redaction](#secret-redaction)
 - [Storage layout](#storage-layout)
@@ -288,6 +289,80 @@ The tag is visible to the LLM but not to the user; agents are free to reference 
 
 ---
 
+## Memory Sync
+
+Memory Sync (the **Memory Sync** entry in the sidebar) backs up your server memory to Servonaut, encrypted on your computer before it leaves, so the service only ever holds ciphertext. A Memory Sync key does the encrypting. Where that key is kept decides how you unlock it.
+
+### One unlock: the key is kept in your vault
+
+When you have a vault, Memory Sync keeps its key there, as a vault item named "Servonaut Memory Sync key". Unlocking your vault also unlocks Memory Sync: there is no Memory Sync passphrase to type, no passphrase in your operating system keychain and no key file on disk. The same goes for config sync, which keeps its own key in the vault in the same way (see [Config sync](configuration.md#config-sync)). The Vault screen and `servonaut vault items` list these items under fixed names and do not show their contents.
+
+An account whose key is kept in the vault is never asked for a Memory Sync passphrase, on any computer, and cannot enrol a second key. If the vault is locked or this computer is not part of it yet, Memory Sync shows **Locked** with an **Open vault** button. If the vault is unlocked but Memory Sync still did not open, press **Try again**.
+
+### Setting up Memory Sync with a vault
+
+Open **Memory Sync** and press **Set up Memory Sync**. Servonaut creates the key in your vault, reads it back to check it, and then registers it with the service. No passphrase dialog appears. Before you start, keep in mind that your vault recovery key becomes the only way back to your synced memory if you lose access to your vault, so keep it safe.
+
+If your account already has a vault but this computer is not part of it, the screen says **Add this device to your vault first** and offers **Open vault**. Accounts without a vault keep using a passphrase, as before.
+
+### Moving an existing account to the vault
+
+If you set up Memory Sync earlier with a passphrase, **Memory Sync** shows a hint and a **Move key to vault** button once your vault is unlocked. From a terminal the same move is:
+
+```bash
+servonaut memory move-key-to-vault [--skip-config] [--skip-memory] [--yes]
+                                   [--passphrase-stdin] [--recovery-key-stdin] [--json]
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--skip-config` | Move only the Memory Sync key. |
+| `--skip-memory` | Move only the config sync key. |
+| `--yes` | Do not ask for confirmation. Without it a terminal is needed to answer. |
+| `--passphrase-stdin` | Read the Memory Sync passphrase from one line of standard input instead of a hidden prompt. |
+| `--recovery-key-stdin` | Read the vault recovery key from one line of standard input. With both stdin flags, the first line is the recovery key and the second is the passphrase. |
+| `--json` | Print the result as JSON. |
+
+By default the command moves both keys. It lists what it will do and asks you to confirm, because the move cannot be undone. Passphrases and recovery keys are never taken as arguments and never printed.
+
+What to expect:
+
+- **The recovery key comes first.** Servonaut asks you to type your vault recovery key and checks it against your vault before it changes anything, so you know your only way back works. If you have no personal vault yet, the move creates one.
+- **The passphrase stops working.** After the move, the Memory Sync passphrase no longer opens anything. Your vault recovery key is the only recovery path; if you lose access to your vault, memory already synced cannot be recovered with a passphrase.
+- **The passphrase is asked for once, to open your current key.** In the app, only when Memory Sync is locked. `servonaut memory move-key-to-vault` always asks, because the command has no unlocked session; the move puts that same key in the vault.
+- **Old config snapshots are replaced.** The config part uploads this computer's current config under the vault key, and only then deletes your passphrase snapshots from the service. Other computers need access to your vault to restore it. If your account has no config snapshots, or your plan has no config sync, this part is skipped.
+- **You can run it again.** If the move stops part-way (offline, rate limited, interrupted), run the same command or press the button again to continue; no data is lost and no second key is created. If the memory part finished and the config part failed, the output says so and a second run finishes config sync.
+- **The Config snapshots screen has its own button.** When your vault is unlocked and some snapshots still use the passphrase, **Config snapshots** shows **Move key to vault**. It asks for the recovery key too.
+
+Update every computer you use before you move: see [Older Servonaut versions](#older-servonaut-versions).
+
+### Rotating the key in vault mode
+
+**Rotate keypair** works without a passphrase when the key is kept in the vault. Servonaut creates a new key in the vault, uploads your local memory again under it, and then removes the previous key's vault item. Memory that teammates shared with you is wrapped to your new key by their computers the next time they open Memory Sync. While the service still needs the previous key for older memory, it refuses to let it go; the previous key then stays in your vault until that older memory ages out, so it can still be opened, and Servonaut removes it the next time you unlock your vault after that.
+
+### Hosted summaries
+
+**Hosted summaries** (`H` on the Memory screen) send the service only the keys for the memory being summarised, never your Memory Sync key or passphrase. An account with its key in the vault is never asked for a passphrase there. If the memory changed on the service while the summary was prepared, try again after syncing that server's memory.
+
+### The MCP server, the relay and the CLI
+
+`servonaut --mcp`, the relay (`servonaut connect`, or the app's built-in listener) and commands such as `servonaut memory pull` read a vault-held key the same way they open the vault: when the vault is unlocked on this computer, or the computer can open it with its device key, they find the key and read your synced and team-shared memory, with no passphrase. They only read; they do not enrol, move or upload keys. When they cannot open the vault, `get_server_memory` and the command say to unlock your vault or add the computer to it, and they try again after `memory.vault_key_recheck_seconds`.
+
+### Computers without a keychain
+
+Opening the vault on a computer needs a device key. Normally it lives in your operating system keychain. A server, container or CI machine without a keychain can either:
+
+- set the environment variable `SERVONAUT_VAULT_DEVICE_KEY` for the process, or
+- turn on `vault.allow_file_key_store` (Settings, Team vault, **Allow encrypted file key storage**), which keeps the device key in a mode-restricted file. This is weaker than a keychain, so keep it off unless a headless computer needs it. See [Vault settings](configuration.md#vault).
+
+The standalone MCP server and the relay use the same device key to open a vault-held Memory Sync key.
+
+### Older Servonaut versions
+
+After an account has moved to the vault, Servonaut versions older than the one that introduced vault custody cannot open Memory Sync for it. They fail without changing anything: no key is replaced and no memory is lost, and they report an error instead of the passphrase prompt. Update Servonaut on every computer (see [updates](updates.md)) before you move an account, then use the update on each one. Config sync behaves the same way: an older version cannot restore snapshots made under the vault key.
+
+---
+
 ## Configuration
 
 Memory is configured under the `memory` key in `~/.servonaut/config.json`:
@@ -345,7 +420,7 @@ Earlier releases could keep a separate record for the team's copy. The first tim
 
 The merge runs wherever you use memory, not only in the app. The `servonaut memory` commands that read or change a server's record or probe it (`build`, including `--all`, `refresh`, `show`, `export`, `annotate`, `pin` and `pull`) run one pass first, and so do the memory tools of `servonaut --mcp` and of the relay (`get_server_memory`, `list_server_memories`, `build_server_memory`, `refresh_server_memory`, `recall_server_findings`, `remember_server_finding`). `clear` and `purge` do not merge before deleting. The command prints what it merged to stderr, so `--json` output stays data; a pass that fails is logged and never fails the command. Signed out, or without a vault runtime, there are no team servers and nothing to merge. Only one pass runs on a computer at a time, and the app, the CLI and the MCP server take a per-server lock before changing a record, so running them together does not lose notes. If another process holds a record for longer than `memory.record_lock_timeout_seconds` (default 5), the change fails like any failed write and is kept for a retry. `servonaut memory annotate` edits a private copy and never creates or truncates the notes file while the editor is open: the text is written back only if the notes are unchanged, otherwise (or if the editor exits with an error) it is kept in an `annotations.unsaved-<time>.md` draft next to the notes, and if even that cannot be written the private copy is kept and its path printed. The merge, its check and the marker are one step under the server's lock, so an edit made while it runs is never mistaken for a change to the team copy. A probe or a findings pull that finds a record busy reports it and can be retried; it does not freeze the app.
 
-The CLI and the MCP server never unlock Memory Sync, so they never read from or upload to the Servonaut service. While Memory Sync is set up but locked, the copy's own notes, findings and modules are merged once and the copy is marked as merged, with a note in its `team_merged.marker` that the service's notes and findings for the server are still owed. A note you delete afterwards is not brought back by later passes. The next pass in the app with Memory Sync unlocked reads the service's part, merges only that, and then sends what you owe the service. A computer where Memory Sync was never set up owes nothing.
+The CLI and the MCP server never unlock Memory Sync with a passphrase, so for an account that keeps its key under one they never read from or upload to the Servonaut service. (With a key in your vault they open it from the vault, as described under [Memory Sync](#memory-sync); they still never upload anything on their own.) While Memory Sync is set up but locked, the copy's own notes, findings and modules are merged once and the copy is marked as merged, with a note in its `team_merged.marker` that the service's notes and findings for the server are still owed. A note you delete afterwards is not brought back by later passes. The next pass in the app with Memory Sync unlocked reads the service's part, merges only that, and then sends what you owe the service. A computer where Memory Sync was never set up owes nothing.
 
 A team's server you do not own yourself keeps its own record, filed under `~/.servonaut/memory/shared/<share id>/` rather than under the team's name.
 
@@ -384,7 +459,7 @@ A member's memory key changes when they set up Memory Sync again or use a new co
 
 A key the service sends that does not match its own fingerprint cannot be confirmed: the share stops and nothing is changed.
 
-**As a member**, a server shared with you appears in Fleet Memory with its module count and age, even when you have no other row for it. Its Memory screen and MCP `get_server_memory` show the team's copy, labelled "Shared by <team>, probed <date>". If you have a snapshot of your own that is newer, yours is shown instead. When several teams share the same server, each module comes from the newest copy, and the label names the team behind each one. Shared memory is read-only: it is never merged into your own notes or uploaded from your computer. The standalone `servonaut --mcp` server and `servonaut connect` read shared memory too, when you unlocked Memory Sync in the app with **Keep unlocked for 30 days** ticked and those 30 days have not run out. They never ask for the passphrase and never change anything; otherwise `get_server_memory` says that Memory Sync is locked. Unlocking in the app is enough: no restart is needed. `get_server_memory` finds the team's copy only for a server that is itself shared with the team, so the server has to appear in your server list as shared, not only have its memory shared.
+**As a member**, a server shared with you appears in Fleet Memory with its module count and age, even when you have no other row for it. Its Memory screen and MCP `get_server_memory` show the team's copy, labelled "Shared by <team>, probed <date>". If you have a snapshot of your own that is newer, yours is shown instead. When several teams share the same server, each module comes from the newest copy, and the label names the team behind each one. Shared memory is read-only: it is never merged into your own notes or uploaded from your computer. The standalone `servonaut --mcp` server and `servonaut connect` read shared memory too, in either of two cases. When your Memory Sync key is kept in your vault, they open it the same way they open the vault: once the vault is unlocked on this computer (or the computer has a device key, see [Computers without a keychain](#computers-without-a-keychain)), no unlocking in the app and no 30-day setting is involved. When the key is still under a passphrase, they read shared memory only if you unlocked Memory Sync in the app with **Keep unlocked for 30 days** ticked and those 30 days have not run out. They never ask for a passphrase and never change anything; otherwise `get_server_memory` says that Memory Sync is locked, and for a key in a vault it says to unlock your vault or add this computer to it. Unlocking in the app is enough: no restart is needed, and a headless process that could not open the vault looks again after `vault_key_recheck_seconds`. `get_server_memory` finds the team's copy only for a server that is itself shared with the team, so the server has to appear in your server list as shared, not only have its memory shared.
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -394,6 +469,10 @@ A key the service sends that does not match its own fingerprint cannot be confir
 | `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload or bulk share; past it, the next sync tries again, and a bulk share stops and says how many servers were not sent. |
 | `record_lock_timeout_seconds` | `5` | How long a change to a server's notes or findings waits for another Servonaut process (the app, the CLI, an MCP server) that is writing the same record; past it the change fails like any failed write and is kept for a retry. |
 | `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
+| `custody_check_interval_hours` | `24` | A computer that unlocks Memory Sync from a local key file (an account not yet moved to the vault) asks the service at most this often whether the key has since moved to the vault, so a move made on another computer is noticed. `0` asks on every start. |
+| `vault_key_recheck_seconds` | `60` | How long the standalone MCP server and the relay wait before they look for your key in the vault again after a failed attempt. |
+
+Disabling sync on the Memory Sync screen sets `sync_disabled` to `true` in this section. While it is set, Memory Sync does not unlock on start-up, sign-in, vault unlock or opening a memory section, until you press **Enable Memory Sync** there. You normally never edit it by hand.
 
 ---
 

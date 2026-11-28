@@ -195,7 +195,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 ### Memory & secrets
 
 - **Server memory** — persistent per-server cache of OS / runtime / service / web-stack / log / database / container / git / disk facts; optional background fleet auto-scan. → [docs](docs/memory.md)
-- **Memory Sync** *(Solo+)* — end-to-end-encrypted backup of fleet memory to servonaut.dev (X25519 + AES-256-GCM, your passphrase), with drift detection, cross-device history, and optional auto-sync. `☁ Memory Sync` in the sidebar.
+- **Memory Sync** *(Solo+)* — end-to-end-encrypted backup of fleet memory to servonaut.dev (X25519 + AES-256-GCM; the key is kept in your vault, so there is no passphrase when you have one), with drift detection, cross-device history, and optional auto-sync. `☁ Memory Sync` in the sidebar.
 - **Database credential vault** *(Solo+)* — scan a server for the DB credentials its apps already use, store the password in your secret vault under a per-site label, and let the `db_*` tools resolve it by name — no password in config or agent context. → [docs](docs/db-credential-vault.md)
 
 ### Agents & automation (MCP)
@@ -205,7 +205,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Team agent rules** *(Teams plan)* — team owners and admins decide what members' AI agents may do on the team's shared servers: a level per role and per server, allowed commands and blocked patterns. The rules are signed by servonaut.dev and checked by every member's Servonaut, for the AI chat with any provider, relayed Servonaut AI tool calls and every MCP agent; rules that cannot be checked leave the team's servers read-only. → [docs](docs/team-agent-rules.md)
 - **Team vault keys** *(Teams plan)* — team owners and admins bind SSH keys from the team's vault to its shared servers, one server at a time or all at once with Auto-bind; members connect with them without holding the keys. → [docs](docs/team-vault-binding.md)
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay.
-- **Config sync** — client-side-encrypted snapshots of your `config.json` synced via servonaut.dev, paired with a passphrase you control.
+- **Config sync** — client-side-encrypted snapshots of your `config.json` synced via servonaut.dev. The key is kept in your vault when you have one, otherwise it is a passphrase you control.
 
 ### Convenience
 
@@ -516,8 +516,9 @@ Optional — Servonaut works fully offline against your own AWS / OVH
 credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
 
 - **Config sync** — push/pull an encrypted snapshot of your
-  `config.json` between machines. The passphrase never leaves your
-  client; the server only sees ciphertext. Sidebar entry `🔄 Sync
+  `config.json` between machines. The key (kept in your vault, or a
+  passphrase you choose) never leaves your client; the server only sees
+  ciphertext. Sidebar entry `🔄 Sync
   Config` opens the snapshot manager directly (Pull Latest / Push New
   / Restore / Rename / Delete).
 - **MCP relay** — a Mercure SSE channel that lets AI agents and
@@ -525,10 +526,14 @@ credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
   is connected, `https://servonaut.dev/account` reports your CLI as
   online, and hosted agents can reach it.
 - **Memory Sync (Solo+)** — encrypted fleet memory backup with drift
-  detection. Open the `☁ Memory Sync` sidebar entry, click *Unlock
-  Memory Sync*, and enter a passphrase. The same screen handles
-  first-time enrolment AND post-restart unlock — your private key is
-  wrapped with the passphrase locally, so the server never sees it.
+  detection. Open the `☁ Memory Sync` sidebar entry, click *Set up
+  Memory Sync* (or *Unlock Memory Sync*). With a vault, the key is kept
+  there: no passphrase, and unlocking the vault unlocks Memory Sync. Without
+  one, you enter a passphrase and your private key is wrapped with it
+  locally, so the server never sees it. An existing passphrase account can
+  switch with *Move key to vault* or `servonaut memory move-key-to-vault`
+  (see [docs](docs/memory.md#memory-sync)); the vault recovery key is then the
+  only recovery path.
   After unlock, click *Sync now* to push every cached server's memory
   modules as encrypted envelopes, or flip on **auto-sync** to drain the
   queue in the background so the server-side copy (and weekly digests)
@@ -708,7 +713,7 @@ All runtime files are under `~/.servonaut/`:
 | `auth.json` | OAuth tokens for servonaut.dev, mode `0600`, atomic writes |
 | `secrets.json` | Local secret store, mode `0600` (the default secrets backend) |
 | `bw_ssh_refs.json` | Saved Bitwarden SSH key references: item IDs only, never key material |
-| `sync_key_probe.json` | Check value that confirms your config-sync passphrase; holds neither the passphrase nor the key |
+| `sync_key_probe.json` | Check value that confirms your config-sync passphrase (passphrase accounts only); holds neither the passphrase nor the key |
 | `ip_ban_audit.json` | IP ban audit trail |
 | `mcp_audit.jsonl` | MCP server audit trail |
 | `aws_audit.jsonl`, `hetzner_audit.jsonl`, `ovh_audit.json` | Audit trails of server lifecycle actions (create, start, stop, delete, …) per provider |
@@ -716,7 +721,7 @@ All runtime files are under `~/.servonaut/`:
 | `team_policy.json` | The last verified agent rules of each of your teams, mode `0600`, checked again whenever they are read (see [Team agent rules](docs/team-agent-rules.md)) |
 | `memory/` | Server-memory store: `<provider>/<instance_id>/<module>.json` per probed server, plus `index.json` |
 | `memory/sync_queue.jsonl` | Pre-encryption envelopes waiting to be pushed to servonaut.dev. Replayed on next bootstrap; deleted after a successful drain. Only present while Memory Sync has unsent work. |
-| `memory/keys.json` | Memory Sync keypair; the private key is stored encrypted with your passphrase |
+| `memory/keys.json` | Memory Sync keypair for an account that keeps its key under a passphrase; the private key is stored encrypted with your passphrase. Not used once the key is kept in your vault |
 | `memory_scan_state.json` | When the background fleet memory scan last ran |
 | `exports/` | Signed server-memory exports |
 | `transfers/` | Local side of relay file transfers: the relay reads and writes local files only here |
