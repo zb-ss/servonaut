@@ -84,6 +84,9 @@ class BwSshPanel(SettingsPanel):
         height: auto;
         margin: 0 0 1 0;
     }
+    BwSshPanel #btn_bw_open_vault {
+        width: auto;
+    }
     """
 
     def __init__(self) -> None:
@@ -113,6 +116,7 @@ class BwSshPanel(SettingsPanel):
             yield Horizontal(
                 Button("Edit", id="btn_bw_ssh_edit", variant="default"),
                 Button("Unlock now", id="btn_bw_unlock", variant="default"),
+                Button("Open SSH vault", id="btn_bw_open_vault", variant="default"),
                 classes="bw-actions-row",
             )
         yield Container(
@@ -261,6 +265,12 @@ class BwSshPanel(SettingsPanel):
                 group="settings_bw_ssh",
                 exclusive=True,
             )
+            return
+        if button_id == "btn_bw_open_vault":
+            event.stop()
+            from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
+
+            self.app.push_screen(BwVaultManagerScreen())
             return
         # Delegate the panel Save button + any other buttons to the base class.
         super().on_button_pressed(event)

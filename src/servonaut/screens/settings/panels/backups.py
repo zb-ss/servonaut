@@ -148,9 +148,10 @@ class BackupsPanel(SettingsPanel):
         super().on_button_pressed(event)
 
     def _open_snapshot_manager(self) -> None:
-        """Push SnapshotManagerScreen, gated on config_sync_service availability."""
+        """Push SnapshotManagerScreen, gated on config_sync entitlement and service."""
+        auth = getattr(self.app, "auth_service", None)
         sync = getattr(self.app, "config_sync_service", None)
-        if sync is None:
+        if sync is None or (auth is not None and not auth.has_feature("config_sync")):
             self.app.notify(
                 "Config sync is not available on this plan.",
                 severity="warning",

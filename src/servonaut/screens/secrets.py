@@ -76,6 +76,7 @@ class SecretsScreen(WorkspaceScreen):
     _ACTION_SHORT = {
         "Guided Bitwarden setup": "Set up Bitwarden",
         "Set up Bitwarden": "Set up Bitwarden",
+        "Bitwarden SSH vault": "BW SSH vault",
         "DB-vault coverage": "DB coverage",
         "Refresh from server": "Refresh",
         "List stored secrets": "List secrets",
@@ -87,6 +88,7 @@ class SecretsScreen(WorkspaceScreen):
     _ACTION_TIPS = {
         "Guided Bitwarden setup": "Pick a project and test the connection",
         "Set up Bitwarden": "Pick a project and test the connection",
+        "Bitwarden SSH vault": "Browse Bitwarden SSH-key items and referencing servers",
         "DB-vault coverage": "See which servers are stored",
         "List stored secrets": "Names only; values stay hidden",
         "Open team settings": "Opens the team settings on the web",
@@ -99,6 +101,7 @@ class SecretsScreen(WorkspaceScreen):
         "r": "refresh", "l": "list_secrets", "c": "clear_cache",
         "o": "open_team_settings", "u": "open_upgrade", "i": "install_bws",
         "g": "guided_setup", "v": "db_coverage", "s": "open_login",
+        "b": "bw_vault",
     }
 
     BINDINGS = [
@@ -111,6 +114,7 @@ class SecretsScreen(WorkspaceScreen):
         Binding("i", "install_bws", "Install bws", show=False),
         Binding("g", "guided_setup", "Setup", show=True),
         Binding("v", "db_coverage", "Coverage", show=True),
+        Binding("b", "bw_vault", "BW SSH vault", show=True),
         Binding("s", "open_login", "Sign in", show=False),
     ]
 
@@ -485,6 +489,7 @@ class SecretsScreen(WorkspaceScreen):
             self._actions(
                 ("g", "Guided Bitwarden setup"),
                 ("v", "DB-vault coverage"),
+                ("b", "Bitwarden SSH vault"),
                 ("r", "Refresh from server"),
                 ("l", "List stored secrets"),
                 ("o", "Open team settings"),
@@ -542,6 +547,7 @@ class SecretsScreen(WorkspaceScreen):
         actions = [
             ("g", "Set up Bitwarden"),
             ("v", "DB-vault coverage"),
+            ("b", "Bitwarden SSH vault"),
             ("l", "List stored secrets"),
             ("u", "Upgrade for team secrets"),
             ("o", "Open docs"),
@@ -645,6 +651,18 @@ class SecretsScreen(WorkspaceScreen):
         """Open the DB-vault coverage + search view (B4)."""
         from servonaut.screens.db_coverage_view import DbCoverageScreen
         self.app.push_screen(DbCoverageScreen())
+
+    def action_bw_vault(self) -> None:
+        """Open the Bitwarden SSH vault manager."""
+        summary = self._summary()
+        if summary is not None and not summary.authenticated:
+            self.action_open_login()
+            return
+        if summary is not None and not summary.entitled_secrets_management:
+            self.action_open_upgrade()
+            return
+        from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
+        self.app.push_screen(BwVaultManagerScreen())
 
     def action_clear_cache(self) -> None:
         from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal

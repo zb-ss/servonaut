@@ -229,6 +229,8 @@ class MemoryDriftScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        from servonaut.widgets.memory_views import MemoryViewsBar
+
         yield SafeHeader()
         yield WorkspaceControls("Memory drift")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
@@ -244,6 +246,7 @@ class MemoryDriftScreen(WorkspaceScreen):
                     Static("", id="drift-filter-label"),
                     id="drift-context",
                 ),
+                MemoryViewsBar(active="drift"),
                 Container(
                     Static("Event actions", classes="memory-secondary-heading"),
                     ActionRow(

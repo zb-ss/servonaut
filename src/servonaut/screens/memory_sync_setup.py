@@ -68,6 +68,8 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
+        from servonaut.widgets.memory_views import MemoryViewsBar
+
         yield SafeHeader()
         yield WorkspaceControls("Memory sync")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
@@ -86,6 +88,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                     ),
                     id="msync_context",
                 ),
+                MemoryViewsBar(active="sync"),
                 # The body card swaps between explain / setup / locked / ready
                 VerticalScroll(id="msync_body"),
                 id="msync_container",
@@ -119,8 +122,12 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         self._render_state()
 
     def _render_state(self) -> None:
+        from servonaut.widgets.memory_views import MemoryViewsBar
+
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()
+        for bar in self.query(MemoryViewsBar):
+            bar.refresh_gates()
 
         auth = getattr(self.app, "auth_service", None)
         sync = getattr(self.app, "memory_sync_service", None)

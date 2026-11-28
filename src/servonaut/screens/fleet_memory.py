@@ -348,6 +348,7 @@ class FleetMemoryScreen(WorkspaceScreen):
     # immutable and replaced on change, so a screen built without __init__
     # (as some tests do) still reads "nothing marked".
     _marked: FrozenSet[str] = frozenset()
+    _initial_tab: str = "fleet"
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -360,8 +361,9 @@ class FleetMemoryScreen(WorkspaceScreen):
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
 
-    def __init__(self) -> None:
+    def __init__(self, initial_tab: str = "fleet") -> None:
         super().__init__()
+        self._initial_tab = initial_tab
         self._read_loading = BusyWork(self, "#read_loading")
         self._rows: List[Dict[str, Any]] = []
         self._scanning = False
@@ -372,6 +374,8 @@ class FleetMemoryScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        from servonaut.widgets.memory_views import MemoryViewsBar
+
         yield SafeHeader()
         yield WorkspaceControls("Fleet memory")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
@@ -388,6 +392,7 @@ class FleetMemoryScreen(WorkspaceScreen):
                     Static("", id="fleet-auto-scan-status"),
                     id="fleet-memory-context",
                 ),
+                MemoryViewsBar(active="fleet"),
                 # Live progress line for bulk scans — hidden when idle so
                 # it never competes with the status summary above.
                 Static("", id="fleet-memory-progress", classes="hidden"),

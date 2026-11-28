@@ -48,7 +48,7 @@ def _panel(module: str, cls: str) -> Callable[[], type[SettingsPanel]]:
     )
 
 
-# Ordered panel catalog. Groups mirror the build spec's Panel Catalog exactly.
+# Ordered panel catalog grouped to match the primary navigation IA.
 PANELS: List[PanelSpec] = [
     # ---------------------------------------------------------------- General
     PanelSpec(
@@ -66,13 +66,6 @@ PANELS: List[PanelSpec] = [
         factory=_panel("appearance", "AppearancePanel"),
     ),
     PanelSpec(
-        id="history_paths",
-        title="History & paths",
-        group="General",
-        keywords=["keywords", "command", "history", "chat", "paths", "store"],
-        factory=_panel("history_paths", "HistoryPathsPanel"),
-    ),
-    PanelSpec(
         id="updates",
         title="Updates",
         group="General",
@@ -82,36 +75,100 @@ PANELS: List[PanelSpec] = [
         ],
         factory=_panel("updates", "UpdatesPanel"),
     ),
-    # ------------------------------------------------------------ Connections
     PanelSpec(
-        id="scan",
-        title="Scan",
-        group="Connections",
-        keywords=["scan", "paths", "rules", "keyword", "commands"],
-        factory=_panel("scan", "ScanPanel"),
+        id="backups",
+        title="Backups",
+        group="General",
+        keywords=["backups", "snapshots", "restore", "config", "sync"],
+        factory=_panel("backups", "BackupsPanel"),
     ),
+    PanelSpec(
+        id="history_paths",
+        title="History & paths",
+        group="General",
+        keywords=["keywords", "command", "history", "chat", "paths", "store"],
+        factory=_panel("history_paths", "HistoryPathsPanel"),
+    ),
+    # ---------------------------------------------------- Access & connections
     PanelSpec(
         id="connections",
         title="Connections",
-        group="Connections",
+        group="Access & connections",
         keywords=["profiles", "rules", "bastion", "proxy", "ssh", "port"],
         factory=_panel("connections", "ConnectionsPanel"),
     ),
     PanelSpec(
         id="custom_servers",
         title="Custom servers",
-        group="Connections",
+        group="Access & connections",
         keywords=["custom", "servers", "non-aws", "hosts", "provider"],
         factory=_panel("custom_servers", "CustomServersPanel"),
     ),
     PanelSpec(
         id="ssh_keys",
-        title="SSH keys",
-        group="Connections",
+        title="Local SSH keys",
+        group="Access & connections",
         keywords=["ssh", "keys", "instance", "default", "key", "pem"],
         factory=_panel("ssh_keys", "SshKeysPanel"),
     ),
-    # ------------------------------------------------------- Cloud Providers
+    PanelSpec(
+        id='vault',
+        title="Vault",
+        group="Access & connections",
+        keywords=["vault", "identity", "recovery", "grant", "verification", "ssh agent"],
+        factory=_panel("vault", "VaultPanel"),
+    ),
+    PanelSpec(
+        id="bw_ssh",
+        title="Bitwarden SSH",
+        group="Access & connections",
+        keywords=["bitwarden", "ssh", "vault", "collection", "secrets"],
+        factory=_panel("bw_ssh", "BwSshPanel"),
+    ),
+    # --------------------------------------------------------- Monitor & logs
+    PanelSpec(
+        id="memory",
+        title="Memory",
+        group="Monitor & logs",
+        keywords=["memory", "redaction", "modules", "ttl", "findings", "snapshot"],
+        factory=_panel("memory", "MemoryPanel"),
+    ),
+    PanelSpec(
+        id="memory_sync",
+        title="Memory Sync",
+        group="Monitor & logs",
+        keywords=["memory", "sync", "digest", "mercure", "consent", "cloud"],
+        factory=_panel("memory_sync", "MemorySyncPanel"),
+    ),
+    PanelSpec(
+        id="log_viewer",
+        title="Log viewer",
+        group="Monitor & logs",
+        keywords=["log", "viewer", "paths", "tail", "lines", "scan", "depth"],
+        factory=_panel("log_viewer", "LogViewerPanel"),
+    ),
+    PanelSpec(
+        id="scan",
+        title="Scan",
+        group="Monitor & logs",
+        keywords=["scan", "paths", "rules", "keyword", "commands"],
+        factory=_panel("scan", "ScanPanel"),
+    ),
+    PanelSpec(
+        id="cloudwatch",
+        title="CloudWatch",
+        group="Monitor & logs",
+        keywords=["cloudwatch", "logs", "region", "events", "log group", "prefix"],
+        factory=_panel("cloudwatch", "CloudwatchPanel"),
+    ),
+    PanelSpec(
+        id="cloudtrail",
+        title="CloudTrail",
+        group="Monitor & logs",
+        keywords=["cloudtrail", "region", "events", "lookback", "audit"],
+        factory=_panel("cloudtrail", "CloudtrailPanel"),
+    ),
+    # --------------------------------------------------------- Cloud providers
     PanelSpec(
         id="aws",
         title="AWS",
@@ -151,64 +208,7 @@ PANELS: List[PanelSpec] = [
         factory=_panel("azure", "AzurePanel"),
         preview=True,
     ),
-    # --------------------------------------------------- Security & Network
-    PanelSpec(
-        id="ip_ban",
-        title="IP ban",
-        group="Security & network",
-        keywords=["ip", "ban", "waf", "security", "group", "nacl", "block"],
-        factory=_panel("ip_ban", "IpBanPanel"),
-    ),
-    PanelSpec(
-        id="ip_lookup",
-        title="IP lookup",
-        group="Security & network",
-        keywords=["abuseipdb", "ip", "lookup", "reputation", "geolocation", "abuse"],
-        factory=_panel("ip_lookup", "IpLookupPanel"),
-    ),
-    PanelSpec(
-        id="cloudtrail",
-        title="CloudTrail",
-        group="Security & network",
-        keywords=["cloudtrail", "region", "events", "lookback", "audit"],
-        factory=_panel("cloudtrail", "CloudtrailPanel"),
-    ),
-    PanelSpec(
-        id="cloudwatch",
-        title="CloudWatch",
-        group="Security & network",
-        keywords=["cloudwatch", "logs", "region", "events", "log group", "prefix"],
-        factory=_panel("cloudwatch", "CloudwatchPanel"),
-    ),
-    PanelSpec(
-        id="log_viewer",
-        title="Log viewer",
-        group="Security & network",
-        keywords=["log", "viewer", "paths", "tail", "lines", "scan", "depth"],
-        factory=_panel("log_viewer", "LogViewerPanel"),
-    ),
-    PanelSpec(
-        id="mcp",
-        title="MCP server",
-        group="Security & network",
-        keywords=["mcp", "guard", "allowlist", "blocklist", "audit", "agents"],
-        factory=_panel("mcp", "McpPanel"),
-    ),
-    PanelSpec(
-        id="relay",
-        title="Relay",
-        group="Security & network",
-        keywords=["relay", "mercure", "heartbeat", "listener", "auto-approve"],
-        factory=_panel("relay", "RelayPanel"),
-    ),
-    PanelSpec(
-        id='vault',
-        title="Team vault",
-        group="Security & network",
-        keywords=["vault", "identity", "recovery", "grant", "verification", "ssh agent"],
-        factory=_panel("vault", "VaultPanel"),
-    ),
-    # ------------------------------------------------------------------- AI
+    # -------------------------------------------------------------------- AI
     PanelSpec(
         id="ai_provider",
         title="AI provider",
@@ -234,33 +234,33 @@ PANELS: List[PanelSpec] = [
                   "vad", "barge-in", "headphones", "interrupt"],
         factory=_panel("voice", "VoicePanel"),
     ),
-    # ------------------------------------------------------- Memory & Sync
     PanelSpec(
-        id="memory",
-        title="Memory",
-        group="Memory & sync",
-        keywords=["memory", "redaction", "modules", "ttl", "findings", "snapshot"],
-        factory=_panel("memory", "MemoryPanel"),
+        id="mcp",
+        title="MCP server",
+        group="AI",
+        keywords=["mcp", "guard", "allowlist", "blocklist", "audit", "agents"],
+        factory=_panel("mcp", "McpPanel"),
     ),
     PanelSpec(
-        id="memory_sync",
-        title="Memory Sync",
-        group="Memory & sync",
-        keywords=["memory", "sync", "digest", "mercure", "consent", "cloud"],
-        factory=_panel("memory_sync", "MemorySyncPanel"),
+        id="relay",
+        title="Relay",
+        group="AI",
+        keywords=["relay", "mercure", "heartbeat", "listener", "auto-approve"],
+        factory=_panel("relay", "RelayPanel"),
+    ),
+    # -------------------------------------------------------------- Security
+    PanelSpec(
+        id="ip_ban",
+        title="IP ban",
+        group="Security",
+        keywords=["ip", "ban", "waf", "security", "group", "nacl", "block"],
+        factory=_panel("ip_ban", "IpBanPanel"),
     ),
     PanelSpec(
-        id="bw_ssh",
-        title="Bitwarden SSH",
-        group="Memory & sync",
-        keywords=["bitwarden", "ssh", "vault", "collection", "secrets"],
-        factory=_panel("bw_ssh", "BwSshPanel"),
-    ),
-    PanelSpec(
-        id="backups",
-        title="Backups",
-        group="Memory & sync",
-        keywords=["backups", "snapshots", "restore", "config", "sync"],
-        factory=_panel("backups", "BackupsPanel"),
+        id="ip_lookup",
+        title="IP lookup",
+        group="Security",
+        keywords=["abuseipdb", "ip", "lookup", "reputation", "geolocation", "abuse"],
+        factory=_panel("ip_lookup", "IpLookupPanel"),
     ),
 ]

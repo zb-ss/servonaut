@@ -47,6 +47,8 @@ class MemoryExportScreen(WorkspaceScreen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        from servonaut.widgets.memory_views import MemoryViewsBar
+
         yield SafeHeader()
         yield WorkspaceControls("Memory export")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
@@ -67,6 +69,7 @@ class MemoryExportScreen(WorkspaceScreen):
                         ),
                         id="export-context",
                     ),
+                    MemoryViewsBar(active="export"),
                     Horizontal(
                         Container(
                             Static("Archive date range", classes="memory-secondary-heading"),

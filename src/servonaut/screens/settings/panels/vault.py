@@ -16,7 +16,7 @@ class VaultPanel(SettingsPanel):
     """Expose the local vault policy without weakening server-side controls."""
 
     PANEL_ID = "vault"
-    TITLE = "Team vault"
+    TITLE = "Vault"
 
     DEFAULT_CSS = """
     VaultPanel .settings-help {

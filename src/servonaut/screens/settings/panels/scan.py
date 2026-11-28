@@ -74,6 +74,9 @@ class ScanPanel(SettingsPanel):
         width: 10;
         min-width: 10;
     }
+    ScanPanel #btn_scan_run_global {
+        width: auto;
+    }
     """
 
     def __init__(self) -> None:
@@ -108,6 +111,10 @@ class ScanPanel(SettingsPanel):
             )
             self._scan_paths_editor = scan_paths_editor
             yield scan_paths_editor
+            yield Horizontal(
+                Button("Scan all servers", id="btn_scan_run_global", variant="default"),
+                classes="scan-add-rule-row",
+            )
         with Vertical(classes="settings-form-section settings-analysis-section"):
             yield Static("Scan rules", classes="scan-section-title")
             yield Static(
@@ -330,6 +337,13 @@ class ScanPanel(SettingsPanel):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle add/remove rule buttons and delegate Save to the base class."""
         btn_id = event.button.id or ""
+
+        if btn_id == "btn_scan_run_global":
+            event.stop()
+            run_scan = getattr(self.app, "_run_global_scan", None)
+            if callable(run_scan):
+                run_scan()
+            return
 
         if btn_id == "scan_btn_add_rule":
             event.stop()

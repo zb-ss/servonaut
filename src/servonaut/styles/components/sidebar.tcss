@@ -35,6 +35,10 @@ Sidebar SidebarSection {
     margin: 0 0 1 0;
 }
 
+Sidebar SidebarSection#section_account {
+    margin: 0;
+}
+
 Sidebar SidebarSection > Button.section-header {
     width: 100%;
     min-width: 0;
