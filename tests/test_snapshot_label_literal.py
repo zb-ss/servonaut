@@ -39,7 +39,11 @@ class _Config:
 class _Sync:
     """Only in-memory list/push/rename; no encryption, API client or config IO."""
 
-    _cached_passphrase = "fixture cached passphrase"
+    def has_cached_passphrase(self) -> bool:
+        return True
+
+    async def key_mode(self) -> str:
+        return "passphrase"
 
     def __init__(self, rows: list[dict]) -> None:
         self.rows = [dict(row) for row in rows]
@@ -219,7 +223,7 @@ async def test_snapshot_native_label_save_keeps_success_toast_literal(
         assert toast._notification.severity == "information"
         assert toast._notification.markup is False
         if action == "push":
-            assert sync.calls == [("push", sync._cached_passphrase, LABEL)]
+            assert sync.calls == [("push", None, LABEL)]
             assert sync.rows[0]["label"] == "before"
             assert sync.rows[-1]["label"] == LABEL
         else:

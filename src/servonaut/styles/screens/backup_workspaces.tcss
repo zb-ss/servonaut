@@ -128,3 +128,14 @@ BackupRestoreScreen.-content-narrow #backups_records {
     width: 100%;
     height: 12;
 }
+
+SnapshotManagerScreen #snapshots_move_notice {
+    height: auto;
+    margin: 0;
+    padding: 0;
+    color: $text-muted;
+}
+
+SnapshotManagerScreen #snap_btn_move_to_vault {
+    margin: 0 0 1 0;
+}

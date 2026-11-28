@@ -24,6 +24,7 @@ from servonaut.widgets.dialogs import (
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from servonaut.services import config_crypto
+from servonaut.services.memory.custody_errors import custody_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         super().__init__()
         self._snapshots: List[Dict[str, Any]] = []
         self._loading: bool = False
+        self._moving_key: bool = False
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -186,6 +188,12 @@ class SnapshotManagerScreen(WorkspaceScreen):
             yield VerticalScroll(
                 Container(
                     Static("[bold $text-accent]Config snapshots[/bold $text-accent]", id="snapshots_header"),
+                    Static(
+                        "[dim]Some snapshots still use your sync passphrase. Move the key "
+                        "to your vault to stop needing it.[/dim]",
+                        id="snapshots_move_notice",
+                    ),
+                    Button("Move key to vault", id="snap_btn_move_to_vault"),
                     id="snapshots_context",
                 ),
                 Horizontal(
@@ -193,7 +201,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
                         Static(
                             "[dim]Click a row, then use the keys below or the buttons. "
                             "Restore pulls a snapshot and replaces your local config. "
-                            "Snapshots are client-encrypted; decryption needs the sync passphrase.[/dim]",
+                            "Snapshots are client-encrypted with your vault key or sync passphrase.[/dim]",
                             id="snapshots_hint",
                         ),
                         Static("", id="snapshots_status"),
@@ -246,6 +254,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
         sync_compact_buttons(self)
         table = self.query_one("#snapshots_table", DataTable)
         table.add_columns("#", "Label", "Version", "Created", "Hash")
+        self._sync_move_offer()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -268,6 +277,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
             snapshots = await sync.list_snapshots(limit=100)
             self._snapshots = snapshots
             self._render_table()
+            self._sync_move_offer()
             n = len(snapshots)
             if n == 0:
                 self._set_status(
@@ -311,6 +321,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
             "btn_delete": self.action_delete,
             "btn_push_new": self.action_push_new,
             "btn_refresh": self.action_refresh,
+            "snap_btn_move_to_vault": self.action_move_key_to_vault,
         }
         action = mapping.get(event.button.id or "")
         if action:
@@ -362,10 +373,11 @@ class SnapshotManagerScreen(WorkspaceScreen):
         self._prompt_passphrase_then(
             lambda pp: self.run_worker(
                 self._do_restore(snap, pp), exclusive=True, name="restore_snapshot"
-            )
+            ),
+            snapshot=snap,
         )
 
-    async def _do_restore(self, snap: Dict[str, Any], passphrase: str) -> None:
+    async def _do_restore(self, snap: Dict[str, Any], passphrase: Optional[str]) -> None:
         sync = self._sync_service()
         if sync is None:
             return
@@ -377,8 +389,12 @@ class SnapshotManagerScreen(WorkspaceScreen):
             self.notify("Snapshot restored. Restart Servonaut to apply fully.",
                         severity="information")
             self._set_status("[$text-success]Snapshot restored.[/$text-success]")
-        except config_crypto.DecryptionError:
-            self.notify("Wrong passphrase or corrupted snapshot.", severity="error")
+        except config_crypto.DecryptionError as exc:
+            if self._is_vault_snapshot(snap):
+                # The text is the client's own (key missing or vault locked).
+                self.notify(self._short_err(exc), severity="error", markup=False)
+            else:
+                self.notify("Wrong passphrase or corrupted snapshot.", severity="error")
             self._set_status("[$text-error]Decryption failed.[/$text-error]")
         except Exception as exc:
             logger.error("Restore failed: %s", exc)
@@ -485,7 +501,7 @@ class SnapshotManagerScreen(WorkspaceScreen):
             allow_set=not self._snapshots,
         )
 
-    async def _do_push(self, label: str, passphrase: str) -> None:
+    async def _do_push(self, label: str, passphrase: Optional[str]) -> None:
         sync = self._sync_service()
         if sync is None:
             return
@@ -499,6 +515,9 @@ class SnapshotManagerScreen(WorkspaceScreen):
         except config_crypto.CryptoUnavailableError:
             self.notify("Install cryptography: pip install 'servonaut[sync]'",
                         severity="error")
+        except config_crypto.DecryptionError as exc:
+            self.notify(self._short_err(exc), severity="error", markup=False)
+            self._set_status(f"[$text-error]Push failed: {escape(self._short_err(exc))}[/$text-error]")
         except ValueError as exc:
             self.notify(f"{exc}", severity="error", markup=False)
         except Exception as exc:
@@ -533,40 +552,159 @@ class SnapshotManagerScreen(WorkspaceScreen):
         except Exception:
             pass
 
-    def _prompt_passphrase_then(self, then, *, allow_set: bool = False) -> None:
-        """Prompt the user for the sync passphrase, then run `then(passphrase)`.
+    def _prompt_passphrase_then(
+        self,
+        then,
+        *,
+        allow_set: bool = False,
+        snapshot: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Resolve the snapshot key, then run ``then(passphrase_or_None)``.
 
-        If the passphrase is cached on the service, uses it without prompting.
+        ``snapshot`` is the snapshot being restored, if any. A vault snapshot
+        needs no passphrase; a passphrase snapshot always asks (or uses the
+        session's cached one), whatever the account's mode is now. A push has
+        no snapshot, so the service's ``key_mode()`` decides; resolving it can
+        call the service, so it runs in a worker behind a loading status.
+        """
+        if snapshot is not None:
+            if self._is_vault_snapshot(snapshot):
+                then(None)
+                return
+            self._ask_passphrase(then, allow_set=False)
+            return
+        self.run_worker(
+            self._resolve_key_mode(then, allow_set),
+            exclusive=True,
+            group="config_sync_key",
+            name="config_sync_key_mode",
+        )
+
+    async def _resolve_key_mode(self, then, allow_set: bool) -> None:
+        sync = self._sync_service()
+        if sync is None:
+            return
+        self._set_status("[dim]Checking sync key…[/dim]")
+        try:
+            mode = await sync.key_mode()
+        except Exception as exc:
+            logger.error("Could not resolve the config sync key mode: %s", exc)
+            text = custody_error_message(exc) or self._short_err(exc)
+            self.notify(text, severity="error", markup=False)
+            self._set_status(f"[$text-error]{escape(text)}[/$text-error]")
+            return
+        self._set_status(self._count_status())
+        if mode == "vault":
+            then(None)
+            return
+        self._ask_passphrase(then, allow_set=allow_set)
+
+    def _ask_passphrase(self, then, *, allow_set: bool) -> None:
+        """Prompt for the sync passphrase, or use the session's cached one.
 
         The "Set sync passphrase" (type-it-twice) mode is ONLY correct when the
-        user is choosing the passphrase for the very first time — i.e. an
-        initial push to an account that has zero snapshots. In every other case
-        the passphrase is account-global and must EXACTLY match the key the
-        target snapshot was encrypted with, so we prompt to *enter* it.
-
-        Keying this off the local probe file (as the old code did) was wrong: a
-        brand-new machine restoring an existing snapshot has no probe yet, so it
-        was mis-prompted to "Set" a new passphrase — which then could never
-        decrypt the existing snapshot. ``allow_set`` is passed True only by the
-        first-push path; restores always pass False.
+        user is choosing the passphrase for the very first time: an initial
+        push to an account with zero snapshots. Otherwise the passphrase is
+        account-global and must EXACTLY match the key the snapshot was
+        encrypted with, so we prompt to *enter* it. A local probe means a
+        passphrase already exists on this device, so "Set" is never offered
+        then, and a brand-new machine restoring a snapshot has no probe, which
+        is why ``allow_set`` (not the probe) opens the "Set" mode.
         """
         sync = self._sync_service()
         if sync is None:
             return
-        cached = getattr(sync, "_cached_passphrase", None)
-        if cached:
-            then(cached)
+        if sync.has_cached_passphrase():
+            # The service falls back to its cached passphrase when given None.
+            then(None)
             return
         # Lazy import to avoid circular imports with login.py
         from servonaut.screens.login import PassphraseModal
-        # A local probe means a passphrase was already established on this
-        # device, so never offer "Set" even if the caller allows it.
         is_set = allow_set and not sync.has_probe()
         title = "Set sync passphrase" if is_set else "Enter sync passphrase"
         self.app.push_screen(
             PassphraseModal(confirm=is_set, title=title),
             callback=lambda pp: then(pp) if pp else None,
         )
+
+    @staticmethod
+    def _is_vault_snapshot(snap: Dict[str, Any]) -> bool:
+        return snap.get("key_custody") == "vault"
+
+    def _count_status(self) -> str:
+        n = len(self._snapshots)
+        if n == 0:
+            return "[dim]No snapshots yet. Push one with [bold]p[/bold] to get started.[/dim]"
+        return f"[dim]{n} snapshot{'s' if n != 1 else ''}.[/dim]"
+
+    # ------------------------------------------------------------------
+    # Move key to vault
+    # ------------------------------------------------------------------
+
+    def _vault_is_ready(self) -> bool:
+        vault = getattr(self.app, "vault_command_service", None)
+        return bool(vault is not None and getattr(vault, "is_unlocked", False))
+
+    def _sync_move_offer(self) -> None:
+        """Show the notice and button only when there is something to move."""
+        offer = self._vault_is_ready() and any(
+            not self._is_vault_snapshot(s) for s in self._snapshots
+        )
+        for widget_id in ("#snapshots_move_notice", "#snap_btn_move_to_vault"):
+            try:
+                self.query_one(widget_id).display = offer
+            except Exception:
+                pass
+
+    def action_move_key_to_vault(self) -> None:
+        if self._moving_key:
+            return
+        self.app.push_screen(
+            ConfirmModal(
+                title="Move key to vault",
+                message=(
+                    "Your old passphrase snapshots are replaced by one new snapshot "
+                    "under the vault key, and the sync passphrase stops being needed. "
+                    "Other devices need access to your vault to restore it."
+                ),
+            ),
+            callback=self._move_after_confirm,
+        )
+
+    def _move_after_confirm(self, ok: Optional[bool]) -> None:
+        if not ok or self._moving_key:
+            return
+        self._moving_key = True
+        self.run_worker(
+            self._do_move_key(), exclusive=True, group="config_sync_move",
+            name="config_sync_move",
+        )
+
+    async def _do_move_key(self) -> None:
+        sync = self._sync_service()
+        if sync is None:
+            self._moving_key = False
+            return
+        labels = {
+            "key": "Preparing the vault key…",
+            "snapshot": "Uploading a snapshot under the vault key…",
+            "cleanup": "Removing the old passphrase snapshots…",
+        }
+        self._set_status("[dim]Moving the key to your vault…[/dim]")
+        try:
+            await sync.move_key_to_vault(
+                lambda step: self._set_status(f"[dim]{labels.get(step, 'Working…')}[/dim]")
+            )
+            self.notify("Config sync key moved to your vault.", severity="information")
+            self._moving_key = False
+            await self._load_snapshots()
+        except Exception as exc:
+            logger.error("Move key to vault failed: %s", exc)
+            text = custody_error_message(exc) or f"Could not move the key: {self._short_err(exc)}"
+            self.notify(text, severity="error", markup=False)
+            self._set_status(f"[$text-error]{escape(text)}[/$text-error]")
+        finally:
+            self._moving_key = False
 
     @staticmethod
     def _format_date(value: Any) -> str:
