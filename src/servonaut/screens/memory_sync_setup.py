@@ -1390,6 +1390,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             self._custody_busy = False
             self._clear_busy()
             self._notify_custody_failure(exc, "rotation", "Rotation failed")
+            self._render_state()
             return
         self._custody_busy = False
         self._clear_busy()

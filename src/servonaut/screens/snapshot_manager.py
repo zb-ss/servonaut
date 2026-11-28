@@ -519,13 +519,14 @@ class SnapshotManagerScreen(WorkspaceScreen):
                         severity="error")
         except config_crypto.DecryptionError as exc:
             self.notify(self._short_err(exc), severity="error", markup=False)
-            self._set_status(f"[$text-error]Push failed: {escape(self._short_err(exc))}[/$text-error]")
+            self._set_status(f"[$text-error]{escape(self._short_err(exc))}[/$text-error]")
         except ValueError as exc:
             self.notify(f"{exc}", severity="error", markup=False)
         except Exception as exc:
             logger.error("Push failed: %s", exc)
-            self.notify(f"Push failed: {self._short_err(exc)}", severity="error", markup=False)
-            self._set_status(f"[$text-error]Push failed: {self._short_err(exc)}[/$text-error]")
+            text = custody_error_message(exc) or f"Push failed: {self._short_err(exc)}"
+            self.notify(text, severity="error", markup=False)
+            self._set_status(f"[$text-error]{escape(text)}[/$text-error]")
 
     # ------------------------------------------------------------------
     # Helpers

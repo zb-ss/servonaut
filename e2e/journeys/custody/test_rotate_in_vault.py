@@ -34,7 +34,7 @@ SERVICE_WORDING = "Your vault already holds two items of this type."
 ROTATE_PATH = f"{KEYS_PATH}/rotate"
 
 
-async def _rotate(t, expect: str, *, refused: bool = False) -> str:
+async def _rotate(t, expect: str) -> str:
     """Press Rotate keypair, confirm, and return the toast matching *expect*."""
     await settle_card(t, "#msync_btn_rotate")
     seen = len(t.toasts())  # earlier rotations' toasts stay in the list
@@ -47,10 +47,7 @@ async def _rotate(t, expect: str, *, refused: bool = False) -> str:
         lambda: next((m for _, m in t.toasts()[seen:] if regex.search(m)), None),
         desc=f"a new toast /{expect}/",
     )
-    if not refused:
-        # A refused rotation leaves the busy line on the status row (reported
-        # as a product bug), so only a finished one is checked for it.
-        await t.wait_until(lambda: status(t) == "● Active", desc="active after the rotation")
+    await t.wait_until(lambda: status(t) == "● Active", desc="active after the rotation")
     await settle_card(t, "#msync_btn_rotate")
     return toast
 
@@ -67,18 +64,8 @@ def _latest_wrap_fingerprints(fake_cloud, user_id: int) -> set[str]:
 
 
 async def test_rotation_keeps_the_old_item_until_older_memory_ages_out(
-    tui, seed, fake_cloud, journey, servonaut_cmd, custody_device, signed_in_home, monkeypatch,
+    tui, seed, fake_cloud, journey, servonaut_cmd, custody_device, signed_in_home,
 ):
-    # Set-up and each rotation attempt (a refused one too) look the key up once
-    # more, so three rotations use up the client's 3-per-hour budget for that
-    # call (the service allows 20). The budget is lifted here so the journey
-    # reaches the part it is about; the tight budget is reported separately.
-    from servonaut.services.memory import rate_limiter
-
-    monkeypatch.setitem(
-        rate_limiter._LIMITS, rate_limiter.RateLimitKey.KEYS_ME,
-        rate_limiter._Window(capacity=1000, period_seconds=3600.0),
-    )
     signed_in_home()
     seed_probed_memory(seed)
     from e2e.harness.vault_custody import setup_vault
@@ -106,7 +93,7 @@ async def test_rotation_keeps_the_old_item_until_older_memory_ages_out(
         assert _latest_wrap_fingerprints(fake_cloud, user_id) == {second["fingerprint"]}
 
         # 2. A second rotation inside the window: the client's own text, nothing changed.
-        toast = await _rotate(t, r"cannot be changed again yet", refused=True)
+        toast = await _rotate(t, r"cannot be changed again yet")
         assert toast == BLOCKED and SERVICE_WORDING not in toast
         assert fake_cloud.memory.enrolled_key()["id"] == second["id"]
         assert len(fake_cloud.requests(ROTATE_PATH, "POST")) == 1

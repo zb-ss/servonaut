@@ -546,7 +546,7 @@ def test_dispatch_with_data_keys_returns_a_result_only_the_account_can_open(fake
 
     consent = _consent(fake_cloud).json()
     response = _dispatch(fake_cloud, consent, envelope_keys=_keys_for(fake_cloud, summary_account))
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
     queued = response.json()
     assert queued["status"] == "queued" and queued["previous_summary_id"] is None
     latest = signed_call(fake_cloud, None, "GET", f"{SUMMARY}/web-1/latest").json()
@@ -595,7 +595,7 @@ def test_stale_envelopes_and_the_forced_one_shot(fake_cloud, summary_account):
     keys = _keys_for(fake_cloud, {**summary_account, "ids": current})
     fake_cloud.summaries.force_stale_once()
     assert _code(_dispatch(fake_cloud, fresh, envelope_keys=keys)) == "stale_envelopes"
-    assert _dispatch(fake_cloud, fresh, envelope_keys=keys).status_code == 200
+    assert _dispatch(fake_cloud, fresh, envelope_keys=keys).status_code == 202
 
 
 def test_summary_switch_and_passphrase_form(fake_cloud, summary_account):
@@ -624,11 +624,11 @@ def test_the_passphrase_form_is_accepted_for_a_passphrase_key_that_it_opens(fake
     consent = _consent(fake_cloud).json()
     wrong = _dispatch(fake_cloud, consent, passphrase="not it")
     assert wrong.status_code == 422 and wrong.json()["error"]["details"]["field"] == "passphrase"
-    assert _dispatch(fake_cloud, consent, passphrase=passphrase).status_code == 200
+    assert _dispatch(fake_cloud, consent, passphrase=passphrase).status_code == 202
     # The data-key form works for a passphrase-custody account too.
     account = {"private": pair.private_key, "user_id": uid, "ids": ids}
     again = _dispatch(fake_cloud, _consent(fake_cloud).json(), envelope_keys=_keys_for(fake_cloud, account))
-    assert again.status_code == 200
+    assert again.status_code == 202
     fake_cloud.memory.set_passphrase_custody(False)
     assert _code(_dispatch(fake_cloud, _consent(fake_cloud).json(), passphrase=passphrase)) == "memory_key_custody_vault"
 
@@ -637,8 +637,11 @@ def test_a_data_key_that_does_not_open_the_envelope_fails_the_job(fake_cloud, su
     consent = _consent(fake_cloud).json()
     keys = _keys_for(fake_cloud, summary_account)
     keys[0]["dek"] = _b64(bytes(32))
-    assert _dispatch(fake_cloud, consent, envelope_keys=keys).status_code == 200
-    latest = signed_call(fake_cloud, None, "GET", f"{SUMMARY}/web-1/latest")
+    queued = _dispatch(fake_cloud, consent, envelope_keys=keys)
+    assert queued.status_code == 202
+    # The client polls for the job it queued: ``after`` is the queued_at timestamp.
+    latest = signed_call(fake_cloud, None, "GET", f"{SUMMARY}/web-1/latest",
+                         query={"after": queued.json()["queued_at"]})
     assert latest.status_code == 200 and latest.json()["status"] == "failed" and latest.json()["reason"]
     assert [j["status"] for j in fake_cloud.summaries.jobs()] == ["failed"]
 

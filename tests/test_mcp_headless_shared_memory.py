@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from servonaut.config.schema import MemoryConfig
+
 import servonaut.services.memory.crypto as memory_crypto
 import servonaut.services.memory.sync_service as sync_module
 from servonaut.config.manager import ConfigManager
@@ -689,16 +691,16 @@ def test_an_account_with_no_key_never_hangs_a_tool_on_the_keys_me_limit(env: Env
 
     async def many_reads() -> list:
         reasons = []
-        for _ in range(12):
+        for _ in range(30):  # more than the client window (20 an hour)
             reasons.append(await shared.check_lock())
             now.value += 61  # past the recheck wait every time
         return reasons
 
     reasons = asyncio.run(asyncio.wait_for(many_reads(), timeout=5))  # a hang fails here
 
-    assert len(reasons) == 12
+    assert len(reasons) == 30
     # One lookup per interval at most, and never more than the client window allows.
-    assert 1 <= env.api.get.await_count <= 3
+    assert 1 <= env.api.get.await_count <= MemoryConfig().keys_me_wait()
 
 
 def test_reads_inside_one_interval_share_one_keys_me_lookup(env: Env):

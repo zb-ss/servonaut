@@ -187,6 +187,13 @@ class _VaultOutcome:
     looked_up: bool = False
 
 
+def _previous_key_in_use() -> APIError:
+    return APIError(
+        code=_ITEM_TYPE_EXISTS, status=409,
+        message="a previous Memory Sync key item is still in use",
+    )
+
+
 class MemoryKeyCustody:
     """Decide where the key lives, load it from the vault, enrol it in the vault.
 
@@ -638,12 +645,10 @@ class MemoryKeyCustody:
             raise VaultCustodyLocked("vault_locked")
         signer = self._signer()
         user_id = await self._user_id()
+        await self._refuse_while_previous_key_in_use(items, user_id)
         previous = await self._active_fingerprint_in_vault(items)
         if await self._finish_earlier_rotation(items, previous):
-            raise APIError(
-                code=_ITEM_TYPE_EXISTS, status=409,
-                message="a previous Memory Sync key item is still in use",
-            )
+            raise _previous_key_in_use()
         material = await self._create_item(items, user_id)
         fingerprint = crypto.fingerprint(material.public_key)
         try:
@@ -664,6 +669,24 @@ class MemoryKeyCustody:
             fingerprint=fingerprint, previous_fingerprint=previous,
             old_item_kept=kept, upload_error=upload_error,
         )
+
+    async def _refuse_while_previous_key_in_use(self, items: AppKeyItems, user_id: int) -> None:
+        """Refuse a rotation the vault already blocks, without a key lookup.
+
+        With the marker naming a held key, any other item is a previous or
+        next key; the service refuses to delete one that is active or in use,
+        so trying the delete is safe even when the marker is stale.  A stale
+        marker at worst blocks here until the next attempt; it never deletes
+        the active item.  Anything else falls through to the service's answer.
+        """
+        marker = self._read_marker(user_id)
+        if marker is None or marker.custody != CUSTODY_VAULT:
+            return
+        held = [ref.public_fingerprint for ref in await items.list(MEMORY_KEY)]
+        if marker.fingerprint not in held or len(held) < 2:
+            return
+        if await self._finish_earlier_rotation(items, marker.fingerprint):
+            raise _previous_key_in_use()
 
     async def retry_pending_item_cleanup(self) -> bool:
         """Delete a previous key's item that a rotation had to keep; never raises.

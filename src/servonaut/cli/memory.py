@@ -730,7 +730,9 @@ def _init_headless_sync_services(
         from servonaut.services.memory.sync_service import MemorySyncService
         from servonaut.services.memory.rate_limiter import RateLimiter
 
-        rate_limiter = RateLimiter()
+        rate_limiter = RateLimiter(
+            keys_me_per_hour=config_manager.get().memory.keys_me_wait(),
+        )
         sync_service = MemorySyncService(
             api_client=api_client,
             crypto=_memory_crypto,

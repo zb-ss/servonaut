@@ -1715,7 +1715,9 @@ class ServonautApp(App):
 
         try:
             from servonaut.services.memory.rate_limiter import RateLimiter
-            self.memory_rate_limiter = RateLimiter()
+            self.memory_rate_limiter = RateLimiter(
+                keys_me_per_hour=self.config_manager.get().memory.keys_me_wait(),
+            )
         except ImportError:
             logger.debug("RateLimiter unavailable")
             return

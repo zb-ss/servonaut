@@ -630,6 +630,30 @@ async def test_move_shows_step_lines_and_loading_while_it_runs() -> None:
             await wait_until(lambda: "msync_move_loading" not in _ids(app))
 
 
+class _RefusedRotationSync(_KeySyncStub):
+    async def rotate_keypair_in_vault(self) -> None:
+        from servonaut.services.api_client import APIError
+
+        raise APIError(code="item_type_exists", message="two items", status=409)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_rotation_restores_the_status_line() -> None:
+    app = _CustodyApp(
+        _RefusedRotationSync(configured=True, key_source="vault"), _CustodyStub())
+    with patch("servonaut.services.memory.passphrase_store.keyring_available", return_value=False):
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            await _open(app, pilot)
+            await _press(app, pilot, "msync_btn_rotate", _on(app, ConfirmModal))
+            await _press(
+                app, pilot, "btn_confirm_yes",
+                lambda: any("cannot be changed again yet" in m for m, _ in app.notified))
+            await wait_until(lambda: "msync_btn_rotate" in _ids(app))
+            status = app.screen.query_one("#msync_status", Static).render().plain
+            assert "Rotating" not in status
+            assert "Active" in status
+
+
 class _DisableSyncStub(_KeySyncStub):
     """Configured sync that locks and stops like the real service."""
 

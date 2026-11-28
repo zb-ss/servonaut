@@ -211,8 +211,10 @@ async def test_restart_unlocks_from_the_local_key_cache(tui, seed, fake_cloud, m
         await unlock(t)
         assert t.is_reachable(t.on_screen("#msync_btn_sync_now"))
 
-    # Unlocked from the local cache: no key fetch, no second enrolment.
-    assert len(fake_cloud.requests(f"{KEYS_PATH}/me")) == key_reads
+    # Unlocked from the local cache: the only key lookup is the one the screen makes
+    # to learn where the key is kept (it loads before showing a card); no second
+    # enrolment, and the cached key is what unlocks.
+    assert len(fake_cloud.requests(f"{KEYS_PATH}/me")) == key_reads + 1
     assert fake_cloud.statuses(KEYS_PATH) == [201]
     assert fake_cloud.memory.enrolled_key() == enrolled
     fake_cloud.assert_no_unexpected_errors(*FIRST_RUN)

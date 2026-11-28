@@ -299,3 +299,27 @@ def test_vault_snapshot_decrypt_failure_does_not_blame_the_passphrase():
     asyncio.run(screen._do_restore({"id": "s1", "key_custody": "vault"}, None))
     assert screen.notify.call_args[0][0] == "not in your vault"
     assert screen.notify.call_args.kwargs["markup"] is False
+
+
+def test_a_refused_push_shows_the_client_text_not_push_failed():
+    screen = _make_screen(has_probe=False, mode="vault")
+    screen.sync.push = AsyncMock(side_effect=ConfigKeyError("config_key_not_ready"))
+    asyncio.run(screen._do_push("laptop", None))
+    shown = screen.notify.call_args[0][0]
+    assert shown.startswith("Your config sync key is not in your vault yet")
+    assert not shown.startswith("Push failed")
+    assert screen.notify.call_args.kwargs["markup"] is False
+    assert "Push failed" not in screen._set_status.call_args[0][0]
+
+
+def test_a_service_refusal_of_a_push_shows_the_client_text():
+    from servonaut.services.api_client import APIError
+
+    screen = _make_screen(has_probe=False, mode="vault")
+    screen.sync.push = AsyncMock(side_effect=APIError(
+        code="config_key_not_ready", message="No live config key item", status=409))
+    asyncio.run(screen._do_push("laptop", None))
+    shown = screen.notify.call_args[0][0]
+    assert shown.startswith("Your config sync key is not in your vault yet")
+    assert "No live config key item" not in shown
+    assert "No live config key item" not in screen._set_status.call_args[0][0]

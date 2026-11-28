@@ -25,6 +25,8 @@ from random import uniform
 from time import monotonic
 from typing import Any, Deque, Dict, Optional, Tuple
 
+from servonaut.config.schema import DEFAULT_KEYS_ME_PER_HOUR
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -65,7 +67,7 @@ class RateLimitKey(str, Enum):
     SYNC = "sync"                    # 100 req/min sliding
     SUMMARY = "summary"              # 5 req/min sliding
     EXPORT = "export"                # 2 req/hour sliding
-    KEYS_ME = "keys_me"             # 3 req/hour sliding
+    KEYS_ME = "keys_me"             # configurable req/hour sliding (MemoryConfig)
     KEYS_ROTATE = "keys_rotate"      # 5 req/day FIXED window
     GENERAL = "general"             # fallback — 60 req/min sliding
 
@@ -75,7 +77,7 @@ _LIMITS = {
     RateLimitKey.SYNC: _Window(capacity=100, period_seconds=60.0),
     RateLimitKey.SUMMARY: _Window(capacity=5, period_seconds=60.0),
     RateLimitKey.EXPORT: _Window(capacity=2, period_seconds=3600.0),
-    RateLimitKey.KEYS_ME: _Window(capacity=3, period_seconds=3600.0),
+    RateLimitKey.KEYS_ME: _Window(capacity=DEFAULT_KEYS_ME_PER_HOUR, period_seconds=3600.0),
     RateLimitKey.KEYS_ROTATE: _Window(capacity=5, period_seconds=86400.0, fixed_window=True),
     RateLimitKey.GENERAL: _Window(capacity=60, period_seconds=60.0),
 }
@@ -104,10 +106,19 @@ class RateLimiter:
         jitter_fraction: Fraction of the backoff floor added as random jitter
             to prevent thundering-herd when multiple clients back off together.
             Default is 0.25 (25 %).
+        keys_me_per_hour: Window size of the ``GET /keys/me`` limit
+            (``MemoryConfig.keys_me_wait`` supplies the validated value).
     """
 
-    def __init__(self, *, jitter_fraction: float = 0.25) -> None:
+    def __init__(
+        self, *, jitter_fraction: float = 0.25,
+        keys_me_per_hour: int = DEFAULT_KEYS_ME_PER_HOUR,
+    ) -> None:
         self._jitter_fraction = jitter_fraction
+        self._limits: Dict[RateLimitKey, _Window] = dict(_LIMITS)
+        self._limits[RateLimitKey.KEYS_ME] = _Window(
+            capacity=keys_me_per_hour, period_seconds=3600.0,
+        )
         # Sliding-window: deque of monotonic timestamps per key.
         self._timestamps: Dict[RateLimitKey, Deque[float]] = {
             key: deque() for key in RateLimitKey
@@ -170,7 +181,7 @@ class RateLimiter:
             RateLimitTimeoutError: When the required wait exceeds *max_wait_seconds*.
         """
         async with self._get_lock(key):
-            window = _LIMITS[key]
+            window = self._limits[key]
 
             # --- Ratchet check (enforced after a 429) ---
             ratchet_remaining = self._ratchet_until[key] - monotonic()
@@ -302,7 +313,7 @@ class RateLimiter:
         """
         result: Dict[str, Dict[str, Any]] = {}
         now = monotonic()
-        for key, window in _LIMITS.items():
+        for key, window in self._limits.items():
             if window.fixed_window:
                 today = self._current_epoch_day()
                 epoch_day, count = self._fixed_window.get(key, (today, 0))

@@ -29,7 +29,6 @@ import os
 import pytest
 
 from e2e.harness.fake_cloud.routes_configs import ENCRYPTION
-from e2e.harness.known_bugs import ProductBug, known_bug
 from e2e.harness.memory_sync import ACTIVE, open_memory_sync, status, sync_all, unlock, use_passphrase
 from e2e.harness.vault_custody import setup_vault
 from e2e.journeys.custody.wi12b_support import (
@@ -234,15 +233,6 @@ def _passphrase_snapshot(fake_cloud) -> None:
     assert status_code == 201
 
 
-class ServiceWordingShown(ProductBug):
-    """The screen showed the service's own text instead of the client's."""
-
-
-@known_bug(
-    "a refused config push shows 'Push failed: <service text>' instead of the client's "
-    "config_key_not_ready wording",
-    raises=ServiceWordingShown,
-)
 async def test_a_config_push_without_the_key_item_reads_as_not_ready(tui, fake_cloud, vault_account, monkeypatch):
     # The service finds no live config sync key item.
     monkeypatch.setattr(fake_cloud.configs, "vault_key_ids", lambda: [])
@@ -254,8 +244,7 @@ async def test_a_config_push_without_the_key_item_reads_as_not_ready(tui, fake_c
         await t.fill("#label_input", "journey-laptop")
         await t.click("#btn_label_save")
         shown = await t.wait_for_toast(r"config sync key", severity="error")
-        if shown != CONFIG_KEY_NOT_READY:
-            raise ServiceWordingShown(shown)
+        assert shown == CONFIG_KEY_NOT_READY
         _assert_only_client_wording(t)
     assert fake_cloud.configs.all() == []
 

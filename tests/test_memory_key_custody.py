@@ -874,3 +874,16 @@ async def test_retry_cleanup_never_deletes_the_active_key_when_the_marker_is_sta
     env.items.delete_errors[b.fingerprint] = IN_USE
     await env.custody.retry_pending_item_cleanup()
     assert b.fingerprint in env.items.payloads
+
+
+@pytest.mark.asyncio
+async def test_a_refused_rotation_makes_no_keys_me_call_when_the_marker_is_current(env) -> None:
+    old = _vault_account(env)
+    env.items.delete_errors[old.fingerprint] = IN_USE
+    first = await env.custody.rotate_in_vault(_uploader())
+    env.keys_me(**_record(_pair_of(env, first.fingerprint), custody="vault", wrapped_private_key=None))
+    env.api.get.reset_mock()
+    with pytest.raises(APIError) as caught:
+        await env.custody.rotate_in_vault(_uploader())
+    assert caught.value.code == "item_type_exists"
+    env.api.get.assert_not_called()

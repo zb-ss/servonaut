@@ -207,18 +207,16 @@ async def test_with_the_custody_switch_off_a_passphrase_account_falls_back_to_th
 
 
 async def test_a_key_the_service_rejects_ends_in_the_failed_text(tui, fake_cloud, vault_account, monkeypatch):
-    # The service finds the data key does not open the memory it holds: the job
-    # is recorded as failed and the poll answers ``status: "failed"``.
+    # The memory is damaged on the service only after the client's own checks (consent
+    # and key release) have passed, so the service is the one that rejects the key.
     summaries = fake_cloud.summaries
-    run_job = summaries._run_job
+    run_job = summaries._run_job  # noqa: SLF001
 
-    def failing_job(*args, **kwargs):
-        job = run_job(*args, **kwargs)
-        with summaries._lock:
-            job.update(status="failed", reason="dek_invalid", result=None)
-        return job
+    def damage_then_run(*args, **kwargs):
+        _corrupt_stored_memory(fake_cloud)
+        return run_job(*args, **kwargs)
 
-    monkeypatch.setattr(summaries, "_run_job", failing_job)
+    monkeypatch.setattr(summaries, "_run_job", damage_then_run)
     async with tui() as t:
         await _vault_ready(t)
         await _open_memory(t)
@@ -229,3 +227,12 @@ async def test_a_key_the_service_rejects_ends_in_the_failed_text(tui, fake_cloud
         assert "MemorySummaryScreen" not in t.stack_names()
 
     assert [job["status"] for job in fake_cloud.summaries.jobs()] == ["failed"]
+    assert [job["reason"] for job in fake_cloud.summaries.jobs()] == ["dek_invalid"]
+
+
+def _corrupt_stored_memory(fake_cloud) -> None:
+    """The service holds memory the sent data keys cannot open (a damaged tag)."""
+    memory = fake_cloud.memory
+    with memory._lock:  # noqa: SLF001 - the harness has no public way to damage a stored envelope
+        for envelope in memory._envelopes:  # noqa: SLF001
+            envelope["tag"] = base64.b64encode(bytes(16)).decode()

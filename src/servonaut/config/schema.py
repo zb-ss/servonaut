@@ -1180,6 +1180,7 @@ DEFAULT_TEAM_WRAP_MAX_WAIT_SECONDS = 30.0
 
 DEFAULT_CUSTODY_CHECK_INTERVAL_HOURS = 24.0
 DEFAULT_VAULT_KEY_RECHECK_SECONDS = 60.0
+DEFAULT_KEYS_ME_PER_HOUR = 20
 
 
 def _usable_seconds(value: Any, default: float) -> float:
@@ -1307,6 +1308,9 @@ class MemoryConfig:
         vault_key_recheck_seconds: How long a headless process (MCP server,
             relay) waits before it looks for the key in the vault again after
             a failed attempt.
+        keys_me_per_hour: How many key lookups (``GET /keys/me``) this client
+            makes per hour; the service allows 20. Not a positive whole
+            number falls back to the default.
     """
 
     enabled: bool = True
@@ -1407,6 +1411,7 @@ class MemoryConfig:
     # Where the Memory Sync key is kept (see the docstring).
     custody_check_interval_hours: float = DEFAULT_CUSTODY_CHECK_INTERVAL_HOURS
     vault_key_recheck_seconds: float = DEFAULT_VAULT_KEY_RECHECK_SECONDS
+    keys_me_per_hour: int = DEFAULT_KEYS_ME_PER_HOUR
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
@@ -1440,6 +1445,13 @@ class MemoryConfig:
         return _usable_seconds(
             self.vault_key_recheck_seconds, DEFAULT_VAULT_KEY_RECHECK_SECONDS
         )
+
+    def keys_me_wait(self) -> int:
+        """The validated key lookups per hour (a positive whole number)."""
+        value = self.keys_me_per_hour
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return DEFAULT_KEYS_ME_PER_HOUR
+        return value
 
     def team_wrap_wait(self) -> tuple[float, float]:
         """The validated ``(retry, max_wait)`` seconds for a rate-limited team write.

@@ -273,7 +273,7 @@ def build_headless_shared_memory(
     def memory_settings() -> Any:
         return config_manager.get().memory
 
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(keys_me_per_hour=memory_settings().keys_me_wait())
     sync = MemorySyncService(
         api_client=api_client,
         crypto=memory_crypto,
