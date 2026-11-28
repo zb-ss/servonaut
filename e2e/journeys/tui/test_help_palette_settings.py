@@ -135,6 +135,7 @@ async def test_teams_ssh_certificate_palette_and_sidebar_routes(tui, seed, fake_
 
     async with tui(size=(100, 30)) as t:
         await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
+        await t.show_navigation()
         await t.wait_until(
             lambda: t.nav_reachable("nav_vault") and t.nav_reachable("nav_ca"),
             desc="Vault and SSH certificate entries visible for Teams user",

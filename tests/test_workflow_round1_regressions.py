@@ -159,6 +159,45 @@ async def test_server_actions_share_with_team_updates_shared_fleet_handles_error
             for row in app.instances
         )
 
+        # Second ServerActionsScreen with same team_service reuses cached team list (no extra list_teams call).
+        second_actions = ServerActionsScreen(dict(own_row))
+        await app.push_screen(second_actions)
+        await wait_until(
+            lambda: second_actions.query_one("#btn_share_team", Button).display is True
+        )
+        assert team_svc.list_teams.await_count == 1
+
+        # Refresh failure after a successful push_servers still reports success (not share failure).
+        refresh_fail_svc = SimpleNamespace(
+            list_teams=AsyncMock(return_value=[team]),
+            list_shared_servers=AsyncMock(return_value=[]),
+            push_servers=AsyncMock(
+                side_effect=lambda slug, rows: [ShareResult(payload=rows[0], status=SHARED)]
+            ),
+        )
+        refresh_notes: list[tuple[str, str]] = []
+        with (
+            patch(
+                "servonaut.services.shared_servers.load_shared_servers",
+                AsyncMock(side_effect=RuntimeError("refresh timed out")),
+            ),
+            patch.object(
+                app,
+                "push_screen_wait",
+                AsyncMock(side_effect=lambda modal: [{**own_row, SHARE_ADDRESS: "10.0.1.50"}]),
+            ),
+            patch.object(
+                app,
+                "notify",
+                side_effect=lambda msg, severity="information", **_kw: refresh_notes.append(
+                    (severity, msg)
+                ),
+            ),
+        ):
+            await second_actions._share_with_team_flow(refresh_fail_svc)
+        assert any("Shared with team Ops." in msg and sev == "information" for sev, msg in refresh_notes)
+        assert not any("Could not share server" in msg for _, msg in refresh_notes)
+
         # HTTP / API failure during push_servers notifies cleanly instead of crashing.
         failing_svc = SimpleNamespace(
             list_teams=AsyncMock(return_value=[team]),
@@ -342,6 +381,59 @@ async def test_custom_server_real_service_preserves_tags_refuses_dup_and_migrate
         await pilot.pause()
         await pilot.click("#custom_rename_confirm")
         await wait_until(lambda: app.custom_server_service.get_server("srv-other") is not None)
+
+
+@pytest.mark.asyncio
+async def test_custom_server_share_holds_button_busy_and_ignores_duplicate_press(
+    tmp_path: Path,
+) -> None:
+    cfg = AppConfig(custom_servers=[CustomServer(name="srv-1", host="10.0.0.1")])
+    team = {"id": "t-1", "slug": "ops", "name": "Ops", "role": "owner"}
+    release = asyncio.Event()
+    calls = 0
+
+    async def _slow_list_shared(_slug: str) -> list[dict]:
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return []
+
+    app = _boot_offline_app(tmp_path, config=cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        app.auth_service = SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda f: f == "team_workspaces",
+        )
+        app.team_service = SimpleNamespace(
+            list_teams=AsyncMock(return_value=[team]),
+            list_shared_servers=_slow_list_shared,
+        )
+        screen = CustomServersScreen()
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#custom_servers_table", DataTable)
+        table.move_cursor(row=0)
+        await pilot.press("e")
+        await pilot.pause()
+        screen._save_server()
+        await wait_until(lambda: screen.query_one("#btn_custom_share_team", Button).display is True)
+
+        notifications: list[str] = []
+        with (
+            patch.object(app, "notify", side_effect=lambda msg, **_kw: notifications.append(msg)),
+            patch.object(app, "push_screen_wait", AsyncMock(return_value=None)),
+        ):
+            screen._share_saved_server_team()
+            await wait_until(lambda: screen.query_one("#btn_custom_share_team", Button).disabled is True)
+            # Second trigger while busy warns instead of cancelling the active share worker.
+            screen._share_saved_server_team()
+            await pilot.pause()
+            assert calls == 1
+            assert any("still in progress" in m for m in notifications)
+            release.set()
+            await screen.workers.wait_for_complete()
+        assert screen.query_one("#btn_custom_share_team", Button).disabled is False
 
 
 @pytest.mark.asyncio

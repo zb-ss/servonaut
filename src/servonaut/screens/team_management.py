@@ -85,6 +85,7 @@ class _TeamBindPromptModal(ModalScreen[bool]):
     """Lightweight yes/no prompt offering to bind a team vault key after sharing."""
 
     DEFAULT_CLASSES = "dialog-screen"
+    AUTO_FOCUS = "#team_bind_prompt_confirm"
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
     DEFAULT_CSS = """
     _TeamBindPromptModal #team_bind_prompt_title { text-style: bold; }
@@ -118,9 +119,6 @@ class _TeamBindPromptModal(ModalScreen[bool]):
             ),
             id="team_bind_prompt_modal",
         )
-
-    def on_mount(self) -> None:
-        self.query_one("#team_bind_prompt_confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "team_bind_prompt_confirm")
@@ -902,6 +900,9 @@ class TeamManagementScreen(WorkspaceScreen):
         indicator.start("Loading teams…")
         try:
             teams = await team_svc.list_teams()
+            from servonaut.screens._team_share import set_cached_teams
+
+            set_cached_teams(self.app, team_svc, teams or [])
             self._populate_teams_table(teams)
         except ClientUpdateRequiredError as exc:
             logger.warning("Teams list refused (426): %s", exc)
@@ -1174,6 +1175,9 @@ class TeamManagementScreen(WorkspaceScreen):
             return
         try:
             await team_svc.create_team(name)
+            from servonaut.screens._team_share import clear_cached_teams
+
+            clear_cached_teams(self.app)
             self._hide_create_form()
             self.notify(f"Team '{name}' created.", severity="information")
             await self._load_teams()

@@ -1176,6 +1176,8 @@ class ServonautApp(App):
             self.workers.cancel_group(self, "vault_background")
         self.vault_update_required = False
         self.vault_available = False
+        self._cached_teams = None
+        self._cached_teams_service = None
         for screen in list(getattr(self, "screen_stack", ())):
             for sidebar in screen.query("Sidebar"):
                 refresh = getattr(sidebar, "refresh_auth_gates", None)

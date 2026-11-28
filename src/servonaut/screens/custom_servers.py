@@ -19,6 +19,8 @@ from servonaut.widgets.dialogs import (
     DialogFrame,
     DialogNotificationSpace,
 )
+from servonaut.screens._busy_work import BusyWork
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static, TextArea
@@ -179,6 +181,8 @@ class CustomServersScreen(WorkspaceScreen):
         self._open_add_form = open_add_form
         self._editing_name: Optional[str] = None
         self._last_saved_name: Optional[str] = None
+        self._busy = BusyWork(self, "#custom_busy")
+        self._manageable_teams: Optional[list[dict[str, Any]]] = None
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self.navigation_focused:
@@ -213,6 +217,7 @@ class CustomServersScreen(WorkspaceScreen):
                             "Use the arrow keys to choose a host, or press e / Enter to edit. Scroll sideways for all connection fields.",
                             classes="custom-record-note",
                         )
+                    yield BusyIndicator(id="custom_busy")
                     with Horizontal(id="custom_post_save_row"):
                         yield Static("", id="custom_post_save_text", markup=False)
                         yield Button("Open server", variant="primary", id="btn_custom_open_server")
@@ -823,21 +828,17 @@ class CustomServersScreen(WorkspaceScreen):
             )
 
     async def _probe_post_save_share_teams(self) -> None:
+        from servonaut.screens._team_share import resolve_manageable_teams
+
         team_svc = getattr(self.app, "team_service", None)
         if team_svc is None:
             return
         try:
-            teams = await team_svc.list_teams()
+            manageable, _ = await resolve_manageable_teams(self.app, team_svc)
         except Exception:
             return
-        manageable = [
-            dict(t)
-            for t in (teams or [])
-            if isinstance(t, Mapping)
-            and str(t.get("role") or "").lower() in {"owner", "admin"}
-            and t.get("slug")
-        ]
-        if not self.is_mounted:
+        self._manageable_teams = manageable
+        if not self.is_attached:
             return
         try:
             self.query_one("#btn_custom_share_team", Button).display = bool(manageable)
@@ -904,6 +905,13 @@ class CustomServersScreen(WorkspaceScreen):
         self.run_worker(_flow(), group="vault", exclusive=True)
 
     def _share_saved_server_team(self) -> None:
+        if self._busy.holds("#btn_custom_share_team"):
+            self.app.notify(
+                "Sharing this server with a team is still in progress: wait for it to finish.",
+                severity="warning",
+                markup=False,
+            )
+            return
         team_svc = getattr(self.app, "team_service", None)
         row = self._saved_real_row()
         if team_svc is None:
@@ -913,77 +921,20 @@ class CustomServersScreen(WorkspaceScreen):
             self.app.notify("Save the server first before sharing it.", severity="warning")
             return
 
-        async def _flow() -> None:
-            from servonaut.screens.server_actions import TeamTargetModal
-            from servonaut.screens.team_share_confirm import ShareServersConfirmModal
-            from servonaut.services.shared_servers import load_shared_servers
-            from servonaut.services.team_service import SHARED
-            from servonaut.services.team_sharing import (
-                server_share_defaults,
-                share_candidates,
-                share_payload,
-            )
+        from servonaut.screens._team_share import share_server_with_team_flow
 
-            try:
-                teams = await team_svc.list_teams()
-            except Exception as exc:
-                self.app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
-                return
-            all_teams = [dict(t) for t in (teams or []) if isinstance(t, Mapping)]
-            manageable = [
-                t for t in all_teams
-                if str(t.get("role") or "").lower() in {"owner", "admin"} and t.get("slug")
-            ]
-            if not manageable:
-                self.app.notify("Only team owners or admins can share servers.", severity="warning")
-                return
-            team = manageable[0]
-            if len(manageable) > 1:
-                picked = await self.app.push_screen_wait(TeamTargetModal(manageable))
-                if not isinstance(picked, Mapping):
-                    return
-                team = dict(picked)
-            slug = str(team["slug"])
-            team_name = str(team.get("name") or slug)
-            try:
-                shared = await team_svc.list_shared_servers(slug)
-            except Exception as exc:
-                self.app.notify(f"Could not read shared servers ({exc}).", severity="error", markup=False)
-                return
-            candidate = server_share_defaults(getattr(self.app, "connection_service", None), row)
-            to_share, skipped_existing, skipped_no_ip = share_candidates([candidate], shared or [])
-            if not to_share:
-                if skipped_existing:
-                    self.app.notify(f"Already shared with {team_name}.", severity="information", markup=False)
-                else:
-                    self.app.notify("This server has no routable IP address to share.", severity="warning")
-                return
-            chosen = await self.app.push_screen_wait(
-                ShareServersConfirmModal(
-                    team_name,
-                    to_share,
-                    skipped_existing=skipped_existing,
-                    skipped_no_address=skipped_no_ip,
-                )
-            )
-            if not chosen:
-                return
-            try:
-                results = await team_svc.push_servers(slug, [share_payload(item) for item in chosen])
-                if any(r.status == SHARED for r in results):
-                    shared_state = await load_shared_servers(team_svc, all_teams)
-                    replace_instances(self.app, "shared", shared_state.rows)
-                    reconcile_team_memory(self.app)
-            except Exception as exc:
-                self.app.notify(f"Could not share server: {exc}", severity="error", markup=False)
-                return
-            if any(r.status == SHARED for r in results):
-                self.app.notify(f"Shared with team {team_name}.", markup=False)
-            else:
-                err = next((r.error for r in results if getattr(r, "error", None)), "unknown error")
-                self.app.notify(f"Could not share server: {err}", severity="error", markup=False)
-
-        self.run_worker(_flow(), group="team_share", exclusive=True)
+        self.run_worker(
+            share_server_with_team_flow(
+                self,
+                row,
+                team_svc,
+                busy=self._busy,
+                hold_selector="#btn_custom_share_team",
+                manageable_teams=self._manageable_teams,
+            ),
+            group="team_share",
+            exclusive=True,
+        )
 
     def _refresh_app_instances(self) -> None:
         """Replace the custom-server rows in ``app.instances``.
