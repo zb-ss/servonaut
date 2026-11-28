@@ -1,6 +1,7 @@
 """Cloud config synchronization service."""
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -9,8 +10,9 @@ import os
 import socket
 import stat
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import ConfigSyncServiceInterface
 from . import config_crypto
@@ -18,6 +20,7 @@ from . import config_crypto
 if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
     from servonaut.config.manager import ConfigManager
+    from servonaut.services.vault.app_keys import AppKeyItems
 
 logger = logging.getLogger(__name__)
 
@@ -140,15 +143,129 @@ def _identity(entry: Any) -> Optional[str]:
 
 PROBE_FILE = Path.home() / ".servonaut" / "sync_key_probe.json"
 DEFAULT_SNAPSHOT_NAME = "servonaut-cli"
+CONFIG_KEY_ITEM = "config_sync_key"
+CONFIG_KEY_NAME = "Servonaut config sync key"
+
+
+class ConfigKeyError(config_crypto.DecryptionError):
+    """A vault-key problem with the client's own text; ``code`` names the case."""
+
+    def __init__(self, code: str, fallback: str = "The config sync key is not available.") -> None:
+        from types import SimpleNamespace
+        from servonaut.services.memory.custody_errors import custody_error_message
+
+        super().__init__(custody_error_message(SimpleNamespace(code=code)) or fallback)
+        self.code = code
+
+
+_UNKNOWN_KEY_TEXT = (
+    "This snapshot was sealed with a vault key that is not in your vault. "
+    "Unlock your vault or add this device to it, then try again."
+)
+
+KeyItemsProvider = Callable[[], Optional["AppKeyItems"]]
 
 
 class ConfigSyncService(ConfigSyncServiceInterface):
     """Sync configuration to/from servonaut.dev cloud."""
 
-    def __init__(self, api_client: 'APIClient', config_manager: 'ConfigManager') -> None:
+    def __init__(
+        self,
+        api_client: 'APIClient',
+        config_manager: 'ConfigManager',
+        key_items_provider: Optional[KeyItemsProvider] = None,
+    ) -> None:
         self._api = api_client
         self._config_manager = config_manager
+        # Returns the vault's AppKeyItems, or None while the vault is absent or locked.
+        self._key_items_provider = key_items_provider
         self._cached_passphrase: Optional[str] = None
+
+    # -- key custody ---------------------------------------------------
+
+    def _key_items(self) -> Optional["AppKeyItems"]:
+        if self._key_items_provider is None:
+            return None
+        return self._key_items_provider()
+
+    async def key_mode(self) -> str:
+        """``"vault"`` or ``"passphrase"``: where the snapshot key is kept.
+
+        Vault when a ``config_sync_key`` item exists, or when the vault is
+        ready and the account has no passphrase snapshot and no local probe
+        (a new user); passphrase otherwise.
+        """
+        items = self._key_items()
+        if items is None:
+            return "passphrase"
+        if await items.list(CONFIG_KEY_ITEM):
+            return "vault"
+        if self.has_probe():
+            return "passphrase"
+        snapshots = await self.list_snapshots()
+        if any(snap.get("key_custody") != "vault" for snap in snapshots):
+            return "passphrase"
+        return "vault"
+
+    async def _vault_keys(self, items: "AppKeyItems") -> List[Dict[str, Any]]:
+        """Payloads of the live config sync key items, newest first."""
+        payloads = []
+        for ref in await items.list(CONFIG_KEY_ITEM):
+            payload = await items.read(CONFIG_KEY_ITEM, ref.public_fingerprint)
+            if payload is not None:
+                payloads.append(payload)
+        payloads.sort(key=lambda p: str(p.get("created_at", "")), reverse=True)
+        return payloads
+
+    async def _ensure_vault_key(self, items: "AppKeyItems") -> Dict[str, Any]:
+        """The current key payload; created and read back on first use."""
+        existing = await self._vault_keys(items)
+        if existing:
+            return existing[0]
+        key = config_crypto.generate_key()
+        try:
+            payload = {
+                "v": 1,
+                "name": CONFIG_KEY_NAME,
+                "key": base64.b64encode(bytes(key)).decode(),
+                "public_fingerprint": config_crypto.key_id(bytes(key)),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await items.create(CONFIG_KEY_ITEM, payload)
+            read_back = await items.read(CONFIG_KEY_ITEM, payload["public_fingerprint"])
+            if read_back is None or read_back.get("key") != payload["key"]:
+                raise ConfigKeyError("config_key_not_ready")
+            return payload
+        finally:
+            for i in range(len(key)):
+                key[i] = 0
+
+    async def _decrypt_vault(self, result: dict) -> dict:
+        items = self._key_items()
+        if items is None:
+            raise ConfigKeyError("config_key_not_ready")
+        wanted = result.get("key_id")
+        for payload in await self._vault_keys(items):
+            if payload.get("public_fingerprint") != wanted:
+                continue
+            key = bytearray(base64.b64decode(payload["key"]))
+            try:
+                return json.loads(config_crypto.decrypt_with_key(result, key))
+            finally:
+                for i in range(len(key)):
+                    key[i] = 0
+        raise config_crypto.DecryptionError(_UNKNOWN_KEY_TEXT)
+
+    def has_cached_passphrase(self) -> bool:
+        """True when a sync passphrase is held in memory for this session."""
+        return bool(self._cached_passphrase)
+
+    def _snapshot_payload(self, label: Optional[str]) -> tuple:
+        effective_label = self._sanitize_label(label) or socket.gethostname() or DEFAULT_SNAPSHOT_NAME
+        config = self._config_manager.get()
+        config_data = self._strip_sensitive(asdict(config))
+        data_json = json.dumps(config_data, sort_keys=True, default=str)
+        return effective_label, data_json, hashlib.sha256(data_json.encode()).hexdigest()
 
     async def push(
         self,
@@ -156,6 +273,8 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         label: Optional[str] = None,
     ) -> dict:
         """Push local config to cloud as an encrypted snapshot.
+
+        In vault mode the key comes from the vault and no passphrase is used.
 
         Args:
             passphrase: Sync passphrase. Falls back to cached value.
@@ -165,19 +284,17 @@ class ConfigSyncService(ConfigSyncServiceInterface):
             Server response (version, id, label, etc.).
 
         Raises:
-            ValueError: If no passphrase is available.
+            ValueError: If no passphrase is available (passphrase mode).
             CryptoUnavailableError: If cryptography package is missing.
         """
+        if await self.key_mode() == "vault":
+            return await self._push_vault(label)
+
         effective_passphrase = passphrase or self._cached_passphrase
         if not effective_passphrase:
             raise ValueError("Sync passphrase required")
 
-        effective_label = self._sanitize_label(label) or socket.gethostname() or DEFAULT_SNAPSHOT_NAME
-
-        config = self._config_manager.get()
-        config_data = self._strip_sensitive(asdict(config))
-        data_json = json.dumps(config_data, sort_keys=True, default=str)
-        data_hash = hashlib.sha256(data_json.encode()).hexdigest()
+        effective_label, data_json, data_hash = self._snapshot_payload(label)
 
         enc = config_crypto.encrypt(data_json, effective_passphrase)
         payload = {
@@ -197,10 +314,58 @@ class ConfigSyncService(ConfigSyncServiceInterface):
                     result.get("version"), effective_label)
         return result
 
+    async def _push_vault(self, label: Optional[str]) -> dict:
+        items = self._key_items()
+        if items is None:
+            raise ConfigKeyError("config_key_not_ready")
+        key_payload = await self._ensure_vault_key(items)
+        effective_label, data_json, data_hash = self._snapshot_payload(label)
+        key = bytearray(base64.b64decode(key_payload["key"]))
+        try:
+            enc = config_crypto.encrypt_with_key(data_json, key)
+        finally:
+            for i in range(len(key)):
+                key[i] = 0
+        payload = {
+            "name": DEFAULT_SNAPSHOT_NAME,
+            "label": effective_label,
+            "data": enc["data"],
+            "hash": data_hash,
+            "encryption": enc["encryption"],
+            "iv": enc["iv"],
+            "tag": enc["tag"],
+            "key_custody": "vault",
+            "key_id": key_payload["public_fingerprint"],
+        }
+        result = await self._api.post("/api/v1/configs", json=payload)
+        logger.info("Config pushed (vault key), version: %s, label: %s",
+                    result.get("version"), effective_label)
+        return result
+
     async def pull(self, passphrase: Optional[str] = None) -> dict:
-        """Pull and decrypt the latest snapshot."""
+        """Pull and decrypt the newest snapshot this device can open."""
+        items = self._key_items()
+        if items is not None:
+            matched = await self._newest_vault_snapshot(items)
+            if matched is not None:
+                full = await self._api.get(f"/api/v1/configs/{matched['id']}")
+                return await self._decrypt_snapshot(full, passphrase)
         result = await self._api.get("/api/v1/configs/latest")
-        return self._decrypt_snapshot(result, passphrase)
+        return await self._decrypt_snapshot(result, passphrase)
+
+    async def _newest_vault_snapshot(self, items: "AppKeyItems") -> Optional[dict]:
+        """Newest vault snapshot under one of our keys; None when there is no vault snapshot.
+
+        Raises DecryptionError when vault snapshots exist but none match a key.
+        """
+        snapshots = [s for s in await self.list_snapshots() if s.get("key_custody") == "vault"]
+        if not snapshots:
+            return None
+        ids = {p.get("public_fingerprint") for p in await self._vault_keys(items)}
+        matching = [s for s in snapshots if s.get("key_id") in ids]
+        if not matching:
+            raise config_crypto.DecryptionError(_UNKNOWN_KEY_TEXT)
+        return max(matching, key=lambda s: (str(s.get("created_at", "")), s.get("version") or 0))
 
     async def list_snapshots(self, limit: int = 30) -> List[dict]:
         """List available config snapshots (metadata only, no ciphertext)."""
@@ -215,13 +380,12 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         an integer we try both forms so callers can use either.
         """
         result = await self._api.get(f"/api/v1/configs/{version}")
-        return self._decrypt_snapshot(result, passphrase)
+        return await self._decrypt_snapshot(result, passphrase)
 
     async def restore_by_id(self, snapshot_id: str, passphrase: Optional[str] = None) -> dict:
         """Restore config by snapshot id (preferred for the snapshot manager)."""
         result = await self._api.get(f"/api/v1/configs/{snapshot_id}")
-        return self._decrypt_snapshot(result, passphrase)
-
+        return await self._decrypt_snapshot(result, passphrase)
 
     async def rename_snapshot(self, snapshot_id: str, label: str) -> dict:
         """Rename a snapshot server-side. Label is plaintext by design."""
@@ -234,13 +398,61 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         """Delete a snapshot server-side."""
         return await self._api.delete(f"/api/v1/configs/{snapshot_id}")
 
-    def _decrypt_snapshot(self, result: dict, passphrase: Optional[str]) -> dict:
+    async def move_key_to_vault(
+        self, progress: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        """Switch config sync to a vault-held key; safe to re-run at every step.
+
+        Order matters: the key item, then a snapshot under it, and only then
+        the bulk delete of passphrase snapshots (the service refuses that
+        delete without a vault snapshot as a second guard). Local passphrase
+        leftovers go last.
+
+        Returns:
+            ``{"key_created", "pushed", "deleted"}``.
+        """
+        say = progress or (lambda _step: None)
+        items = self._key_items()
+        if items is None:
+            raise ConfigKeyError("config_key_not_ready")
+        say("key")
+        had_key = bool(await items.list(CONFIG_KEY_ITEM))
+        key_payload = await self._ensure_vault_key(items)
+        key_id = key_payload["public_fingerprint"]
+
+        say("snapshot")
+        has_snapshot = any(
+            s.get("key_custody") == "vault" and s.get("key_id") == key_id
+            for s in await self.list_snapshots()
+        )
+        if not has_snapshot:
+            await self._push_vault(None)
+
+        say("cleanup")
+        response = await self._api.delete(
+            "/api/v1/configs", params={"key_custody": "passphrase"},
+        )
+        self._forget_local_passphrase()
+        deleted = response.get("deleted", 0) if isinstance(response, dict) else 0
+        return {"key_created": not had_key, "pushed": not has_snapshot, "deleted": deleted}
+
+    def _forget_local_passphrase(self) -> None:
+        self._cached_passphrase = None
+        try:
+            PROBE_FILE.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove sync key probe: %s", exc)
+
+    async def _decrypt_snapshot(self, result: dict, passphrase: Optional[str]) -> dict:
         """Decrypt a full-envelope response and return the parsed config dict."""
         if not result.get("encryption"):
             raise config_crypto.DecryptionError(
                 "Snapshot is missing the client-encryption envelope. Delete it "
                 "and push a fresh one."
             )
+
+        if result.get("key_custody") == "vault":
+            return await self._decrypt_vault(result)
 
         effective_passphrase = passphrase or self._cached_passphrase
         if not effective_passphrase:
@@ -460,3 +672,18 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         """Compute deterministic hash of config data."""
         serialized = json.dumps(config_data, sort_keys=True, default=str)
         return hashlib.sha256(serialized.encode()).hexdigest()[:16]
+
+
+def vault_key_items_provider(get_vault_service: Callable[[], Any]) -> KeyItemsProvider:
+    """A key provider that reads the app's vault service lazily.
+
+    The vault service is rebuilt on login, so the provider asks for it on
+    every call and answers None while it is absent or locked.
+    """
+    def provider() -> Optional["AppKeyItems"]:
+        vault = get_vault_service()
+        if vault is None or not vault.is_unlocked:
+            return None
+        return vault.app_keys
+
+    return provider

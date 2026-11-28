@@ -1037,6 +1037,18 @@ class ConfigSyncServiceInterface(ABC):
     async def delete_snapshot(self, snapshot_id: str) -> dict:
         pass
 
+    @abstractmethod
+    async def key_mode(self) -> str:
+        """``"vault"`` or ``"passphrase"``: where the snapshot key is kept."""
+
+    @abstractmethod
+    async def move_key_to_vault(self, progress: Optional[Callable[[str], None]] = None) -> dict:
+        """Switch to a vault-held key and remove the passphrase snapshots; re-runnable."""
+
+    @abstractmethod
+    def has_cached_passphrase(self) -> bool:
+        """Whether a sync passphrase is held in memory for this session."""
+
 
 class CloudServiceInterface(ABC):
     """Interface for cloud provider instance services (GCP, Azure)."""

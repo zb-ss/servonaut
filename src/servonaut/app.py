@@ -1419,14 +1419,19 @@ class ServonautApp(App):
         try:
             from servonaut.services.api_client import APIClient
             from servonaut.services.entitlement_guard import EntitlementGuard
-            from servonaut.services.config_sync_service import ConfigSyncService
+            from servonaut.services.config_sync_service import (
+                ConfigSyncService, vault_key_items_provider,
+            )
             from servonaut.services.team_service import TeamService
             from servonaut.services.remote_audit_service import RemoteAuditService
             self.api_client = APIClient(self.auth_service)
             from servonaut.services.ai_conversations import AIConversationsClient
             self.ai_conversations_client = AIConversationsClient(self.api_client)
             self.entitlement_guard = EntitlementGuard(self.auth_service)
-            self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+            self.config_sync_service = ConfigSyncService(
+                self.api_client, self.config_manager,
+                key_items_provider=vault_key_items_provider(lambda: self.vault_command_service),
+            )
             self.team_service = TeamService(self.api_client, config=self.config_manager.get())
             from servonaut.services.vault.command_service import VaultCommandService
             if self.vault_command_service is not None:
