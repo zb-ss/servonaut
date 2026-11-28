@@ -440,8 +440,9 @@ async def _run_tui(runtime: object, config_path: Path) -> dict[str, bool]:
         fleet_section = next(
             node for node in list_btn.ancestors if isinstance(node, SidebarSection)
         )
-        await pilot.click(fleet_section.query_one("Button.section-header", Button))
-        await pilot.pause()
+        if fleet_section.collapsed:
+            await pilot.click(fleet_section.query_one("Button.section-header", Button))
+            await pilot.pause()
         await pilot.click(list_btn)
         await pilot.pause()
         if not isinstance(app.screen, InstanceListScreen):

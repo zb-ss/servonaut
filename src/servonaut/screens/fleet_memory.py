@@ -27,11 +27,13 @@ from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from rich.markup import escape
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.coordinate import Coordinate
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Static, TabPane, TabbedContent
 
@@ -398,6 +400,8 @@ class FleetMemoryScreen(WorkspaceScreen):
     _marked: FrozenSet[str] = frozenset()
     _initial_tab: str = "fleet"
     _active_tab_key: str = "fleet"
+    _programmatic_tab_target: Optional[str] = None
+    _tab_strip_key_nav: bool = False
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -405,12 +409,12 @@ class FleetMemoryScreen(WorkspaceScreen):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         tab = getattr(self, "_active_tab_key", "fleet")
-        if action in ("drift_ack", "drift_unack"):
-            return tab == "drift"
-        if action == "export_start":
-            return tab == "export"
-        if action == "refresh_view":
-            return tab in {"fleet", "sync", "drift"}
+        if action in ("drift_ack", "drift_unack") and tab != "drift":
+            return False
+        if action == "export_start" and tab != "export":
+            return False
+        if action == "refresh_view" and tab not in {"fleet", "sync", "drift"}:
+            return False
         if action in self._FLEET_TAB_ACTIONS and tab != "fleet":
             return False
         if action in _ROW_ACTIONS and not getattr(self, "_rows", None):
@@ -543,6 +547,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         prompt_unlock = getattr(self.app, "prompt_memory_sync_unlock", None)
         if prompt_unlock is not None:
             async def _unlock_then_refresh() -> None:
+                was_configured = self._sync_is_configured()
                 await prompt_unlock()
                 if self.is_attached:
                     self.refresh_tab_gates()
@@ -552,6 +557,12 @@ class FleetMemoryScreen(WorkspaceScreen):
                         self.query_one("#memory_sync_pane", MemorySyncPane).refresh_state()
                     except Exception:
                         pass
+                    if (
+                        not was_configured
+                        and self._sync_is_configured()
+                        and not getattr(self, "_scanning", False)
+                    ):
+                        self._launch_populate()
 
             self.app.run_worker(
                 _unlock_then_refresh(),
@@ -584,17 +595,22 @@ class FleetMemoryScreen(WorkspaceScreen):
             return
         try:
             tabs = self.query_one("#memory_tabs", TabbedContent)
-        except Exception:
+        except NoMatches:
             return
         auth = getattr(self.app, "auth_service", None)
         configured = self._sync_is_configured()
         show_drift = bool(auth and auth.has_feature("memory_drift") and configured)
         show_export = bool(auth and auth.has_feature("memory_compliance_export") and configured)
         for pane_id, visible in (("mem_tab_drift", show_drift), ("mem_tab_export", show_export)):
-            if visible or self._TAB_BY_PANE.get(tabs.active) == self._TAB_BY_PANE.get(pane_id):
+            if visible:
                 tabs.show_tab(pane_id)
-            else:
-                tabs.hide_tab(pane_id)
+                continue
+            if tabs.active == pane_id:
+                self._active_tab_key = "fleet"
+                self._programmatic_tab_target = "fleet"
+                tabs.active = "mem_tab_fleet"
+                self.refresh_bindings()
+            tabs.hide_tab(pane_id)
 
     def activate_tab(self, tab_key: str) -> None:
         """Switch to *tab_key* (``fleet`` | ``sync`` | ``drift`` | ``export``)."""
@@ -622,14 +638,17 @@ class FleetMemoryScreen(WorkspaceScreen):
         pane_id = self._TAB_IDS[key]
         try:
             tabs = self.query_one("#memory_tabs", TabbedContent)
-            # Clear focus out of any outgoing TabPane before ContentSwitcher hides it
-            # so Textual doesn't bounce TabPane.Focused back to the previous tab.
-            self._focus_tab_target(tabs, key)
-            tabs.show_tab(pane_id)
+        except NoMatches:
+            return
+        # Clear focus out of any outgoing TabPane before ContentSwitcher hides it
+        # so Textual doesn't bounce TabPane.Focused back to the previous tab.
+        self._focus_tab_target(tabs, key)
+        tabs.show_tab(pane_id)
+        if tabs.active == pane_id:
+            self._activate_pane(key, focus_content=True)
+        else:
+            self._programmatic_tab_target = key
             tabs.active = pane_id
-            self._activate_pane(key)
-        except Exception:
-            pass
 
     def _focus_tab_target(self, tabs: TabbedContent, key: str) -> None:
         if self.navigation_focused:
@@ -639,63 +658,101 @@ class FleetMemoryScreen(WorkspaceScreen):
             return
         try:
             pane = tabs.query_one(f"#{pane_id}", TabPane)
-            focused = self.focused
-            if focused is not None and (pane in focused.ancestors or focused is pane):
-                return
-            if key == "fleet":
-                target = self.query_one("#fleet-memory-table", DataTable)
+        except NoMatches:
+            return
+        focused = self.focused
+        if focused is not None and (pane in focused.ancestors or focused is pane):
+            return
+        if key == "fleet":
+            try:
+                target: Any = self.query_one("#fleet-memory-table", DataTable)
                 if not target.display:
                     offer = self.query_one("#btn_empty_scan", ActionButton)
                     if offer.display and not offer.disabled:
                         target = offer
                 target.focus(scroll_visible=False)
+            except NoMatches:
                 return
-            if key == "drift":
+            return
+        if key == "drift":
+            try:
                 self.query_one("#drift-table", DataTable).focus(scroll_visible=False)
+            except NoMatches:
+                pass
+            return
+        for candidate in pane.query("Button, Input, Select, DataTable, TextArea"):
+            if candidate.display and not candidate.disabled and candidate.focusable:
+                candidate.focus(scroll_visible=False)
                 return
-            for candidate in pane.query("Button, Input, Select, DataTable, TextArea"):
-                if candidate.display and not candidate.disabled and candidate.focusable:
-                    candidate.focus(scroll_visible=False)
-                    return
-            from textual.widgets._tabbed_content import ContentTabs
+        from textual.widgets._tabbed_content import ContentTabs
 
+        try:
             tabs.get_child_by_type(ContentTabs).focus(scroll_visible=False)
-        except Exception:
+        except NoMatches:
             pass
 
-    def _activate_pane(self, key: str) -> None:
+    def _activate_pane(self, key: str, *, focus_content: bool = True) -> None:
         self._active_tab_key = key
         self.refresh_bindings()
         if key == "fleet":
-            if not self.navigation_focused:
+            if focus_content and not self.navigation_focused:
                 try:
                     table = self.query_one("#fleet-memory-table", DataTable)
                     self.call_after_refresh(table.focus, scroll_visible=False)
-                except Exception:
+                except NoMatches:
                     pass
         elif key == "sync":
             try:
                 from servonaut.widgets.memory_panes import MemorySyncPane
 
                 self.query_one("#memory_sync_pane", MemorySyncPane).activate()
-                self._focus_tab_target(self.query_one("#memory_tabs", TabbedContent), "sync")
-            except Exception:
+                if focus_content:
+                    self._focus_tab_target(self.query_one("#memory_tabs", TabbedContent), "sync")
+            except NoMatches:
                 pass
+            except Exception:
+                logger.debug("Could not activate Sync pane", exc_info=True)
         elif key == "drift":
             try:
                 from servonaut.widgets.memory_panes import MemoryDriftPane
 
-                self.query_one("#memory_drift_pane", MemoryDriftPane).activate()
-            except Exception:
+                self.query_one("#memory_drift_pane", MemoryDriftPane).activate(focus_table=focus_content)
+            except NoMatches:
                 pass
+            except Exception:
+                logger.debug("Could not activate Drift pane", exc_info=True)
         elif key == "export":
             try:
                 from servonaut.widgets.memory_panes import MemoryExportPane
 
                 self.query_one("#memory_export_pane", MemoryExportPane).activate()
-                self._focus_tab_target(self.query_one("#memory_tabs", TabbedContent), "export")
-            except Exception:
+                if focus_content:
+                    self._focus_tab_target(self.query_one("#memory_tabs", TabbedContent), "export")
+            except NoMatches:
                 pass
+            except Exception:
+                logger.debug("Could not activate Export pane", exc_info=True)
+
+    def _is_tab_strip_focused(self) -> bool:
+        from textual.widgets._tabbed_content import ContentTabs
+
+        focused = self.focused
+        if focused is None:
+            return False
+        try:
+            tabs = self.query_one("#memory_tabs", TabbedContent)
+            strip = tabs.get_child_by_type(ContentTabs)
+        except NoMatches:
+            return False
+        return focused is strip or strip in focused.ancestors
+
+    def on_key(self, event: events.Key) -> None:
+        self._tab_strip_key_nav = (
+            event.key in ("left", "right") and self._is_tab_strip_focused()
+        )
+
+    def on_mouse_down(self, _event: events.MouseDown) -> None:
+        self._tab_strip_key_nav = False
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         pane_id = (
@@ -704,7 +761,11 @@ class FleetMemoryScreen(WorkspaceScreen):
             else (event.tab.id or "").removeprefix("--content-tab-")
         )
         key = self._TAB_BY_PANE.get(pane_id or "", "fleet")
-        self._activate_pane(key)
+        programmatic = self._programmatic_tab_target == key
+        self._programmatic_tab_target = None
+        keep_strip_focus = not programmatic and self._tab_strip_key_nav
+        self._tab_strip_key_nav = False
+        self._activate_pane(key, focus_content=not keep_strip_focus)
 
     def refresh_memory_sync_progress(self, message: Optional[str]) -> None:
         """Forward live Memory Sync progress updates to the Sync tab pane."""
@@ -713,8 +774,10 @@ class FleetMemoryScreen(WorkspaceScreen):
             from servonaut.widgets.memory_panes import MemorySyncPane
 
             self.query_one("#memory_sync_pane", MemorySyncPane).refresh_memory_sync_progress(message)
-        except Exception:
+        except NoMatches:
             pass
+        except Exception:
+            logger.debug("Could not forward Sync progress", exc_info=True)
 
     def on_screen_resume(self) -> None:
         super().on_screen_resume()
@@ -723,8 +786,13 @@ class FleetMemoryScreen(WorkspaceScreen):
             from servonaut.widgets.memory_panes import MemorySyncPane
 
             self.query_one("#memory_sync_pane", MemorySyncPane).refresh_state()
-        except Exception:
+        except NoMatches:
             pass
+        except Exception:
+            logger.debug("Could not refresh Sync pane on resume", exc_info=True)
+        if self._reread_shares and self._rows:
+            self._reread_shares = False
+            self._start_shared_prefetch()
 
     # ------------------------------------------------------------------
     # Data / populate
@@ -1209,12 +1277,6 @@ class FleetMemoryScreen(WorkspaceScreen):
     # Set when a share form opens: coming back, what is shared may have changed.
     _reread_shares = False
 
-    def on_screen_resume(self) -> None:
-        """Back from a share form: read again what is shared."""
-        if self._reread_shares and self._rows:
-            self._reread_shares = False
-            self._start_shared_prefetch()
-
     def _start_shared_prefetch(self) -> None:
         """Look up the team-shared rows without blocking the table."""
         if getattr(self.app, "shared_memory_reader", None) is None:
@@ -1534,16 +1596,20 @@ class FleetMemoryScreen(WorkspaceScreen):
                 from servonaut.widgets.memory_panes import MemorySyncPane
 
                 self.query_one("#memory_sync_pane", MemorySyncPane).refresh_state()
-            except Exception:
+            except NoMatches:
                 pass
+            except Exception:
+                logger.debug("Could not refresh Sync pane", exc_info=True)
             return
         if tab == "drift":
             try:
                 from servonaut.widgets.memory_panes import MemoryDriftPane
 
                 self.query_one("#memory_drift_pane", MemoryDriftPane).action_refresh()
-            except Exception:
+            except NoMatches:
                 pass
+            except Exception:
+                logger.debug("Could not refresh Drift pane", exc_info=True)
             return
         self._refresh_auto_scan_status()
         self._launch_populate()
@@ -1554,24 +1620,30 @@ class FleetMemoryScreen(WorkspaceScreen):
             from servonaut.widgets.memory_panes import MemoryDriftPane
 
             self.query_one("#memory_drift_pane", MemoryDriftPane).action_ack_selected()
-        except Exception:
+        except NoMatches:
             pass
+        except Exception:
+            logger.debug("Could not acknowledge drift event", exc_info=True)
 
     def action_drift_unack(self) -> None:
         try:
             from servonaut.widgets.memory_panes import MemoryDriftPane
 
             self.query_one("#memory_drift_pane", MemoryDriftPane).action_toggle_unack()
-        except Exception:
+        except NoMatches:
             pass
+        except Exception:
+            logger.debug("Could not toggle unacknowledged filter", exc_info=True)
 
     def action_export_start(self) -> None:
         try:
             from servonaut.widgets.memory_panes import MemoryExportPane
 
             self.query_one("#memory_export_pane", MemoryExportPane).action_start_export()
-        except Exception:
+        except NoMatches:
             pass
+        except Exception:
+            logger.debug("Could not start memory export", exc_info=True)
 
     def action_open_selected(self) -> None:
         row = self._selected_row()
@@ -1902,7 +1974,7 @@ class FleetMemoryScreen(WorkspaceScreen):
         # Recompute the summary count line so fresh/stale totals track live.
         try:
             self.query_one("#fleet-memory-status", Static).update(self._status_line())
-        except Exception:
+        except Exception:  # noqa: BLE001 — screen may leave while scan progress updates
             pass
 
     async def _do_bulk_scan(self, stale_only: bool, *_legacy_args: Any) -> None:

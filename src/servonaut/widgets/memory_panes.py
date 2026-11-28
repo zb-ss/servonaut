@@ -2,92 +2,42 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+import logging
+from typing import Any, List, Optional
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Button, DataTable, Static
+from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.widgets import Button, DataTable
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.screens.memory_drift import (
-    _SEVERITY_STYLE,  # noqa: F401
-    compose_drift_container,
-)
+from servonaut.screens.memory_drift import _MemoryDriftContentMixin, compose_drift_container
 from servonaut.screens.memory_export import _MemoryExportContentMixin
-from servonaut.screens.memory_sync_setup import compose_sync_container
-from servonaut.utils.theme_text import follow_theme, rebuild_keeping_cursor
+from servonaut.screens.memory_sync_setup import _MemorySyncContentMixin, compose_sync_container
+from servonaut.utils.theme_text import rebuild_keeping_cursor
 
-_SYNC_FORWARDED_METHODS = (
-    "_apply_sync_state",
-    "_render_state",
-    "_set_status",
-    "_build_logged_out_card",
-    "_build_upsell_card",
-    "_build_setup_card",
-    "_build_status_card",
-    "_build_benefits_list",
-    "_kv_row",
-    "_refresh_status_card",
-    "refresh_memory_sync_progress",
-    "_publish_manual_sync_progress",
-    "_finish_manual_sync",
-    "_refresh_visible_sync_screen",
-    "_start_sync_now",
-    "_run_sync_now_background",
-    "on_button_pressed",
-    "_do_setup",
-    "_show_setup_error",
-    "_set_busy",
-    "_clear_busy",
-    "_do_sync_now",
-    "_do_rotate",
-    "_do_remember",
-    "_store_remembered_passphrase",
-    "_do_disable",
-    "_do_forget",
-)
+logger = logging.getLogger(__name__)
 
 
-def _sync_screen_cls():
-    from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
-
-    return MemorySyncSetupScreen
-
-
-def _drift_screen_cls():
-    from servonaut.screens.memory_drift import MemoryDriftScreen
-
-    return MemoryDriftScreen
-
-
-def _make_sync_forwarder(name: str) -> Callable[..., Any]:
-    def _forwarded(self: "MemorySyncPane", *args: Any, **kwargs: Any) -> Any:
-        target = getattr(_sync_screen_cls(), name)
-        return target(self, *args, **kwargs)
-
-    _forwarded.__name__ = name
-    return _forwarded
-
-
-class MemorySyncPane(Vertical):
+class MemorySyncPane(_MemorySyncContentMixin, Vertical):
     """Embedded Memory Sync tab pane inside FleetMemoryScreen."""
 
     _rendered: bool = False
 
-    for _method_name in _SYNC_FORWARDED_METHODS:
-        locals()[_method_name] = _make_sync_forwarder(_method_name)
-    del _method_name
-
-    @property
-    def _MAX_DRAIN_BATCHES(self) -> int:
-        return _sync_screen_cls()._MAX_DRAIN_BATCHES
-
-    @staticmethod
-    def _open_url(url: str) -> None:
-        _sync_screen_cls()._open_url(url)
-
     def compose(self) -> ComposeResult:
         yield from compose_sync_container()
+
+    def _build_status_card(self, auth: Any, sync: Any) -> Container:
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+        return MemorySyncSetupScreen._build_status_card(self, auth, sync)
+
+    def _kv_row(
+        self, label: str, value: str, *, value_id: Optional[str] = None
+    ) -> Horizontal:
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+        return MemorySyncSetupScreen._kv_row(self, label, value, value_id=value_id)
 
     def activate(self, *, force_refresh: bool = False) -> None:
         """Render status/setup cards lazily when the Sync tab opens."""
@@ -112,35 +62,8 @@ class MemorySyncPane(Vertical):
             self._render_state()
 
 
-def _make_drift_forwarder(name: str) -> Callable[..., Any]:
-    def _forwarded(self: "MemoryDriftPane", *args: Any, **kwargs: Any) -> Any:
-        target = getattr(_drift_screen_cls(), name)
-        return target(self, *args, **kwargs)
-
-    _forwarded.__name__ = name
-    return _forwarded
-
-
-_DRIFT_FORWARDED_METHODS = (
-    "_load_drift_events",
-    "_do_load",
-    "_event_for_row_key",
-    "_event_at_cursor",
-    "action_ack_selected",
-    "_do_ack",
-    "action_toggle_unack",
-    "action_view_diff",
-    "on_data_table_row_selected",
-    "_open_diff",
-)
-
-
-class MemoryDriftPane(Vertical):
+class MemoryDriftPane(_MemoryDriftContentMixin, Vertical):
     """Embedded Drift tab pane inside FleetMemoryScreen."""
-
-    for _method_name in _DRIFT_FORWARDED_METHODS:
-        locals()[_method_name] = _make_drift_forwarder(_method_name)
-    del _method_name
 
     def __init__(self, *, busy: Optional[BusyWork] = None, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -148,6 +71,7 @@ class MemoryDriftPane(Vertical):
         self._show_unack_only: bool = False
         self._events: List[Any] = []
         self._loaded_once: bool = False
+        self._focus_table_after_load: bool = True
 
     def compose(self) -> ComposeResult:
         yield from compose_drift_container(include_busy=False)
@@ -163,7 +87,7 @@ class MemoryDriftPane(Vertical):
         table.add_column("Status", key="status")
 
     def _restyle_rows(self, _theme: Any = None) -> None:
-        if not self.is_attached:
+        if not self.is_attached or not self._loaded_once:
             return
         self.call_after_refresh(
             rebuild_keeping_cursor,
@@ -172,9 +96,9 @@ class MemoryDriftPane(Vertical):
         )
 
     def _render_table(self) -> None:
-        _drift_screen_cls()._render_table(self)
-        self._loaded_once = True
-        self._focus_table_if_active()
+        super()._render_table()
+        if self._focus_table_after_load:
+            self._focus_table_if_active()
 
     def _focus_table_if_active(self) -> None:
         if not self.is_attached:
@@ -185,13 +109,13 @@ class MemoryDriftPane(Vertical):
             return
         try:
             table = self.query_one("#drift-table", DataTable)
-            if table.row_count > 0 and table.cursor_row < 0:
-                table.move_cursor(row=0)
-            table.focus()
-        except Exception:
-            pass
+        except NoMatches:
+            return
+        if table.row_count > 0 and table.cursor_row < 0:
+            table.move_cursor(row=0)
+        table.focus()
 
-    def activate(self, *, force_refresh: bool = False) -> None:
+    def activate(self, *, force_refresh: bool = False, focus_table: bool = True) -> None:
         """Gate check, load events when Drift opens, and focus the table."""
         auth = getattr(self.app, "auth_service", None)
         if auth and not auth.has_feature("memory_drift"):
@@ -199,9 +123,10 @@ class MemoryDriftPane(Vertical):
 
             self.app.push_screen(UpsellModal("memory_drift"))
             return
+        self._focus_table_after_load = focus_table
         if force_refresh or not self._loaded_once:
             self._load_drift_events()
-        else:
+        elif focus_table:
             self.call_after_refresh(self._focus_table_if_active)
 
     def refresh_after_demo_toggle(self) -> None:

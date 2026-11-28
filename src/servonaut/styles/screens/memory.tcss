@@ -11,7 +11,8 @@ MemoryScreen #memory-share-state {
 /* Full memory views keep records and decisions close to their context. */
 MemoryDriftScreen .memory-secondary-heading,
 MemoryExportScreen .memory-secondary-heading,
-ShareInstanceScreen .memory-secondary-heading {
+ShareInstanceScreen .memory-secondary-heading,
+FleetMemoryScreen .memory-secondary-heading {
     width: 1fr;
     height: auto;
     min-height: 1;
@@ -22,106 +23,130 @@ ShareInstanceScreen .memory-secondary-heading {
 
 MemoryDriftScreen #drift-context,
 MemoryExportScreen #export-context,
-ShareInstanceScreen #share-context {
+ShareInstanceScreen #share-context,
+FleetMemoryScreen #drift-context,
+FleetMemoryScreen #export-context {
     height: auto;
     margin-bottom: 1;
     padding: 0 1;
 }
 
 /* Drift: compact review controls above the change ledger. */
-MemoryDriftScreen #drift-container {
+MemoryDriftScreen #drift-container,
+FleetMemoryScreen #drift-container {
     width: 1fr;
     height: 1fr;
     padding: 0 1;
     overflow-y: auto;
 }
 
-MemoryDriftScreen #drift-filter-label {
+MemoryDriftScreen #drift-filter-label,
+FleetMemoryScreen #drift-filter-label {
     height: auto;
     margin: 0;
 }
 
-MemoryDriftScreen #drift-records {
+MemoryDriftScreen #drift-records,
+FleetMemoryScreen #drift-records {
     height: 1fr;
     min-height: 10;
     border: round $panel;
     background: transparent;
 }
 
-MemoryDriftScreen #drift-table {
+MemoryDriftScreen #drift-table,
+FleetMemoryScreen #drift-table {
     height: 1fr;
     background: $surface;
 }
 
-MemoryDriftScreen #drift-tools {
+MemoryDriftScreen #drift-tools,
+FleetMemoryScreen #drift-tools {
     height: auto;
     margin-bottom: 1;
 }
 
-MemoryDriftScreen #drift-actions {
+MemoryDriftScreen #drift-actions,
+FleetMemoryScreen #drift-actions {
     width: 100%;
     height: auto;
 }
 
-MemoryDriftScreen #drift-empty-state {
+MemoryDriftScreen #drift-empty-state,
+FleetMemoryScreen #drift-empty-state {
     height: auto;
     padding: 1;
     color: $text-muted;
 }
 
 /* Export: a bounded form beside its verification document. */
-MemoryExportScreen #export-scroll {
+MemoryExportScreen #export-scroll,
+FleetMemoryScreen #export-scroll {
     width: 1fr;
     height: 1fr;
 }
 
-MemoryExportScreen #export-container {
+FleetMemoryScreen #export-scroll {
+    padding: 0 1;
+}
+
+MemoryExportScreen #export-container,
+FleetMemoryScreen #export-container {
     padding: 0 1;
     width: 1fr;
     height: auto;
 }
 
-MemoryExportScreen #export-description {
+MemoryExportScreen #export-description,
+FleetMemoryScreen #export-description {
     height: auto;
     max-width: 96;
     margin: 0;
 }
 
-MemoryExportScreen #export-workspace {
+MemoryExportScreen #export-workspace,
+FleetMemoryScreen #export-workspace {
     height: auto;
     min-height: 16;
 }
 
 MemoryExportScreen #export-range-panel,
-MemoryExportScreen #export-result-panel {
+MemoryExportScreen #export-result-panel,
+FleetMemoryScreen #export-range-panel,
+FleetMemoryScreen #export-result-panel {
     height: auto;
     min-height: 16;
     border: round $panel;
     background: transparent;
 }
 
-MemoryExportScreen #export-range-panel {
+MemoryExportScreen #export-range-panel,
+FleetMemoryScreen #export-range-panel {
     width: 2fr;
     margin-right: 1;
 }
 
-MemoryExportScreen #export-result-panel {
+MemoryExportScreen #export-result-panel,
+FleetMemoryScreen #export-result-panel {
     width: 3fr;
 }
 
-MemoryExportScreen #export-date-fields {
+MemoryExportScreen #export-date-fields,
+FleetMemoryScreen #export-date-fields {
     layout: vertical;
     height: auto;
     padding: 1 1 0 1;
 }
 
-MemoryExportScreen .export-field-row {
+MemoryExportScreen .export-field-row,
+FleetMemoryScreen .export-field-row {
     width: 1fr;
     height: auto;
     margin-bottom: 1;
 }
 
-MemoryExportScreen #export-status {
+MemoryExportScreen #export-status,
+FleetMemoryScreen #export-status {
     height: auto;
     min-height: 3;
     padding: 1 1;
@@ -147,21 +172,41 @@ MemoryExportScreen #export-btn-row Button {
     padding: 0;
 }
 
-MemoryExportScreen.-content-narrow #export-workspace {
+FleetMemoryScreen #export-btn-row {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+}
+
+FleetMemoryScreen #export-btn-row Button {
+    width: auto;
+    min-width: 16;
+    height: auto;
+    min-height: 3;
+    margin: 0;
+    padding: 0 2;
+}
+
+MemoryExportScreen.-content-narrow #export-workspace,
+FleetMemoryScreen.-content-narrow #export-workspace {
     layout: vertical;
 }
 
 MemoryExportScreen.-content-narrow #export-range-panel,
-MemoryExportScreen.-content-narrow #export-result-panel {
+MemoryExportScreen.-content-narrow #export-result-panel,
+FleetMemoryScreen.-content-narrow #export-range-panel,
+FleetMemoryScreen.-content-narrow #export-result-panel {
     width: 100%;
     margin-right: 0;
 }
 
-MemoryExportScreen.-content-narrow #export-range-panel {
+MemoryExportScreen.-content-narrow #export-range-panel,
+FleetMemoryScreen.-content-narrow #export-range-panel {
     margin-bottom: 1;
 }
 
-MemoryExportScreen.-content-narrow #export-result-panel {
+MemoryExportScreen.-content-narrow #export-result-panel,
+FleetMemoryScreen.-content-narrow #export-result-panel {
     min-height: 8;
 }
 
@@ -453,60 +498,72 @@ PassphraseEnrolModal:ansi #enrol-mismatch {
 
 
 /* Memory Sync: a device ledger with separate key and sync controls. */
-MemorySyncSetupScreen #msync_container {
+MemorySyncSetupScreen #msync_container,
+FleetMemoryScreen #msync_container {
     width: 1fr;
     height: 1fr;
     padding: 0 1;
 }
 
-MemorySyncSetupScreen #msync_context {
+MemorySyncSetupScreen #msync_context,
+FleetMemoryScreen #msync_context {
     height: auto;
     padding: 0 1;
     margin-bottom: 1;
 }
 
-MemorySyncSetupScreen #msync_heading_row {
+MemorySyncSetupScreen #msync_heading_row,
+FleetMemoryScreen #msync_heading_row {
     height: auto;
 }
 
 MemorySyncSetupScreen #msync_title,
 MemorySyncSetupScreen #msync_subtitle,
-MemorySyncSetupScreen #msync_status {
+MemorySyncSetupScreen #msync_status,
+FleetMemoryScreen #msync_title,
+FleetMemoryScreen #msync_subtitle,
+FleetMemoryScreen #msync_status {
     height: auto;
     margin: 0;
     text-align: left;
 }
 
-MemorySyncSetupScreen #msync_title {
+MemorySyncSetupScreen #msync_title,
+FleetMemoryScreen #msync_title {
     width: 1fr;
     color: $text;
     text-style: bold;
 }
 
-MemorySyncSetupScreen #msync_subtitle {
+MemorySyncSetupScreen #msync_subtitle,
+FleetMemoryScreen #msync_subtitle {
     color: $text-muted;
     max-width: 96;
 }
 
-MemorySyncSetupScreen #msync_status {
+MemorySyncSetupScreen #msync_status,
+FleetMemoryScreen #msync_status {
     width: auto;
     max-width: 50%;
     min-height: 1;
     text-align: right;
 }
 
-MemorySyncSetupScreen #msync_body {
+MemorySyncSetupScreen #msync_body,
+FleetMemoryScreen #msync_body {
     height: 1fr;
     min-height: 6;
 }
 
-MemorySyncSetupScreen .msync_card_stack {
+MemorySyncSetupScreen .msync_card_stack,
+FleetMemoryScreen .msync_card_stack {
     layout: horizontal;
     height: auto;
     width: 1fr;
 }
 
-MemorySyncSetupScreen .msync_card {
+MemorySyncSetupScreen .msync_card,
+FleetMemoryScreen .msync_card {
     border: round $panel;
     background: transparent;
     padding: 0 1;
@@ -515,33 +572,39 @@ MemorySyncSetupScreen .msync_card {
     width: 100%;
 }
 
-MemorySyncSetupScreen .msync_card_stack > .msync_card {
+MemorySyncSetupScreen .msync_card_stack > .msync_card,
+FleetMemoryScreen .msync_card_stack > .msync_card {
     width: 2fr;
 }
 
-MemorySyncSetupScreen .msync_card_stack > .msync_card:first-child {
+MemorySyncSetupScreen .msync_card_stack > .msync_card:first-child,
+FleetMemoryScreen .msync_card_stack > .msync_card:first-child {
     width: 3fr;
     margin-right: 1;
 }
 
-MemorySyncSetupScreen .msync_card_title {
+MemorySyncSetupScreen .msync_card_title,
+FleetMemoryScreen .msync_card_title {
     height: auto;
     color: $text;
     text-style: bold;
     margin-bottom: 1;
 }
 
-MemorySyncSetupScreen .msync_card_body {
+MemorySyncSetupScreen .msync_card_body,
+FleetMemoryScreen .msync_card_body {
     padding: 0 0 1 0;
     color: $text;
     height: auto;
 }
 
-MemorySyncSetupScreen .msync_card_warning {
+MemorySyncSetupScreen .msync_card_warning,
+FleetMemoryScreen .msync_card_warning {
     color: $text-warning;
 }
 
-MemorySyncSetupScreen .msync_card_actions {
+MemorySyncSetupScreen .msync_card_actions,
+FleetMemoryScreen .msync_card_actions {
     layout: grid;
     grid-size: 2;
     grid-columns: 1fr 1fr;
@@ -551,7 +614,8 @@ MemorySyncSetupScreen .msync_card_actions {
     padding: 0;
 }
 
-MemorySyncSetupScreen .msync_card_actions Button {
+MemorySyncSetupScreen .msync_card_actions Button,
+FleetMemoryScreen .msync_card_actions Button {
     width: 1fr;
     height: auto;
     min-height: 3;
@@ -560,21 +624,25 @@ MemorySyncSetupScreen .msync_card_actions Button {
     min-width: 0;
 }
 
-MemorySyncSetupScreen .msync_benefits {
+MemorySyncSetupScreen .msync_benefits,
+FleetMemoryScreen .msync_benefits {
     height: auto;
     padding: 0 0 1 0;
 }
 
-MemorySyncSetupScreen .msync_benefit_row {
+MemorySyncSetupScreen .msync_benefit_row,
+FleetMemoryScreen .msync_benefit_row {
     height: auto;
     color: $text;
 }
 
-MemorySyncSetupScreen .msync_kv_grid {
+MemorySyncSetupScreen .msync_kv_grid,
+FleetMemoryScreen .msync_kv_grid {
     height: auto;
 }
 
-MemorySyncSetupScreen .msync_kv_row {
+MemorySyncSetupScreen .msync_kv_row,
+FleetMemoryScreen .msync_kv_row {
     height: auto;
     layout: horizontal;
     padding: 0 1;
@@ -582,33 +650,40 @@ MemorySyncSetupScreen .msync_kv_row {
     background: $boost;
 }
 
-MemorySyncSetupScreen .msync_kv_label {
+MemorySyncSetupScreen .msync_kv_label,
+FleetMemoryScreen .msync_kv_label {
     width: 18;
     height: auto;
     color: $text-muted;
 }
 
-MemorySyncSetupScreen .msync_kv_value {
+MemorySyncSetupScreen .msync_kv_value,
+FleetMemoryScreen .msync_kv_value {
     width: 1fr;
     height: auto;
     color: $text;
 }
 
-MemorySyncSetupScreen .msync_configured_actions {
+MemorySyncSetupScreen .msync_configured_actions,
+FleetMemoryScreen .msync_configured_actions {
     layout: vertical;
 }
 
-MemorySyncSetupScreen.-content-narrow .msync_card_stack {
+MemorySyncSetupScreen.-content-narrow .msync_card_stack,
+FleetMemoryScreen.-content-narrow .msync_card_stack {
     layout: vertical;
 }
 
 MemorySyncSetupScreen.-content-narrow .msync_card_stack > .msync_card,
-MemorySyncSetupScreen.-content-narrow .msync_card {
+MemorySyncSetupScreen.-content-narrow .msync_card,
+FleetMemoryScreen.-content-narrow .msync_card_stack > .msync_card,
+FleetMemoryScreen.-content-narrow .msync_card {
     width: 100%;
     margin-right: 0;
 }
 
-MemorySyncSetupScreen.-content-narrow .msync_card_actions {
+MemorySyncSetupScreen.-content-narrow .msync_card_actions,
+FleetMemoryScreen.-content-narrow .msync_card_actions {
     layout: vertical;
 }
 

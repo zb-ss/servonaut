@@ -160,12 +160,13 @@ async def test_server_actions_share_with_team_updates_shared_fleet_handles_error
         )
 
         # Second ServerActionsScreen with same team_service reuses cached team list (no extra list_teams call).
+        calls_before_second = team_svc.list_teams.await_count
         second_actions = ServerActionsScreen(dict(own_row))
         await app.push_screen(second_actions)
         await wait_until(
             lambda: second_actions.query_one("#btn_share_team", Button).display is True
         )
-        assert team_svc.list_teams.await_count == 1
+        assert team_svc.list_teams.await_count == calls_before_second
 
         # Refresh failure after a successful push_servers still reports success (not share failure).
         refresh_fail_svc = SimpleNamespace(
@@ -204,7 +205,6 @@ async def test_server_actions_share_with_team_updates_shared_fleet_handles_error
             list_shared_servers=AsyncMock(return_value=[]),
             push_servers=AsyncMock(side_effect=RuntimeError("403 Forbidden")),
         )
-        actions._manageable_teams = [team]
         notifications: list[tuple[str, str]] = []
         with (
             patch.object(

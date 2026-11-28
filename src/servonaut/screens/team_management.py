@@ -1280,7 +1280,10 @@ class TeamManagementScreen(WorkspaceScreen):
         if team_svc is None:
             return
         try:
+            from servonaut.screens._team_share import clear_cached_teams
+
             await team_svc.remove_member(slug, member_id)
+            clear_cached_teams(self.app)
             self.notify(f"Removed {email}.", severity="information")
             await self._load_team_detail(slug)
         except Exception as exc:
@@ -1292,7 +1295,10 @@ class TeamManagementScreen(WorkspaceScreen):
         if team_svc is None:
             return
         try:
+            from servonaut.screens._team_share import clear_cached_teams
+
             await team_svc.update_role(slug, member_id, role)
+            clear_cached_teams(self.app)
             self._hide_change_role_form()
             self.notify(f"{email} is now {role.capitalize()}.", severity="information")
             await self._load_team_detail(slug)
@@ -2154,34 +2160,10 @@ class TeamManagementScreen(WorkspaceScreen):
             self._action_share_server()
 
     def _matching_own_row(self, shared_row: dict) -> Optional[dict]:
-        target_id = str(shared_row.get("instance_id") or "")
-        rows = [row for row in (real_fleet_rows(self.app) or []) if row.get("is_shared") is not True]
-        if target_id:
-            for row in rows:
-                if str(row.get("id") or "") == target_id:
-                    return dict(row)
-        host = str(shared_row.get("hostname") or shared_row.get("host") or "").strip()
-        name = str(shared_row.get("name") or "").strip()
-        if host:
-            host_matches = [
-                row for row in rows
-                if host in {
-                    str(row.get(k) or "").strip()
-                    for k in ("public_ip", "private_ip", "host", "hostname")
-                    if row.get(k)
-                }
-            ]
-            if len(host_matches) == 1:
-                return dict(host_matches[0])
-            if name:
-                for row in host_matches:
-                    if str(row.get("name") or "").strip() == name:
-                        return dict(row)
-        if name:
-            name_matches = [row for row in rows if str(row.get("name") or "").strip() == name]
-            if len(name_matches) == 1:
-                return dict(name_matches[0])
-        return None
+        from servonaut.services.shared_servers import own_twin
+
+        twin = own_twin(shared_row, real_fleet_rows(self.app) or [])
+        return dict(twin) if twin is not None else None
 
     def _offer_post_share_bind(self, slug: str, hostname: str, name: str) -> None:
         if not self.is_attached or self.app.screen is not self or self._server_busy:
@@ -2290,7 +2272,7 @@ class TeamManagementScreen(WorkspaceScreen):
         finally:
             self._binding_shared_key = False
             if bind_btn is not None and bind_btn.is_mounted:
-                bind_btn.disabled = False
+                bind_btn.disabled = self._server_busy
 
     def _action_push_config(self) -> None:
         """Open the push-config form. Only owners/admins reach this button."""
@@ -2642,7 +2624,7 @@ class TeamManagementScreen(WorkspaceScreen):
 
     def _start_server_operation(self, operation: Callable[[], Awaitable[None]], message: str) -> None:
         """Hold the screen's controls from the first click through the final reload."""
-        if self._server_busy:
+        if self._server_busy or self._binding_shared_key:
             return
         self._server_busy = True
         focused = self.focused

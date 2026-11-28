@@ -117,13 +117,12 @@ class BackupsPanel(SettingsPanel):
 
     def _sync_snapshots_button(self) -> None:
         """Hide Manage snapshots for signed-out or unentitled accounts."""
-        auth = getattr(self.app, "auth_service", None)
-        if auth is None:
-            return
+        can_manage = bool(
+            is_nav_route_visible(self.app, "nav_sync_config")
+            and getattr(self.app, "config_sync_service", None) is not None
+        )
         try:
-            self.query_one("#backups_open_snapshots", Button).display = is_nav_route_visible(
-                self.app, "nav_sync_config"
-            )
+            self.query_one("#backups_open_snapshots", Button).display = can_manage
         except Exception:
             pass
 

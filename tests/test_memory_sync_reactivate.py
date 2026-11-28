@@ -1014,6 +1014,7 @@ class TestLogoutClearsMemorySyncState:
             config_sync_service=MagicMock(),
             config_manager=cm,
             memory_sync_service=sync if has_sync else None,
+            _refresh_navigation_and_tab_gates=MagicMock(),
         )
         return stub
 

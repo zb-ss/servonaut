@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import partial
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -186,7 +187,6 @@ class CustomServersScreen(WorkspaceScreen):
         self._editing_name: Optional[str] = None
         self._last_saved_name: Optional[str] = None
         self._busy = BusyWork(self, "#custom_busy")
-        self._manageable_teams: Optional[list[dict[str, Any]]] = None
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self.navigation_focused:
@@ -314,7 +314,7 @@ class CustomServersScreen(WorkspaceScreen):
         for raw_key in keys:
             shown = home_relative(str(raw_key))
             label = shown
-            if callable(check_perms) and Path(str(raw_key)).expanduser().exists():
+            if os.name != "nt" and callable(check_perms) and Path(str(raw_key)).expanduser().exists():
                 try:
                     if not check_perms(str(raw_key)):
                         label = f"{shown} (insecure permissions: expected 0600)"
@@ -459,7 +459,7 @@ class CustomServersScreen(WorkspaceScreen):
             self.query_one("#input_ssh_key", Input).value = event.value
             ssh_svc = getattr(self.app, "ssh_service", None)
             check_perms = getattr(ssh_svc, "check_key_permissions", None) if ssh_svc is not None else None
-            if callable(check_perms) and Path(event.value).expanduser().exists():
+            if os.name != "nt" and callable(check_perms) and Path(event.value).expanduser().exists():
                 try:
                     if not check_perms(event.value):
                         self.app.notify(
@@ -845,8 +845,8 @@ class CustomServersScreen(WorkspaceScreen):
         open_btn = self.query_one("#btn_custom_open_server", Button)
         row = self.query_one("#custom_post_save_row")
         row.display = True
-        self.set_focus(open_btn)
         if getattr(self, "is_attached", False):
+            self.set_focus(open_btn)
             self.call_after_refresh(self._reveal_post_save_row)
             self.call_later(self._reveal_post_save_row)
         if can_team:
@@ -876,7 +876,6 @@ class CustomServersScreen(WorkspaceScreen):
             manageable, _ = await resolve_manageable_teams(self.app, team_svc)
         except Exception:
             return
-        self._manageable_teams = manageable
         if not self.is_attached:
             return
         try:
@@ -969,7 +968,6 @@ class CustomServersScreen(WorkspaceScreen):
                 team_svc,
                 busy=self._busy,
                 hold_selector="#btn_custom_share_team",
-                manageable_teams=self._manageable_teams,
             ),
             group="team_share",
             exclusive=True,

@@ -174,17 +174,20 @@ async def test_the_footer_shows_four_keys_and_help_when_narrow() -> None:
     app = _LayoutHost()
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await _open_actions(app, pilot)
-        await wait_until(lambda: "6" not in _footer_keys(screen))
-        keys = _footer_keys(screen) & {"1", "2", "3", "4", "5", "6", "7", "8", "m", "d", "f", "l", "r", "v", "question_mark"}
-        assert keys == {"1", "2", "3", "4", "question_mark"}
+        await wait_until(lambda: "l" not in _footer_keys(screen))
+        keys = _footer_keys(screen) & {
+            "s", "c", "b", "t", "1", "2", "3", "4", "5", "6", "7", "8",
+            "m", "d", "f", "l", "r", "v", "w", "u", "question_mark",
+        }
+        assert keys == {"s", "c", "b", "t", "question_mark"}
 
 
 async def test_the_footer_adds_logs_and_ban_ip_when_wide() -> None:
     app = _LayoutHost()
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
-        await wait_until(lambda: "6" in _footer_keys(screen))
-        assert {"6", "8"} <= _footer_keys(screen)
+        await wait_until(lambda: "l" in _footer_keys(screen))
+        assert {"l", "8"} <= _footer_keys(screen)
 
 
 async def _toggle_navigation(app, pilot) -> None:
@@ -278,12 +281,12 @@ async def test_refresh_is_off_while_monitoring_and_says_why() -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
         with patch("servonaut.screens.server_actions.format_live_stats", lambda stats, **kw: "stats"):
-            await pilot.press("l")
+            await pilot.press("w")
             await wait_until(lambda: screen._live_on)
             refresh = _button(screen, "btn_live_refresh")
             await wait_until(lambda: refresh.disabled)
             assert "already updating" in str(refresh.tooltip)
-            await pilot.press("l")
+            await pilot.press("w")
             await wait_until(lambda: not refresh.disabled)
 
 
@@ -342,7 +345,7 @@ async def test_footer_bindings_are_copied_per_screen() -> None:
     class_bindings = {b.key: b.show for b in ServerActionsScreen.BINDINGS}
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
-        await wait_until(lambda: "6" in _footer_keys(screen))
+        await wait_until(lambda: "l" in _footer_keys(screen))
     assert {b.key: b.show for b in ServerActionsScreen.BINDINGS} == class_bindings
     assert ServerActionsScreen._merged_bindings is not None if hasattr(ServerActionsScreen, "_merged_bindings") else True
 
@@ -370,7 +373,7 @@ async def test_an_unexpected_error_while_monitoring_stops_it_and_keeps_the_app()
     app.live_stats_service = _Service()
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _open_actions(app, pilot)
-        await pilot.press("l")
+        await pilot.press("w")
         await wait_until(lambda: "poll failed" in str(screen.query_one("#live_stats", Static).content))
         assert "boom" not in str(screen.query_one("#live_stats", Static).content)
         assert app.is_running

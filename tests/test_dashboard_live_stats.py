@@ -70,7 +70,7 @@ async def test_live_controls_failure_retry_and_navigation(
         screen = ServerActionsScreen(instance)
         await app.push_screen(screen)
         assert not screen.query("#btn_ovh_monitoring")
-        await pilot.press("l")
+        await pilot.press("w")
         await wait_for(pilot, lambda: "authentication failed" in panel_text(screen))
         assert not screen._live_on
         assert "retry" in panel_text(screen)
@@ -78,16 +78,16 @@ async def test_live_controls_failure_retry_and_navigation(
         assert runner.await_count == 1
 
         runner.return_value = ("SVN_MEM\nMem: 1000 250 750\n", "", 0)
-        await pilot.press("L")
+        await pilot.press("W")
         await wait_for(pilot, lambda: "25%" in panel_text(screen))
         assert screen._live_on
-        await pilot.press("l")
+        await pilot.press("w")
         assert not screen._live_on
         calls = runner.await_count
         await pilot.pause(0.1)
         assert runner.await_count == calls
 
-        await pilot.press("l")
+        await pilot.press("w")
         await wait_for(pilot, lambda: runner.await_count > calls)
         await app.push_screen(Screen())
         assert not screen._live_on
@@ -134,7 +134,7 @@ async def test_leaving_during_connect_cancels_pending_read(
     monkeypatch.setattr(ServerActionsScreen, "_fetch_rdns", AsyncMock())
     async with app.run_test(size=(155, 47)) as pilot:
         await app.push_screen(ServerActionsScreen({"id": "vps-web-1", "name": "web-1", "provider_type": "vps", "is_ovh": True, "public_ip": "192.0.2.1"}))
-        await pilot.press("l")
+        await pilot.press("w")
         await asyncio.wait_for(started.wait(), timeout=5)
         await pilot.press("escape")
         await asyncio.wait_for(cancelled.wait(), timeout=5)

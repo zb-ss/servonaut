@@ -1,6 +1,7 @@
 """SSH keys screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import os
 import subprocess
 from typing import Optional
 
@@ -306,10 +307,10 @@ class KeyManagementScreen(WorkspaceScreen):
             for key_path in keys:
                 shown = home_relative(str(key_path))
                 suffix = ""
-                if callable(check_perms) and Path(str(key_path)).expanduser().exists():
+                if os.name != "nt" and callable(check_perms) and Path(str(key_path)).expanduser().exists():
                     try:
                         if not check_perms(str(key_path)):
-                            suffix = " (insecure perms: expected 0600)"
+                            suffix = " (insecure permissions: expected 0600)"
                     except Exception:
                         pass
                 row_key = table.add_row(_k(shown) + suffix)
@@ -344,7 +345,7 @@ class KeyManagementScreen(WorkspaceScreen):
         from pathlib import Path
 
         check_perms = getattr(self.app.ssh_service, "check_key_permissions", None)
-        if callable(check_perms) and Path(key_path).expanduser().exists():
+        if os.name != "nt" and callable(check_perms) and Path(key_path).expanduser().exists():
             try:
                 if not check_perms(key_path):
                     self.notify(

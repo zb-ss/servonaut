@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from typing import Any, Optional
@@ -22,35 +23,38 @@ from servonaut.services.team_sharing import (
 
 logger = logging.getLogger(__name__)
 
+_TEAM_CACHE_TTL_SECONDS = 60.0
+
 
 def cached_teams_for(app: Any, team_svc: Any) -> Optional[list[dict[str, Any]]]:
-    """Return cached team dicts for *team_svc* when still fresh for this service instance."""
+    """Return cached team dicts for *team_svc* when within the cache TTL."""
     if team_svc is None:
         return None
-    cached = getattr(app, "_cached_teams", None)
-    if not isinstance(cached, list):
+    entry = getattr(app, "_team_list_cache", None)
+    if not isinstance(entry, tuple) or len(entry) != 3:
         return None
-    if getattr(app, "_cached_teams_service", None) is not team_svc:
+    cached_svc, fetched_at, teams = entry
+    if cached_svc is not team_svc:
         return None
-    return [dict(t) for t in cached if isinstance(t, Mapping)]
+    if (time.monotonic() - fetched_at) >= _TEAM_CACHE_TTL_SECONDS:
+        return None
+    return [dict(t) for t in teams if isinstance(t, Mapping)]
 
 
 def set_cached_teams(app: Any, team_svc: Any, teams: list[dict[str, Any]]) -> None:
     """Store fetched team records on *app* keyed to *team_svc*."""
-    try:
-        app._cached_teams = [dict(t) for t in teams if isinstance(t, Mapping)]
-        app._cached_teams_service = team_svc
-    except Exception:  # noqa: BLE001 — test doubles may omit dynamic attributes
-        pass
+    if team_svc is None:
+        return
+    app._team_list_cache = (
+        team_svc,
+        time.monotonic(),
+        [dict(t) for t in teams if isinstance(t, Mapping)],
+    )
 
 
 def clear_cached_teams(app: Any) -> None:
     """Invalidate any cached team list on *app*."""
-    try:
-        app._cached_teams = None
-        app._cached_teams_service = None
-    except Exception:  # noqa: BLE001
-        pass
+    app._team_list_cache = None
 
 
 async def resolve_manageable_teams(
@@ -78,7 +82,6 @@ async def share_server_with_team_flow(
     *,
     busy: Optional[BusyWork] = None,
     hold_selector: str = "",
-    manageable_teams: Optional[list[dict[str, Any]]] = None,
     on_shared: Optional[Callable[[], None]] = None,
 ) -> None:
     """Pick an eligible team, confirm defaults, push the server, and refresh shared fleet."""
@@ -94,15 +97,15 @@ async def share_server_with_team_flow(
             return busy.running(message, hold=holds)
         return nullcontext()
 
-    teams = cached_teams_for(app, team_svc)
-    manageable = [dict(t) for t in manageable_teams] if manageable_teams is not None else None
-    if manageable is None:
-        try:
+    try:
+        if cached_teams_for(app, team_svc) is None:
             with _run_busy("Loading teams…"):
-                manageable, teams = await resolve_manageable_teams(app, team_svc)
-        except Exception as exc:
-            app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
-            return
+                manageable, _teams = await resolve_manageable_teams(app, team_svc)
+        else:
+            manageable, _teams = await resolve_manageable_teams(app, team_svc)
+    except Exception as exc:
+        app.notify(f"Could not load teams ({exc}).", severity="error", markup=False)
+        return
 
     if not manageable:
         app.notify("Only team owners or admins can share servers.", severity="warning")
@@ -162,7 +165,8 @@ async def share_server_with_team_flow(
 
     try:
         with _run_busy("Refreshing shared inventory…"):
-            shared_state = await load_shared_servers(team_svc, teams)
+            shared_state = await load_shared_servers(team_svc)
+            set_cached_teams(app, team_svc, shared_state.teams)
             replace_instances(app, "shared", shared_state.rows)
             reconcile_team_memory(app)
     except Exception as exc:

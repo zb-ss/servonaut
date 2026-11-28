@@ -150,16 +150,24 @@ async def test_backups_panel_hides_snapshots_only_when_auth_disallows() -> None:
             panel_signed_out._open_snapshot_manager()
         assert "Sign in to manage config snapshots." in str(notify_mock.call_args.args[0])
 
-    # Auth-less launcher host preserves legacy visible launcher button contract.
+    # Auth-less host hides snapshots (both auth_service and config_sync_service absent).
     panel_no_auth = BackupsPanel()
     app_none = _PanelHost(panel_no_auth, with_auth=False)
     async with app_none.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        assert panel_no_auth.query_one("#backups_open_snapshots", Button).display is True
+        assert panel_no_auth.query_one("#backups_open_snapshots", Button).display is False
 
-    # Entitled signed-in account shows the launcher.
+    # Entitled signed-in account with config_sync_service unset still hides snapshots.
+    panel_no_sync = BackupsPanel()
+    app_no_sync = _PanelHost(panel_no_sync, authenticated=True, features={"config_sync"}, with_auth=True)
+    async with app_no_sync.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert panel_no_sync.query_one("#backups_open_snapshots", Button).display is False
+
+    # Entitled signed-in account with config_sync_service present shows the launcher.
     panel_ok = BackupsPanel()
     app_ok = _PanelHost(panel_ok, authenticated=True, features={"config_sync"}, with_auth=True)
+    app_ok.config_sync_service = object()
     async with app_ok.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert panel_ok.query_one("#backups_open_snapshots", Button).display is True
@@ -205,51 +213,141 @@ async def test_add_server_modal_hides_unconfigured_providers_and_routes_to_setti
             assert modal.query("#add_srv_connect_provider")
 
 
-def test_instance_list_gates_use_vault_key_when_unavailable_or_busy() -> None:
-    screen = InstanceListScreen()
-    screen._vault_binding = False
-    mock_app = SimpleNamespace(vault_available=False, vault_command_service=None)
-    with patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)):
+@pytest.mark.asyncio
+async def test_instance_list_gates_use_vault_key_when_unavailable_or_busy(tmp_path) -> None:
+    from servonaut.app import ServonautApp
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
+
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: [], is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = None
+        app.team_service = None
+        app.vault_command_service = None
+        app.vault_available = False
+        app.config_sync_service = None
+        app.memory_sync_service = None
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: []  # type: ignore[method-assign]
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, InstanceListScreen)
+        screen._vault_binding = False
         assert screen.check_action("use_vault_key", ()) is False
-        mock_app.vault_available = True
+        app.vault_available = True
         assert screen.check_action("use_vault_key", ()) is False
-        mock_app.vault_command_service = object()
+        app.vault_command_service = SimpleNamespace(close=MagicMock())
         assert screen.check_action("use_vault_key", ()) is True
         screen._vault_binding = True
         assert screen.check_action("use_vault_key", ()) is False
 
 
 @pytest.mark.asyncio
-async def test_servonaut_app_auth_lifecycle_refreshes_gates_and_caches() -> None:
+async def test_servonaut_app_auth_lifecycle_refreshes_gates_and_caches(tmp_path) -> None:
+    from textual.widgets import TabbedContent
     from servonaut.app import ServonautApp
+    from servonaut.screens._team_share import cached_teams_for, set_cached_teams
+    from servonaut.screens.fleet_memory import FleetMemoryScreen
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
 
     app = ServonautApp()
-    app.vault_available = True
-    app.vault_update_required = True
-    app._personal_vault_bound_ids = {"i-1"}
-    app._team_share_cache = [{"slug": "ops"}]
-    sidebar = MagicMock(spec=Sidebar)
-    mem_screen = MagicMock()
-    mem_screen.query.return_value = [sidebar]
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+    team_svc = SimpleNamespace(list_teams=AsyncMock(return_value=[]))
 
-    with (
-        patch.object(type(app), "screen_stack", new=property(lambda self: [mem_screen])),
-        patch.object(app, "notify"),
-    ):
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: [], is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda feat: feat in {"memory_drift", "memory_compliance_export"},
+            fetch_entitlements=AsyncMock(return_value={}),
+        )
+        app.team_service = team_svc
+        app.vault_command_service = None
+        app.config_sync_service = None
+        app.memory_sync_service = SimpleNamespace(
+            is_configured=True,
+            is_unlocked=False,
+            is_enrolled_locally=lambda: False,
+            get_key_material=lambda: None,
+            clear_local_keypair_cache=MagicMock(),
+            lock=MagicMock(),
+        )
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: []  # type: ignore[method-assign]
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        app.vault_available = True
+        app.vault_update_required = True
+        app._personal_vault_bound_ids = {"i-1"}
+        set_cached_teams(app, team_svc, [{"slug": "ops"}])
+        assert cached_teams_for(app, team_svc) == [{"slug": "ops"}]
+
+        mem_screen = FleetMemoryScreen(initial_tab="drift")
+        mem_screen._drift_client_ready = False
+        await app.switch_screen(mem_screen)
+        await pilot.pause()
+        await pilot.pause()
+        tabs = mem_screen.query_one("#memory_tabs", TabbedContent)
+        assert tabs.active == "mem_tab_drift"
+
+        # Ending sign-in resets caches, clears _team_list_cache, switches active gated tab to fleet, and hides Drift/Export.
+        app.auth_service = SimpleNamespace(
+            is_authenticated=False,
+            has_feature=lambda _feat: False,
+            fetch_entitlements=AsyncMock(return_value={}),
+        )
         app._on_sign_in_ended()
-    assert app.vault_available is False
-    assert app.vault_update_required is False
-    assert app._personal_vault_bound_ids == set()
-    sidebar.refresh_auth_gates.assert_called_once()
-    mem_screen.refresh_tab_gates.assert_called_once()
+        await pilot.pause()
+        assert app.vault_available is False
+        assert app.vault_update_required is False
+        assert app._personal_vault_bound_ids == set()
+        assert cached_teams_for(app, team_svc) is None
+        assert tabs.active == "mem_tab_fleet"
+        assert tabs.get_tab("mem_tab_drift").display is False
+        assert tabs.get_tab("mem_tab_export").display is False
 
-    app.auth_service = SimpleNamespace(fetch_entitlements=AsyncMock(return_value={}))
-    with (
-        patch.object(app, "_refresh_navigation_and_tab_gates") as refresh_mock,
-        patch.object(type(app), "screen_stack", new=property(lambda self: [])),
-    ):
-        await app._refresh_entitlements_on_start()
-    refresh_mock.assert_called_once()
+        # _refresh_entitlements_on_start also triggers _refresh_navigation_and_tab_gates.
+        with patch.object(app, "_refresh_navigation_and_tab_gates") as refresh_mock:
+            await app._refresh_entitlements_on_start()
+        refresh_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -278,8 +376,14 @@ async def test_sidebar_keeps_fleet_expanded_on_settings_screen() -> None:
         assert sidebar.query_one("#section_fleet").collapsed is False
 
 
-def test_server_actions_mnemonic_bindings_and_mounted_no_key_jump() -> None:
+@pytest.mark.asyncio
+async def test_server_actions_mnemonic_bindings_and_mounted_no_key_jump(tmp_path) -> None:
+    from servonaut.app import ServonautApp
     from servonaut.screens.server_actions import _WIDE_FOOTER_KEYS
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
 
     by_key = {b.key: b.action for b in ServerActionsScreen.BINDINGS}
     assert by_key["s"] == "action_3"
@@ -290,45 +394,56 @@ def test_server_actions_mnemonic_bindings_and_mounted_no_key_jump() -> None:
     assert by_key["w"] == "toggle_live"
     assert _WIDE_FOOTER_KEYS == ("l", "8")
 
-    screen = object.__new__(ServerActionsScreen)
-    screen._instance = {"id": "i-1", "name": "web-1", "public_ip": "1.1.1.1"}
-    screen._vault_binding_source = None
-    screen._busy = MagicMock()
-    resolver = SimpleNamespace(resolve=AsyncMock(return_value=None))
-    mock_app = SimpleNamespace(
-        demo_mode=False,
-        redaction_service=None,
-        vault_available=True,
-        vault_command_service=None,
-        team_service=None,
-        bw_ssh_config_service=None,
-        instances=[],
-        notify=MagicMock(),
-        push_screen=MagicMock(),
-    )
-    with (
-        patch.object(ServerActionsScreen, "app", new=property(lambda self: mock_app)),
-        patch.object(ServerActionsScreen, "is_attached", new=property(lambda self: True)),
-        patch.object(ServerActionsScreen, "is_mounted", new=property(lambda self: True)),
-        patch.object(screen, "_ssh_ref_resolver", AsyncMock(return_value=resolver)),
-        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(screen._instance, None))),
-        patch.object(screen, "_render_server_info"),
-        patch.object(screen, "action_use_vault_key") as use_vault_mock,
-    ):
-        asyncio.run(screen._resolve_and_launch_ssh(MagicMock()))
-    use_vault_mock.assert_called_once()
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
 
-    mock_app.vault_available = False
-    with (
-        patch.object(ServerActionsScreen, "app", new=property(lambda self: mock_app)),
-        patch.object(ServerActionsScreen, "is_attached", new=property(lambda self: True)),
-        patch.object(ServerActionsScreen, "is_mounted", new=property(lambda self: True)),
-        patch.object(screen, "_ssh_ref_resolver", AsyncMock(return_value=resolver)),
-        patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(screen._instance, None))),
-        patch.object(screen, "_render_server_info"),
-    ):
-        asyncio.run(screen._resolve_and_launch_ssh(MagicMock()))
-    assert mock_app.push_screen.call_args.args[0].__class__ is KeyManagementScreen
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: [], is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = None
+        app.team_service = None
+        app.vault_command_service = None
+        app.vault_available = True
+        app.config_sync_service = None
+        app.memory_sync_service = None
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: []  # type: ignore[method-assign]
+    instance = {"id": "i-1", "name": "web-1", "public_ip": "1.1.1.1"}
+    resolver = SimpleNamespace(resolve=AsyncMock(return_value=None))
+
+    with patch.object(ServerActionsScreen, "_fetch_rdns", AsyncMock()):
+        async with app.run_test(size=(160, 50)) as pilot:
+            screen = ServerActionsScreen(instance)
+            await app.push_screen(screen)
+            await pilot.pause()
+            with (
+                patch.object(screen, "_ssh_ref_resolver", AsyncMock(return_value=resolver)),
+                patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(instance, None))),
+                patch.object(screen, "action_use_vault_key") as use_vault_mock,
+            ):
+                await screen._resolve_and_launch_ssh(MagicMock())
+            use_vault_mock.assert_called_once()
+
+            app.vault_available = False
+            with (
+                patch.object(screen, "_ssh_ref_resolver", AsyncMock(return_value=resolver)),
+                patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(instance, None))),
+            ):
+                await screen._resolve_and_launch_ssh(MagicMock())
+            await pilot.pause()
+            assert isinstance(app.screen, KeyManagementScreen)
 
 
 @pytest.mark.asyncio
@@ -415,31 +530,72 @@ async def test_vault_bind_modal_race_guard_personal_create_scope_and_scrub() -> 
 
 
 @pytest.mark.asyncio
-async def test_vault_screen_refresh_after_ssh_import_sets_next_action() -> None:
-    from contextlib import asynccontextmanager
+async def test_vault_screen_refresh_after_ssh_import_sets_next_action(tmp_path) -> None:
+    from servonaut.app import ServonautApp
     from servonaut.screens.vault import VaultScreen
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
 
-    screen = object.__new__(VaultScreen)
-    screen._vaults = []
-    screen._table_mode = "vaults"
-    screen._next_action = ""
-    entered_busy = {"count": 0}
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+    vault_svc = SimpleNamespace(
+        is_unlocked=True,
+        list_vaults=AsyncMock(return_value=[{"vault_id": "v1", "label": "Personal"}]),
+        list_items=AsyncMock(return_value=[]),
+        list_devices=AsyncMock(return_value=[]),
+        identity_state=AsyncMock(return_value=SimpleNamespace(state="ready", reason="")),
+        close=MagicMock(),
+    )
 
-    @asynccontextmanager
-    async def _busy(_msg: str):
-        entered_busy["count"] += 1
-        yield
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: [], is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = SimpleNamespace(is_authenticated=True, has_feature=lambda _f: True)
+        app.team_service = None
+        app.vault_command_service = vault_svc
+        app.vault_available = True
+        app.config_sync_service = None
+        app.memory_sync_service = None
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
 
-    screen._busy = _busy
-    screen._status = MagicMock()
-    screen._render_vaults = MagicMock()
-    table = MagicMock()
-    svc = SimpleNamespace(list_vaults=AsyncMock(return_value=[{"vault_id": "v1", "label": "Personal"}]))
-    screen._service = lambda: svc
-    with patch.object(screen, "query_one", return_value=table):
-        await screen._refresh_imported_vault_metadata("v1", 1, 0, [{"source": "ssh", "vault_item_id": "k1"}], 0)
-    assert entered_busy["count"] == 1
-    assert screen._next_action == "vault_bind_key"
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: []  # type: ignore[method-assign]
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = VaultScreen()
+        await app.switch_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        screen._table_mode = "vaults"
+        screen._next_action = ""
+        with patch.object(screen, "_render_vaults"):
+            await screen._refresh_imported_vault_metadata(
+                "v1", 1, 0, [{"source": "ssh", "vault_item_id": "k1"}], 0
+            )
+        assert screen._next_action == "vault_bind_key"
+
+        # Narrowed try scope: rendering failure is NOT swallowed as a vault-list fetch warning.
+        with (
+            patch.object(app, "notify") as notify_mock,
+            patch.object(screen, "_render_vaults", side_effect=RuntimeError("render boom")),
+        ):
+            with pytest.raises(RuntimeError, match="render boom"):
+                await screen._refresh_imported_vault_metadata(
+                    "v1", 1, 0, [{"source": "ssh", "vault_item_id": "k1"}], 0
+                )
+        assert not any("Failed to refresh vault list" in str(c.args[0]) for c in notify_mock.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -483,7 +639,7 @@ async def test_key_management_filters_custom_and_shared_and_warns_open_perms(tmp
         values = [opt[1] for opt in server_select._options if isinstance(opt[1], str)]
         assert values == ["i-cloud"]
         avail = screen.query_one("#available_keys_table", DataTable)
-        assert "(insecure perms: expected 0600)" in str(avail.get_row_at(0)[0])
+        assert "(insecure permissions: expected 0600)" in str(avail.get_row_at(0)[0])
         with patch.object(app, "notify") as notify_mock:
             avail.move_cursor(row=0)
             screen.on_data_table_row_selected(
@@ -556,73 +712,169 @@ async def test_custom_servers_key_dropdown_warnings_and_narrow_edit_scroll(tmp_p
         assert 0 <= btn.region.y and btn.region.bottom <= 30
 
 
-def test_team_management_bind_guard_matching_own_row_and_share_all_prompt() -> None:
-    screen = object.__new__(TeamManagementScreen)
-    screen._binding_shared_key = False
-    screen._current_team_slug = "ops"
-    screen._server_busy = False
-    shared_row = {"id": "s1", "name": "app-1", "hostname": "10.0.1.9"}
-    own_row = {"id": "i-99", "name": "app-1", "public_ip": "10.0.1.9"}
-    shared_on_fleet = {"id": "team:ops:s1", "is_shared": True, "team_slug": "ops", "name": "app-1", "hostname": "10.0.1.9"}
-    mock_app = SimpleNamespace(
-        demo_mode=True,
-        redaction_service=object(),
-        instances=[own_row, shared_on_fleet],
-        _instances_pristine=[own_row, shared_on_fleet],
-        notify=MagicMock(),
-        run_worker=MagicMock(),
-        push_screen=MagicMock(),
+@pytest.mark.asyncio
+async def test_team_management_bind_guard_matching_own_row_and_share_all_prompt(tmp_path) -> None:
+    from servonaut.app import ServonautApp
+    from servonaut.screens._team_share import cached_teams_for, set_cached_teams
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
+
+    shared_row = {"id": "s1", "name": "app-1", "hostname": "198.51.100.9"}
+    own_row = {"id": "i-99", "name": "app-1", "public_ip": "198.51.100.9", "private_ip": "10.0.1.9"}
+    shared_on_fleet = {
+        "id": "team:ops:s1",
+        "is_shared": True,
+        "team_slug": "ops",
+        "name": "app-1",
+        "hostname": "198.51.100.9",
+    }
+    team_svc = SimpleNamespace(
+        list_teams=AsyncMock(return_value=[{"slug": "ops", "name": "Ops", "role": "owner"}]),
+        get_team=AsyncMock(return_value={"slug": "ops", "name": "Ops", "role": "owner", "members": [], "servers": [shared_row]}),
+        list_shared_servers=AsyncMock(return_value=[shared_row]),
+        list_team_configs=AsyncMock(return_value=[]),
+        get_team_agent_rules=AsyncMock(return_value={}),
+        remove_member=AsyncMock(return_value=None),
+        update_role=AsyncMock(return_value=None),
     )
-    with (
-        patch.object(TeamManagementScreen, "app", new=property(lambda self: mock_app)),
-        patch("servonaut.screens.team_management.refuse_unresolved", return_value=True) as refuse_mock,
-    ):
-        screen._start_bind_row(shared_row)
-    refuse_mock.assert_called_once()
-    mock_app.run_worker.assert_not_called()
 
-    # IP/host and unique-name fallback resolution on _matching_own_row
-    with patch.object(TeamManagementScreen, "app", new=property(lambda self: mock_app)):
-        assert screen._matching_own_row({"hostname": "10.0.1.9"})["id"] == "i-99"
-        assert screen._matching_own_row({"hostname": "192.168.1.9", "name": "app-1"})["id"] == "i-99"
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
 
-    # _offer_post_share_bind triggers _TeamBindPromptModal for newly shared unbound server.
-    mock_app.demo_mode = False
-    mock_app.vault_available = True
-    mock_app.vault_command_service = object()
-    mock_app.instances = [own_row, {**shared_on_fleet, "id": "s1"}]
-    screen._shared_servers = [shared_row]
-    screen._display_server_name = lambda n: str(n)
-    with (
-        patch.object(TeamManagementScreen, "app", new=property(lambda self: mock_app)),
-        patch.object(TeamManagementScreen, "is_attached", new=property(lambda self: True)),
-    ):
-        mock_app.screen = screen
-        screen._offer_post_share_bind("ops", "10.0.1.9", "app-1")
-    assert isinstance(mock_app.push_screen.call_args.args[0], _TeamBindPromptModal)
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: [own_row], is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = SimpleNamespace(is_authenticated=True, has_feature=lambda f: f == "team_workspaces")
+        app.team_service = team_svc
+        app.vault_command_service = SimpleNamespace(close=MagicMock())
+        app.vault_available = True
+        app.config_sync_service = None
+        app.memory_sync_service = None
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: [own_row]  # type: ignore[method-assign]
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        app.instances = [own_row, shared_on_fleet]
+        app._instances_pristine = [own_row, shared_on_fleet]
+        screen = TeamManagementScreen()
+        await app.switch_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        screen._current_team_slug = "ops"
+        screen._shared_servers = [shared_row]
+
+        # Demo unresolved guard stops shared-row bind worker.
+        app.demo_mode = True
+        with (
+            patch("servonaut.screens.team_management.refuse_unresolved", return_value=True) as refuse_mock,
+            patch.object(screen, "run_worker") as run_worker_mock,
+        ):
+            screen._start_bind_row(shared_row)
+        refuse_mock.assert_called_once()
+        run_worker_mock.assert_not_called()
+
+        # Blocker #3: own_twin matches public_ip / id, NEVER private_ip alone or name alone.
+        app.demo_mode = False
+        assert screen._matching_own_row({"hostname": "198.51.100.9"})["id"] == "i-99"
+        assert screen._matching_own_row({"hostname": "10.0.1.9"}) is None
+        assert screen._matching_own_row({"hostname": "192.0.2.9", "name": "app-1"}) is None
+
+        # _start_server_operation is refused while _binding_shared_key is True.
+        screen._binding_shared_key = True
+        op = AsyncMock()
+        screen._start_server_operation(op, "Working...")
+        op.assert_not_called()
+        screen._binding_shared_key = False
+
+        # Role change and member removal clear _team_list_cache.
+        set_cached_teams(app, team_svc, [{"slug": "ops", "role": "owner"}])
+        await screen._do_remove_member("ops", "m-1", "a@example.com")
+        assert cached_teams_for(app, team_svc) is None
+        set_cached_teams(app, team_svc, [{"slug": "ops", "role": "owner"}])
+        await screen._do_update_role("ops", "m-2", "b@example.com", "admin")
+        assert cached_teams_for(app, team_svc) is None
+
+        # _offer_post_share_bind triggers _TeamBindPromptModal for newly shared unbound server.
+        app.instances = [own_row, {**shared_on_fleet, "id": "s1"}]
+        app._instances_pristine = list(app.instances)
+        screen._offer_post_share_bind("ops", "198.51.100.9", "app-1")
+        await pilot.pause()
+        assert isinstance(app.screen, _TeamBindPromptModal)
 
 
-def test_inspector_key_badges_and_vault_settings_keywords() -> None:
-    screen = object.__new__(InstanceListScreen)
+@pytest.mark.asyncio
+async def test_inspector_key_badges_and_vault_settings_keywords(tmp_path) -> None:
+    from servonaut.app import ServonautApp
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
+
     shared_ca = {"id": "s1", "is_shared": True, "ssh_ca": {"enrolled": True}}
     shared_vault = {"id": "s2", "is_shared": True, "credential_binding": {"source": "servonaut_vault"}}
     shared_local = {"id": "s3", "is_shared": True}
     own_ca = {"id": "i-1", "ssh_ca": {"enrolled": True}}
     own_vault = {"id": "i-2"}
-    own_twin_ca = {"id": "i-3", "name": "web-3", "public_ip": "10.0.1.3"}
-    own_twin_vault = {"id": "i-4", "name": "web-4", "public_ip": "10.0.1.4"}
-    own_twin_local = {"id": "i-5", "name": "web-5", "public_ip": "10.0.1.5"}
+    own_twin_ca = {"id": "i-3", "name": "web-3", "public_ip": "198.51.100.3"}
+    own_twin_vault = {"id": "i-4", "name": "web-4", "public_ip": "198.51.100.4"}
+    own_twin_local = {"id": "i-5", "name": "web-5", "public_ip": "198.51.100.5"}
+    own_private_collision = {"id": "i-6", "name": "web-priv", "public_ip": "198.51.100.6", "private_ip": "10.0.1.99"}
 
-    mock_app = SimpleNamespace(
-        demo_mode=False,
-        _personal_vault_bound_ids={"i-2"},
-        instances=[
-            {"id": "t3", "is_shared": True, "instance_id": "i-3", "ssh_ca": {"enrolled": True}},
-            {"id": "t4", "is_shared": True, "instance_id": "i-4", "credential_binding": {"source": "servonaut_vault"}},
-            {"id": "t5", "is_shared": True, "instance_id": "i-5"},
-        ],
-    )
-    with patch.object(InstanceListScreen, "app", new=property(lambda self: mock_app)):
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+    rows = [
+        {"id": "t3", "is_shared": True, "instance_id": "i-3", "ssh_ca": {"enrolled": True}},
+        {"id": "t4", "is_shared": True, "instance_id": "i-4", "credential_binding": {"source": "servonaut_vault"}},
+        {"id": "t5", "is_shared": True, "instance_id": "i-5"},
+        {"id": "t6", "is_shared": True, "name": "web-priv", "hostname": "10.0.1.99", "credential_binding": {"source": "servonaut_vault"}},
+    ]
+
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: rows, is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = None
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.auth_service = None
+        app.team_service = None
+        app.vault_command_service = None
+        app.config_sync_service = None
+        app.memory_sync_service = None
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: list(rows)  # type: ignore[method-assign]
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.instances = list(rows)
+        app._instances_pristine = list(rows)
+        screen = app.screen
+        assert isinstance(screen, InstanceListScreen)
+        app._personal_vault_bound_ids = {"i-2"}
         assert screen._inspector_key_badge(shared_ca).plain == "● SSH CA ready"
         assert screen._inspector_key_badge(shared_vault).plain == "● team key ready"
         assert screen._inspector_key_badge(shared_local).plain == "○ Shared · local key"
@@ -631,6 +883,9 @@ def test_inspector_key_badges_and_vault_settings_keywords() -> None:
         assert screen._inspector_key_badge(own_twin_ca).plain == "● SSH CA (via team)"
         assert screen._inspector_key_badge(own_twin_vault).plain == "● team key ready"
         assert screen._inspector_key_badge(own_twin_local).plain == "○ Shared · local key"
+        # Private IP or name collision without matching id/public_ip is never treated as a twin.
+        assert screen._matching_team_row(own_private_collision) is None
+        assert screen._has_team_twin(own_private_collision) is False
 
     vault_spec = next((spec for spec in PANELS if spec.id == "vault"), None)
     assert vault_spec is not None
@@ -706,3 +961,464 @@ async def test_custom_servers_post_save_disables_hidden_form_buttons_and_focuses
         await pilot.pause()
         assert screen.query_one("#btn_save_server").disabled is False
         assert screen.query_one("#btn_cancel_form").disabled is False
+
+
+def _make_offline_app(
+    tmp_path: Path,
+    *,
+    instances: list[dict] | None = None,
+    auth_service: object | None = None,
+    team_service: object | None = None,
+    vault_command_service: object | None = None,
+    vault_available: bool = False,
+    memory_sync_service: object | None = None,
+    drift_service: object | None = None,
+    aws_service: object | None = None,
+    ovh_service: object | None = None,
+    hetzner_service: object | None = None,
+):
+    from servonaut.app import ServonautApp
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.keyword_store import KeywordStore
+    from servonaut.services.ssh_service import SSHService
+
+    app = ServonautApp()
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+    app.config_manager = cm
+    rows = list(instances or [])
+
+    def _init_services() -> None:
+        app.config_manager = cm
+        app.custom_server_service = CustomServerService(cm)
+        app.connection_service = ConnectionService(cm)
+        app.ssh_service = SSHService(cm)
+        app.keyword_store = KeywordStore(str(tmp_path / "kw.json"))
+        app.cache_service = SimpleNamespace(get_instances=lambda: list(rows), is_fresh=lambda: True, get_age=lambda: None)
+        app.aws_service = aws_service
+        app.ovh_service = ovh_service
+        app.hetzner_service = hetzner_service
+        app.auth_service = auth_service
+        app.team_service = team_service
+        app.vault_command_service = vault_command_service
+        app.vault_available = vault_available
+        app.config_sync_service = None
+        app.memory_sync_service = memory_sync_service
+        app.drift_service = drift_service
+        app.bw_ssh_config_service = None
+        app.relay_manager = None
+        app._apt_monitor = None
+
+    app._init_services = _init_services  # type: ignore[method-assign]
+    app._cached_fleet = lambda: list(rows)  # type: ignore[method-assign]
+    return app
+
+
+@pytest.mark.asyncio
+async def test_team_cache_ttl_and_share_flow_preserves_other_teams(tmp_path, monkeypatch) -> None:
+    from servonaut.screens import _team_share
+    from servonaut.screens.server_actions import TeamTargetModal
+    from servonaut.services.team_service import ShareResult, SHARED
+
+    now = [100.0]
+    monkeypatch.setattr(_team_share, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    team_a = {"id": "t-a", "slug": "ops", "name": "Ops", "role": "owner"}
+    team_b = {"id": "t-b", "slug": "sec", "name": "Sec", "role": "member"}
+    team_b_row = {
+        "id": "sh-b",
+        "name": "sec-web-1",
+        "is_shared": True,
+        "team_slug": "sec",
+        "team_name": "Sec",
+        "hostname": "198.51.100.20",
+    }
+    team_a_row = {
+        "id": "sh-a",
+        "name": "ops-web-1",
+        "is_shared": True,
+        "team_slug": "ops",
+        "team_name": "Ops",
+        "hostname": "198.51.100.10",
+    }
+    shared_pushed = [False]
+
+    async def _list_shared(slug: str):
+        if slug == "ops":
+            return [team_a_row] if shared_pushed[0] else []
+        return [team_b_row]
+
+    async def _push_servers(_slug: str, srv_rows):
+        shared_pushed[0] = True
+        return [ShareResult(payload=srv_rows[0], status=SHARED)]
+
+    team_svc = SimpleNamespace(
+        list_teams=AsyncMock(return_value=[team_a, team_b]),
+        list_shared_servers=AsyncMock(side_effect=_list_shared),
+        push_servers=AsyncMock(side_effect=_push_servers),
+    )
+    app = _make_offline_app(
+        tmp_path,
+        instances=[{"id": "i-1", "name": "ops-web-1", "public_ip": "198.51.100.10", "region": "us-east-1"}],
+        team_service=team_svc,
+    )
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        # Cache hit within TTL avoids extra list_teams RPC, then expires after _TEAM_CACHE_TTL_SECONDS.
+        manageable_1, teams_1 = await _team_share.resolve_manageable_teams(app, team_svc)
+        manageable_2, _ = await _team_share.resolve_manageable_teams(app, team_svc)
+        assert len(manageable_1) == 1 and len(manageable_2) == 1 and len(teams_1) == 2
+        assert team_svc.list_teams.await_count == 1
+
+        now[0] += _team_share._TEAM_CACHE_TTL_SECONDS + 1.0
+        await _team_share.resolve_manageable_teams(app, team_svc)
+        assert team_svc.list_teams.await_count == 2
+
+        # share_server_with_team_flow reloads shared servers across ALL teams, preserving Team B's row.
+        with patch.object(
+            app,
+            "push_screen_wait",
+            AsyncMock(side_effect=lambda modal: getattr(modal, "_servers", [])),
+        ):
+            await _team_share.share_server_with_team_flow(
+                app.screen, app.instances[0], team_svc
+            )
+        assert team_svc.push_servers.await_count == 1
+        shared_ids = {r["id"] for r in app.instances if r.get("is_shared")}
+        assert shared_ids == {"sh-a", "sh-b"}
+
+
+@pytest.mark.asyncio
+async def test_instance_list_quick_ssh_team_key_bastion_hop_and_bitwarden(tmp_path, monkeypatch) -> None:
+    from servonaut.config.schema import ConnectionProfile
+    from servonaut.screens import instance_list as il_mod
+    from servonaut.services.ssh_credentials import VaultCredentialError
+    from servonaut.services.ssh_ref_resolver import ResolvedSshRef
+
+    instance = {
+        "id": "i-app",
+        "name": "app-1",
+        "key_name": "ops-keypair",
+        "public_ip": "198.51.100.50",
+        "private_ip": "10.0.1.50",
+        "username": "deploy",
+        "port": 2222,
+    }
+    team_twin_row = {
+        "id": "sh-app",
+        "name": "app-1",
+        "is_shared": True,
+        "team_slug": "ops",
+        "team_name": "Ops",
+        "instance_id": "i-app",
+        "hostname": "198.51.100.50",
+        "credential_binding": {"source": "servonaut_vault"},
+    }
+    bastion_row = {"id": "i-jump", "name": "jump-1", "public_ip": "198.51.100.1"}
+    profile = ConnectionProfile(name="via-jump", bastion_host="198.51.100.1", bastion_user="jump")
+
+    app = _make_offline_app(tmp_path, instances=[instance, team_twin_row, bastion_row])
+    base_conn = {
+        "host": "10.0.1.50",
+        "username": "rule-user",
+        "key_path": "/keys/orig",
+        "proxy_args": ["-J", "jump@198.51.100.1"],
+        "port": 2222,
+        "extra_options": ["-o", "ServerAliveInterval=30"],
+        "profile": profile,
+    }
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.instances = [instance, team_twin_row, bastion_row]
+        app._instances_pristine = [instance, team_twin_row, bastion_row]
+        screen = app.screen
+        assert isinstance(screen, InstanceListScreen)
+        app.terminal_service = SimpleNamespace(launch_ssh_in_terminal=MagicMock(return_value=True), last_error=None)
+        app.ssh_service = SimpleNamespace(build_ssh_command=MagicMock(return_value=["ssh", "target"]))
+
+        # 1. Lost team key uses scrub_for_display (no NameError) cleanly.
+        app.vault_command_service = SimpleNamespace(is_unlocked=True, take_lost_team_key=lambda _row: True, close=MagicMock())
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, None))),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=None)),
+            patch("servonaut.services.ssh_credentials.bastion_hop_hint", return_value=None),
+            patch.object(app, "notify") as notify_mock,
+        ):
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        assert notify_mock.call_count >= 1
+        assert any("team vault" in str(c.args[0]).lower() for c in notify_mock.call_args_list)
+
+        # 2. Resolved None + locked vault triggers team_key_hint via scrub_for_display safely.
+        app.vault_command_service = SimpleNamespace(is_unlocked=False, take_lost_team_key=lambda _row: False, close=MagicMock())
+        resolver_none = SimpleNamespace(resolve=AsyncMock(return_value=None))
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver", return_value=resolver_none),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, None))),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=None)),
+            patch("servonaut.services.ssh_credentials.bastion_hop_hint", return_value=None),
+            patch.object(app, "notify") as notify_mock,
+        ):
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        assert any("Servonaut Vault identity" in str(c.args[0]) for c in notify_mock.call_args_list)
+
+        # 3. Local-key path runs bastion_lease (allow_bastion=True) & catches VaultCredentialError cleanly.
+        app.terminal_service.launch_ssh_in_terminal.reset_mock()
+        app.vault_command_service = SimpleNamespace(is_unlocked=True, take_lost_team_key=lambda _row: False, close=MagicMock())
+        resolver_local = SimpleNamespace(resolve=AsyncMock(return_value=ResolvedSshRef(source="local", local_key_path="/keys/local")))
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver", return_value=resolver_local),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, ResolvedSshRef(source="local", local_key_path="/keys/local")))),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(side_effect=VaultCredentialError("untrusted jump key"))),
+            patch.object(app, "notify") as notify_mock,
+        ):
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        assert any("untrusted jump key" in str(c.args[0]) for c in notify_mock.call_args_list)
+        app.terminal_service.launch_ssh_in_terminal.assert_not_called()
+
+        # 4a. Local-key path with healthy bastion lease passes hop into connection proxy args.
+        hop_sock = tmp_path / "hop.sock"
+        hop_sock.touch()
+        fake_hop = SimpleNamespace(
+            source="vault",
+            identity_agent=str(hop_sock),
+            identity_file=str(tmp_path / "hop.pub"),
+            certificate_path=None,
+            known_hosts_path=str(tmp_path / "hop_kh"),
+            login_user="jump",
+            target_host="198.51.100.1",
+            target_port=22,
+            close=MagicMock(),
+        )
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver", return_value=resolver_local),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, ResolvedSshRef(source="local", local_key_path="/keys/local")))),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=fake_hop)) as bastion_mock,
+            patch.object(app.connection_service, "get_proxy_args", wraps=app.connection_service.get_proxy_args) as proxy_spy,
+            patch.object(screen, "_maybe_show_memory_prompt"),
+            patch.object(screen, "_maybe_pull_annotations"),
+        ):
+            app.ssh_service.build_ssh_command.reset_mock()
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        bastion_mock.assert_awaited_once()
+        assert proxy_spy.call_args.kwargs["hop"] is fake_hop
+        assert any("ProxyCommand=" in a for a in app.ssh_service.build_ssh_command.call_args.kwargs["proxy_args"])
+
+        # 4b. When bastion_lease returns None, bastion_hop_hint notifies cleanly via scrub_for_display.
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver", return_value=resolver_local),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, ResolvedSshRef(source="local", local_key_path="/keys/local")))),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=None)),
+            patch("servonaut.services.ssh_credentials.bastion_hop_hint", return_value="Unlock vault for jump host"),
+            patch.object(screen, "_maybe_show_memory_prompt"),
+            patch.object(screen, "_maybe_pull_annotations"),
+            patch.object(app, "notify") as notify_mock,
+        ):
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        assert any("Unlock vault for jump host" in str(c.args[0]) for c in notify_mock.call_args_list)
+
+        # 5. Bitwarden path preserves proxy_args, extra_options, profile, and rule username while swapping key_path.
+        bw_ref = ResolvedSshRef(source="personal", item_id="bw-item-1")
+        inst = dict(instance)
+        with (
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver", return_value=SimpleNamespace(resolve=AsyncMock(return_value=bw_ref))),
+            patch("servonaut.services.ssh_ref_resolver.resolve_target", AsyncMock(return_value=(inst, bw_ref))),
+            patch("servonaut.screens._vault_bind.resolve_bw_ssh_key_path", AsyncMock(return_value="/tmp/bw_key")),
+            patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=None)),
+            patch("servonaut.services.ssh_credentials.bastion_hop_hint", return_value=None),
+            patch.object(screen, "_maybe_show_memory_prompt"),
+            patch.object(screen, "_maybe_pull_annotations"),
+        ):
+            app.ssh_service.build_ssh_command.reset_mock()
+            await screen._launch_ssh(inst, inst, dict(base_conn))
+        bw_call = app.ssh_service.build_ssh_command.call_args
+        assert bw_call.kwargs["key_path"] == "/tmp/bw_key"
+        assert bw_call.kwargs["username"] == "rule-user"
+        assert bw_call.kwargs["proxy_args"] == ["-J", "jump@198.51.100.1"]
+        assert bw_call.kwargs["extra_options"] == ["-o", "ServerAliveInterval=30"]
+
+
+@pytest.mark.asyncio
+async def test_windows_platform_skips_ssh_key_permission_checks(tmp_path, monkeypatch) -> None:
+    from servonaut.screens import custom_servers as cs_mod
+    from servonaut.screens import key_management as km_mod
+
+    perm_mock = MagicMock(return_value=False)
+
+    app = _make_offline_app(tmp_path)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        app.ssh_service = SimpleNamespace(
+            list_available_keys=lambda: [("/keys/id_ed25519", "SSH Key")],
+            check_key_permissions=perm_mock,
+            set_key_path=lambda *_a, **_kw: None,
+            get_key_path=lambda *_a, **_kw: None,
+        )
+        # Swap os binding only on the two screen modules so stdlib Path stays PosixPath on Linux.
+        monkeypatch.setattr(km_mod, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(cs_mod, "os", SimpleNamespace(name="nt"))
+        km = KeyManagementScreen()
+        await app.switch_screen(km)
+        await pilot.pause()
+        await pilot.pause()
+        avail = km.query_one("#available_keys_table", DataTable)
+        assert "insecure" not in str(avail.get_row_at(0)[0]).lower()
+
+        cs = CustomServersScreen(open_add_form=True)
+        await app.switch_screen(cs)
+        await pilot.pause()
+        await pilot.pause()
+        select = cs.query_one("#select_custom_ssh_key", Select)
+        assert select is not None
+        assert perm_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_add_server_modal_connect_provider_picks_first_unconfigured_panel(tmp_path) -> None:
+    aws_only = _make_offline_app(tmp_path, aws_service=object())
+
+    async with aws_only.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = aws_only.screen
+        assert isinstance(screen, InstanceListScreen)
+        with (
+            patch("servonaut.widgets.sidebar.provider_ready", side_effect=lambda _app, p: p == "aws"),
+            patch.object(aws_only, "open_settings_screen") as open_settings,
+        ):
+            screen.action_add_server()
+            await pilot.pause()
+            assert isinstance(aws_only.screen, AddServerModal)
+            await pilot.click("#add_srv_connect_provider")
+            await pilot.pause()
+        open_settings.assert_called_once_with("hetzner")
+
+        with (
+            patch("servonaut.widgets.sidebar.provider_ready", side_effect=lambda _app, p: p in {"aws", "hetzner"}),
+            patch.object(aws_only, "open_settings_screen") as open_settings,
+        ):
+            screen.action_add_server()
+            await pilot.pause()
+            assert isinstance(aws_only.screen, AddServerModal)
+            await pilot.click("#add_srv_connect_provider")
+            await pilot.pause()
+        open_settings.assert_called_once_with("ovh")
+
+
+@pytest.mark.asyncio
+async def test_artifact_selftest_run_tui_passes_with_fleet_section_open(tmp_path) -> None:
+    from dataclasses import replace
+    from servonaut._artifact_selftest import _create_fixtures, _run_tui
+    from servonaut.runtime import detect_runtime
+
+    data_root = tmp_path / ".servonaut"
+    config_path, _, _ = _create_fixtures(data_root)
+    runtime = replace(detect_runtime(), data_root=data_root)
+    result = await _run_tui(runtime, config_path)
+    assert result == {"main": True, "sidebar": True, "adjacent": True, "exited": True}
+
+
+@pytest.mark.asyncio
+async def test_fleet_memory_tab_activation_drift_gate_resume_and_reload(tmp_path) -> None:
+    from textual.widgets import TabbedContent
+    from textual.widgets._tabbed_content import ContentTabs
+    from servonaut.screens.fleet_memory import FleetMemoryScreen
+    from servonaut.widgets.memory_panes import MemoryDriftPane, MemorySyncPane
+
+    drift_svc = SimpleNamespace(
+        list_drift=AsyncMock(return_value=[])
+    )
+    app = _make_offline_app(
+        tmp_path,
+        instances=[{"id": "i-1", "name": "web-1", "provider": "aws", "public_ip": "198.51.100.1"}],
+        auth_service=SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda f: f in {"memory_sync", "memory_drift", "memory_compliance_export"},
+        ),
+        memory_sync_service=SimpleNamespace(
+            is_configured=True,
+            is_enrolled_locally=lambda: True,
+            get_key_material=lambda: b"key",
+        ),
+        drift_service=drift_svc,
+    )
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = FleetMemoryScreen()
+        await app.switch_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+
+        # Theme restyle (_render_table) does NOT mark Drift loaded before activation.
+        drift_pane = screen.query_one("#memory_drift_pane", MemoryDriftPane)
+        drift_pane._render_table()
+        assert drift_pane._loaded_once is False
+
+        # Switching to Drift loads list_drift() exactly once (no double activation).
+        screen.activate_tab("drift")
+        await pilot.pause()
+        await pilot.pause()
+        assert drift_svc.list_drift.await_count == 1
+        assert drift_pane._loaded_once is True
+
+        # Navigation focus blocks drift_ack, drift_unack, refresh_view.
+        sidebar = screen.query_one("Sidebar")
+        sidebar.enter_navigation_mode()
+        await pilot.pause()
+        assert screen.navigation_focused is True
+        assert screen.check_action("drift_ack", ()) is None
+        assert screen.check_action("drift_unack", ()) is None
+        assert screen.check_action("refresh_view", ()) is None
+        with patch.object(drift_pane, "action_ack_selected") as ack_mock:
+            await pilot.press("a")
+            await pilot.pause()
+        ack_mock.assert_not_called()
+        sidebar.exit_navigation_mode()
+        await pilot.pause()
+
+        # Arrowing along ContentTabs keeps focus on the tab strip rather than jumping into content.
+        tabs = screen.query_one("#memory_tabs", TabbedContent)
+        strip = tabs.get_child_by_type(ContentTabs)
+        strip.focus()
+        await pilot.pause()
+        await pilot.press("left")
+        await pilot.pause()
+        focused = screen.focused
+        assert focused is strip or (focused is not None and strip in focused.ancestors)
+
+        # Clicking the Drift tab with the mouse focuses #drift-table (does not get stuck on strip).
+        await pilot.click("#--content-tab-mem_tab_drift")
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.focused is screen.query_one("#drift-table")
+
+        # Single merged on_screen_resume refreshes both tab gates and MemorySyncPane state.
+        sync_pane = screen.query_one("#memory_sync_pane", MemorySyncPane)
+        with (
+            patch.object(screen, "refresh_tab_gates") as gates_mock,
+            patch.object(sync_pane, "refresh_state") as sync_mock,
+        ):
+            screen.on_screen_resume()
+        gates_mock.assert_called_once()
+        sync_mock.assert_called_once()
+
+        # Returning from Sync tab to Fleet tab via nav_memory re-populates fleet rows.
+        screen.activate_tab("sync")
+        await pilot.pause()
+        app.instances.append({"id": "i-2", "name": "edge-1", "provider": "aws", "public_ip": "198.51.100.2"})
+        with patch.object(screen, "_launch_populate", wraps=screen._launch_populate) as pop_mock:
+            app.on_sidebar_navigation_requested(Sidebar.NavigationRequested("nav_memory"))
+            await pilot.pause()
+            await pilot.pause()
+        assert pop_mock.call_count >= 1
+        fleet_table = screen.query_one("#fleet-memory-table", DataTable)
+        names = [str(fleet_table.get_row_at(r)[0]) for r in range(fleet_table.row_count)]
+        assert "edge-1" in names

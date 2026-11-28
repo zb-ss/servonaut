@@ -175,8 +175,8 @@ class LoginScreen(WorkspaceScreen):
 
         Args:
             return_to: Optional screen slug to switch to after a successful
-                login. Currently ``"memory_sync"`` (back to
-                MemorySyncSetupScreen) and ``"sync_config"`` (forward to
+                login. Currently ``"memory_sync"`` (back to the Sync tab in
+                FleetMemoryScreen) and ``"sync_config"`` (forward to
                 SnapshotManagerScreen) are recognised. None (default)
                 parks the user on the logged-in view.
         """

@@ -56,9 +56,7 @@ from servonaut.screens._demo_resolve import (
     fleet_rows,
     display_username,
     hide_login,
-    reconcile_team_memory,
     refuse_unresolved,
-    replace_instances,
     team_rows,
 )
 from servonaut.screens._provider_accounts import ServerAccountMixin
@@ -1207,7 +1205,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
         # server. Personal bindings are not part of the row (only a team's
         # shared servers carry theirs), so it is looked up after mount.
         self._vault_binding_source: Optional[str] = None
-        self._manageable_teams: Optional[list[dict[str, Any]]] = None
 
     def _can_share_with_team(self) -> bool:
         if self._instance.get("is_shared") is True:
@@ -1230,7 +1227,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             manageable, _ = await resolve_manageable_teams(self.app, team_svc)
         except Exception:
             return
-        self._manageable_teams = manageable
         if not self.is_attached:
             return
         try:
@@ -2427,7 +2423,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             if (
                 not hint
                 and getattr(self, "is_attached", False)
-                and hasattr(self, "_busy")
                 and not getattr(self.app, "demo_mode", False)
             ):
                 if getattr(self.app, "vault_available", False):
@@ -2841,7 +2836,6 @@ class ServerActionsScreen(ServerAccountMixin, WorkspaceScreen):
             team_svc,
             busy=self._busy,
             hold_selector="#btn_share_team",
-            manageable_teams=self._manageable_teams,
             on_shared=_on_shared,
         )
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from typing import Any
 
@@ -46,6 +47,17 @@ def status(t: Any) -> str:
     return plain(t.on_screen("#msync_status").render())
 
 
+async def _wait_mount_unlock(t: Any) -> None:
+    """Wait for FleetMemoryScreen's mount-time unlock worker to settle."""
+    await t.wait_until(
+        lambda: not any(
+            w.name == "memory_sync_unlock_prompt" and w.is_running
+            for w in t.app.workers
+        ),
+        desc="mount-time memory unlock settled",
+    )
+
+
 async def open_memory_sync(t: Any) -> None:
     await t.nav("nav_memory")
     await t.wait_for_screen("FleetMemoryScreen")
@@ -54,15 +66,23 @@ async def open_memory_sync(t: Any) -> None:
         lambda: t.is_reachable(t.on_screen("#msync_status")),
         desc="Memory Sync tab active",
     )
+    if os.environ.get(PASSPHRASE_ENV):
+        await _wait_mount_unlock(t)
 
 
 async def unlock(t: Any) -> None:
-    """Press "Unlock Memory Sync" and wait until the store is active.
+    """Ensure Memory Sync is active on the Sync tab, unlocking if needed.
 
-    The status line turns active first; the card with the actions is
-    rebuilt for the new state and its buttons follow a few frames later,
-    so the step ends when those are available too.
+    When an already-enrolled session supplies ``SERVONAUT_MEMORY_PASSPHRASE``,
+    opening ``FleetMemoryScreen`` unlocks Sync automatically via its mount
+    worker; otherwise click ``#msync_btn_setup`` and wait until ready.
     """
+    await _wait_mount_unlock(t)
+    sync = getattr(t.app, "memory_sync_service", None)
+    if sync is not None and sync.is_configured:
+        await t.wait_for_toast(r"^Memory Sync (unlocked|is now active)\.$")
+        await t.wait_until(lambda: _idle(t), desc="Memory Sync active, with its actions")
+        return
     await t.click("#msync_btn_setup")
     await t.wait_for_toast(r"^Memory Sync is now active\.$")
     await t.wait_until(lambda: _idle(t), desc="Memory Sync active, with its actions")

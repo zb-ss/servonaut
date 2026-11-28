@@ -89,6 +89,17 @@ def _aws_switched_on(app) -> bool:
         return True
 
 
+def provider_ready(app, provider: str) -> bool:
+    """Whether *provider* has an enabled, usable account for creating servers."""
+    if provider == "aws":
+        return is_nav_route_visible(app, "nav_aws_manage") and _provider_available(app, "aws")
+    if provider == "hetzner":
+        return is_nav_route_visible(app, "nav_hetzner_manage")
+    if provider == "ovh":
+        return is_nav_route_visible(app, "nav_ovh_manage")
+    return _provider_available(app, provider)
+
+
 def is_nav_route_visible(app, target_id: str) -> bool:
     """Single source of truth for Sidebar and Command Palette route visibility."""
     auth = getattr(app, "auth_service", None)

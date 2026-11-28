@@ -317,6 +317,7 @@ class ServonautApp(App):
         self.user_theme_errors: Tuple[ThemeError, ...] = ()
         self._register_user_themes()
         self.instances = []
+        self._team_list_cache = None
         self.workspace_state = WorkspaceState()
         self.memory_first_connect_seen = set()
         self.memory_annotations_pulled_seen = set()
@@ -1192,11 +1193,12 @@ class ServonautApp(App):
                             name="relay_logout_stop", exclusive=True)
         if getattr(self, "vault_command_service", None) is not None:
             self.workers.cancel_group(self, "vault_background")
+        from servonaut.screens._team_share import clear_cached_teams
+
         self.vault_update_required = False
         self.vault_available = False
         self._personal_vault_bound_ids = set()
-        self._cached_teams = None
-        self._cached_teams_service = None
+        clear_cached_teams(self)
         self._refresh_navigation_and_tab_gates()
         # Config-sync session
         if getattr(self, "config_sync_service", None) is not None:
@@ -1855,7 +1857,7 @@ class ServonautApp(App):
             logger.debug("TeamMemoryService init failed: %s", exc)
 
         # NOTE: Memory cloud is NOT bootstrapped at app start.  The user opts
-        # in via ``MemorySyncSetupScreen`` (sidebar → Memory Sync), which calls
+        # in via ``FleetMemoryScreen`` (Monitor -> Fleet memory -> Sync), which calls
         # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
         # No auto-modals, no auto network calls.
 
@@ -1864,7 +1866,7 @@ class ServonautApp(App):
     ) -> None:
         """Bootstrap the memory cloud sync layer (user-initiated or auto-restart).
 
-        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up",
+        Called from ``FleetMemoryScreen``'s Sync tab when the user clicks "Set up",
         or from ``_reactivate_memory_sync`` on startup when a local keypair
         cache is present.
 
@@ -3829,6 +3831,8 @@ class ServonautApp(App):
         screen = getattr(self, "screen", None)
         if isinstance(screen, FleetMemoryScreen):
             screen.activate_tab(tab)
+            if tab == "fleet" and not getattr(screen, "_scanning", False):
+                screen._launch_populate()
             return
         self.switch_screen(FleetMemoryScreen(initial_tab=tab))
 
