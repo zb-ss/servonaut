@@ -315,6 +315,19 @@ class AuthService(AuthServiceInterface):
         # auth.json. A cache save compares it with the stored one to tell
         # whether another process changed the pair meanwhile.
         self._persisted_refresh_token: Optional[str] = None
+        # Refresh exchanges still running. Each runs in its own task, so a
+        # caller cancelled mid-request does not drop the pair the server
+        # has already rotated to (see refresh_token).
+        self._refresh_tasks: Set[asyncio.Task] = set()
+        # The subset that has started sending its request: those keep running
+        # when their caller is cancelled.
+        self._sending_refreshes: Set[asyncio.Task] = set()
+        # Called once when the API refuses this process's sign-in for good.
+        self._sign_in_ended_listeners: List[Callable[[], None]] = []
+        # Size, mtime and inode of auth.json when it was last checked after a
+        # refused sign-in, so a new sign-in is noticed without re-reading the
+        # file on every is_authenticated check.
+        self._ended_file_signature: Optional[tuple] = None
         self._load_token()
 
     def _get_refresh_lock(self) -> asyncio.Lock:
@@ -330,9 +343,55 @@ class AuthService(AuthServiceInterface):
 
     @property
     def is_authenticated(self) -> bool:
-        if self._refresh_grant_revoked:
+        if self._refresh_grant_revoked and not self._adopt_new_sign_in():
             return False
         return self._token is not None and self._token.is_authenticated
+
+    @property
+    def sign_in_ended(self) -> bool:
+        """Whether the API refused this sign-in for good (the user must sign in again)."""
+        return self._refresh_grant_revoked and not self._adopt_new_sign_in()
+
+    def add_sign_in_ended_listener(self, listener: Callable[[], None]) -> None:
+        """Call *listener* when the API refuses this process's sign-in for good."""
+        self._sign_in_ended_listeners.append(listener)
+
+    def _announce_sign_in_ended(self) -> None:
+        for listener in list(self._sign_in_ended_listeners):
+            try:
+                listener()
+            except Exception:  # noqa: BLE001 - a listener must not break the refresh path
+                logger.debug("A sign-in-ended listener failed", exc_info=True)
+
+    def _adopt_new_sign_in(self) -> bool:
+        """After a refused sign-in, take over one that any process stored since.
+
+        A long-running MCP server or relay then works again once the user
+        signs in elsewhere, without a restart. auth.json is read only when
+        its size, modification time or inode changed, so the frequent
+        is_authenticated checks stay cheap.
+        """
+        try:
+            info = AUTH_FILE.stat()
+        except OSError:
+            self._ended_file_signature = None
+            return False
+        signature = (info.st_size, info.st_mtime_ns, info.st_ino)
+        if signature == self._ended_file_signature:
+            return False
+        self._ended_file_signature = signature
+        stored = self._load_token_from_disk_silent()
+        if stored is None or not stored.is_authenticated:
+            return False
+        if _token_digest(stored.refresh_token) == self._refused_refresh_digest:
+            return False
+        self._token = stored
+        self._persisted_refresh_token = stored.refresh_token
+        self._refresh_grant_revoked = False
+        self._refused_refresh_digest = None
+        self._ended_file_signature = None
+        logger.info("Using a new sign-in stored by another Servonaut process")
+        return True
 
     @property
     def plan(self) -> str:
@@ -345,7 +404,7 @@ class AuthService(AuthServiceInterface):
         # Once the server has told us the refresh_token is dead, no point
         # leaking the (also-dead) access_token to API callers — they'd
         # just hit 401 → trigger another refresh attempt → fail again.
-        if self._refresh_grant_revoked:
+        if self._refresh_grant_revoked and not self._adopt_new_sign_in():
             return None
         if self._token and self._token.access_token:
             return self._token.access_token
@@ -953,6 +1012,12 @@ class AuthService(AuthServiceInterface):
         An older stored pair (a stale cache write) is never adopted, see
         :meth:`_adopt_rotated_disk_token`.
 
+        The exchange runs in its own task. Once the request is sent the
+        server has rotated the pair, so a caller cancelled meanwhile (a
+        screen closing, a background load replaced by a newer one) must not
+        drop the new pair: the task finishes, stores it and releases the
+        locks, and the next caller adopts it.
+
         Returns ``True`` on success (in-memory + on-disk token are
         now the freshly issued pair). Returns ``False`` on any kind
         of failure; check :pyattr:`is_authenticated` afterwards to
@@ -963,7 +1028,30 @@ class AuthService(AuthServiceInterface):
         if not HAS_HTTPX:
             return False
 
-        attempted_with = self._token.refresh_token
+        task = asyncio.ensure_future(self._refresh_under_locks(self._token.refresh_token))
+        self._refresh_tasks.add(task)
+        task.add_done_callback(self._refresh_task_done)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task not in self._sending_refreshes:
+                # Nothing was sent yet, so nothing can be lost: stop waiting
+                # for the locks too, and let it close them before returning.
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    def _refresh_task_done(self, task: asyncio.Task) -> None:
+        self._refresh_tasks.discard(task)
+        self._sending_refreshes.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # Retrieved here so a refresh whose caller went away is logged
+            # instead of reported as an unretrieved task exception.
+            logger.warning("Token refresh failed: %s", type(task.exception()).__name__)
+
+    async def _refresh_under_locks(self, attempted_with: str) -> bool:
+        """Adopt a pair rotated elsewhere, or exchange ours (see refresh_token)."""
         async with self._get_refresh_lock():
             async with _cross_process_refresh_lock() as lock_timed_out:
                 # Concurrent-rotation dedup: another task or process may
@@ -997,6 +1085,9 @@ class AuthService(AuthServiceInterface):
                     # Refused already and no newer pair on disk: sending it
                     # again cannot succeed, so the user has to sign in.
                     return False
+                # From here on the server may rotate the pair, so this task
+                # runs to the end even if its caller is cancelled.
+                self._sending_refreshes.add(asyncio.current_task())
                 return await self._exchange_refresh_token()
 
     async def _exchange_refresh_token(self) -> bool:
@@ -1044,11 +1135,32 @@ class AuthService(AuthServiceInterface):
 
         self._refresh_grant_revoked = True
         self._refused_refresh_digest = _token_digest(presented)
+        self._ended_file_signature = None
         logger.warning(
             "Refresh token revoked or expired (invalid_grant) — "
             "user must re-authenticate"
         )
+        self._forget_refused_sign_in(presented)
+        self._announce_sign_in_ended()
         return False
+
+    def _forget_refused_sign_in(self, refused: str) -> None:
+        """Delete ``auth.json`` while it still holds the refused token (locks held).
+
+        Left in place, every process started later would load the dead pair,
+        present it once more and fail without telling the user. A pair that
+        another process stored meanwhile is kept.
+        """
+        stored = self._load_token_from_disk_silent()
+        if stored is None or stored.refresh_token != refused:
+            return
+        try:
+            AUTH_FILE.unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning("Could not delete %s: %s", AUTH_FILE, error)
+            return
+        self._persisted_refresh_token = None
+        logger.info("Removed the refused sign-in from %s", AUTH_FILE)
 
     @staticmethod
     async def _post_refresh(refresh_url: str, refresh_token: str) -> "httpx.Response":

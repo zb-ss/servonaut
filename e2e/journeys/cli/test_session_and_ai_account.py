@@ -5,7 +5,9 @@ refresh token rotates and the new pair is saved) and retries; the next
 expiry is healed with the rotated refresh token, which proves it was kept.
 The quota reads the same in plain and JSON form, including the capped
 states. ``ai conversations list`` shows the chat history. Signed out, both
-point the user at ``servonaut login``.
+point the user at ``servonaut login``. When the service has ended the
+sign-in, the command says so, the dead sign-in is removed, and the next
+command does not present it again.
 """
 
 from __future__ import annotations
@@ -119,3 +121,20 @@ def test_signed_out_account_commands_ask_for_login(journey, fake_cloud, cli, acc
         assert result.returncode == 2, result.describe()
         assert "servonaut login" in result.stderr
     assert fake_cloud.requests() == []
+
+
+def test_an_ended_sign_in_is_reported_and_cleared(journey, fake_cloud, cli, account_home):
+    home = account_home("cli-session-ended")
+    fake_cloud.revoke_session()
+
+    ended = cli(home, "ai", "conversations", "list")
+    assert ended.returncode != 0, ended.describe()
+    assert "sign-in has ended" in ended.stderr, ended.describe()
+    assert "servonaut login" in ended.stderr, ended.describe()
+    assert fake_cloud.statuses("/api/oauth/refresh") == [400]
+    assert read_session(home.home) is None
+
+    again = cli(home, "ai", "conversations", "list")
+    assert again.returncode == 2, again.describe()
+    assert "servonaut login" in again.stderr
+    assert fake_cloud.statuses("/api/oauth/refresh") == [400]
