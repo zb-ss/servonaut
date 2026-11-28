@@ -646,3 +646,58 @@ class TestEnvelopeKeys:
 
 async def _async_value(value):
     return value
+
+
+class TestEnvelopePlaintextShapes:
+    """The service writes a hosted summary as bare Markdown; probe modules are JSON."""
+
+    @staticmethod
+    def _service_and_raw(module: str, plaintext: bytes):
+        from servonaut.services.memory import crypto
+
+        pair = crypto.generate_keypair()
+        wire = crypto.encrypt_envelope(
+            plaintext, self_public_key=pair.public_key, self_user_id=42,
+        ).to_dict()
+        raw = {
+            "id": "env-1", "instance_id": "web-01", "module": module,
+            "probed_at": "2026-04-25T12:00:00+00:00", "created_at": "2026-04-25T12:00:00+00:00",
+            "ttl_seconds": 3600, "snapshot_version": 1, "salt": None,
+            "iv": wire["iv"], "tag": wire["tag"], "ciphertext": wire["ciphertext"],
+            "encryption": wire["encryption"], "wrapped_dek": wire["dek_wraps"][0]["wrapped_dek"],
+        }
+        svc = _make_service()
+        svc._self_pubkey = pair.public_key
+        svc._self_privkey = pair.private_key
+        return svc, raw
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("markdown", [
+        "* **Host:** `web-1` running Ubuntu 24.04.\n* **Services:** nginx.\n",
+        "42",  # parses as JSON, but is not a summary payload
+    ])
+    async def test_bare_markdown_summary_is_the_summary(self, markdown):
+        svc, raw = self._service_and_raw("ai_summary", markdown.encode())
+
+        decrypted = await svc.decrypt_envelope(
+            raw, expected_instance_id="web-01", expected_module="ai_summary",
+        )
+
+        assert decrypted.plaintext == markdown
+
+    @pytest.mark.asyncio
+    async def test_json_summary_payload_still_decodes(self):
+        svc, raw = self._service_and_raw("ai_summary", json.dumps({"summary": "# Hi"}).encode())
+
+        decrypted = await svc.decrypt_envelope(
+            raw, expected_instance_id="web-01", expected_module="ai_summary",
+        )
+
+        assert decrypted.plaintext == {"summary": "# Hi"}
+
+    @pytest.mark.asyncio
+    async def test_probe_module_that_is_not_json_still_fails(self):
+        svc, raw = self._service_and_raw("os", b"* not json")
+
+        with pytest.raises(json.JSONDecodeError):
+            await svc.decrypt_envelope(raw, expected_instance_id="web-01", expected_module="os")

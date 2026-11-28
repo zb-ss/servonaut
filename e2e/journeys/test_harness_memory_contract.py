@@ -554,7 +554,7 @@ def test_dispatch_with_data_keys_returns_a_result_only_the_account_can_open(fake
     plain = decrypt_envelope(latest, self_user_id=summary_account["user_id"],
                              self_private_key=summary_account["private"],
                              self_public_key=base64.b64decode(summary_account["public"]))
-    assert "summary" in json.loads(plain)
+    assert plain.decode().startswith("# Summary of web-1")  # bare Markdown, like the service
     waiting = signed_call(fake_cloud, None, "GET", f"{SUMMARY}/web-1/latest", query={"after": latest["id"]}).json()
     assert waiting["status"] == "pending" and waiting["previous_summary_id"] == latest["id"]
     second = _dispatch(fake_cloud, _consent(fake_cloud).json(), envelope_keys=_keys_for(fake_cloud, summary_account))

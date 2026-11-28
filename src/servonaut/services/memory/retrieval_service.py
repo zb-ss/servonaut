@@ -128,6 +128,28 @@ class _LRUCache:
         return len(self._data)
 
 
+#: Server-written summaries; their plaintext may be bare Markdown, not JSON.
+_SUMMARY_MODULE = "ai_summary"
+
+
+def _parse_plaintext(module: str, plaintext_bytes: bytes) -> Any:
+    """Decode an envelope's plaintext.
+
+    Probe modules are always JSON; anything else is corrupt and raises. A
+    hosted summary is written by the service as bare UTF-8 Markdown, so for
+    that module text that is not JSON is the summary itself.
+    """
+    text = plaintext_bytes.decode("utf-8")
+    if module != _SUMMARY_MODULE:
+        return json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    # Markdown such as "42" also parses as JSON; only an object or a string is a summary payload.
+    return parsed if isinstance(parsed, (dict, str)) else text
+
+
 class MemoryRetrievalService:
     """Fetch and decrypt envelopes from the server memory API.
 
@@ -273,7 +295,7 @@ class MemoryRetrievalService:
             self_private_key=self._self_privkey,
             self_public_key=self._self_pubkey,
         )
-        plaintext = json.loads(plaintext_bytes.decode("utf-8"))
+        plaintext = _parse_plaintext(raw.get("module", ""), plaintext_bytes)
 
         return DecryptedEnvelope(
             id=raw.get("id", ""),

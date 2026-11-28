@@ -22,7 +22,6 @@ import base64
 import binascii
 import copy
 import datetime as dt
-import json
 import threading
 import uuid
 from typing import Any, Callable, Optional
@@ -321,8 +320,8 @@ class SummaryCloud:
 
         public = base64.b64decode(self._memory.enrolled_key(uid)["public_key"])
         text = f"# Summary of {instance_id}\n\nCovers: {', '.join(modules)}.\n"
-        envelope = encrypt_envelope(
-            json.dumps({"summary": text}).encode(), self_public_key=public, self_user_id=uid)
+        # Like the service: the summary is the model's Markdown as bare UTF-8, not JSON.
+        envelope = encrypt_envelope(text.encode(), self_public_key=public, self_user_id=uid)
         wire = envelope.to_dict()
         return {
             "id": str(uuid.uuid4()), "instance_id": instance_id, "module": "ai_summary",
