@@ -385,7 +385,10 @@ class Owner:
                  verification_uri: Optional[str] = None, user_code: Optional[str] = None,
                  hostname: Optional[str] = None, ai_script: Optional[dict] = None,
                  team_server_as: Optional[str] = None, bitwarden: bool = False,
-                 vault_capabilities: Optional[list[str]] = None) -> None:
+                 vault_capabilities: Optional[list[str]] = None,
+                 vault_custody_off: bool = False, passphrase_custody_off: bool = False) -> None:
+        self.vault_custody_off = vault_custody_off
+        self.passphrase_custody_off = passphrase_custody_off
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -506,6 +509,10 @@ class Owner:
             self.fake_cloud.vault.refuse_ca_activation(self.ssh_ca_refuse)
         if self.api_delay:
             self.fake_cloud.slow_down(self.api_delay)
+        if self.vault_custody_off:
+            self.fake_cloud.memory.set_vault_custody(False)
+        if self.passphrase_custody_off:
+            self.fake_cloud.memory.set_passphrase_custody(False)
         if self.vault_capabilities is not None:
             self.fake_cloud.vault.set_capabilities(self.vault_capabilities)
         if self.account_email or self.verification_uri:
@@ -1194,6 +1201,7 @@ def up(
     ai_script: Optional[Path] = None, user_code: Optional[str] = None,
     team_server_as: Optional[str] = None, bitwarden: bool = False,
     vault_capabilities: Optional[list[str]] = None,
+    vault_custody_off: bool = False, passphrase_custody_off: bool = False,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -1238,7 +1246,9 @@ def up(
                           ssh_ca_refuse=ssh_ca_refuse, api_delay=api_delay, teams=teams, account_email=account_email,
                           verification_uri=verification_uri, user_code=user_code,
                           hostname=hostname, ai_script=script, team_server_as=team_server_as,
-                          bitwarden=bitwarden, vault_capabilities=vault_capabilities)
+                          bitwarden=bitwarden, vault_capabilities=vault_capabilities,
+                          vault_custody_off=vault_custody_off,
+                          passphrase_custody_off=passphrase_custody_off)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

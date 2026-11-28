@@ -506,3 +506,95 @@ def test_fake_team_changes_drop_the_users_own_bindings(fake_cloud):
     account.remove_member("managed-team", 1, ids[3])
     assert ("aws", "i-4") not in cloud._bindings
     assert ("team", "srv") in cloud._bindings
+
+
+# ---------------------------------------------------------------------------
+# Item types that hold a Servonaut key (memory_key, config_sync_key)
+# ---------------------------------------------------------------------------
+
+from e2e.harness.vault_custody import put_key_item, seed_personal_vault  # noqa: E402
+
+
+def _refused(result, status, code, field=None):
+    got_status, body = result
+    assert (got_status, body["error"]["code"]) == (status, code), body
+    if field is not None:
+        assert body["error"]["details"]["field"] == field
+    return body["error"]
+
+
+@pytest.fixture
+def personal(fake_cloud):
+    return seed_personal_vault(fake_cloud)
+
+
+@pytest.mark.parametrize("item_type", ["memory_key", "config_sync_key"])
+def test_app_key_items_are_personal_vault_only_with_a_hex_fingerprint(fake_cloud, personal, item_type):
+    assert put_key_item(fake_cloud, personal, item_type, "a" * 64)[0] == 201
+    for bad in ("a" * 63, "A" * 64, "g" * 64, None, "SHA256:abc"):
+        _refused(put_key_item(fake_cloud, personal, item_type, bad), 422, "validation_failed", "public_fingerprint")
+    fake_cloud.vault.seed_identity(4243)
+    team = fake_cloud.vault.seed_team(fake_cloud.entitlements()["user_id"], 4243)
+    body = put_key_item(fake_cloud, {**personal, "vault_id": team["vault_id"]}, item_type, "b" * 64)
+    _refused(body, 422, "validation_failed", "type")
+
+
+@pytest.mark.parametrize("item_type", ["memory_key", "config_sync_key"])
+def test_at_most_two_live_items_per_type_and_an_immutable_fingerprint(fake_cloud, personal, item_type):
+    _, first = put_key_item(fake_cloud, personal, item_type, "a" * 64)
+    assert put_key_item(fake_cloud, personal, item_type, "b" * 64)[0] == 201
+    error = _refused(put_key_item(fake_cloud, personal, item_type, "c" * 64), 409, "item_type_exists")
+    assert error["message"] == "Your vault already holds two items of this type."
+    # The other type has its own allowance.
+    other = "config_sync_key" if item_type == "memory_key" else "memory_key"
+    assert put_key_item(fake_cloud, personal, other, "d" * 64)[0] == 201
+    # A new revision may not change the fingerprint.
+    update = {"expected_revision": first["revision"], "public_fingerprint": "e" * 64}
+    _refused(put_key_item(fake_cloud, personal, item_type, "e" * 64, item_id=first["item_id"], **update),
+             422, "validation_failed", "public_fingerprint")
+    same = {"expected_revision": first["revision"]}
+    assert put_key_item(fake_cloud, personal, item_type, "a" * 64, item_id=first["item_id"], **same)[0] == 200
+    # A deleted item frees its place.
+    cloud = fake_cloud.vault
+    assert cloud.delete_item(personal["vault_id"], first["item_id"], {"revision": first["revision"] + 2},
+                             personal["user_id"])[0] == 200
+    assert put_key_item(fake_cloud, personal, item_type, "c" * 64)[0] == 201
+
+
+def test_an_item_never_changes_type_to_or_from_a_key_type(fake_cloud, personal):
+    _, key = put_key_item(fake_cloud, personal, "memory_key", "a" * 64)
+    _refused(put_key_item(fake_cloud, personal, "ssh_key", "a" * 64, item_id=key["item_id"],
+                          expected_revision=key["revision"]), 422, "validation_failed", "type")
+    _refused(put_key_item(fake_cloud, personal, "config_sync_key", "a" * 64, item_id=key["item_id"],
+                          expected_revision=key["revision"]), 422, "validation_failed", "type")
+    _, ssh = put_key_item(fake_cloud, personal, "ssh_key", "SHA256:x")
+    _refused(put_key_item(fake_cloud, personal, "memory_key", "b" * 64, item_id=ssh["item_id"],
+                          expected_revision=ssh["revision"]), 422, "validation_failed", "type")
+
+
+def test_ssh_items_keep_their_rules_whatever_the_switch(fake_cloud, personal):
+    fake_cloud.memory.set_vault_custody(False)
+    assert put_key_item(fake_cloud, personal, "ssh_key", "SHA256:x")[0] == 201
+
+
+def test_the_custody_switch_makes_a_put_503_but_deletes_are_not_gated(fake_cloud, personal):
+    _, item = put_key_item(fake_cloud, personal, "config_sync_key", "a" * 64)
+    fake_cloud.memory.set_vault_custody(False)
+    error = _refused(put_key_item(fake_cloud, personal, "config_sync_key", "b" * 64), 503, "feature_disabled")
+    assert error["message"] == "Vault custody for Memory Sync keys is not available yet."
+    _refused(put_key_item(fake_cloud, personal, "memory_key", "c" * 64), 503, "feature_disabled")
+    result = fake_cloud.vault.delete_item(personal["vault_id"], item["item_id"], {"revision": item["revision"] + 1},
+                                          personal["user_id"])
+    assert result[0] == 200
+    assert fake_cloud.vault.app_key_fingerprints(personal["user_id"], "config_sync_key") == []
+
+
+def test_app_key_fingerprints_list_only_live_items_of_the_type(fake_cloud, personal):
+    put_key_item(fake_cloud, personal, "memory_key", "a" * 64)
+    _, gone = put_key_item(fake_cloud, personal, "memory_key", "b" * 64)
+    put_key_item(fake_cloud, personal, "config_sync_key", "c" * 64)
+    fake_cloud.vault.delete_item(personal["vault_id"], gone["item_id"], {"revision": gone["revision"] + 1},
+                                 personal["user_id"])
+    assert fake_cloud.vault.app_key_fingerprints(personal["user_id"], "memory_key") == ["a" * 64]
+    assert fake_cloud.vault.app_key_fingerprints(personal["user_id"], "config_sync_key") == ["c" * 64]
+    assert fake_cloud.vault.app_key_fingerprints(9999, "memory_key") == []

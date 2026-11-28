@@ -9,16 +9,25 @@ client-side encryption envelope with the shape of AES-256-GCM output
 only, newest first; ``GET /latest`` and ``GET /{id}`` (by snapshot id only)
 return the envelope for a restore; ``PATCH`` renames and ``DELETE`` removes.
 
+Key custody: a snapshot is sealed with a passphrase-derived key (``salt``) or
+with a random key held in the user's vault (``key_custody: "vault"``, a
+``key_id`` naming that key, no salt). The service's two settings decide what is
+accepted, and ``DELETE /api/v1/configs?key_custody=passphrase`` (or
+``?key_id=<hex>``) removes old copies once a vault snapshot exists.
+
 Every route needs the account's current access token.
 """
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
+import os
+import re
 import threading
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from aiohttp import web
 
@@ -34,7 +43,15 @@ from e2e.harness.fake_cloud.state import ScenarioStore
 CONFIGS = "/api/v1/configs"
 ENVELOPE_FIELDS = ("encryption", "data", "salt", "iv", "tag")
 ENCRYPTION = "aes-256-gcm"
-_METADATA = ("id", "version", "name", "label", "hash", "created_at")
+_METADATA = ("id", "version", "name", "label", "hash", "created_at", "key_custody", "key_id")
+KEY_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int, dict[str, Any]]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        error["details"] = details
+    return status, {"error": error}
 
 
 def _not_found() -> web.Response:
@@ -48,6 +65,11 @@ class ConfigSnapshots:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Wired by FakeCloud: the service's two settings and the key_ids of the
+        # user's live ``config_sync_key`` vault items.
+        self.custody_enabled: Callable[[], bool] = lambda: True
+        self.passphrase_accepted: Callable[[], bool] = lambda: True
+        self.vault_key_ids: Callable[[], list[str]] = lambda: []
         self.reset()
 
     def reset(self) -> None:
@@ -59,15 +81,36 @@ class ConfigSnapshots:
         with self._lock:
             return copy.deepcopy(self._snapshots)
 
-    def push(self, body: dict[str, Any]) -> Optional[dict[str, Any]]:
-        if (
-            body.get("encryption") != ENCRYPTION
-            or not has_bytes(body.get("data"))
-            or not has_size(body.get("salt"), KDF_SALT)
-            or not has_size(body.get("iv"), GCM_IV)
-            or not has_size(body.get("tag"), GCM_TAG)
-        ):
-            return None
+    def uses_key_id(self, key_id: str) -> bool:
+        """Whether any snapshot is sealed under the vault key *key_id*."""
+        with self._lock:
+            return any(s.get("key_id") == key_id for s in self._snapshots)
+
+    def seed_vault_snapshot(self, key_id: Optional[str] = None, *, name: str = "default") -> dict[str, Any]:
+        """A snapshot sealed under a vault key (random ciphertext of the right shape)."""
+        key_id = key_id or os.urandom(32).hex()
+        # Stored directly: a fixture, so the vault-item precondition of a push does not apply.
+        return self._append({
+            "name": name, "encryption": ENCRYPTION,
+            "data": base64.b64encode(os.urandom(48)).decode(),
+            "iv": base64.b64encode(os.urandom(12)).decode(),
+            "tag": base64.b64encode(os.urandom(16)).decode(),
+        }, "vault", key_id)
+
+    def push(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        custody = body.get("key_custody", "passphrase")
+        key_id = body.get("key_id")
+        if custody not in ("passphrase", "vault"):
+            return _refusal(422, "validation_failed", "key_custody must be passphrase or vault", field="key_custody")
+        if custody == "vault":
+            refusal = self._vault_push_refusal(body, key_id)
+        else:
+            refusal = self._passphrase_push_refusal(body, key_id)
+        if refusal is not None:
+            return refusal
+        return 201, self._append(body, custody, key_id)
+
+    def _append(self, body: dict[str, Any], custody: str, key_id: Optional[str]) -> dict[str, Any]:
         with self._lock:
             snapshot = {
                 "id": str(uuid.uuid4()),
@@ -76,10 +119,71 @@ class ConfigSnapshots:
                 "label": body.get("label") or "",
                 "hash": body.get("hash") or "",
                 "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                **{k: body[k] for k in ENVELOPE_FIELDS},
+                "key_custody": custody,
+                "key_id": key_id if custody == "vault" else None,
+                "salt": body.get("salt") if custody == "passphrase" else None,
+                **{k: body[k] for k in ENVELOPE_FIELDS if k != "salt"},
             }
             self._snapshots.append(snapshot)
             return {k: snapshot[k] for k in _METADATA}
+
+    @staticmethod
+    def _envelope_ok(body: dict[str, Any]) -> bool:
+        return (
+            body.get("encryption") == ENCRYPTION
+            and has_bytes(body.get("data"))
+            and has_size(body.get("iv"), GCM_IV)
+            and has_size(body.get("tag"), GCM_TAG)
+        )
+
+    def _vault_push_refusal(self, body: dict[str, Any], key_id: Any) -> Optional[tuple[int, dict[str, Any]]]:
+        if not self.custody_enabled():
+            return _refusal(503, "feature_disabled", "Vault custody for Memory Sync keys is not available yet.")
+        if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
+            return _refusal(422, "validation_failed", "key_id must be 64 lowercase hex", field="key_id")
+        if body.get("salt") is not None:
+            return _refusal(422, "validation_failed", "A vault snapshot has no salt", field="salt")
+        if not self._envelope_ok(body):
+            return _refusal(422, "validation_failed", "snapshots must carry the client-side encryption envelope")
+        if key_id not in self.vault_key_ids():
+            return _refusal(409, "config_key_not_ready", "Store your config sync key in your personal vault first.")
+        return None
+
+    def _passphrase_push_refusal(self, body: dict[str, Any], key_id: Any) -> Optional[tuple[int, dict[str, Any]]]:
+        if key_id is not None:
+            return _refusal(422, "validation_failed", "key_id belongs to vault snapshots", field="key_id")
+        if not self.passphrase_accepted():
+            return _refusal(409, "config_key_custody_vault", "Update Servonaut to use config sync.")
+        if not self._envelope_ok(body) or not has_size(body.get("salt"), KDF_SALT):
+            return _refusal(422, "validation_failed", "snapshots must carry the client-side encryption envelope")
+        return None
+
+    def delete_many(self, query: Any) -> tuple[int, dict[str, Any]]:
+        """Bulk delete by ``key_custody=passphrase`` or by ``key_id`` (exactly one of them)."""
+        custody, key_id = query.get("key_custody"), query.get("key_id")
+        if (custody is None) == (key_id is None):
+            return _refusal(422, "validation_failed", "Pass exactly one of key_custody and key_id",
+                            field="key_custody")
+        if custody is not None and custody != "passphrase":
+            return _refusal(422, "validation_failed", "key_custody must be passphrase", field="key_custody")
+        if key_id is not None and not KEY_ID.fullmatch(key_id):
+            return _refusal(422, "validation_failed", "key_id must be 64 lowercase hex", field="key_id")
+        with self._lock:
+            # Never leave the user without a readable copy: another vault snapshot must exist.
+            safe = any(
+                s["key_custody"] == "vault" and (custody is not None or s["key_id"] != key_id)
+                for s in self._snapshots
+            )
+            if not safe:
+                return _refusal(409, "no_vault_snapshot",
+                                "Upload your config under the vault key before removing the old copies.")
+            keep = [
+                s for s in self._snapshots
+                if not (s["key_custody"] == "passphrase" if custody is not None else s["key_id"] == key_id)
+            ]
+            deleted = len(self._snapshots) - len(keep)
+            self._snapshots = keep
+            return 200, {"deleted": deleted}
 
     def listing(self, limit: int) -> list[dict[str, Any]]:
         with self._lock:
@@ -125,10 +229,12 @@ def add_routes(app: web.Application, store: ScenarioStore, snapshots: ConfigSnap
         return wrapper
 
     async def push(request: web.Request) -> web.Response:
-        created = snapshots.push(await json_body(request))
-        if created is None:
-            return validation_failed("snapshots must carry the client-side encryption envelope")
-        return web.json_response(created, status=201)
+        status, body = snapshots.push(await json_body(request))
+        return web.json_response(body, status=status)
+
+    async def delete_many(request: web.Request) -> web.Response:
+        status, body = snapshots.delete_many(request.query)
+        return web.json_response(body, status=status)
 
     async def listing(request: web.Request) -> web.Response:
         try:
@@ -161,6 +267,7 @@ def add_routes(app: web.Application, store: ScenarioStore, snapshots: ConfigSnap
     one = f"{CONFIGS}/{{snapshot_id}}"
     app.router.add_post(CONFIGS, guarded(push))
     app.router.add_get(CONFIGS, guarded(listing))
+    app.router.add_delete(CONFIGS, guarded(delete_many))
     app.router.add_get(f"{CONFIGS}/latest", guarded(latest))
     app.router.add_get(one, guarded(fetch))
     app.router.add_patch(one, guarded(rename))

@@ -23,6 +23,13 @@ grants under ``/api/v1/teams/{slug}/memory``. :class:`MemoryCloud`
   be sealed boxes for known team members, and reference stored envelopes of
   the modules the grant names (422 otherwise).
 
+* the key custody contract: a key row is held in ``passphrase`` custody (a
+  wrapped private key) or ``vault`` custody (no wrap on the service), the
+  switch from one to the other keeps the row, and two switches model the
+  service's settings (``vault_custody_enabled``, ``passphrase_custody_accepted``);
+* the record of which key every stored wrap was sealed to, which is what keeps
+  a rotated key "in use" until the history prune drops the old envelopes.
+
 Every route needs the account's current access token.
 """
 
@@ -34,6 +41,7 @@ import base64
 import hashlib
 import itertools
 import json
+import re
 import threading
 import uuid
 from typing import Any, Callable, Optional
@@ -86,8 +94,16 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _error(code: str, message: str, status: int) -> web.Response:
-    return web.json_response({"error": {"code": code, "message": message}}, status=status)
+def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int, dict[str, Any]]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        error["details"] = details
+    return status, {"error": error}
+
+
+def _error(code: str, message: str, status: int, **details: Any) -> web.Response:
+    status, body = _refusal(status, code, message, **details)
+    return web.json_response(body, status=status)
 
 
 def _not_found(message: str = "Not found") -> web.Response:
@@ -97,12 +113,20 @@ def _not_found(message: str = "Not found") -> web.Response:
 class MemoryCloud:
     """Thread-safe server-side memory state for the one fake account."""
 
-    def __init__(self, user_id: Callable[[], int], owner_id: Optional[Callable[[], int]] = None) -> None:
+    def __init__(
+        self, user_id: Callable[[], int], owner_id: Optional[Callable[[], int]] = None,
+        plan: Optional[Callable[[], str]] = None,
+    ) -> None:
         # ``user_id`` is whoever makes the current request; ``owner_id`` is the
         # scenario's own account (the one ``enrolled_key`` and the grants of
-        # the single-account journeys belong to).
+        # the single-account journeys belong to). ``plan`` names the caller's
+        # plan: a free account outside a team has no Memory Sync entitlement.
         self._user_id = user_id
         self._owner_id = owner_id or user_id
+        self._plan = plan
+        # (user id, fingerprint) -> True when that user's vault holds a live
+        # ``memory_key`` item for it and a grantable identity; wired by FakeCloud.
+        self._vault_ready: Optional[Callable[[int, str], bool]] = None
         self._lock = threading.RLock()
         self.reset()
 
@@ -126,6 +150,13 @@ class MemoryCloud:
                 "anomaly_rules": {},
             }
             self._ids = itertools.count(1)
+            # The service's two settings; see the module docstring.
+            self.vault_custody_enabled = True
+            self.passphrase_custody_accepted = True
+
+    def bind_vault(self, vault_ready: Callable[[int, str], bool]) -> None:
+        """Wire the vault lookup behind the ``vault_not_ready`` precondition."""
+        self._vault_ready = vault_ready
 
     # ------------------------------------------------------------------
     # Journey controls and observations
@@ -142,6 +173,133 @@ class MemoryCloud:
     def current_key(self) -> Optional[dict[str, Any]]:
         """The enrolled keypair of whoever makes the current request."""
         return self.enrolled_key(self._user_id())
+
+    def set_vault_custody(self, enabled: bool) -> None:
+        """Switch ``memory_key_vault_custody_enabled``: off answers 503 on every vault-custody write."""
+        with self._lock:
+            self.vault_custody_enabled = bool(enabled)
+
+    def set_passphrase_custody(self, accepted: bool) -> None:
+        """Switch ``memory_key_passphrase_custody_accepted``: off refuses the passphrase shapes (409)."""
+        with self._lock:
+            self.passphrase_custody_accepted = bool(accepted)
+
+    def key_history(self) -> list[dict[str, Any]]:
+        """Keys that were replaced, oldest first (each carries ``rotated_at``)."""
+        with self._lock:
+            return copy.deepcopy(self._key_history)
+
+    def seed_vault_custody_key(
+        self, user_id: Optional[int] = None, *, public_key_b64: Optional[str] = None
+    ) -> dict[str, Any]:
+        """A key row enrolled directly in vault custody (``custody_changed_at`` stays null).
+
+        Generates the pair unless *public_key_b64* is given; the private half
+        is returned (base64) only to the calling fixture and never stored.
+        """
+        import nacl.public
+
+        private_b64 = None
+        if public_key_b64 is None:
+            pair = nacl.public.PrivateKey.generate()
+            public_key_b64 = base64.b64encode(bytes(pair.public_key)).decode()
+            private_b64 = base64.b64encode(bytes(pair)).decode()
+        raw = base64.b64decode(public_key_b64, validate=True)
+        if len(raw) != X25519_KEY:
+            raise ValueError("public_key must be a 32-byte X25519 key")
+        uid = self._owner_id() if user_id is None else user_id
+        with self._lock:
+            row = self._new_key_row(public_key_b64, hashlib.sha256(raw).hexdigest(), None, "vault")
+            if uid in self._keys:
+                self._retire(uid)
+            self._keys[uid] = row
+            return {**copy.deepcopy(row), "private_key": private_b64}
+
+    def prune_history(self, older_than_seconds: float = 0.0) -> dict[str, int]:
+        """The history window passing: drop envelopes older than the limit.
+
+        The newest envelope of every instance and module is always kept, as on
+        the service; the wraps of dropped envelopes go with them, which is what
+        finally clears a rotated key's "in use".
+        """
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=older_than_seconds)
+        with self._lock:
+            newest = {(e["instance_id"], e["module"]): e["id"] for e in self._envelopes}
+            dropped = {
+                e["id"] for e in self._envelopes
+                if newest[(e["instance_id"], e["module"])] != e["id"]
+                and dt.datetime.fromisoformat(e["created_at"]) < cutoff
+            }
+            self._envelopes = [e for e in self._envelopes if e["id"] not in dropped]
+            wraps = 0
+            for grant in self._grants:
+                kept = [w for w in grant["wraps"] if w["envelope_id"] not in dropped]
+                wraps += len(grant["wraps"]) - len(kept)
+                grant["wraps"] = kept
+            return {"envelopes_removed": len(dropped), "grant_wraps_removed": wraps}
+
+    def key_in_use(self, user_id: int, fingerprint: str) -> bool:
+        """Whether the service still needs *fingerprint* as this user's key.
+
+        True for the active vault-custody key, and while ANY stored wrap
+        (the user's own envelopes or ones shared with them) was sealed to it.
+        A newer upload does not clear it: only :meth:`prune_history` or a
+        deleted instance removes old wraps.
+        """
+        with self._lock:
+            active = self._keys.get(user_id)
+            if active and active.get("custody") == "vault" and active["fingerprint"] == fingerprint:
+                return True
+            wraps = [w for e in self._envelopes for w in e.get("dek_wraps", [])]
+            wraps += [w for g in self._grants for w in g["wraps"]]
+            return any(
+                w.get("recipient_user_id") == user_id and w.get("fingerprint") == fingerprint
+                for w in wraps
+            )
+
+    def seed_shared_envelope(
+        self, team_slug: str, from_user_id: int, instance_id: str, module: str,
+        envelope: dict[str, Any], recipient_wrap: dict[str, Any],
+    ) -> str:
+        """A teammate's envelope shared with the scenario account through a grant.
+
+        *envelope* is the wire form with the teammate's own wrap in ``dek_wraps``;
+        *recipient_wrap* (``recipient_user_id``, ``wrapped_dek``) goes into the
+        grant, stamped with the key it was sealed to.
+        """
+        with self._lock:
+            self.upsert_instance({"instance_id": instance_id})
+            stored = copy.deepcopy(envelope)
+            stored.update({
+                "id": str(uuid.uuid4()), "instance_id": instance_id, "module": module,
+                "uploader_id": from_user_id, "created_at": _now(),
+                "snapshot_version": 1 + sum(
+                    e["instance_id"] == instance_id and e["module"] == module for e in self._envelopes
+                ),
+            })
+            stored.setdefault("probed_at", stored["created_at"])
+            stored.setdefault("ttl_seconds", 86400)
+            for wrap in stored["dek_wraps"]:
+                wrap["fingerprint"] = self._key_fingerprint(wrap.get("recipient_user_id"))
+            self._envelopes.append(stored)
+            grant = next(
+                (g for g in self._grants if g["team_slug"] == team_slug
+                 and g["instance_id"] == instance_id and g["status"] == "active"), None)
+            if grant is None:
+                grant = {
+                    "id": str(uuid.uuid4()), "team_slug": team_slug, "instance_id": instance_id,
+                    "required_role": "member", "modules": None, "status": "active",
+                    "granted_by_user_id": from_user_id, "created_at": _now(),
+                    "revoked_at": None, "wraps": [],
+                }
+                self._grants.append(grant)
+            recipient = recipient_wrap["recipient_user_id"]
+            grant["wraps"].append({
+                "recipient_user_id": recipient, "envelope_id": stored["id"],
+                "wrapped_dek": recipient_wrap["wrapped_dek"],
+                "fingerprint": self._key_fingerprint(recipient),
+            })
+            return stored["id"]
 
     def instances(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -249,7 +407,57 @@ class MemoryCloud:
         with self._lock:
             return copy.deepcopy(self._settings)
 
+    def _new_key_row(
+        self, public_key: str, fingerprint: str, wrapped: Optional[str], custody: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": next(self._ids), "public_key": public_key, "wrapped_private_key": wrapped,
+            "fingerprint": fingerprint, "created_at": _now(), "custody": custody,
+            "custody_changed_at": None,
+        }
+
+    def _retire(self, uid: int) -> None:
+        """The active key becomes a rotated one (kept for envelopes still sealed to it)."""
+        self._key_history.append({**self._keys[uid], "user_id": uid, "rotated_at": _now()})
+
+    def _key_fingerprint(self, user_id: Any) -> Optional[str]:
+        """The key a wrap for *user_id* is sealed to now: their own, or a teammate's."""
+        if user_id in self._keys:
+            return self._keys[user_id]["fingerprint"]
+        for members in self._members.values():
+            for member in members:
+                if member["user_id"] == user_id:
+                    return member["fingerprint"]
+        return None
+
+    def _entitled(self) -> bool:
+        """The ``memory_sync`` entitlement: a free account outside a team has none."""
+        if self._plan is None or self._plan() != "free":
+            return True
+        uid = self._user_id()
+        return any(m["user_id"] == uid for members in self._members.values() for m in members)
+
+    def _key_gate(self) -> Optional[tuple[int, dict[str, Any]]]:
+        """Entitlement and, for vault custody, the service switch."""
+        if not self._entitled():
+            return _refusal(403, "forbidden_entitlement", "Your plan does not include Memory Sync.",
+                            feature="memory_sync")
+        return None
+
+    def _vault_off(self) -> tuple[int, dict[str, Any]]:
+        return _refusal(503, "feature_disabled", "Vault custody for Memory Sync keys is not available yet.")
+
+    def key_response(self, key: dict[str, Any]) -> dict[str, Any]:
+        """A key row as ``GET /keys/me`` describes it."""
+        return {
+            "id": key.get("id"), "fingerprint": key["fingerprint"], "public_key": key["public_key"],
+            "wrapped_private_key": key.get("wrapped_private_key"),
+            "created_at": key.get("created_at"), "custody": key.get("custody", "passphrase"),
+            "custody_changed_at": key.get("custody_changed_at"),
+        }
+
     def enrol(self, body: dict[str, Any]) -> Optional[str]:
+        """Store a passphrase-custody key (the caller already ran the gates)."""
         missing = [k for k in KEY_FIELDS if not isinstance(body.get(k), str) or not body[k]]
         if missing:
             return f"missing {', '.join(missing)}"
@@ -259,10 +467,90 @@ class MemoryCloud:
         uid = self._user_id()
         with self._lock:
             if uid in self._keys:
-                self._key_history.append(self._keys[uid])
-            self._keys[uid] = {k: body[k] for k in KEY_FIELDS}
-            self._keys[uid]["created_at"] = _now()
+                self._retire(uid)
+            self._keys[uid] = self._new_key_row(
+                body["public_key"], body["fingerprint"], body["wrapped_private_key"], "passphrase")
         return None
+
+    def write_passphrase_key(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST /keys`` / ``/keys/rotate`` with today's passphrase body."""
+        refusal = self._key_gate()
+        if refusal:
+            return refusal
+        uid = self._user_id()
+        with self._lock:
+            active = self._keys.get(uid)
+            if (active and active.get("custody") == "vault") or not self.passphrase_custody_accepted:
+                return _refusal(409, "memory_key_custody_vault", "Update Servonaut to set up Memory Sync.")
+            rotated = active is not None
+            problem = self.enrol(body)
+            if problem:
+                return 422, {"error": {"code": "validation_failed", "message": problem}}
+            key = self._keys[uid]
+            return 201, {"id": key["id"], "fingerprint": key["fingerprint"], "custody": "passphrase",
+                         "rotated_from_previous": rotated}
+
+    def write_vault_key(self, body: dict[str, Any], *, rotate: bool) -> tuple[int, dict[str, Any]]:
+        """``POST /keys`` / ``/keys/rotate`` in the vault shape (the device signature is verified by the route)."""
+        refusal = self._key_gate()
+        if refusal:
+            return refusal
+        if not self.vault_custody_enabled:
+            return self._vault_off()
+        public_key, fingerprint = body.get("public_key"), body.get("fingerprint")
+        if body.get("wrapped_private_key") is not None:
+            return _refusal(422, "validation_failed", "A vault key has no wrapped private key.",
+                            field="wrapped_private_key")
+        if not has_size(public_key, X25519_KEY):
+            return _refusal(422, "validation_failed", "public_key must be a 32-byte X25519 key",
+                            field="public_key")
+        if fingerprint != hashlib.sha256(base64.b64decode(public_key)).hexdigest():
+            return _refusal(422, "validation_failed", "fingerprint must be the SHA-256 of the public key",
+                            field="fingerprint")
+        uid = self._user_id()
+        with self._lock:
+            active = self._keys.get(uid)
+            if rotate and active is None:
+                return _refusal(404, "not_found", "No active keypair")
+            if self._vault_ready is not None and not self._vault_ready(uid, fingerprint):
+                return _refusal(409, "vault_not_ready", "Store your Memory Sync key in your personal vault first.")
+            rotated = active is not None
+            if rotated:
+                self._retire(uid)
+            row = self._new_key_row(public_key, fingerprint, None, "vault")
+            self._keys[uid] = row
+            return 201, {"id": row["id"], "fingerprint": fingerprint, "custody": "vault",
+                         "rotated_from_previous": rotated}
+
+    def switch_custody(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST /keys/me/custody``: the active key moves to vault custody in place (same row id)."""
+        refusal = self._key_gate()
+        if refusal:
+            return refusal
+        if not self.vault_custody_enabled:
+            return self._vault_off()
+        fingerprint = body.get("fingerprint")
+        if body.get("custody") != "vault":
+            return _refusal(422, "validation_failed", "Only vault custody can be requested.", field="custody")
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            return _refusal(422, "validation_failed", "fingerprint must be 64 lowercase hex",
+                            field="fingerprint")
+        uid = self._user_id()
+        with self._lock:
+            active = self._keys.get(uid)
+            if active is None:
+                return _refusal(404, "not_found", "No active keypair")
+            if active["fingerprint"] != fingerprint:
+                return _refusal(409, "fingerprint_mismatch",
+                                "The fingerprint does not match your active Memory Sync key.")
+            if active.get("custody") != "vault":
+                if self._vault_ready is not None and not self._vault_ready(uid, fingerprint):
+                    return _refusal(409, "vault_not_ready",
+                                    "Store your Memory Sync key in your personal vault first.")
+                active.update({"wrapped_private_key": None, "custody": "vault",
+                               "custody_changed_at": _now()})
+            return 200, {"id": active["id"], "fingerprint": fingerprint, "custody": "vault",
+                         "custody_changed_at": active["custody_changed_at"]}
 
     def upsert_instance(self, body: dict[str, Any]) -> dict[str, Any]:
         instance_id = str(body.get("instance_id") or "")
@@ -290,6 +578,11 @@ class MemoryCloud:
                 stored = copy.deepcopy(envelope)
                 stored["id"] = str(uuid.uuid4())
                 stored["uploader_id"] = user_id
+                # The key each wrap was sealed to: a rotated key stays "in use"
+                # while any wrap points at it (see key_in_use).
+                stored["uploader_fingerprint"] = self._key_fingerprint(user_id)
+                for wrap in stored["dek_wraps"]:
+                    wrap["fingerprint"] = self._key_fingerprint(wrap.get("recipient_user_id"))
                 stored["created_at"] = _now()
                 stored["snapshot_version"] = 1 + sum(
                     e["instance_id"] == envelope["instance_id"]
@@ -783,8 +1076,21 @@ def _public_grant(grant: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in grant.items() if k not in ("wraps", "team_slug")}
 
 
-def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) -> None:
-    """Register the memory routes on *app* (fixed paths before patterns)."""
+def add_routes(
+    app: web.Application, store: ScenarioStore, memory: MemoryCloud,
+    authenticate: Optional[Callable[[web.Request], tuple[Any, Optional[web.Response]]]] = None,
+) -> None:
+    """Register the memory routes on *app* (fixed paths before patterns).
+
+    *authenticate* is the vault's device-signature check (``VaultCloud.authenticate``):
+    the vault-custody writes need a verified device, so a request without one
+    answers ``device_signature_required``. Without it the check is skipped.
+    """
+
+    def device_refusal(request: web.Request) -> Optional[web.Response]:
+        if authenticate is None:
+            return None
+        return authenticate(request)[1]
 
     def guarded(handler: Any) -> Any:
         async def wrapper(request: web.Request) -> web.StreamResponse:
@@ -804,14 +1110,30 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
         key = memory.current_key()
         if key is None:
             return _not_found("No active keypair")
-        return web.json_response(key)
+        return web.json_response(memory.key_response(key))
+
+    async def write_key(request: web.Request, *, rotate: bool) -> web.Response:
+        body = await json_body(request)
+        if body.get("custody") == "vault":
+            if (failure := device_refusal(request)) is not None:
+                return failure
+            status, answer = memory.write_vault_key(body, rotate=rotate)
+        else:
+            status, answer = memory.write_passphrase_key(body)
+        return web.json_response(answer, status=status)
 
     async def enrol(request: web.Request) -> web.Response:
-        problem = memory.enrol(await json_body(request))
-        if problem:
-            return validation_failed(problem)
-        key = memory.current_key() or {}
-        return web.json_response({"fingerprint": key.get("fingerprint")}, status=201)
+        return await write_key(request, rotate=False)
+
+    async def rotate_key(request: web.Request) -> web.Response:
+        return await write_key(request, rotate=True)
+
+    async def switch_custody(request: web.Request) -> web.Response:
+        body = await json_body(request)
+        if (failure := device_refusal(request)) is not None:
+            return failure
+        status, answer = memory.switch_custody(body)
+        return web.json_response(answer, status=status)
 
     async def team_keys(request: web.Request) -> web.Response:
         return web.json_response({"members": memory.team_keys(request.match_info["team_slug"])})
@@ -906,6 +1228,8 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
     router.add_get(f"{MEMORY}/settings", guarded(settings))
     router.add_get(f"{KEYS_PATH}/me", guarded(key_me))
     router.add_post(KEYS_PATH, guarded(enrol))
+    router.add_post(f"{KEYS_PATH}/rotate", guarded(rotate_key))
+    router.add_post(f"{KEYS_PATH}/me/custody", guarded(switch_custody))
     router.add_get(f"{KEYS_PATH}/team/{{team_slug}}", guarded(team_keys))
     router.add_post(f"{MEMORY}/instances", guarded(upsert_instance))
     router.add_post(SYNC_PATH, guarded(sync))
@@ -953,3 +1277,27 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
 
     router.add_post(f"{CONTROL_PREFIX}memory/team-member", add_team_member)
     router.add_post(f"{CONTROL_PREFIX}memory/rotate-member-key", rotate_member_key)
+
+    async def custody_switches(request: web.Request) -> web.Response:
+        # The service's two settings, for a sandbox in another process (the
+        # journeys call set_vault_custody / set_passphrase_custody in process).
+        body = await json_body(request)
+        if "vault_custody_enabled" in body:
+            memory.set_vault_custody(bool(body["vault_custody_enabled"]))
+        if "passphrase_custody_accepted" in body:
+            memory.set_passphrase_custody(bool(body["passphrase_custody_accepted"]))
+        return web.json_response({
+            "vault_custody_enabled": memory.vault_custody_enabled,
+            "passphrase_custody_accepted": memory.passphrase_custody_accepted,
+        })
+
+    async def prune_history(request: web.Request) -> web.Response:
+        body = await json_body(request)
+        try:
+            seconds = float(body.get("older_than_seconds", 0))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "older_than_seconds must be a number"}, status=400)
+        return web.json_response(memory.prune_history(seconds))
+
+    router.add_post(f"{CONTROL_PREFIX}memory/custody", custody_switches)
+    router.add_post(f"{CONTROL_PREFIX}memory/prune-history", prune_history)

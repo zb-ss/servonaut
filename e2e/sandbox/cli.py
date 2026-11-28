@@ -55,6 +55,12 @@ def _parser() -> argparse.ArgumentParser:
     up.add_argument("--ssh-ca-refuse", choices=("frozen", "busy"), default=None,
                     help="refuse every SSH certificates switch-on: frozen = switching on is paused "
                          "(409), busy = another switch-on holds the service (503)")
+    up.add_argument("--vault-custody-off", action="store_true",
+                    help="answer like a service with vault custody of Memory Sync keys switched off "
+                         "(503 on every vault-custody write)")
+    up.add_argument("--passphrase-custody-off", action="store_true",
+                    help="answer like a service that no longer accepts passphrase-custody keys "
+                         "(409 on the passphrase shapes)")
     up.add_argument("--teams", action="store_true",
                     help="on the Teams plan, owning a team whose shared server (server-1) runs "
                          "an sshd that honours SSH certificates, to walk Team Vault and SSH "
@@ -180,7 +186,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         verification_uri=args.verification_uri, user_code=args.user_code,
                         hostname=args.hostname, ai_script=args.ai_script,
                         team_server_as=args.team_server_as, bitwarden=args.bitwarden,
-                        vault_capabilities=args.vault_capabilities)
+                        vault_capabilities=args.vault_capabilities,
+                        vault_custody_off=args.vault_custody_off,
+                        passphrase_custody_off=args.passphrase_custody_off)
 
     from e2e.sandbox import client
 

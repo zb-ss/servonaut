@@ -38,6 +38,7 @@ from e2e.harness.fake_cloud import (
     routes_findings,
     routes_hosted_mcp,
     routes_memory,
+    routes_memory_summary,
     routes_misc,
     routes_pypi,
     routes_relay,
@@ -54,6 +55,7 @@ from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
 from e2e.harness.fake_cloud.routes_findings import FindingsCloud
 from e2e.harness.fake_cloud.routes_hosted_mcp import HostedMcpState
 from e2e.harness.fake_cloud.routes_memory import MemoryCloud
+from e2e.harness.fake_cloud.routes_memory_summary import SummaryCloud
 from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.routes_vault import VaultCloud
 from e2e.harness.fake_cloud.state import ScenarioStore
@@ -90,7 +92,9 @@ class FakeCloud(LoopbackServer):
         self.memory = MemoryCloud(
             lambda: (current_account().user_id if current_account() else self._store.snapshot().user_id),
             lambda: self._store.snapshot().user_id,
+            lambda: self._store.snapshot().plan,
         )
+        self.summaries = SummaryCloud(self.memory, self.memory._user_id)
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
         self.vault = VaultCloud(
@@ -98,6 +102,7 @@ class FakeCloud(LoopbackServer):
             team_members=self.account.team_members,
         )
         self.account.on_role_change = self.vault.team_role_changed
+        self._wire_custody()
         # The hosted service can ship with SSH certificates switched off (Settings
         # feature.ssh_ca_enabled); see :meth:`switch_off_ssh_ca`.
         self.ssh_ca_switched_off = False
@@ -158,6 +163,7 @@ class FakeCloud(LoopbackServer):
         self.ai.reset()
         self.hosted_mcp.reset()
         self.memory.reset()
+        self.summaries.reset()
         self.configs.reset()
         self.secrets.reset()
         self.vault.reset()
@@ -339,6 +345,17 @@ class FakeCloud(LoopbackServer):
         with self._held_lock:
             return path in self._held_paths
 
+    def _wire_custody(self) -> None:
+        """Connect the stores that check each other: key custody, item guards and the two switches."""
+        user_id = lambda: self._store.snapshot().user_id  # noqa: E731
+        self.memory.bind_vault(self.vault.memory_key_ready)
+        self.vault.custody_enabled = lambda: self.memory.vault_custody_enabled
+        self.vault.memory_key_in_use = self.memory.key_in_use
+        self.vault.config_key_in_use = lambda _user, key_id: self.configs.uses_key_id(key_id)
+        self.configs.custody_enabled = lambda: self.memory.vault_custody_enabled
+        self.configs.passphrase_accepted = lambda: self.memory.passphrase_custody_accepted
+        self.configs.vault_key_ids = lambda: self.vault.app_key_fingerprints(user_id(), "config_sync_key")
+
     def _team_id_of(self, slug: str) -> Optional[str]:
         """The id of team *slug* when the requesting user is a member."""
         return self.account.team_id_of(
@@ -377,7 +394,8 @@ class FakeCloud(LoopbackServer):
         )
         routes_ai.add_routes(app, self._store, self.ai)
         routes_hosted_mcp.add_routes(app, self._store, self.hosted_mcp)
-        routes_memory.add_routes(app, self._store, self.memory)
+        routes_memory_summary.add_routes(app, self._store, self.summaries)
+        routes_memory.add_routes(app, self._store, self.memory, self.vault.authenticate)
         routes_configs.add_routes(app, self._store, self.configs)
         routes_secrets.add_routes(app, self._store, self.secrets)
         routes_vault.add_routes(app, self._store, self.vault)

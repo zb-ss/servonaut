@@ -184,6 +184,12 @@ def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int,
     return status, {"error": error}
 
 
+# Item types that hold a Servonaut key: personal vault only, a fingerprint of
+# their own format, at most two live items (active + next).
+APP_KEY_TYPES = frozenset({"memory_key", "config_sync_key"})
+APP_KEY_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+APP_KEY_ITEMS_PER_TYPE = 2
+
 OWN_BINDING_MISMATCH = "Personal instances can use an item of your personal vault or of a team vault you manage."
 
 
@@ -242,6 +248,11 @@ class VaultCloud:
         # or None for a team whose membership the fake does not keep.
         self._team_members = team_members or (lambda slug: None)
         self._lock = threading.RLock()
+        # Cross-store lookups wired by FakeCloud (None = no guard): the custody
+        # switch, and whether a key is still used by Memory Sync or config sync.
+        self.custody_enabled: Callable[[], bool] = lambda: True
+        self.memory_key_in_use: Optional[Callable[[int, str], bool]] = None
+        self.config_key_in_use: Optional[Callable[[int, str], bool]] = None
         self.reset()
 
     def reset(self) -> None:
@@ -949,6 +960,61 @@ class VaultCloud:
             self._vaults[vault_id], self._items[vault_id], self._exposures[vault_id] = vault, {}, []
             return 201, self._vault_payload(vault, user_id)
 
+    def app_key_fingerprints(self, user_id: int, item_type: str) -> list[str]:
+        """Fingerprints of the live *item_type* items in the user's personal vault."""
+        with self._lock:
+            return [
+                item["public_fingerprint"]
+                for vault_id, vault in self._vaults.items()
+                if vault["kind"] == "personal" and vault["owner_user_id"] == user_id
+                for item in self._items.get(vault_id, {}).values()
+                if item.get("type") == item_type and not item.get("deleted_at")
+            ]
+
+    def memory_key_ready(self, user_id: int, fingerprint: str) -> bool:
+        """The ``vault_not_ready`` precondition: a grantable identity and a live item for the key."""
+        with self._lock:
+            identity = self._identity(user_id)
+            usable = bool(identity and identity.get("grantable") and identity.get("status") == "active")
+            return usable and fingerprint in self.app_key_fingerprints(user_id, "memory_key")
+
+    def _app_key_refusal(
+        self, vault: dict[str, Any], vault_id: str, item_id: str, body: dict[str, Any],
+        old: Optional[dict[str, Any]],
+    ) -> Optional[tuple[int, dict[str, Any]]]:
+        """The rules for the two app-key item types, as the service applies them on a PUT."""
+        item_type = body["type"]
+        old_type = old.get("type") if old else None
+        if item_type not in APP_KEY_TYPES and old_type not in APP_KEY_TYPES:
+            return None
+        if item_type in APP_KEY_TYPES and not self.custody_enabled():
+            return _refusal(503, "feature_disabled", "Vault custody for Memory Sync keys is not available yet.")
+        if old_type is not None and old_type != item_type:
+            return _refusal(422, "validation_failed", "An item cannot change to or from a Servonaut key type.",
+                            field="type")
+        if vault["kind"] != "personal":
+            return _refusal(422, "validation_failed", "This item type belongs in a personal vault.", field="type")
+        fingerprint = body.get("public_fingerprint")
+        if not isinstance(fingerprint, str) or not APP_KEY_FINGERPRINT.fullmatch(fingerprint):
+            return _refusal(422, "validation_failed", "public_fingerprint must be 64 lowercase hex.",
+                            field="public_fingerprint")
+        if old is not None and old.get("public_fingerprint") != fingerprint:
+            return _refusal(422, "validation_failed", "public_fingerprint cannot change.",
+                            field="public_fingerprint")
+        live = sum(1 for other_id, other in self._items.get(vault_id, {}).items()
+                   if other.get("type") == item_type and not other.get("deleted_at") and other_id != item_id)
+        if old is None and live >= APP_KEY_ITEMS_PER_TYPE:
+            return _refusal(409, "item_type_exists", "Your vault already holds two items of this type.")
+        return None
+
+    def _app_key_delete_refusal(self, item: dict[str, Any], user_id: int) -> Optional[tuple[int, dict[str, Any]]]:
+        fingerprint = str(item.get("public_fingerprint") or "")
+        if item.get("type") == "memory_key" and self.memory_key_in_use and self.memory_key_in_use(user_id, fingerprint):
+            return _refusal(409, "memory_key_in_use", "This item holds your Memory Sync key.")
+        if item.get("type") == "config_sync_key" and self.config_key_in_use and self.config_key_in_use(user_id, fingerprint):
+            return _refusal(409, "config_key_in_use", "This item holds your config sync key.")
+        return None
+
     def put_item(self, vault_id: str, item_id: str, body: dict[str, Any], user_id: int) -> tuple[int, dict[str, Any]]:
         with self._lock:
             vault = self._vaults.get(vault_id)
@@ -967,6 +1033,9 @@ class VaultCloud:
                                 current_version=vault["current_version"])
             expected = body.get("expected_revision")
             old = self._items.setdefault(vault_id, {}).get(item_id)
+            refusal = self._app_key_refusal(vault, vault_id, item_id, body, old)
+            if refusal is not None:
+                return refusal
             if old is not None and expected != old["revision"]:
                 return 409, {"error": {"code": "revision_conflict", "message": "Item revision changed"}}
             if old is None and expected not in (None, 0):
@@ -1132,6 +1201,9 @@ class VaultCloud:
                 return _refusal(409, "item_deleted", "Item already deleted")
             if type(body.get("revision")) is not int or body["revision"] != item["revision"] + 1:
                 return _refusal(409, "revision_conflict", "Item revision changed")
+            guarded = self._app_key_delete_refusal(item, user_id)
+            if guarded is not None:
+                return guarded
             if refuses_bound:
                 usage = self.item_usage(vault_id, item_id)
                 in_use = (usage["team_servers"] or usage["own_instances"] or usage["other_members"]["servers"])
