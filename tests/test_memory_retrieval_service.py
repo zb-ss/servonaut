@@ -460,3 +460,24 @@ class TestCommandLineReader:
         monkeypatch.setattr(reader, "_ensure_keypair", unlock)
         await reader._ensure_key_material()
         assert reader._self_user_id == 77
+
+
+class TestVaultCustodyRecord:
+    """A vault-custody key record never leads to a passphrase prompt."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record", [
+        {"fingerprint": "a" * 64, "public_key": "AAAA", "wrapped_private_key": None,
+         "custody": "vault"},
+        {"fingerprint": "a" * 64, "public_key": "AAAA"},  # no wrap at all: fail closed
+    ])
+    async def test_vault_record_raises_without_calling_the_provider(self, record):
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+
+        svc = _make_service(api_client=_make_api_client(get_return=record))
+        svc._self_privkey = None
+        provider = AsyncMock(return_value="pw")
+        svc._passphrase_provider = provider
+        with pytest.raises(VaultCustodyLocked):
+            await svc._ensure_keypair()
+        provider.assert_not_called()

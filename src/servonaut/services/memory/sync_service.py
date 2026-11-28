@@ -71,6 +71,8 @@ from servonaut.services.memory.interfaces import (
     SyncRejection,
     UpsellRequired,
     ValidationFailed,
+    VaultCustodyLocked,
+    VaultCustodyUnavailable,
 )
 from servonaut.services.memory.store import (
     EMPTY_NOTES_DIGEST, MemoryCorruptError, NotesFingerprint, RecordBusy,
@@ -206,6 +208,18 @@ class LocalUnlock(str, Enum):
     BAD_PASSPHRASE = "bad_passphrase"
 
 
+class VaultUnlock(str, Enum):
+    """How :meth:`MemorySyncService.unlock_from_vault` ended."""
+
+    OK = "ok"
+    #: The key is not kept in the vault (or no custody is wired): use the passphrase path.
+    NOT_VAULT = "not_vault"
+    #: The key is kept in the vault and the vault cannot give it up here.
+    VAULT_LOCKED = "vault_locked"
+    #: Where the key is kept could not be determined (offline, service error): try later.
+    UNAVAILABLE = "unavailable"
+
+
 class MemorySyncService:
     """Manages background sync of memory module results to the server.
 
@@ -252,6 +266,10 @@ class MemorySyncService:
         self._self_user_id: Optional[int] = None
         self._self_pubkey: Optional[bytes] = None
         self._self_privkey: Optional[bytes] = None
+        # Where the adopted key came from: "vault", "passphrase" or None.
+        self._key_source: Optional[str] = None
+        # Optional MemoryKeyCustody; None keeps the passphrase-only behaviour.
+        self._key_custody: Optional[Any] = None
 
         # Hook fired after key-material becomes available (or rotates).
         self._key_material_listener: Optional[Callable[[], None]] = None
@@ -332,6 +350,62 @@ class MemorySyncService:
     def subscribe(self, listener: Callable[[MemorySyncStatus], None]) -> None:
         """Register a status-change listener."""
         self._listeners.append(listener)
+
+    def set_key_custody(self, custody: Optional[Any]) -> None:
+        """Wire the :class:`MemoryKeyCustody` that decides where the key is kept.
+
+        Without one, every method behaves as it did before vault custody.
+        """
+        self._key_custody = custody
+
+    @property
+    def key_source(self) -> Optional[str]:
+        """``"vault"`` or ``"passphrase"`` once a key is adopted, else ``None``."""
+        return self._key_source
+
+    def adopt_key_material(
+        self, user_id: int, public_key: bytes, private_key: bytes, *, source: str = "vault",
+    ) -> None:
+        """Take a key that was loaded or created elsewhere (the vault, the move helper).
+
+        Sets the three key fields and announces them, like an unlock does.
+        """
+        self._self_user_id = int(user_id)
+        self._self_pubkey = public_key
+        self._self_privkey = private_key
+        self._key_source = source
+        self._announce_key_material()
+
+    async def unlock_from_vault(self) -> "VaultUnlock":
+        """Unlock from a vault-held key, without enrolling, uploading or cleaning up.
+
+        For read-only processes (MCP server, relay, CLI reads). Needs a custody
+        set with :meth:`set_key_custody`; without one the answer is
+        ``NOT_VAULT``.
+        """
+        if self.is_configured:
+            return VaultUnlock.OK
+        if self._key_custody is None:
+            return VaultUnlock.NOT_VAULT
+        from servonaut.services.memory.key_custody import ResolutionKind
+
+        try:
+            resolution = await self._key_custody.resolve()
+        except (APIError, OSError, MemoryBackendError) as exc:
+            logger.debug("unlock_from_vault: resolve failed (%s)", type(exc).__name__)
+            return VaultUnlock.UNAVAILABLE
+        kind = resolution.kind
+        if kind is ResolutionKind.VAULT_KEY and resolution.material is not None:
+            if not self.is_configured:
+                material = resolution.material
+                self.adopt_key_material(
+                    material.user_id, material.public_key, material.private_key)
+            return VaultUnlock.OK
+        if kind is ResolutionKind.VAULT_LOCKED:
+            return VaultUnlock.VAULT_LOCKED
+        if kind is ResolutionKind.UNAVAILABLE:
+            return VaultUnlock.UNAVAILABLE
+        return VaultUnlock.NOT_VAULT
 
     def set_key_material_listener(self, listener: Callable[[], None]) -> None:
         """Register a callback fired whenever the active keypair changes.
@@ -421,6 +495,7 @@ class MemorySyncService:
         """
         self._self_pubkey = None
         self._self_privkey = None
+        self._key_source = None
         self._notify_listeners()
 
     def can_unwrap_local(self, passphrase: str) -> bool:
@@ -497,6 +572,7 @@ class MemorySyncService:
         self._self_user_id = int(user_id)
         self._self_pubkey = public_key
         self._self_privkey = private_key
+        self._key_source = "passphrase"
         self._announce_key_material()
         return LocalUnlock.OK
 
@@ -1761,6 +1837,7 @@ class MemorySyncService:
         # we burn rate-limit budget on the rotate POST.
         await self._rate_limiter.acquire(RateLimitKey.KEYS_ME)
         data = await self._api.get("/api/v1/memory/keys/me", retry_on_401=False)
+        self._refuse_vault_record(data)
         wrapped_old = WrappedPrivateKey.from_json(data.get("wrapped_private_key", ""))
         try:
             unwrap_private_key(wrapped_old, old_passphrase)
@@ -1790,9 +1867,13 @@ class MemorySyncService:
             raise RateLimited(
                 endpoint="/api/v1/memory/keys/rotate", retry_after_s=86400.0
             ) from exc
+        except APIError as exc:
+            self._raise_mapped_key_write_error(exc)
+            raise
 
         self._self_pubkey = new_kp.public_key
         self._self_privkey = new_kp.private_key
+        self._key_source = "passphrase"
         # Overwrite the local cache with the new wrapped keypair so that
         # the next startup can skip the /keys/me network call.  The old
         # cached passphrase (if any) in the OS keychain is now invalid;
@@ -1813,6 +1894,24 @@ class MemorySyncService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _refuse_vault_record(data: Any) -> None:
+        """Raise :class:`VaultCustodyLocked` when the service's key record is vault custody."""
+        from servonaut.services.memory.key_custody import CUSTODY_VAULT, parse_key_record
+
+        if parse_key_record(data).custody == CUSTODY_VAULT:
+            raise VaultCustodyLocked("vault_locked")
+
+    @staticmethod
+    def _raise_mapped_key_write_error(exc: APIError) -> None:
+        """Translate the key-write refusals this client has a meaning for; else return."""
+        if isinstance(exc, ForbiddenEntitlementError):
+            plan = "teams" if (exc.details or {}).get("required_plan") == "teams" else "solo"
+            raise UpsellRequired(plan) from exc
+        code = getattr(exc, "code", None)
+        if code in ("device_signature_required", "memory_key_custody_vault"):
+            raise VaultCustodyLocked(code) from exc
 
     def _derive_public_key(self, private_key_bytes: bytes) -> Optional[bytes]:
         """Derive the X25519 public key from raw *private_key_bytes*.
@@ -1943,7 +2042,74 @@ class MemorySyncService:
         return metrics or None
 
     async def _ensure_keypair(self, passphrase_provider: Callable[[], Any]) -> None:
-        """Fetch or enrol the caller's X25519 keypair.
+        """Load the caller's key from the vault, or fall back to the passphrase paths.
+
+        With no custody set this is exactly :meth:`_ensure_keypair_passphrase`.
+        With one, the vault is asked first: a vault key is adopted without any
+        passphrase call, a locked vault raises :class:`VaultCustodyLocked`
+        before the provider is ever touched, and only a passphrase account (or
+        one with no vault identity at all) reaches the passphrase code.
+        """
+        if self._key_custody is None:
+            await self._ensure_keypair_passphrase(passphrase_provider)
+            return
+        from servonaut.services.memory.key_custody import (
+            MODE_NEEDS_VAULT_DEVICE,
+            MODE_VAULT,
+            ResolutionKind,
+        )
+
+        resolution = await self._key_custody.resolve()
+        kind = resolution.kind
+        if kind is ResolutionKind.VAULT_KEY and resolution.material is not None:
+            material = resolution.material
+            self.adopt_key_material(material.user_id, material.public_key, material.private_key)
+            logger.info("Bootstrap: loaded keypair from the vault fingerprint=%s", resolution.fingerprint)
+            return
+        if kind is ResolutionKind.VAULT_LOCKED:
+            raise VaultCustodyLocked(resolution.reason or "vault_locked")
+        if kind is ResolutionKind.UNAVAILABLE:
+            self._raise_unavailable(resolution)
+        if kind is ResolutionKind.PASSPHRASE:
+            await self._ensure_keypair_passphrase(passphrase_provider, record=resolution.record)
+            return
+        mode = await self._key_custody.enrolment_mode()
+        if mode == MODE_NEEDS_VAULT_DEVICE:
+            raise VaultCustodyLocked(MODE_NEEDS_VAULT_DEVICE)
+        if mode != MODE_VAULT:
+            await self._ensure_keypair_passphrase(passphrase_provider, skip_lookup=True)
+            return
+        await self._enrol_in_vault()
+
+    @staticmethod
+    def _raise_unavailable(resolution: Any) -> None:
+        error = resolution.error
+        if isinstance(error, RateLimitedError):
+            raise RateLimited(endpoint="/api/v1/memory/keys/me", retry_after_s=1200.0) from error
+        if isinstance(error, (APIError, MemoryBackendError)):
+            raise error
+        raise VaultCustodyUnavailable(resolution.reason or "unavailable") from error
+
+    async def _enrol_in_vault(self) -> None:
+        try:
+            material = await self._key_custody.enrol_in_vault()
+        except APIError as exc:
+            self._raise_mapped_key_write_error(exc)
+            raise
+        self.adopt_key_material(material.user_id, material.public_key, material.private_key)
+        logger.info("Bootstrap: enrolled a new keypair in the vault")
+
+    async def _ensure_keypair_passphrase(
+        self,
+        passphrase_provider: Callable[[], Any],
+        *,
+        record: Optional[Any] = None,
+        skip_lookup: bool = False,
+    ) -> None:
+        """Fetch or enrol the caller's X25519 keypair under a passphrase.
+
+        ``record`` is the key record the custody already fetched (no second
+        ``GET``); ``skip_lookup`` means the service is known to hold no key.
 
         Fast path (local cache):
             If ``keys.json`` is present, unwrap the private key from it using
@@ -1969,7 +2135,7 @@ class MemorySyncService:
         # ------------------------------------------------------------------
         # Fast path: local passphrase-encrypted cache
         # ------------------------------------------------------------------
-        if self._key_cache_path.exists():
+        if record is None and not skip_lookup and self._key_cache_path.exists():
             cached: Optional[Dict[str, Any]] = None
             try:
                 raw = self._key_cache_path.read_text(encoding="utf-8")
@@ -2032,6 +2198,7 @@ class MemorySyncService:
                             # Only update state AFTER successful unwrap + pubkey check.
                             self._self_pubkey = base64.b64decode(pub_b64)
                             self._self_privkey = privkey
+                            self._key_source = "passphrase"
                             logger.info(
                                 "Bootstrap: loaded keypair from local cache fingerprint=%s",
                                 fingerprint,
@@ -2043,8 +2210,19 @@ class MemorySyncService:
         # Network path: GET /api/v1/memory/keys/me
         # ------------------------------------------------------------------
         try:
-            await self._rate_limiter.acquire(RateLimitKey.KEYS_ME)
-            data = await self._api.get("/api/v1/memory/keys/me", retry_on_401=False)
+            if skip_lookup:
+                raise NotFoundError(code="not_found", message="no active key", status=404)
+            if record is not None:
+                data = {
+                    "public_key": record.public_key,
+                    "wrapped_private_key": record.wrapped_private_key,
+                    "fingerprint": record.fingerprint,
+                }
+            else:
+                await self._rate_limiter.acquire(RateLimitKey.KEYS_ME)
+                data = await self._api.get("/api/v1/memory/keys/me", retry_on_401=False)
+                # Vault custody means there is no passphrase to ask for.
+                self._refuse_vault_record(data)
             pub_b64 = data.get("public_key", "")
             wrapped_json = data.get("wrapped_private_key", "")
             fingerprint = data.get("fingerprint", "")
@@ -2055,6 +2233,7 @@ class MemorySyncService:
             # Update state AFTER successful unwrap.
             self._self_pubkey = base64.b64decode(pub_b64)
             self._self_privkey = privkey
+            self._key_source = "passphrase"
             # Persist encrypted material so the next bootstrap skips the
             # /keys/me rate-limit slot.  Include user_id so the cache is
             # bound to this account (MAJOR-2).
@@ -2091,9 +2270,14 @@ class MemorySyncService:
             "wrapped_private_key": wrapped.to_json(),
             "fingerprint": kp.fingerprint,
         }
-        await self._api.post("/api/v1/memory/keys", json=payload, retry_on_401=False)
+        try:
+            await self._api.post("/api/v1/memory/keys", json=payload, retry_on_401=False)
+        except APIError as exc:
+            self._raise_mapped_key_write_error(exc)
+            raise
         self._self_pubkey = kp.public_key
         self._self_privkey = kp.private_key
+        self._key_source = "passphrase"
         # Persist encrypted material after successful enrolment.  Include
         # user_id so the cache is bound to this account (MAJOR-2).
         self._persist_key_cache(

@@ -30,6 +30,7 @@ from servonaut.services.memory.interfaces import (
     MemoryNotFound,
     ReservedInstanceIdError,
     UpsellRequired,
+    VaultCustodyLocked,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 
@@ -164,6 +165,13 @@ class MemoryRetrievalService:
         data = await self._api.get(
             "/api/v1/memory/keys/me", retry_on_401=False
         )
+        # A vault-custody key has no passphrase to ask for, and this service
+        # never prompts for (or reads) a vault item: Memory Sync's own unlock
+        # hands the key over.
+        from servonaut.services.memory.key_custody import CUSTODY_VAULT, parse_key_record
+
+        if parse_key_record(data).custody == CUSTODY_VAULT:
+            raise VaultCustodyLocked("vault_locked")
         pub_b64 = data.get("public_key", "")
         wrapped_json = data.get("wrapped_private_key", "")
         fingerprint = data.get("fingerprint", "")
