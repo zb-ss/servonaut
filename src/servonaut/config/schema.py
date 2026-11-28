@@ -1178,6 +1178,11 @@ DEFAULT_TEAM_WRAP_RETRY_SECONDS = 5.0
 DEFAULT_TEAM_WRAP_MAX_WAIT_SECONDS = 30.0
 
 
+DEFAULT_CUSTODY_CHECK_INTERVAL_HOURS = 24.0
+DEFAULT_VAULT_KEY_RECHECK_SECONDS = 60.0
+DEFAULT_KEYS_ME_PER_HOUR = 20
+
+
 def _usable_seconds(value: Any, default: float) -> float:
     """*value* as seconds when it is a finite, non-negative number, else *default*."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1296,6 +1301,16 @@ class MemoryConfig:
             CLI, an MCP server) that is writing the same record, before it
             fails as a failed write and the change is kept for a retry.
         record_lock_poll_seconds: How often that wait looks again.
+        custody_check_interval_hours: Longest a device that unlocks Memory
+            Sync from a local key file goes without asking the service where
+            the key is kept (it may have moved to the vault). ``0`` asks on
+            every start.
+        vault_key_recheck_seconds: How long a headless process (MCP server,
+            relay) waits before it looks for the key in the vault again after
+            a failed attempt.
+        keys_me_per_hour: How many key lookups (``GET /keys/me``) this client
+            makes per hour; the service allows 20. Not a positive whole
+            number falls back to the default.
     """
 
     enabled: bool = True
@@ -1338,6 +1353,10 @@ class MemoryConfig:
     # silent keychain-based bootstrap on startup.  The actual passphrase
     # is NEVER stored in this config file — only this boolean flag.
     sync_remember_device: bool = False
+    # Set by "Disable sync" on the Memory Sync screen: no start-up, login,
+    # vault-unlock or section-open unlock runs until the user enables it
+    # again there. Without it a vault-held key would unlock again at once.
+    sync_disabled: bool = False
     # Optional client-side AI enhancement. The exact provider is selected and
     # consented per request; this prompt is operator-configurable.
     ai_enhancement_prompt: str = DEFAULT_MEMORY_AI_ENHANCEMENT_PROMPT
@@ -1389,6 +1408,11 @@ class MemoryConfig:
     record_lock_timeout_seconds: float = DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS
     record_lock_poll_seconds: float = DEFAULT_RECORD_LOCK_POLL_SECONDS
 
+    # Where the Memory Sync key is kept (see the docstring).
+    custody_check_interval_hours: float = DEFAULT_CUSTODY_CHECK_INTERVAL_HOURS
+    vault_key_recheck_seconds: float = DEFAULT_VAULT_KEY_RECHECK_SECONDS
+    keys_me_per_hour: int = DEFAULT_KEYS_ME_PER_HOUR
+
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
     # ------------------------------------------------------------------
@@ -1404,6 +1428,30 @@ class MemoryConfig:
         )
         poll = _usable_seconds(self.record_lock_poll_seconds, DEFAULT_RECORD_LOCK_POLL_SECONDS)
         return timeout, poll or DEFAULT_RECORD_LOCK_POLL_SECONDS
+
+    def custody_check_interval_seconds(self) -> float:
+        """The validated custody check interval in seconds.
+
+        A value that is not a finite, non-negative number (a hand-edited
+        config) falls back to the default.
+        """
+        hours = _usable_seconds(
+            self.custody_check_interval_hours, DEFAULT_CUSTODY_CHECK_INTERVAL_HOURS
+        )
+        return hours * 3600.0
+
+    def vault_key_recheck_wait(self) -> float:
+        """The validated pause in seconds before a headless vault key retry."""
+        return _usable_seconds(
+            self.vault_key_recheck_seconds, DEFAULT_VAULT_KEY_RECHECK_SECONDS
+        )
+
+    def keys_me_wait(self) -> int:
+        """The validated key lookups per hour (a positive whole number)."""
+        value = self.keys_me_per_hour
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return DEFAULT_KEYS_ME_PER_HOUR
+        return value
 
     def team_wrap_wait(self) -> tuple[float, float]:
         """The validated ``(retry, max_wait)`` seconds for a rate-limited team write.

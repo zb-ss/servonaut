@@ -722,3 +722,266 @@ class TestPreservationRegressions:
             if isinstance(os_val, dict):
                 assert not os_val.get("access_key")
                 assert not os_val.get("secret_key")
+
+
+# ---------------------------------------------------------------------------
+# Vault key custody
+# ---------------------------------------------------------------------------
+
+import base64 as _b64
+from types import SimpleNamespace
+
+from servonaut.services.config_sync_service import ConfigKeyError, vault_key_items_provider
+
+
+class FakeKeyItems:
+    """In-memory stand-in for AppKeyItems (config_sync_key only)."""
+
+    def __init__(self):
+        self.payloads: dict = {}
+        self.created = 0
+
+    async def list(self, item_type):
+        return [SimpleNamespace(public_fingerprint=fp) for fp in self.payloads]
+
+    async def read(self, item_type, fingerprint):
+        return self.payloads.get(fingerprint)
+
+    async def create(self, item_type, payload):
+        self.created += 1
+        self.payloads[payload["public_fingerprint"]] = dict(payload)
+
+    def add_key(self, key: bytes, created_at="2026-01-01T00:00:00+00:00"):
+        fp = config_crypto.key_id(key)
+        self.payloads[fp] = {
+            "v": 1, "name": "Servonaut config sync key",
+            "key": _b64.b64encode(key).decode(), "public_fingerprint": fp,
+            "created_at": created_at,
+        }
+        return fp
+
+
+@pytest.fixture
+def items():
+    return FakeKeyItems()
+
+
+@pytest.fixture
+def vault_service(mock_api, mock_config_manager, items, tmp_path, monkeypatch):
+    monkeypatch.setattr("servonaut.services.config_sync_service.PROBE_FILE", tmp_path / "probe.json")
+    return ConfigSyncService(mock_api, mock_config_manager, key_items_provider=lambda: items)
+
+
+def _vault_snapshot(key: bytes, plaintext: str, snap_id="s1", created="2026-02-01T00:00:00+00:00"):
+    env = config_crypto.encrypt_with_key(plaintext, key)
+    return {"id": snap_id, "created_at": created, "key_custody": "vault",
+            "key_id": config_crypto.key_id(key), "salt": None, **env}
+
+
+class TestVaultMode:
+    def test_key_mode_passphrase_without_provider(self, sync_service):
+        assert _run(sync_service.key_mode()) == "passphrase"
+
+    def test_key_mode_vault_when_item_exists(self, vault_service, items):
+        items.add_key(bytes(range(32)))
+        assert _run(vault_service.key_mode()) == "vault"
+
+    def test_key_mode_vault_for_new_account(self, vault_service, mock_api):
+        mock_api.get.return_value = {"snapshots": []}
+        assert _run(vault_service.key_mode()) == "vault"
+
+    def test_key_mode_passphrase_with_probe_or_passphrase_snapshot(self, vault_service, mock_api):
+        mock_api.get.return_value = {"snapshots": [{"id": "a", "key_custody": "passphrase"}]}
+        assert _run(vault_service.key_mode()) == "passphrase"
+        mock_api.get.return_value = {"snapshots": []}
+        with patch.object(vault_service, "has_probe", return_value=True):
+            assert _run(vault_service.key_mode()) == "passphrase"
+
+    def test_key_mode_passphrase_when_vault_locked(self, mock_api, mock_config_manager):
+        svc = ConfigSyncService(mock_api, mock_config_manager, key_items_provider=lambda: None)
+        assert _run(svc.key_mode()) == "passphrase"
+
+    def test_first_push_creates_key_and_posts_vault_shape(self, vault_service, items, mock_api):
+        mock_api.get.return_value = {"snapshots": []}
+        _run(vault_service.push(label="web-1"))
+        assert items.created == 1
+        body = mock_api.post.call_args.kwargs["json"]
+        assert "salt" not in body
+        assert body["key_custody"] == "vault"
+        assert body["key_id"] in items.payloads
+        assert body["label"] == "web-1"
+        # second push reuses the key
+        _run(vault_service.push(label="web-1"))
+        assert items.created == 1
+
+    def test_pushed_snapshot_decrypts_with_item_key(self, vault_service, items, mock_api):
+        mock_api.get.return_value = {"snapshots": []}
+        _run(vault_service.push())
+        body = mock_api.post.call_args.kwargs["json"]
+        key = _b64.b64decode(items.payloads[body["key_id"]]["key"])
+        plain = config_crypto.decrypt_with_key(body, key)
+        assert "sk-secret-key" not in plain
+
+    def test_pull_picks_newest_matching_vault_snapshot(self, vault_service, items, mock_api):
+        key_a, key_b = bytes(range(32)), bytes(range(1, 33))
+        items.add_key(key_a)
+        newest = _vault_snapshot(key_a, '{"x": "new"}', "new", "2026-03-01T00:00:00+00:00")
+        old = _vault_snapshot(key_a, '{"x": "old"}', "old", "2026-01-01T00:00:00+00:00")
+        foreign = _vault_snapshot(key_b, '{"x": "foreign"}', "foreign", "2026-04-01T00:00:00+00:00")
+        meta = [{k: v for k, v in s.items() if k in ("id", "created_at", "key_custody", "key_id")}
+                for s in (old, foreign, newest)]
+
+        async def get(path, **kw):
+            if path.startswith("/api/v1/configs?"):
+                return {"snapshots": meta}
+            return {"new": newest, "old": old}[path.rsplit("/", 1)[1]]
+
+        mock_api.get.side_effect = get
+        assert _run(vault_service.pull()) == {"x": "new"}
+
+    def test_pull_vault_snapshot_with_unknown_key_id_raises_clear_error(self, vault_service, items, mock_api):
+        items.add_key(bytes(range(32)))
+        foreign = _vault_snapshot(bytes(range(1, 33)), "{}", "f")
+        mock_api.get.return_value = {"snapshots": [
+            {"id": "f", "key_custody": "vault", "key_id": foreign["key_id"]}]}
+        with pytest.raises(DecryptionError, match="not in your vault"):
+            _run(vault_service.pull())
+
+    def test_restore_unknown_key_id_raises(self, vault_service, items, mock_api):
+        items.add_key(bytes(range(32)))
+        mock_api.get.return_value = _vault_snapshot(bytes(range(1, 33)), "{}")
+        with pytest.raises(DecryptionError, match="not in your vault"):
+            _run(vault_service.restore_by_id("s1"))
+
+    def test_vault_snapshot_with_locked_vault_gives_client_text(self, mock_api, mock_config_manager):
+        svc = ConfigSyncService(mock_api, mock_config_manager, key_items_provider=lambda: None)
+        mock_api.get.return_value = _vault_snapshot(bytes(range(32)), "{}")
+        with pytest.raises(ConfigKeyError) as info:
+            _run(svc.restore_by_id("s1"))
+        assert "not in your vault yet" in str(info.value)
+        assert info.value.code == "config_key_not_ready"
+
+    def test_passphrase_snapshot_path_unchanged_in_vault_service(self, vault_service, mock_api):
+        mock_api.get.return_value = {"snapshots": [{"id": "a", "key_custody": "passphrase"}]}
+        enc = config_crypto.encrypt('{"k": 1}', PASS)
+        snap = {**enc, "key_custody": "passphrase", "key_id": None}
+        mock_api.get.side_effect = None
+        mock_api.get.return_value = snap
+        assert _run(vault_service._decrypt_snapshot(snap, PASS)) == {"k": 1}
+        vault_service.clear_session()
+        with pytest.raises(ValueError, match="passphrase required"):
+            _run(vault_service._decrypt_snapshot(snap, None))
+
+    def test_has_cached_passphrase(self, sync_service):
+        assert sync_service.has_cached_passphrase() is False
+        sync_service._cached_passphrase = PASS
+        assert sync_service.has_cached_passphrase() is True
+
+
+async def _pass_gate() -> None:
+    return None
+
+
+class TestMoveKeyToVault:
+    def test_recovery_gate_runs_before_the_key_item_or_any_write(self, vault_service, items, mock_api):
+        self._setup(mock_api, [{"id": "p", "key_custody": "passphrase"}])
+
+        async def refuse() -> None:
+            raise RuntimeError("recovery key refused")
+
+        with pytest.raises(RuntimeError, match="recovery key refused"):
+            _run(vault_service.move_key_to_vault(recovery_gate=refuse))
+        assert items.created == 0
+        mock_api.post.assert_not_awaited()
+        mock_api.delete.assert_not_awaited()
+
+    def test_gate_is_required(self, vault_service):
+        with pytest.raises(TypeError):
+            _run(vault_service.move_key_to_vault())
+
+    def _setup(self, mock_api, snapshots):
+        state = {"snapshots": list(snapshots)}
+
+        async def get(path, **kw):
+            return {"snapshots": state["snapshots"]}
+
+        async def post(path, *, json=None, **kw):
+            state["snapshots"].append({"id": "v", "key_custody": "vault", "key_id": json["key_id"]})
+            return {"id": "v"}
+
+        mock_api.get.side_effect = get
+        mock_api.post.side_effect = post
+        mock_api.delete.return_value = {"deleted": 2}
+        return state
+
+    def test_happy_path_then_rerun(self, vault_service, items, mock_api, tmp_path):
+        probe = tmp_path / "probe.json"
+        probe.write_text("{}")
+        vault_service._cached_passphrase = PASS
+        self._setup(mock_api, [{"id": "p", "key_custody": "passphrase"}])
+        steps = []
+        report = _run(vault_service.move_key_to_vault(steps.append, recovery_gate=_pass_gate))
+        assert report == {"key_created": True, "pushed": True, "deleted": 2}
+        assert steps == ["key", "snapshot", "cleanup"]
+        mock_api.delete.assert_awaited_once_with("/api/v1/configs", params={"key_custody": "passphrase"})
+        assert not probe.exists()
+        assert vault_service.has_cached_passphrase() is False
+        # a re-run reuses the key and the snapshot
+        posts = mock_api.post.await_count
+        report = _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
+        assert report["key_created"] is False and report["pushed"] is False
+        assert mock_api.post.await_count == posts
+        assert items.created == 1
+
+    def test_rerun_after_crash_before_delete_does_not_push_again(self, vault_service, items, mock_api):
+        self._setup(mock_api, [])
+        mock_api.delete.side_effect = RuntimeError("network")
+        with pytest.raises(RuntimeError):
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
+        mock_api.delete.side_effect = None
+        mock_api.delete.return_value = {"deleted": 1}
+        posts = mock_api.post.await_count
+        report = _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
+        assert report["pushed"] is False and report["deleted"] == 1
+        assert mock_api.post.await_count == posts
+
+    def test_locked_vault_raises_config_key_not_ready(self, mock_api, mock_config_manager):
+        svc = ConfigSyncService(mock_api, mock_config_manager, key_items_provider=lambda: None)
+        with pytest.raises(ConfigKeyError) as info:
+            _run(svc.move_key_to_vault(recovery_gate=_pass_gate))
+        assert info.value.code == "config_key_not_ready"
+        mock_api.delete.assert_not_awaited()
+
+    def test_delete_refusal_propagates_and_keeps_local_passphrase(self, vault_service, mock_api, tmp_path):
+        from servonaut.services.api_client import APIError
+        probe = tmp_path / "probe.json"
+        probe.write_text("{}")
+        vault_service._cached_passphrase = PASS
+        self._setup(mock_api, [])
+        mock_api.delete.side_effect = APIError(code="no_vault_snapshot", message="svc words", status=409)
+        with pytest.raises(APIError) as info:
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
+        from servonaut.services.memory.custody_errors import custody_error_message
+        assert "Nothing was deleted" in custody_error_message(info.value)
+        assert probe.exists() and vault_service.has_cached_passphrase()
+
+    def test_feature_disabled_on_push_propagates_before_delete(self, vault_service, mock_api):
+        from servonaut.services.api_client import FeatureDisabledError
+        mock_api.get.side_effect = None
+        mock_api.get.return_value = {"snapshots": []}
+        mock_api.post.side_effect = FeatureDisabledError(code="feature_disabled", message="x", status=503)
+        with pytest.raises(FeatureDisabledError):
+            _run(vault_service.move_key_to_vault(recovery_gate=_pass_gate))
+        mock_api.delete.assert_not_awaited()
+
+
+class TestProvider:
+    def test_none_when_absent_or_locked(self):
+        assert vault_key_items_provider(lambda: None)() is None
+        locked = SimpleNamespace(is_unlocked=False, app_keys=object())
+        assert vault_key_items_provider(lambda: locked)() is None
+
+    def test_returns_app_keys_when_unlocked(self):
+        keys = object()
+        vault = SimpleNamespace(is_unlocked=True, app_keys=keys)
+        assert vault_key_items_provider(lambda: vault)() is keys

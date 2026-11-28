@@ -164,3 +164,66 @@ def verify_probe(passphrase: str, probe_hex: str) -> bool:
     """
     candidate = make_probe(passphrase)
     return hmac.compare_digest(candidate, probe_hex)
+
+
+# --- Vault-held key (no passphrase, no salt) --------------------------------
+
+# A different label from the passphrase scheme: a snapshot sealed under one
+# custody mode cannot be replayed as the other.
+VAULT_ASSOCIATED_DATA = b"servonaut-config-vault-v1"
+KEY_ID_LABEL = b"servonaut-config-sync-key-id-v1"
+
+_VAULT_DECRYPT_FAILED = "Decryption failed - wrong key or corrupted data"
+
+
+def generate_key() -> bytearray:
+    """A fresh random 256-bit config sync key (zero it after use)."""
+    return bytearray(os.urandom(KEY_SIZE))
+
+
+def key_id(key: bytes) -> str:
+    """Opaque 64-hex identifier of *key*; safe to send to the service."""
+    return hmac.new(bytes(key), KEY_ID_LABEL, hashlib.sha256).hexdigest()
+
+
+def _check_key(key: bytes) -> None:
+    if not HAS_CRYPTOGRAPHY:
+        raise CryptoUnavailableError("Install with: pip install 'servonaut[sync]'")
+    if len(key) != KEY_SIZE:
+        raise ValueError(f"Key must be {KEY_SIZE} bytes")
+
+
+def encrypt_with_key(plaintext: str, key: bytes) -> dict:
+    """Encrypt with a raw 32-byte key. Returns encryption, data, iv, tag (no salt)."""
+    _check_key(key)
+    nonce = os.urandom(NONCE_SIZE)
+    ct_with_tag = AESGCM(bytes(key)).encrypt(nonce, plaintext.encode("utf-8"), VAULT_ASSOCIATED_DATA)
+    return {
+        "encryption": ENCRYPTION_ALGORITHM,
+        "data": base64.b64encode(ct_with_tag[:-TAG_SIZE]).decode(),
+        "iv": base64.b64encode(nonce).decode(),
+        "tag": base64.b64encode(ct_with_tag[-TAG_SIZE:]).decode(),
+    }
+
+
+def decrypt_with_key(encrypted: dict, key: bytes) -> str:
+    """Decrypt an envelope made by :func:`encrypt_with_key`.
+
+    Raises:
+        DecryptionError: wrong key, tampering or malformed fields (generic text).
+    """
+    _check_key(key)
+    try:
+        if encrypted.get("encryption", "") != ENCRYPTION_ALGORITHM:
+            raise DecryptionError(_VAULT_DECRYPT_FAILED)
+        iv_raw = base64.b64decode(encrypted["iv"])
+        tag_raw = base64.b64decode(encrypted["tag"])
+        data_raw = base64.b64decode(encrypted["data"])
+        if len(iv_raw) != NONCE_SIZE or len(tag_raw) != TAG_SIZE or len(data_raw) < 1:
+            raise DecryptionError(_VAULT_DECRYPT_FAILED)
+        plaintext = AESGCM(bytes(key)).decrypt(iv_raw, data_raw + tag_raw, VAULT_ASSOCIATED_DATA)
+        return plaintext.decode("utf-8")
+    except DecryptionError:
+        raise
+    except Exception:
+        raise DecryptionError(_VAULT_DECRYPT_FAILED)

@@ -741,3 +741,28 @@ FleetMemoryScreen #fleet-empty-text {
     margin-bottom: 1;
     color: $text-muted;
 }
+
+/* Memory Sync: key-custody loading and move progress. */
+MemorySyncSetupScreen #msync_loading,
+MemorySyncSetupScreen #msync_move_loading {
+    height: 3;
+    width: 100%;
+}
+
+MemorySyncSetupScreen #msync_loading_text {
+    height: auto;
+    color: $text-muted;
+    text-align: center;
+    width: 100%;
+}
+
+MemorySyncSetupScreen #msync_vault_body,
+MemorySyncSetupScreen #msync_vault_hint,
+MemorySyncSetupScreen #msync_move_hint,
+MemorySyncSetupScreen #msync_move_steps {
+    height: auto;
+}
+
+MemorySyncSetupScreen #msync_key_value {
+    color: $text-success;
+}

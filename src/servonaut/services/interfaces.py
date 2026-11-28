@@ -3,7 +3,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Dict, Optional, Tuple, TYPE_CHECKING, TypedDict
+from typing import Any, Awaitable, Callable, List, Dict, Optional, Tuple, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from servonaut.config.schema import (
@@ -1036,6 +1036,26 @@ class ConfigSyncServiceInterface(ABC):
     @abstractmethod
     async def delete_snapshot(self, snapshot_id: str) -> dict:
         pass
+
+    @abstractmethod
+    async def key_mode(self) -> str:
+        """``"vault"`` or ``"passphrase"``: where the snapshot key is kept."""
+
+    @abstractmethod
+    async def move_key_to_vault(
+        self,
+        progress: Optional[Callable[[str], None]] = None,
+        *,
+        recovery_gate: Callable[[], Awaitable[None]],
+    ) -> dict:
+        """Switch to a vault-held key and remove the passphrase snapshots; re-runnable.
+
+        *recovery_gate* proves the vault recovery key before anything is written.
+        """
+
+    @abstractmethod
+    def has_cached_passphrase(self) -> bool:
+        """Whether a sync passphrase is held in memory for this session."""
 
 
 class CloudServiceInterface(ABC):

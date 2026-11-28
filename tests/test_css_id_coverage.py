@@ -127,6 +127,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "memory-summary-reader-heading",
         # memory.tcss: MemorySyncSetupScreen .msync_card_actions Button
         "msync_btn_remember",
+        "msync_btn_move_to_vault",
+        "msync_btn_open_vault",
+        "msync_btn_enable",
+        "msync_btn_unlock_vault",
+        "msync_btn_retry",
         # provider_key_registry.tcss: .provider-key-workspace .provider-key-selection
         "provider_key_selection",
         # scp_transfer.tcss: SCPTransferScreen .transfer-path-group

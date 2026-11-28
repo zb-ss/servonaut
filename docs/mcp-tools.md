@@ -184,6 +184,8 @@ Return cached memory for an instance.
 
 *chat_exposed: yes*
 
+**Shared and synced memory.** For a server shared with one of your teams, `get_server_memory` also reads the team's copy. That needs your Memory Sync key. When the key is kept in your vault, the standalone MCP server (`servonaut --mcp`) and the relay open it the same way they open the vault: once the vault is unlocked on the computer, or the computer has a device key (`SERVONAUT_VAULT_DEVICE_KEY` or `vault.allow_file_key_store`, for computers without a keychain). No passphrase is involved, and nothing is uploaded or changed. If they cannot open the vault, the tool says to unlock your vault or add the computer to it, and tries again after `memory.vault_key_recheck_seconds` (default 60). See [Memory Sync](memory.md#memory-sync).
+
 ### `refresh_server_memory(instance_id, modules?)`
 
 Re-probe one or more modules, bypassing TTL freshness.  Omit `modules` to refresh all.

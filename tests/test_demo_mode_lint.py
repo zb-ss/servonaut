@@ -705,6 +705,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_show_setup_error", "update",
                    "Writes escaped exception message from setup flow — exception "
                    "type, not raw server data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_on_move_step", "update",
+                   "Writes fixed step labels of the move to the vault — "
+                   "code-controlled constants, no server or memory data."),
     AllowlistEntry("screens/memory_sync_setup.py", "_set_busy", "update",
                    "Writes a busy-state message passed from _do_setup — "
                    "always a code-controlled string constant."),
@@ -715,6 +718,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_do_forget", "update",
                    "config_manager.update(memory=...) to reset the remember flag — "
                    "config write, not a widget/UI write; no server-origin data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_set_sync_disabled", "update",
+                   "config_manager.update(memory=...) persists the Disable sync "
+                   "flag — config write, not a widget/UI write."),
     AllowlistEntry("screens/memory_sync_setup.py", "_store_remembered_passphrase", "update",
                    "config_manager.update(memory=...) persists the device-unlock "
                    "expiry — config write, not a widget/UI write."),

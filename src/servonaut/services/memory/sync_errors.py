@@ -7,6 +7,8 @@ words.
 
 from __future__ import annotations
 
+from servonaut.services.memory.custody_errors import CONTEXT_GENERAL, custody_error_message
+
 WRONG_PASSPHRASE_MESSAGE = "Wrong passphrase — try again."
 
 _RATE_LIMIT_KINDS = frozenset({"RateLimitedError", "RateLimited", "RateLimitTimeoutError"})
@@ -45,6 +47,9 @@ def describe_sync_error(exc: BaseException, *, failure_prefix: str) -> str:
         Plain text (no Rich markup): the exception text may come from the
         server, so callers show it with markup off or escaped.
     """
+    custody_text = custody_error_message(exc, CONTEXT_GENERAL)
+    if custody_text is not None:
+        return custody_text
     msg = str(exc) or exc.__class__.__name__
     kind = exc.__class__.__name__
     if kind in _RATE_LIMIT_KINDS or "rate limit" in msg.lower():

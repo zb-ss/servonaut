@@ -648,6 +648,8 @@ the same step:
   from a device you already use, or `servonaut vault recover` with your
   recovery key.
 
+Servonaut also keeps your Memory Sync key and your config sync key in your personal vault, as items named "Servonaut Memory Sync key" and "Servonaut config sync key". `servonaut vault items` lists them by those names and never shows their contents; they cannot be deleted while they are in use. Your vault recovery key is the only way to recover them if you lose access to the vault. To move an account that still uses a passphrase, run `servonaut memory move-key-to-vault`; see [Moving an existing account to the vault](memory.md#moving-an-existing-account-to-the-vault).
+
 Use `servonaut vault devices approve <device-id>` only while comparing the
 six-digit safety code on both devices. A mismatch rejects that registration;
 start again with the new device rather than retrying it. `devices revoke` asks

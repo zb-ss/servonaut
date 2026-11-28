@@ -469,3 +469,41 @@ def test_snapshot_fixture_passphrase_unwraps_private_key() -> None:
     wrapped = WrappedPrivateKey.from_json(json.dumps(fixture["wrapped_private_key"]))
     recovered = unwrap_private_key(wrapped, fixture["test_passphrase"])
     assert recovered == expected_priv_bytes
+
+
+class TestOpenDek:
+    """open_dek opens the caller's own sealed wrap of a data key."""
+
+    @staticmethod
+    def _seal(dek: bytes, public_key: bytes) -> str:
+        import base64 as b64
+        import nacl.public as nacl_public
+
+        return b64.b64encode(nacl_public.SealedBox(nacl_public.PublicKey(public_key)).encrypt(dek)).decode()
+
+    def test_round_trip_returns_a_zeroable_buffer(self):
+        from servonaut.services.memory.crypto import generate_keypair, open_dek, secure_zero
+
+        pair = generate_keypair()
+        dek = bytes(range(32))
+        opened = open_dek(self._seal(dek, pair.public_key), private_key=pair.private_key)
+        assert bytes(opened) == dek
+        assert isinstance(opened, bytearray)
+        secure_zero(opened)
+        assert bytes(opened) == bytes(32)
+
+    def test_wrong_key_fails_without_key_material_in_the_message(self):
+        from servonaut.services.memory.crypto import DecryptionFailedError, generate_keypair, open_dek
+
+        owner, other = generate_keypair(), generate_keypair()
+        wrap = self._seal(bytes(range(32)), owner.public_key)
+        with pytest.raises(DecryptionFailedError) as caught:
+            open_dek(wrap, private_key=other.private_key)
+        assert str(caught.value) == "decryption failed"
+
+    def test_wrong_length_key_is_refused(self):
+        from servonaut.services.memory.crypto import DecryptionFailedError, generate_keypair, open_dek
+
+        pair = generate_keypair()
+        with pytest.raises(DecryptionFailedError):
+            open_dek(self._seal(b"\x07" * 16, pair.public_key), private_key=pair.private_key)

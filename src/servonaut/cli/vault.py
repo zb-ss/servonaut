@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError, ClientUpdateRequiredError
+from servonaut.services.vault.items import APP_KEY_LABELS
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST,
     grant_summary,
@@ -860,6 +861,8 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
 
 
 def _named_row(row: Mapping[str, Any], names: Mapping[str, Any]) -> dict[str, Any]:
+    if row.get("type") in APP_KEY_LABELS:
+        return {**row, "name": APP_KEY_LABELS[row["type"]]}
     if row.get("type") != "ssh_key":
         return dict(row)
     name = names.get(row.get("item_id"))
@@ -869,7 +872,8 @@ def _named_row(row: Mapping[str, Any], names: Mapping[str, Any]) -> dict[str, An
 async def _items_with_names(services: Any, args: argparse.Namespace) -> dict[str, Any]:
     listed = await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted)
     if not args.names:
-        return listed
+        # Servonaut's own keys always carry their fixed label; nothing is decrypted for it.
+        return {**listed, "data": [_named_row(row, {}) if row.get("type") in APP_KEY_LABELS else row for row in listed["data"]]}
     choices = await _invoke(services, "ssh_key_choices", vault_id=args.vault, name_limit=None)
     names = {row["item_id"]: row.get("name") for row in choices}
     return {**listed, "data": [_named_row(row, names) for row in listed["data"]]}

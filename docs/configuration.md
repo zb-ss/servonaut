@@ -553,7 +553,7 @@ key. Those values are stored separately with operating-system key protection.
 |-------|------|-------------|
 | `vault.auto_grant` | bool | Lets an eligible administrator process pending automatic grants. The team vault policy still decides whether approval is required. |
 | `vault.strict_verification` | bool | Requires a local safety-number confirmation before a new or changed member identity receives a vault grant. |
-| `vault.allow_file_key_store` | bool | Allows the explicitly weaker, mode-restricted local device-key fallback when no trusted OS keyring is available. Keep this disabled unless headless operation requires it. |
+| `vault.allow_file_key_store` | bool | Allows the explicitly weaker, mode-restricted local device-key fallback when no trusted OS keyring is available. Keep this disabled unless headless operation requires it. Also what lets a computer without a keychain open the vault-held Memory Sync and config sync keys. |
 | `vault.poll_after_seconds` | int | Poll interval used when a live vault-event connection is unavailable. |
 | `vault.approval_poll_initial_seconds` / `vault.approval_poll_max_seconds` | number | Initial and capped delay while a new device waits for approval. |
 | `vault.agent_key_ttl_seconds` | int | Maximum lifetime of a key loaded into the private SSH agent. |
@@ -561,9 +561,44 @@ key. Those values are stored separately with operating-system key protection.
 | `vault.binding_read_backoff_seconds` | number | How long Servonaut stops checking server bindings after the service refuses a check (default `60`). It applies when the service limits requests without saying how long to wait, or does not accept the sign-in. A sign-in pause ends as soon as you sign in again. |
 
 Native vault SSH keys are loaded into a private session agent and are never
-written as a key file. For unattended test environments only,
-`SERVONAUT_VAULT_DEVICE_KEY` may provide the device-key material; do not use it
-for an ordinary interactive installation.
+written as a key file. On a computer without an operating-system keychain (a
+server, a container, an unattended runner), `SERVONAUT_VAULT_DEVICE_KEY` may
+provide the device-key material, or `vault.allow_file_key_store` may keep it in
+a restricted file. Do not use either on an ordinary interactive installation
+that has a keychain. The same device key lets the standalone MCP server and
+the relay open a vault-held Memory Sync key, so those processes need no
+passphrase (see [Memory Sync](memory.md#memory-sync)).
+
+### Config sync
+
+Config sync stores encrypted snapshots of your `config.json` on your Servonaut
+account (sidebar entry **Sync config**; sign in with `servonaut login` first). Tokens, keys and
+client secrets are removed before a snapshot is uploaded, and the service only
+holds ciphertext. The key that encrypts snapshots is kept one of two ways:
+
+- **In your vault** (when you have one). Config sync keeps a key in your
+  personal vault, as the item "Servonaut config sync key". Pushing, pulling and
+  restoring need no passphrase; unlocking the vault is the only unlock. A
+  restore on another computer needs that computer to be part of your vault.
+  New config sync use starts this way when your vault is ready and your account
+  has no passphrase snapshots yet.
+- **Under a passphrase you choose**, for accounts without a vault, or
+  snapshots made before.
+
+**Move key to vault.** When your vault is unlocked and some snapshots still use
+a passphrase, the **Config snapshots** screen shows **Move key to vault**. It
+asks for your vault recovery key first and checks it. It then uploads your
+current config under the vault key and, only after that snapshot exists,
+deletes your old passphrase snapshots from the service. If the upload cannot
+be confirmed, nothing is deleted. Afterwards the sync passphrase no longer
+opens anything, and your vault recovery key is the only recovery path. The
+same move is part of `servonaut memory move-key-to-vault` (use `--skip-memory`
+to move only this key); see [Moving an existing account to the
+vault](memory.md#moving-an-existing-account-to-the-vault).
+
+Servonaut versions older than the one that introduced this cannot restore a
+snapshot made under the vault key; update every computer that uses config sync
+first.
 
 Runtime state lives under `~/.servonaut/vault/` with owner-only permissions.
 It contains wrapped device material, trust pins and rollback state. Removing it
@@ -635,6 +670,7 @@ These environment variables configure service endpoints and local runtime behavi
 |----------|---------|-------------|
 | `SERVONAUT_API_URL` | `https://api.servonaut.dev` | Base URL for the Servonaut API (auth, config sync, teams, entitlements) |
 | `SERVONAUT_MCP_URL` | `https://mcp.servonaut.dev` | Base URL for the hosted MCP server (premium tools) |
+| `SERVONAUT_VAULT_DEVICE_KEY` | — | Device-key material for opening the vault on a computer without an OS keychain (servers, containers, unattended runners). Also lets the standalone MCP server and the relay read a vault-held Memory Sync key. Keep it secret; see [Vault](#vault) |
 | `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
 | `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
 | `SERVONAUT_PYPI_URL` | `https://pypi.org/pypi/servonaut/json` | PyPI JSON document read by the update check (pip and pipx installs) |

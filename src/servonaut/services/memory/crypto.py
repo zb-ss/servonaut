@@ -554,6 +554,38 @@ def encrypt_envelope(
         secure_zero(dek)
 
 
+DEK_LENGTH = 32
+
+
+def open_dek(wrapped_dek_b64: str, *, private_key: bytes) -> bytearray:
+    """Open the caller's own sealed wrap of an envelope's data key.
+
+    The key is returned in a ``bytearray`` so the caller can zero it with
+    :func:`secure_zero` as soon as it has been used.
+
+    Args:
+        wrapped_dek_b64: The caller's own base64 sealed wrap of the data key.
+        private_key: Caller's raw 32-byte X25519 private key.
+
+    Returns:
+        The 32-byte data key.
+
+    Raises:
+        DecryptionFailedError: If the wrap cannot be opened or does not hold a
+            32-byte key. The message never carries key material.
+        InvalidEnvelopeError: If the wrap has an impossible size.
+    """
+    wrapped = validate_wrapped_dek(wrapped_dek_b64)
+    try:
+        dek = bytearray(nacl.public.SealedBox(nacl.public.PrivateKey(private_key)).decrypt(wrapped))
+    except (nacl.exceptions.CryptoError, ValueError, TypeError) as exc:
+        raise DecryptionFailedError("decryption failed") from exc
+    if len(dek) != DEK_LENGTH:
+        secure_zero(dek)
+        raise DecryptionFailedError("decryption failed")
+    return dek
+
+
 def reseal_dek(
     wrapped_dek_b64: str,
     *,

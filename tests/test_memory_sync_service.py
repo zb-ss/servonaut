@@ -2115,3 +2115,311 @@ class TestKeyMaterialAnnouncedOnLoad:
         with caplog.at_level("WARNING"):
             svc._announce_key_material()
         assert "listener broke" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Vault custody
+# ---------------------------------------------------------------------------
+
+from servonaut.services.api_client import (  # noqa: E402
+    APIError as _APIError,
+    ForbiddenEntitlementError as _Forbidden,
+    NotFoundError as _NotFound,
+)
+from servonaut.services.memory.interfaces import (  # noqa: E402
+    KeyMaterial as _KeyMaterial,
+    UpsellRequired as _Upsell,
+    VaultCustodyLocked as _Locked,
+    VaultCustodyUnavailable as _Unavailable,
+)
+from servonaut.services.memory.key_custody import (  # noqa: E402
+    Resolution as _Resolution,
+    ResolutionKind as _Kind,
+    parse_key_record as _parse_key_record,
+)
+from servonaut.services.memory.sync_service import LocalUnlock, VaultUnlock  # noqa: E402
+
+
+def _fake_custody(resolution=None, mode="vault", enrolled=None):
+    custody = MagicMock()
+    custody.resolve = AsyncMock(return_value=resolution)
+    custody.enrolment_mode = AsyncMock(return_value=mode)
+    custody.enrol_in_vault = AsyncMock(return_value=enrolled)
+    return custody
+
+
+def _vault_material() -> _KeyMaterial:
+    return _KeyMaterial(user_id=42, public_key=b"\x05" * 32, private_key=b"\x06" * 32)
+
+
+def _vault_service(tmp_path: Path, resolution=None, **kwargs):
+    api = _make_api_client()
+    svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+    svc._self_user_id = 42
+    custody = _fake_custody(resolution, **kwargs)
+    svc.set_key_custody(custody)
+    return svc, api, custody
+
+
+class TestVaultCustody:
+    @pytest.mark.asyncio
+    async def test_vault_key_is_adopted_with_no_provider_call_and_no_get(self, tmp_path):
+        material = _vault_material()
+        svc, api, _ = _vault_service(
+            tmp_path, _Resolution(_Kind.VAULT_KEY, material=material, fingerprint="f" * 64))
+        provider = AsyncMock(return_value="pw")
+        listener = MagicMock()
+        svc.set_key_material_listener(listener)
+        await svc._ensure_keypair(provider)
+        provider.assert_not_called()
+        api.get.assert_not_called()
+        assert svc.is_configured and svc.key_source == "vault"
+        assert svc.get_key_material() == material
+        listener.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_locked_vault_raises_before_any_provider_call(self, tmp_path):
+        svc, api, _ = _vault_service(tmp_path, _Resolution(_Kind.VAULT_LOCKED, reason="vault_locked"))
+        provider = AsyncMock(return_value="pw")
+        with pytest.raises(_Locked):
+            await svc._ensure_keypair(provider)
+        provider.assert_not_called()
+        api.post.assert_not_called()
+        assert not svc.is_configured
+
+    @pytest.mark.asyncio
+    async def test_not_enrolled_with_a_ready_vault_enrols_in_the_vault(self, tmp_path):
+        svc, api, custody = _vault_service(
+            tmp_path, _Resolution(_Kind.NOT_ENROLLED), mode="vault", enrolled=_vault_material())
+        provider = AsyncMock(return_value="pw")
+        await svc._ensure_keypair(provider)
+        custody.enrol_in_vault.assert_awaited_once()
+        provider.assert_not_called()
+        api.post.assert_not_called()
+        assert svc.key_source == "vault" and svc.is_configured
+
+    @pytest.mark.asyncio
+    async def test_not_enrolled_with_identity_elsewhere_raises(self, tmp_path):
+        svc, _, custody = _vault_service(
+            tmp_path, _Resolution(_Kind.NOT_ENROLLED), mode="needs_vault_device")
+        provider = AsyncMock(return_value="pw")
+        with pytest.raises(_Locked) as info:
+            await svc._ensure_keypair(provider)
+        assert info.value.reason == "needs_vault_device"
+        provider.assert_not_called()
+        custody.enrol_in_vault.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_not_enrolled_without_a_vault_enrols_with_a_passphrase_and_no_get(self, tmp_path):
+        svc, api, _ = _vault_service(tmp_path, _Resolution(_Kind.NOT_ENROLLED), mode="passphrase")
+        provider = AsyncMock(return_value="pw")
+        with patch("servonaut.services.memory.sync_service.generate_keypair") as gen, \
+                patch("servonaut.services.memory.sync_service.wrap_private_key") as wrap:
+            gen.return_value = MagicMock(public_key=b"\x07" * 32, private_key=b"\x08" * 32,
+                                         fingerprint="e" * 64)
+            wrap.return_value.to_json.return_value = "{}"
+            await svc._ensure_keypair(provider)
+        api.get.assert_not_called()
+        api.post.assert_awaited_once()
+        assert svc.key_source == "passphrase"
+
+    @pytest.mark.asyncio
+    async def test_passphrase_resolution_reuses_the_fetched_record(self, tmp_path):
+        record = _parse_key_record({
+            "id": 1, "fingerprint": "a" * 64,
+            "public_key": base64.b64encode(b"\x01" * 32).decode(),
+            "wrapped_private_key": _fake_wrapped_json(), "custody": "passphrase",
+        })
+        svc, api, _ = _vault_service(tmp_path, _Resolution(_Kind.PASSPHRASE, record=record))
+        provider = AsyncMock(return_value="pw")
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key",
+                   return_value=b"\x02" * 32):
+            await svc._ensure_keypair(provider)
+        api.get.assert_not_called()
+        provider.assert_awaited_once_with("unlock")
+        assert svc.key_source == "passphrase"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_reraises_the_cause(self, tmp_path):
+        error = _APIError(code="boom", message="x", status=500)
+        svc, _, _ = _vault_service(
+            tmp_path, _Resolution(_Kind.UNAVAILABLE, reason="keys_me_unavailable", error=error))
+        with pytest.raises(_APIError):
+            await svc._ensure_keypair(AsyncMock())
+        svc2, _, _ = _vault_service(tmp_path, _Resolution(_Kind.UNAVAILABLE, reason="vault_unreadable"))
+        with pytest.raises(_Unavailable):
+            await svc2._ensure_keypair(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_network_path_without_custody_refuses_a_vault_record(self, tmp_path):
+        api = _make_api_client(get_return={
+            "fingerprint": "a" * 64, "public_key": "AAAA", "wrapped_private_key": None,
+            "custody": "vault"})
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        svc._self_user_id = 42
+        provider = AsyncMock(return_value="pw")
+        with pytest.raises(_Locked):
+            await svc._ensure_keypair(provider)
+        provider.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", ["memory_key_custody_vault", "device_signature_required"])
+    async def test_key_write_refusals_map_to_vault_locked(self, tmp_path, code):
+        api = _make_api_client(
+            get_side_effect=_NotFound(code="not_found", message="x", status=404),
+            post_side_effect=_APIError(code=code, message="svc wording", status=409))
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        svc._self_user_id = 42
+        with patch("servonaut.services.memory.sync_service.generate_keypair") as gen, \
+                patch("servonaut.services.memory.sync_service.wrap_private_key") as wrap:
+            gen.return_value = MagicMock(public_key=b"\x07" * 32, private_key=b"\x08" * 32,
+                                         fingerprint="e" * 64)
+            wrap.return_value.to_json.return_value = "{}"
+            with pytest.raises(_Locked) as info:
+                await svc._ensure_keypair(AsyncMock(return_value="pw"))
+        assert info.value.reason == code
+
+    @pytest.mark.asyncio
+    async def test_forbidden_entitlement_on_a_key_write_is_upsell(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, _Resolution(_Kind.NOT_ENROLLED), mode="vault")
+        custody.enrol_in_vault.side_effect = _Forbidden(
+            code="forbidden_entitlement", message="x", status=403,
+            details={"required_plan": "teams"})
+        with pytest.raises(_Upsell) as info:
+            await svc._ensure_keypair(AsyncMock())
+        assert info.value.plan == "teams"
+
+    @pytest.mark.asyncio
+    async def test_device_signature_required_on_enrol_is_vault_locked(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, _Resolution(_Kind.NOT_ENROLLED), mode="vault")
+        custody.enrol_in_vault.side_effect = _Locked("device_signature_required")
+        with pytest.raises(_Locked):
+            await svc._ensure_keypair(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_no_custody_leaves_key_source_unset_until_unlock(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        assert svc.key_source is None
+        svc.adopt_key_material(42, b"\x05" * 32, b"\x06" * 32)
+        assert svc.key_source == "vault"
+        svc.lock()
+        assert svc.key_source is None
+
+
+class TestUnlockFromVault:
+    @pytest.mark.asyncio
+    async def test_no_custody_is_not_vault(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        assert await svc.unlock_from_vault() is VaultUnlock.NOT_VAULT
+
+    @pytest.mark.asyncio
+    async def test_vault_key_unlocks_without_posting_or_enrolling(self, tmp_path):
+        svc, api, custody = _vault_service(
+            tmp_path, _Resolution(_Kind.VAULT_KEY, material=_vault_material()))
+        assert await svc.unlock_from_vault() is VaultUnlock.OK
+        assert svc.is_configured and svc.key_source == "vault"
+        custody.enrol_in_vault.assert_not_called()
+        api.post.assert_not_called()
+        api.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind,expected", [
+        (_Kind.VAULT_LOCKED, VaultUnlock.VAULT_LOCKED),
+        (_Kind.UNAVAILABLE, VaultUnlock.UNAVAILABLE),
+        (_Kind.PASSPHRASE, VaultUnlock.NOT_VAULT),
+        (_Kind.NOT_ENROLLED, VaultUnlock.NOT_VAULT),
+    ])
+    async def test_other_outcomes(self, tmp_path, kind, expected):
+        svc, _, custody = _vault_service(tmp_path, _Resolution(kind))
+        assert await svc.unlock_from_vault() is expected
+        assert not svc.is_configured
+        custody.enrol_in_vault.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_failure_is_unavailable(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        custody.resolve.side_effect = _Unavailable("x")
+        assert await svc.unlock_from_vault() is VaultUnlock.UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_unlock_local_still_works_and_sets_the_source(self, tmp_path):
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        svc._key_cache_path = tmp_path / "memory" / "keys.json"
+        _write_cache(svc._key_cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key",
+                   return_value=b"\x02" * 32):
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            assert await svc.unlock_local("pw") is LocalUnlock.OK
+        assert svc.key_source == "passphrase"
+
+
+class TestRotateInVault:
+    @pytest.mark.asyncio
+    async def test_adopts_the_new_key_backfills_and_drains_until_empty(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        material = _vault_material()
+        listener = MagicMock()
+        svc.set_key_material_listener(listener)
+        svc.backfill_from_local_store = MagicMock(return_value=2)
+        batches = [
+            MagicMock(accepted=["a"], rejected=[]),
+            MagicMock(accepted=[], rejected=[]),
+        ]
+        svc.drain_now = AsyncMock(side_effect=batches)
+        sentinel = object()
+
+        async def rotate(upload):
+            assert await upload(material) is None
+            return sentinel
+
+        custody.rotate_in_vault = AsyncMock(side_effect=rotate)
+        assert await svc.rotate_keypair_in_vault() is sentinel
+        assert svc.get_key_material() == material and svc.key_source == "vault"
+        listener.assert_called_once()
+        svc.backfill_from_local_store.assert_called_once()
+        assert svc.drain_now.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_stuck_queue_reports_the_reason_after_the_loop(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        svc.backfill_from_local_store = MagicMock(return_value=0)
+        svc.drain_now = AsyncMock(return_value=MagicMock(accepted=[], rejected=[]))
+        svc._halted_reason = "quota_exceeded"
+        svc._pending.append(MagicMock())
+
+        async def rotate(upload):
+            return await upload(_vault_material())
+
+        custody.rotate_in_vault = AsyncMock(side_effect=rotate)
+        assert await svc.rotate_keypair_in_vault() == "quota_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_errors_are_mapped_like_other_key_writes(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        custody.rotate_in_vault = AsyncMock(side_effect=_Forbidden(
+            code="forbidden_entitlement", message="m", status=403, details={"required_plan": "solo"}))
+        with pytest.raises(_Upsell):
+            await svc.rotate_keypair_in_vault()
+        custody.rotate_in_vault = AsyncMock(side_effect=_APIError(
+            code="device_signature_required", message="m", status=403))
+        with pytest.raises(_Locked):
+            await svc.rotate_keypair_in_vault()
+        exists = _APIError(code="item_type_exists", message="m", status=409)
+        custody.rotate_in_vault = AsyncMock(side_effect=exists)
+        with pytest.raises(_APIError) as caught:
+            await svc.rotate_keypair_in_vault()
+        assert caught.value is exists
+
+    @pytest.mark.asyncio
+    async def test_without_a_custody_it_is_unavailable_and_retry_is_a_no_op(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path)
+        with pytest.raises(_Unavailable):
+            await svc.rotate_keypair_in_vault()
+        assert await svc.retry_pending_item_cleanup() is True
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_item_cleanup_delegates(self, tmp_path):
+        svc, _, custody = _vault_service(tmp_path, None)
+        custody.retry_pending_item_cleanup = AsyncMock(return_value=False)
+        assert await svc.retry_pending_item_cleanup() is False

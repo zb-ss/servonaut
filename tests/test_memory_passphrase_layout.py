@@ -254,6 +254,8 @@ class _RetryUnlockApp(App):
     """Run the real prompt and retry methods with a local bootstrap boundary."""
 
     CSS_PATH = CSS_FILES
+    # A passphrase unlock: the real after-unlock step sees no vault key and returns.
+    memory_sync_service = None
 
     def __init__(self):
         super().__init__()
@@ -264,6 +266,11 @@ class _RetryUnlockApp(App):
         from servonaut.app import ServonautApp
 
         self.unlock_worker = self.run_worker(ServonautApp._unlock_memory_sync_with_prompt(self))
+
+    async def _after_memory_unlock(self):
+        from servonaut.app import ServonautApp
+
+        await ServonautApp._after_memory_unlock(self)
 
     async def bootstrap_memory_cloud(self):
         from servonaut.app import ServonautApp

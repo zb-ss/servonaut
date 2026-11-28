@@ -328,3 +328,15 @@ async def test_reset_none_clears_all_keys() -> None:
         status = limiter.quota_status()
     assert status["sync"]["used"] == 0
     assert status["summary"]["used"] == 0
+
+
+@pytest.mark.asyncio
+async def test_keys_me_window_follows_the_configured_size() -> None:
+    limiter = _make_limiter(keys_me_per_hour=2)
+    await limiter.acquire(RateLimitKey.KEYS_ME, block=False)
+    await limiter.acquire(RateLimitKey.KEYS_ME, block=False)
+    with pytest.raises(RateLimitWouldBlockError):
+        await limiter.acquire(RateLimitKey.KEYS_ME, block=False)
+    assert limiter.quota_status()["keys_me"]["capacity"] == 2
+    assert _make_limiter().quota_status()["keys_me"]["capacity"] == 20
+    assert _LIMITS[RateLimitKey.KEYS_ME].capacity == 20  # other instances keep the default

@@ -14,7 +14,7 @@ import secrets
 import time
 from collections import deque
 from pathlib import PurePosixPath
-from typing import Any, Deque, Dict, List, Mapping, Optional
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 from servonaut.config.accounts import PROVIDER_TITLES, primary_label
 from servonaut.config.schema import MCPConfig
@@ -304,6 +304,7 @@ class ServonautTools:
         # record (a HeadlessTeamMerge). None in the app, which runs its own.
         self._team_merge = team_merge
         self._shared_memory_reader = shared_memory_reader
+        self._shared_memory_unlock = None
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
         self._cache_service = cache_service
@@ -461,13 +462,17 @@ class ServonautTools:
     def has_memory(self) -> bool:
         return self._memory_service is not None
 
-    def set_shared_memory_reader(self, reader) -> None:
-        """Bind the reader of team-shared memory (the app holds the unlocked key).
+    def set_shared_memory_reader(self, reader, unlock=None) -> None:
+        """Bind the reader of team-shared memory.
 
         Pushed in after construction, like the secret provider: the reader
-        exists only once the memory cloud services are up.
+        exists only once the memory cloud services are up. The app holds the
+        unlocked key itself; a process without an app passes *unlock*, an
+        async callable returning why Memory Sync is locked (``None`` when it is
+        unlocked), which runs before each read.
         """
         self._shared_memory_reader = reader
+        self._shared_memory_unlock = unlock
 
     def set_secret_provider(self, provider) -> None:
         """Bind/rebind the active secret store used by the DB tools.
@@ -2593,7 +2598,7 @@ class ServonautTools:
         # agent a machine-readable `missing` code and a clear hint so it can
         # self-heal by calling build_server_memory.
         stored_modules = self._memory_service.get_all_modules(iid, provider)
-        shared = await self._shared_memory(requested, instance)
+        shared, lock_reason = await self._shared_memory(requested, instance)
         if shared is not None:
             merged = merge_shared(stored_modules, shared)
             if any(merged.get(n) is m for n, m in shared.modules.items()):
@@ -2612,12 +2617,8 @@ class ServonautTools:
                 f"Call build_server_memory(instance_id='{iid}') to "
                 "probe the host and populate memory, then retry."
             )
-            if requested.get('is_shared') is True and self._shared_memory_reader is None:
-                hint = (
-                    "This server is shared through a team. Memory a team "
-                    "shares can only be read from the Servonaut app with "
-                    "Memory Sync unlocked; this server cannot open it."
-                )
+            if requested.get('is_shared') is True:
+                hint = self._shared_memory_unavailable_hint(hint, lock_reason)
             payload = json.dumps({
                 "error": {
                     "code": "missing",
@@ -2627,7 +2628,7 @@ class ServonautTools:
             })
             self._audit.log(
                 'get_server_memory', {'instance_id': instance_id, 'format': format},
-                payload, False, 'missing',
+                payload, False, self._missing_audit_reason(requested, lock_reason),
             )
             return payload
 
@@ -2736,15 +2737,39 @@ class ServonautTools:
         except (OSError, ValueError):
             return False
 
-    async def _shared_memory(self, requested: Dict, target: Dict) -> Any:
-        """What a team shares of this server, or None (nothing, or not wired).
+    @staticmethod
+    def _missing_audit_reason(requested: Dict, lock_reason: Any) -> str:
+        """The audit reason for "no memory": its own code when a lock hid a shared copy."""
+        if requested.get('is_shared') is True and lock_reason is not None:
+            return f"shared_memory_locked_{getattr(lock_reason, 'value', lock_reason)}"
+        return 'missing'
+
+    def _shared_memory_unavailable_hint(self, default: str, lock_reason: Any) -> str:
+        """Why a team-shared server has no readable copy, for the ``missing`` hint."""
+        from servonaut.services.memory.headless_shared import (
+            NOT_WIRED_HINT, locked_hint,
+        )
+
+        if self._shared_memory_reader is None:
+            return NOT_WIRED_HINT
+        if lock_reason is not None:
+            return locked_hint(lock_reason)
+        return default
+
+    async def _shared_memory(self, requested: Dict, target: Dict) -> Tuple[Any, Any]:
+        """``(shared, lock_reason)``: what a team shares, or None; why it is locked.
 
         Read-only and best effort: any failure reads as nothing shared.
         """
         reader = self._shared_memory_reader
         if reader is None:
-            return None
+            return None, None
+        lock_reason = None
         try:
+            if self._shared_memory_unlock is not None:
+                lock_reason = await self._shared_memory_unlock()
+                if lock_reason is not None:
+                    return None, lock_reason
             rows = await self._shared_server_rows()
             candidates = share_candidates(target, rows) or share_candidates(requested, rows)
             from servonaut.services.memory.shared_view import combine_shared
@@ -2752,10 +2777,10 @@ class ServonautTools:
             return combine_shared([
                 await reader.read(c.team_slug, c.team_name, c.instance_id)
                 for c in candidates
-            ])
+            ]), None
         except Exception as exc:  # noqa: BLE001 — a fallback must never fail the tool
             logger.debug("Shared memory not read (%s)", type(exc).__name__)
-        return None
+        return None, None
 
     def _shared_memory_text(
         self, iid: str, modules: Dict, shared: Any, fmt: str,

@@ -6,7 +6,7 @@ import copy
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import glob
 import io
 import json
@@ -816,6 +816,29 @@ class ConfigManager:
         if self._config is None:
             self._config = self.load()
         return self._config
+
+    def read_saved_memory_remember(self) -> Tuple[bool, str]:
+        """``(remembered, expires_at)`` for the Memory Sync passphrase, as saved now.
+
+        ``get()`` keeps what was read at start-up, so a process that never
+        saves (the standalone MCP server) uses this to notice that the app
+        has since ticked "Remember on this device". Read-only: nothing is
+        migrated, written or replaced. Falls back to the loaded values when
+        the file cannot be read.
+        """
+        memory = self.get().memory
+        fallback = (bool(memory.sync_remember_device), memory.sync_remember_expires_at or "")
+        try:
+            raw = _parse_config_bytes(self._config_path.read_bytes())
+        except (OSError, ValueError):
+            return fallback
+        section = raw.get("memory") if isinstance(raw, dict) else None
+        if not isinstance(section, dict):
+            return (False, "")
+        return (
+            section.get("sync_remember_device") is True,
+            str(section.get("sync_remember_expires_at") or ""),
+        )
 
     @property
     def load_error(self) -> Optional[str]:

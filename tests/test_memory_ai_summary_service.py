@@ -298,7 +298,7 @@ class TestDispatchSummary:
                 "i-123",
                 "jwt.consent.token",
                 "server_60s",
-                "my-passphrase-123!",
+                passphrase="my-passphrase-123!",
             )
         )
 
@@ -321,17 +321,17 @@ class TestDispatchSummary:
 
     def test_dispatch_without_disclosure_raises(self, service, mock_api):
         with pytest.raises(ConsentNotConfirmedError):
-            run(service.dispatch_summary("i-123", "tok", "server_60s", "pass"))
+            run(service.dispatch_summary("i-123", "tok", "server_60s", passphrase="pass"))
         mock_api.post.assert_not_called()
 
     def test_entitlement_gate(self, service_no_entitlement):
         with pytest.raises(UpsellRequired):
-            run(service_no_entitlement.dispatch_summary("i-123", "tok", "server_60s", "pass"))
+            run(service_no_entitlement.dispatch_summary("i-123", "tok", "server_60s", passphrase="pass"))
 
     def test_rate_limiter_acquired(self, service, mock_api, mock_rate_limiter):
         mock_api.post.return_value = _DISPATCH_RESPONSE.copy()
         service.confirm_provider_disclosure_shown("i-123")
-        run(service.dispatch_summary("i-123", "tok", "server_60s", "pass"))
+        run(service.dispatch_summary("i-123", "tok", "server_60s", passphrase="pass"))
         mock_rate_limiter.acquire.assert_called_once_with(RateLimitKey.SUMMARY)
 
     def test_backend_maintenance(self, service, mock_api, mock_rate_limiter):
@@ -340,12 +340,12 @@ class TestDispatchSummary:
         )
         service.confirm_provider_disclosure_shown("i-123")
         with pytest.raises(BackendMaintenance):
-            run(service.dispatch_summary("i-123", "tok", "server_60s", "pass"))
+            run(service.dispatch_summary("i-123", "tok", "server_60s", passphrase="pass"))
 
     def test_message_field_defaults_empty(self, service, mock_api, mock_rate_limiter):
         mock_api.post.return_value = {"status": "queued"}
         service.confirm_provider_disclosure_shown("i-123")
-        result = run(service.dispatch_summary("i-123", "tok", "server_60s", "pass"))
+        result = run(service.dispatch_summary("i-123", "tok", "server_60s", passphrase="pass"))
         assert result.message == ""
 
         assert result.correlation_supported is False
@@ -484,3 +484,285 @@ class TestGetLatestSummary:
             match="no stable envelope id",
         ):
             run(service.wait_for_new_summary("i-123"))
+
+
+# ---------------------------------------------------------------------------
+# Envelope keys (B9): body forms, run_summary order, failed status
+# ---------------------------------------------------------------------------
+
+from servonaut.services.memory.ai_summary_service import (  # noqa: E402
+    HostedSummaryUnavailable,
+    SummaryFailed,
+    summary_error_message,
+)
+from servonaut.services.memory.retrieval_service import StaleEnvelopes  # noqa: E402
+
+_KEYS = [{"envelope_id": "env-os", "dek": "QUJD"}]
+_IDS_CONSENT = {**_CONSENT_RESPONSE, "envelope_ids": {"os": "env-os"}}
+_CONSENT_ARGS = ("jwt.consent.token", "server_60s")
+
+
+def _api_error(cls, code, status, details=None):
+    return cls(code=code, message="service wording", status=status, details=details)
+
+
+def _retrieval(keys=None, side_effect=None):
+    retrieval = MagicMock()
+    retrieval.envelope_keys = AsyncMock(
+        return_value=list(keys if keys is not None else _KEYS), side_effect=side_effect)
+    return retrieval
+
+
+def _run_summary(service, retrieval, *, source="vault", passphrase_provider=None):
+    return run(service.run_summary(
+        "i-123",
+        retrieval=retrieval,
+        key_source=lambda: source,
+        passphrase_provider=passphrase_provider or AsyncMock(return_value="pw-placeholder"),
+    ))
+
+
+@pytest.fixture
+def disclosed(service):
+    service.confirm_provider_disclosure_shown("i-123")
+    return service
+
+
+class TestDispatchBodies:
+    def test_keys_form_sends_envelope_keys_and_no_passphrase(self, disclosed, mock_api):
+        mock_api.post.return_value = _DISPATCH_RESPONSE.copy()
+        run(disclosed.dispatch_summary("i-123", "tok", "server_60s", envelope_keys=_KEYS))
+        body = mock_api.post.call_args.kwargs["json"]
+        assert body == {"consent_token": "tok", "mode": "server_60s", "envelope_keys": _KEYS}
+        assert mock_api.post.call_args.kwargs["retry_on_401"] is False
+
+    def test_passphrase_form_never_retries_on_401(self, disclosed, mock_api):
+        mock_api.post.return_value = _DISPATCH_RESPONSE.copy()
+        run(disclosed.dispatch_summary("i-123", "tok", "server_60s", passphrase="pw"))
+        assert mock_api.post.call_args.kwargs["retry_on_401"] is False
+        assert "envelope_keys" not in mock_api.post.call_args.kwargs["json"]
+
+    @pytest.mark.parametrize("kwargs", [{}, {"envelope_keys": _KEYS, "passphrase": "pw"}])
+    def test_exactly_one_form(self, disclosed, mock_api, kwargs):
+        with pytest.raises(ValueError):
+            run(disclosed.dispatch_summary("i-123", "tok", "server_60s", **kwargs))
+        mock_api.post.assert_not_called()
+
+    def test_consent_parses_envelope_ids(self, disclosed, mock_api):
+        mock_api.post.return_value = dict(_IDS_CONSENT)
+        consent = run(disclosed.request_consent_token("i-123", "server_60s"))
+        assert consent.envelope_ids == {"os": "env-os"}
+
+    def test_older_service_has_no_envelope_ids(self, disclosed, mock_api):
+        mock_api.post.return_value = dict(_CONSENT_RESPONSE)
+        assert run(disclosed.request_consent_token("i-123", "server_60s")).envelope_ids == {}
+
+
+class TestRunSummary:
+    def _consents(self, mock_api, *answers):
+        """Queue consent and dispatch answers in the order the calls happen."""
+        mock_api.post.side_effect = list(answers)
+
+    def test_vault_account_sends_keys_and_never_asks_for_a_passphrase(self, disclosed, mock_api):
+        self._consents(mock_api, dict(_IDS_CONSENT), _DISPATCH_RESPONSE.copy())
+        provider = AsyncMock()
+        retrieval = _retrieval()
+        result = _run_summary(disclosed, retrieval, source="vault", passphrase_provider=provider)
+        assert result.status == "queued"
+        provider.assert_not_awaited()
+        retrieval.envelope_keys.assert_awaited_once_with("i-123", {"os": "env-os"})
+        dispatch_body = mock_api.post.call_args_list[1].kwargs["json"]
+        assert "passphrase" not in dispatch_body and "envelope_keys" in dispatch_body
+
+    def test_passphrase_account_also_uses_keys(self, disclosed, mock_api):
+        self._consents(mock_api, dict(_IDS_CONSENT), _DISPATCH_RESPONSE.copy())
+        provider = AsyncMock()
+        _run_summary(disclosed, _retrieval(), source="passphrase", passphrase_provider=provider)
+        provider.assert_not_awaited()
+
+    def test_stale_409_is_retried_once_with_a_fresh_consent(self, disclosed, mock_api):
+        stale = _api_error(APIErrorClass, "stale_envelopes", 409)
+        self._consents(mock_api, dict(_IDS_CONSENT), stale, dict(_IDS_CONSENT), _DISPATCH_RESPONSE.copy())
+        result = _run_summary(disclosed, _retrieval())
+        assert result.status == "queued"
+        assert mock_api.post.await_count == 4
+
+    def test_stale_while_building_keys_is_retried_once(self, disclosed, mock_api):
+        self._consents(mock_api, dict(_IDS_CONSENT), dict(_IDS_CONSENT), _DISPATCH_RESPONSE.copy())
+        retrieval = MagicMock()
+        retrieval.envelope_keys = AsyncMock(side_effect=[StaleEnvelopes(), list(_KEYS)])
+        assert _run_summary(disclosed, retrieval).status == "queued"
+        assert retrieval.envelope_keys.await_count == 2
+
+    def test_second_stale_is_raised_with_its_text(self, disclosed, mock_api):
+        stale = _api_error(APIErrorClass, "stale_envelopes", 409)
+        self._consents(mock_api, dict(_IDS_CONSENT), stale, dict(_IDS_CONSENT), stale)
+        with pytest.raises(StaleEnvelopes) as caught:
+            _run_summary(disclosed, _retrieval())
+        assert summary_error_message(caught.value) == (
+            "Memory changed while the summary was being prepared. Try again.")
+        assert mock_api.post.await_count == 4
+
+    def test_503_falls_back_to_passphrase_for_passphrase_custody(self, disclosed, mock_api):
+        off = _api_error(FeatureDisabledError, "feature_disabled", 503)
+        self._consents(mock_api, dict(_IDS_CONSENT), off, _DISPATCH_RESPONSE.copy())
+        provider = AsyncMock(return_value="pw-placeholder")
+        _run_summary(disclosed, _retrieval(), source="passphrase", passphrase_provider=provider)
+        provider.assert_awaited_once()
+        assert mock_api.post.call_args_list[2].kwargs["json"]["passphrase"] == "pw-placeholder"
+
+    def test_503_for_a_vault_key_never_falls_back(self, disclosed, mock_api):
+        off = _api_error(FeatureDisabledError, "feature_disabled", 503)
+        self._consents(mock_api, dict(_IDS_CONSENT), off)
+        provider = AsyncMock()
+        with pytest.raises(HostedSummaryUnavailable) as caught:
+            _run_summary(disclosed, _retrieval(), source="vault", passphrase_provider=provider)
+        provider.assert_not_awaited()
+        assert mock_api.post.await_count == 2
+        assert summary_error_message(caught.value) == (
+            "Hosted summaries are not available for a key kept in the vault on this "
+            "Servonaut service yet. Try again later.")
+
+    @pytest.mark.parametrize("ids", [
+        {"os": "env-os", "secrets_vault": "env-x"},  # not a known module
+        {"os": "env-os", "network": "env-net"},  # known, but not in the consent's modules
+        {"os": "env-os", "services": "env-svc", "disk": "env-disk"},  # more than consented
+    ])
+    def test_envelope_ids_outside_the_consented_modules_open_no_key(self, disclosed, mock_api, ids):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        self._consents(mock_api, {**_CONSENT_RESPONSE, "envelope_ids": ids})
+        retrieval = _retrieval()
+        with pytest.raises(EnvelopeKeyError) as caught:
+            _run_summary(disclosed, retrieval)
+        assert caught.value.code == "envelope_not_consented"
+        retrieval.envelope_keys.assert_not_awaited()
+        assert mock_api.post.await_count == 1  # nothing was dispatched
+        assert "approved" in summary_error_message(caught.value)
+
+    def test_requested_modules_bound_the_ids_even_when_the_consent_lists_more(self, disclosed, mock_api):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        self._consents(mock_api, {**_CONSENT_RESPONSE, "envelope_ids": {"os": "env-os", "services": "env-svc"}})
+        retrieval = _retrieval()
+        with pytest.raises(EnvelopeKeyError):
+            run(disclosed.run_summary(
+                "i-123", retrieval=retrieval, key_source=lambda: "vault",
+                passphrase_provider=AsyncMock(), modules=["os"],
+            ))
+        retrieval.envelope_keys.assert_not_awaited()
+
+    def test_unreadable_envelope_key_has_plain_text(self):
+        from servonaut.services.memory.retrieval_service import EnvelopeKeyError
+
+        text = summary_error_message(EnvelopeKeyError("envelope_key_unreadable"))
+        assert text and "envelope_key_unreadable" not in text
+
+    def test_older_service_uses_passphrase_for_passphrase_custody(self, disclosed, mock_api):
+        self._consents(mock_api, dict(_CONSENT_RESPONSE), _DISPATCH_RESPONSE.copy())
+        retrieval = _retrieval()
+        _run_summary(disclosed, retrieval, source="passphrase")
+        retrieval.envelope_keys.assert_not_awaited()
+        assert mock_api.post.call_args_list[1].kwargs["json"]["passphrase"] == "pw-placeholder"
+
+    def test_older_service_vault_custody_gets_the_unavailable_text(self, disclosed, mock_api):
+        self._consents(mock_api, dict(_CONSENT_RESPONSE))
+        with pytest.raises(HostedSummaryUnavailable):
+            _run_summary(disclosed, _retrieval(), source="vault")
+
+    def test_custody_vault_409_and_envelope_keys_422_show_client_text(self, disclosed, mock_api):
+        refused = _api_error(APIErrorClass, "memory_key_custody_vault", 409)
+        self._consents(mock_api, dict(_CONSENT_RESPONSE), refused)
+        with pytest.raises(Exception) as caught:
+            _run_summary(disclosed, _retrieval(), source="passphrase")
+        assert summary_error_message(caught.value) == (
+            "Memory Sync keeps its key in your vault. Set up or unlock your vault on "
+            "this device, then try again.")
+
+        invalid = _api_error(
+            ValidationFailedError, "validation_failed", 422, {"field": "envelope_keys"})
+        self._consents(mock_api, dict(_IDS_CONSENT), invalid)
+        with pytest.raises(Exception) as caught:
+            _run_summary(disclosed, _retrieval())
+        assert summary_error_message(caught.value) == (
+            "The summary could not be started because the memory on the service "
+            "changed. Sync this server's memory and try again.")
+
+    def test_keys_never_reach_the_log(self, disclosed, mock_api, caplog):
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        off = _api_error(FeatureDisabledError, "feature_disabled", 503)
+        self._consents(mock_api, dict(_IDS_CONSENT), off)
+        with pytest.raises(HostedSummaryUnavailable):
+            _run_summary(disclosed, _retrieval(keys=[{"envelope_id": "env-os", "dek": "SECRETDEK"}]))
+        assert "SECRETDEK" not in caplog.text
+
+
+class TestFailedStatus:
+    def _config(self, mock_config):
+        mock_config.get.return_value = SimpleNamespace(memory=SimpleNamespace(
+            ai_summary_poll_interval_seconds=0.1, ai_summary_poll_timeout_seconds=1))
+
+    def test_failed_stops_polling_and_raises(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.return_value = {"status": "failed", "reason": "decryption_failed"}
+        with pytest.raises(SummaryFailed) as caught:
+            run(service.wait_for_new_summary("i-123", previous_envelope_id="old"))
+        assert mock_api.get.await_count == 1
+        assert caught.value.reason == "decryption_failed"
+        assert summary_error_message(caught.value) == (
+            "The summary could not be created (the memory could not be opened with "
+            "the keys that were sent).")
+
+    QUEUED_AT = "2026-11-28T10:00:00+00:00"
+
+    def test_timestamp_poll_asks_after_queued_at_and_raises_on_failed_without_an_id(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.side_effect = [
+            {"status": "pending", "poll_after_seconds": 0.1},
+            {"status": "failed", "reason": "balance_exhausted", "failed_at": "2026-11-28T10:00:05+00:00"},
+        ]
+        with pytest.raises(SummaryFailed) as caught:
+            run(service.wait_for_new_summary("i-123", previous_envelope_id="old", queued_at=self.QUEUED_AT))
+        assert all(c.kwargs == {"params": {"after": self.QUEUED_AT}} for c in mock_api.get.await_args_list)
+        assert summary_error_message(caught.value) == (
+            "The summary could not be created (your AI balance ran out).")
+
+    def test_timestamp_poll_returns_the_envelope_even_when_it_has_the_previous_id(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.side_effect = [{}, {"id": "old", "module": "ai_summary"}]
+        result = run(service.wait_for_new_summary("i-123", previous_envelope_id="old", queued_at=self.QUEUED_AT))
+        assert result["id"] == "old"
+
+    def test_without_queued_at_the_poll_keeps_the_envelope_id_form(self, service, mock_api, mock_config):
+        self._config(mock_config)
+        mock_api.get.return_value = {"id": "new"}
+        run(service.wait_for_new_summary("i-123", previous_envelope_id="old"))
+        assert mock_api.get.await_args.kwargs == {"params": {"after": "old"}}
+
+    @pytest.mark.parametrize("reason", [
+        "request_expired", "consent_invalid", "account_suspended", "balance_exhausted",
+        "passphrase_invalid", "memory_key_custody_vault", "no_active_key", "nothing_to_summarise",
+        "dek_invalid", "stale_envelopes", "provider_error", "internal_error",
+    ])
+    def test_every_server_reason_has_its_own_text_without_the_code(self, reason):
+        text = summary_error_message(SummaryFailed(reason))
+        assert reason not in text
+        assert text != "The summary could not be created (the service reported a problem)."
+
+    def test_unknown_reason_uses_the_generic_text_and_hides_the_code(self, service, mock_api, mock_config, caplog):
+        self._config(mock_config)
+        mock_api.get.return_value = {"status": "failed", "reason": "weird_new_code"}
+        with pytest.raises(SummaryFailed) as caught:
+            run(service.wait_for_new_summary("i-123"))
+        text = summary_error_message(caught.value)
+        assert text == "The summary could not be created (the service reported a problem)."
+        assert "weird_new_code" not in text
+        assert "weird_new_code" in caplog.text  # logged, not shown
+
+    def test_other_errors_have_no_summary_text(self):
+        assert summary_error_message(RuntimeError("x")) is None
+
+
+from servonaut.services.api_client import APIError as APIErrorClass  # noqa: E402

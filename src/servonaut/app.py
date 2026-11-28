@@ -69,8 +69,9 @@ _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 # the package) neither bundles it nor reports this import as missing.
 _DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
 
-# A headless or scripted session supplies the Memory Sync passphrase here
-# instead of through the passphrase dialog.
+# A scripted session of the app supplies the Memory Sync passphrase here
+# instead of through the passphrase dialog. Only the app reads it: the
+# standalone MCP server and the CLI do not.
 MEMORY_PASSPHRASE_ENV = "SERVONAUT_MEMORY_PASSPHRASE"
 
 if TYPE_CHECKING:
@@ -103,6 +104,62 @@ def _note_memory_bootstrap_outcome(task: "asyncio.Future[None]") -> None:
     exc = task.exception()
     if exc is not None:
         logger.info("Memory Sync unlock did not finish: %s", exc)
+
+
+def _note_memory_reactivation_outcome(task: "asyncio.Future[None]") -> None:
+    """Retrieve a start-up unlock's failure so it is logged once, never left unretrieved."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("Memory Sync start-up unlock did not finish (%s)", type(exc).__name__)
+
+
+class _PassphraseCustodyNeeded(Exception):
+    """Raised by the start-up passphrase provider: this account keeps its key under a passphrase.
+
+    Start-up must never open a passphrase dialog, so the shared bootstrap gets
+    a provider that raises this instead. The caller then follows the
+    remembered-passphrase path.
+    """
+
+
+async def _no_passphrase_at_startup(mode: str) -> str:
+    raise _PassphraseCustodyNeeded(mode)
+
+
+def _memory_sync_disabled(app: Any) -> bool:
+    """Whether the user switched Memory Sync off on this device ("Disable sync")."""
+    try:
+        return app.config_manager.get().memory.sync_disabled is True
+    except AttributeError:
+        return False
+
+
+def _memory_unlock_trigger(app: Any) -> Optional[str]:
+    """Why a Memory Sync unlock may start now, or ``None``. Local state only, no network.
+
+    ``"enrolled"``: a passphrase key file is on this device. ``"marker"``: the
+    local marker says the key is kept in the vault. ``"vault"``: the vault is
+    unlocked (the key may or may not be in it; the caller checks).
+    """
+    sync = getattr(app, "memory_sync_service", None)
+    auth = getattr(app, "auth_service", None)
+    if sync is None or auth is None:
+        return None
+    if not auth.is_authenticated or not auth.has_feature("memory_sync"):
+        return None
+    if _memory_sync_disabled(app):
+        return None
+    if sync.is_enrolled_locally():
+        return "enrolled"
+    custody = getattr(app, "memory_key_custody", None)
+    if custody is not None and custody.marker_says_vault(getattr(auth, "user_id", None)):
+        return "marker"
+    vault = getattr(app, "vault_command_service", None)
+    if vault is not None and vault.is_unlocked:
+        return "vault"
+    return None
 
 
 # Framework actions no Servonaut binding or link uses. They act on any widget,
@@ -227,6 +284,7 @@ class ServonautApp(App):
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
     memory_sync_service = None
+    memory_key_custody = None
     memory_retrieval_service = None
     memory_settings_service = None
     fleet_service = None
@@ -240,6 +298,7 @@ class ServonautApp(App):
     memory_crypto = None
     _memory_key_material = None
     _memory_bootstrap_task = None
+    _memory_reactivation_task = None
 
     # Shared state. The mutable containers are created per app in __init__:
     # a class-level default would be one list/set shared by every instance.
@@ -511,20 +570,13 @@ class ServonautApp(App):
         # Reactivate Memory Sync if the user enrolled on a previous session.
         # Gated entirely on local state (no eager network calls) so it is
         # safe and fast for users who have never set up Memory Sync.
-        sync = getattr(self, "memory_sync_service", None)
-        _auth = getattr(self, "auth_service", None)
-        if (
-            sync is not None
-            and _auth is not None
-            and _auth.is_authenticated
-            and _auth.has_feature("memory_sync")
-            and sync.is_enrolled_locally()
-        ):
+        if _memory_unlock_trigger(self) is not None:
             self.run_worker(
                 self._reactivate_memory_sync(),
                 name="memory_sync_autostart",
                 group="memory_reactivate",
                 exclusive=True,
+                exit_on_error=False,
             )
         # Start background fleet auto-scan loop (sleeps first, so safe to
         # call here even before the instance list is fully populated).
@@ -1093,16 +1145,8 @@ class ServonautApp(App):
                 exclusive=True,
             )
 
-        sync = getattr(self, "memory_sync_service", None)
-        auth = getattr(self, "auth_service", None)
         try:
-            should_reactivate = bool(
-                sync is not None
-                and auth is not None
-                and auth.is_authenticated
-                and auth.has_feature("memory_sync")
-                and sync.is_enrolled_locally()
-            )
+            should_reactivate = _memory_unlock_trigger(self) is not None
         except Exception:
             should_reactivate = False
         if not should_reactivate:
@@ -1113,6 +1157,7 @@ class ServonautApp(App):
             name="memory_sync_login_reactivate",
             group="memory_reactivate",
             exclusive=True,
+            exit_on_error=False,
         )
 
     async def _start_relay_with_toast(self) -> None:
@@ -1200,10 +1245,17 @@ class ServonautApp(App):
         try:
             import dataclasses as _dc
             cfg = self.config_manager.get()
-            updated_mem = _dc.replace(cfg.memory, sync_remember_device=False)
+            updated_mem = _dc.replace(
+                cfg.memory, sync_remember_device=False, sync_remember_expires_at="",
+            )
             self.config_manager.update(memory=updated_mem)
         except Exception:
             pass
+        # The marker names this account's key; the next account must not read it.
+        custody = getattr(self, "memory_key_custody", None)
+        if custody is not None:
+            custody.clear_marker()
+        self._memory_leftovers_cleared = False
 
     def _start_ui_stall_watchdog(self) -> None:
         """Log the stack of any long freeze, which otherwise leaves no trace."""
@@ -1418,14 +1470,19 @@ class ServonautApp(App):
         try:
             from servonaut.services.api_client import APIClient
             from servonaut.services.entitlement_guard import EntitlementGuard
-            from servonaut.services.config_sync_service import ConfigSyncService
+            from servonaut.services.config_sync_service import (
+                ConfigSyncService, vault_key_items_provider,
+            )
             from servonaut.services.team_service import TeamService
             from servonaut.services.remote_audit_service import RemoteAuditService
             self.api_client = APIClient(self.auth_service)
             from servonaut.services.ai_conversations import AIConversationsClient
             self.ai_conversations_client = AIConversationsClient(self.api_client)
             self.entitlement_guard = EntitlementGuard(self.auth_service)
-            self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+            self.config_sync_service = ConfigSyncService(
+                self.api_client, self.config_manager,
+                key_items_provider=vault_key_items_provider(lambda: self.vault_command_service),
+            )
             self.team_service = TeamService(self.api_client, config=self.config_manager.get())
             from servonaut.services.vault.command_service import VaultCommandService
             if self.vault_command_service is not None:
@@ -1443,6 +1500,7 @@ class ServonautApp(App):
             )
             if getattr(self, "servonaut_tools", None) is not None:
                 self.servonaut_tools.set_vault_runtime(self.vault_command_service)
+            self._watch_vault_unlock_for_memory(self.vault_command_service)
             self._start_vault_background()
             self.remote_audit_service = RemoteAuditService(self.api_client)
             from servonaut.services.findings_service import FindingsService
@@ -1657,7 +1715,9 @@ class ServonautApp(App):
 
         try:
             from servonaut.services.memory.rate_limiter import RateLimiter
-            self.memory_rate_limiter = RateLimiter()
+            self.memory_rate_limiter = RateLimiter(
+                keys_me_per_hour=self.config_manager.get().memory.keys_me_wait(),
+            )
         except ImportError:
             logger.debug("RateLimiter unavailable")
             return
@@ -1672,6 +1732,8 @@ class ServonautApp(App):
                 auth_service=self.auth_service,
                 rate_limiter=self.memory_rate_limiter,
             )
+            self.memory_key_custody = self._build_memory_key_custody()
+            self.memory_sync_service.set_key_custody(self.memory_key_custody)
             if self.memory_service is not None and hasattr(self.memory_service, "set_sync_service"):
                 self.memory_service.set_sync_service(self.memory_sync_service)
             # No share-keyed envelope is uploaded before the shared servers
@@ -1831,8 +1893,132 @@ class ServonautApp(App):
         # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
         # No auto-modals, no auto network calls.
 
+    def _build_memory_key_custody(self):
+        """The writable key custody: where the Memory Sync key lives, vault first.
+
+        The vault is read lazily because ``init_paid_services`` rebuilds
+        ``vault_command_service`` on every sign-in.
+        """
+        from servonaut.services.memory.key_custody import DEFAULT_MARKER_PATH, MemoryKeyCustody
+
+        return MemoryKeyCustody(
+            self.api_client,
+            self.auth_service,
+            self.memory_rate_limiter,
+            self._memory_app_keys,
+            self._memory_device_signer,
+            DEFAULT_MARKER_PATH,
+            True,
+            remote_identity_provider=self._vault_has_remote_identity,
+            memory_config_provider=lambda: self.config_manager.get().memory,
+            on_vault_detected=self._forget_memory_passphrase_leftovers,
+        )
+
+    def _memory_app_keys(self):
+        """The vault's app-key items, or ``None`` while the vault is absent or locked."""
+        vault = self.vault_command_service
+        if vault is None or not vault.is_unlocked:
+            return None
+        return vault.app_keys
+
+    def _memory_device_signer(self):
+        from servonaut.services.vault.errors import NO_LOCAL_IDENTITY, VaultUserError
+
+        vault = self.vault_command_service
+        if vault is None:
+            raise VaultUserError(NO_LOCAL_IDENTITY)
+        return vault.device_signer()
+
+    async def _vault_has_remote_identity(self) -> bool:
+        vault = self.vault_command_service
+        return vault is not None and await vault.has_remote_identity()
+
+    def _forget_memory_passphrase_leftovers(self) -> None:
+        custody = self.memory_key_custody
+        if custody is not None:
+            custody.forget_passphrase_leftovers(self.memory_sync_service, self.config_manager)
+
+    def _watch_vault_unlock_for_memory(self, vault) -> None:
+        """Start the Memory Sync unlock whenever *vault* goes from locked to unlocked.
+
+        A listener hears only unlocks after it is registered, so a vault that
+        is already unlocked starts the unlock right away.
+        """
+        vault.add_unlock_listener(self._start_memory_unlock_after_vault_unlock)
+        if vault.is_unlocked:
+            self._start_memory_unlock_after_vault_unlock()
+
+    def _start_memory_unlock_after_vault_unlock(self) -> None:
+        try:
+            self.run_worker(
+                self._reactivate_memory_sync(),
+                name="memory_sync_vault_unlock",
+                group="memory_vault_unlock",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - the app may not be running yet
+            logger.debug("Could not start the Memory Sync unlock after a vault unlock", exc_info=True)
+
+    async def _after_memory_unlock(self) -> None:
+        """After a vault-key unlock: drop passphrase leftovers once, retry a pending item delete."""
+        sync = self.memory_sync_service
+        if sync is None or sync.key_source != "vault":
+            return
+        if not getattr(self, "_memory_leftovers_cleared", False):
+            self._forget_memory_passphrase_leftovers()
+            self._memory_leftovers_cleared = True
+        try:
+            await sync.retry_pending_item_cleanup()
+        except Exception:  # noqa: BLE001 - the next vault unlock tries again
+            logger.debug("Pending Memory Sync key cleanup failed", exc_info=True)
+
+    async def _memory_unlock_applies(self) -> bool:
+        """Whether a section-open unlock may run. Never enrols a key, never raises.
+
+        With only an unlocked vault to go on, the key must already be in it:
+        a user who never set up Memory Sync must not get a key enrolled just
+        because the vault is open, and must not cost a lookup at the service.
+        """
+        trigger = _memory_unlock_trigger(self)
+        if trigger is None:
+            return False
+        if trigger != "vault":
+            return True
+        resolution = await self._resolve_custody_quietly()
+        if resolution is None:
+            return False
+        from servonaut.services.memory.key_custody import ResolutionKind
+
+        return resolution.kind is ResolutionKind.VAULT_KEY
+
+    async def _resolve_custody_quietly(self):
+        """The custody's local-first answer, or ``None`` when it cannot give one.
+
+        Offline or any other failure is an answer of "nothing to do now": the
+        unlock is retried at the next trigger, and the app is never taken down.
+        """
+        custody = getattr(self, "memory_key_custody", None)
+        if custody is None:
+            return None
+        try:
+            return await custody.resolve(quiet=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a start-up probe must never end the app
+            logger.info("Memory Sync custody check failed (%s)", type(exc).__name__)
+            return None
+
+    def _notify_vault_custody_locked(self, exc: BaseException) -> None:
+        from servonaut.services.memory.custody_errors import custody_error_message
+
+        self.notify(
+            custody_error_message(exc) or "Memory Sync is locked.",
+            severity="information", timeout=8, markup=False,
+        )
+
     async def bootstrap_memory_cloud(
-        self, passphrase_provider=None
+        self, passphrase_provider=None, *, quiet: bool = False
     ) -> None:
         """Bootstrap the memory cloud sync layer (user-initiated or auto-restart).
 
@@ -1846,6 +2032,9 @@ class ServonautApp(App):
                 ``self._prompt_memory_passphrase`` (shows the TUI modal).
                 Pass a custom coroutine factory to supply the passphrase
                 silently (e.g. from the OS keychain) without opening a modal.
+
+        ``quiet`` (start-up) makes no lookup at the service for the key's
+        custody and never enrols a key.
 
         Idempotent — safe to call multiple times; the underlying service
         skips the network round-trip if a key is already loaded.
@@ -1875,17 +2064,22 @@ class ServonautApp(App):
             )
             # The task copies this caller's context, so a passphrase modal
             # opened inside it still runs under the caller's worker.
-            task = asyncio.ensure_future(self._run_memory_bootstrap(provider))
+            task = asyncio.ensure_future(self._run_memory_bootstrap(provider, quiet))
             task.add_done_callback(_note_memory_bootstrap_outcome)
             self._memory_bootstrap_task = task
         await asyncio.shield(task)
 
-    async def _run_memory_bootstrap(self, provider) -> None:
+    async def _run_memory_bootstrap(self, provider, quiet: bool = False) -> None:
         """The bootstrap :meth:`bootstrap_memory_cloud` shares between callers."""
         await self.auth_service.fetch_user_id()
-        await self.memory_sync_service.bootstrap(
-            passphrase_provider=provider,
-        )
+        if quiet:
+            await self.memory_sync_service.bootstrap(
+                passphrase_provider=provider, quiet_custody=True,
+            )
+        else:
+            await self.memory_sync_service.bootstrap(
+                passphrase_provider=provider,
+            )
         self._propagate_memory_key_material()
         # Fetch the server-side auto_sync_enabled flag before spawning the loop.
         auto_sync = False
@@ -1973,24 +2167,16 @@ class ServonautApp(App):
     def _remember_passphrase_expired(self, cfg) -> bool:
         """Return ``True`` when the remembered passphrase has passed its TTL.
 
-        Reads ``config.memory.sync_remember_expires_at`` (ISO-8601 UTC).  An
-        empty value means "no expiry recorded" (legacy enrolment from before
-        the TTL feature) and is treated as NOT expired so existing users are
-        not surprised by a sudden re-prompt; the timestamp is stamped the next
-        time they re-enter the passphrase.  Unparseable values fail open
-        (not expired) — a malformed timestamp should not lock a user out.
+        The rule (empty or malformed timestamps count as not expired) lives
+        in :func:`remember_passphrase_expired`, which the standalone MCP
+        server shares.
         """
-        raw = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
-        if not raw:
-            return False
-        try:
-            from datetime import datetime, timezone
-            exp = datetime.fromisoformat(raw)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            return datetime.now(timezone.utc) >= exp
-        except Exception:
-            return False
+        from servonaut.services.memory.remembered_passphrase import (
+            remember_passphrase_expired,
+        )
+        return remember_passphrase_expired(
+            getattr(cfg.memory, "sync_remember_expires_at", "")
+        )
 
     def _clear_remember_device(self, *, drop_cache: bool = False) -> None:
         """Forget the device-remembered passphrase (keychain + config flags).
@@ -2029,7 +2215,7 @@ class ServonautApp(App):
                 "_clear_remember_device: could not clear remember flags: %s", exc
             )
 
-    async def _try_silent_memory_unlock(self) -> bool:
+    async def _try_silent_memory_unlock(self, *, quiet: bool = False) -> bool:
         """Attempt a no-modal keychain-based Memory Sync unlock.
 
         Returns ``True`` iff the sync service ends up configured.  Never shows
@@ -2043,6 +2229,9 @@ class ServonautApp(App):
         - transient network/backend failure with a VALID passphrase → keep the
           credential untouched and return ``False`` (retry next launch);
         - valid passphrase + successful bootstrap → return ``True``.
+
+        ``quiet`` (start-up) keeps the bootstrap from asking the service where
+        the key is kept: a start makes the calls it always made, no more.
         """
         import logging as _log
         _logger = _log.getLogger(__name__)
@@ -2096,7 +2285,11 @@ class ServonautApp(App):
                 return stored_pw
 
             try:
-                await self.bootstrap_memory_cloud(passphrase_provider=_kc_provider)
+                if quiet:
+                    await self.bootstrap_memory_cloud(
+                        passphrase_provider=_kc_provider, quiet=True)
+                else:
+                    await self.bootstrap_memory_cloud(passphrase_provider=_kc_provider)
                 _logger.info("_try_silent_memory_unlock: silent reactivation succeeded")
                 return True
             except Exception as exc:
@@ -2125,16 +2318,22 @@ class ServonautApp(App):
     async def _reactivate_memory_sync(self) -> None:
         """Startup SILENT reactivation of Memory Sync (no modal).
 
-        Runs as a background worker from ``on_mount``.  Only attempts the
-        non-intrusive keychain-based unlock — it NEVER opens a passphrase
-        modal on boot.  When the user has not opted into "Remember on this
-        device" (or the credential is stale/expired), Memory Sync simply stays
-        dormant until the user opens a memory section, at which point
-        :meth:`prompt_memory_sync_unlock` offers the unlock modal in context.
+        Runs as a background worker from ``on_mount``, after a login and after
+        a vault unlock. Only attempts the non-intrusive unlocks: a key kept in
+        the vault, or the keychain-based passphrase unlock. It NEVER opens a
+        passphrase modal on boot. When the user has not opted into "Remember
+        on this device" (or the credential is stale/expired), Memory Sync
+        simply stays dormant until the user opens a memory section, at which
+        point :meth:`prompt_memory_sync_unlock` offers the unlock modal in
+        context.
 
         Early-returns quickly when reactivation is not applicable so there is
-        no startup cost for users who never set up Memory Sync.  Free users
+        no startup cost for users who never set up Memory Sync. Free users
         (no ``memory_sync`` entitlement) never reach the unlock path at all.
+
+        Single flight: the three triggers (start, login, vault unlock) share
+        one run, so none of them locks a service another one just unlocked.
+        A failure is logged, never raised: this must not end the app.
         """
         sync = getattr(self, "memory_sync_service", None)
         if sync is None:
@@ -2142,19 +2341,92 @@ class ServonautApp(App):
         if sync.is_configured:
             self._propagate_memory_key_material()
             return
-        if not sync.is_enrolled_locally():
-            return
-        # Auth guard — all cheap (reads from persisted token, no network).
-        auth = getattr(self, "auth_service", None)
-        if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
-            return
+        task = getattr(self, "_memory_reactivation_task", None)
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._reactivate_memory_sync_once())
+            task.add_done_callback(_note_memory_reactivation_outcome)
+            self._memory_reactivation_task = task
         try:
-            await self._try_silent_memory_unlock()
+            await asyncio.shield(task)
         except asyncio.CancelledError:
             # Replaced by another unlock in the same worker group; the shared
-            # bootstrap goes on without this worker.
+            # run goes on without this worker.
             logger.info("Memory Sync start-up unlock handed over to a newer unlock")
             raise
+
+    async def _reactivate_memory_sync_once(self) -> None:
+        try:
+            await self._reactivate_memory_unlock()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - start-up must never end the app
+            logger.info("Memory Sync start-up unlock failed (%s)", type(exc).__name__)
+
+    async def _reactivate_memory_unlock(self) -> None:
+        trigger = _memory_unlock_trigger(self)
+        if trigger is None:
+            return
+        if trigger == "enrolled" and not self._memory_marker_says_vault():
+            # A passphrase account with a key file: today's path, no new call.
+            await self._try_silent_memory_unlock(quiet=True)
+            return
+        if await self._unlock_memory_from_custody():
+            return
+        # A passphrase account: only the remembered passphrase may help.
+        await self._try_silent_memory_unlock(quiet=True)
+
+    def _memory_marker_says_vault(self) -> bool:
+        custody = getattr(self, "memory_key_custody", None)
+        if custody is None:
+            return False
+        try:
+            return bool(custody.marker_says_vault(getattr(self.auth_service, "user_id", None)))
+        except Exception:  # noqa: BLE001 - an unreadable marker is no marker
+            return False
+
+    async def _unlock_memory_from_custody(self) -> bool:
+        """Unlock from a vault-held key; never from a lookup at the service.
+
+        Asks the custody first (local facts, no lookup for an account with no
+        key) and starts the shared bootstrap only for a key it can load.
+        Returns ``True`` when Memory Sync ended up unlocked or nothing more can
+        be done quietly (the key is in a vault this device cannot open, or
+        there is no key). ``False`` means a passphrase key file may still
+        unlock it: the caller follows the remembered passphrase.
+        """
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+        from servonaut.services.memory.key_custody import ResolutionKind
+
+        sync = self.memory_sync_service
+        resolution = await self._resolve_custody_quietly()
+        has_key_file = sync.is_enrolled_locally()
+        if resolution is None or resolution.kind is ResolutionKind.UNAVAILABLE:
+            return not has_key_file
+        if resolution.kind is ResolutionKind.VAULT_LOCKED:
+            # The Memory Sync screen explains the state; start-up stays quiet.
+            logger.info("Memory Sync key is kept in the vault; the vault is locked here")
+            return True
+        if resolution.kind is not ResolutionKind.VAULT_KEY:
+            return not has_key_file
+        try:
+            await self.bootstrap_memory_cloud(
+                passphrase_provider=_no_passphrase_at_startup, quiet=True)
+        except _PassphraseCustodyNeeded:
+            return False
+        except VaultCustodyLocked:
+            logger.info("Memory Sync key is kept in the vault; the vault is locked here")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the remembered passphrase may still work
+            if sync.is_configured:
+                self._propagate_memory_key_material()
+                await self._after_memory_unlock()
+                return True
+            logger.info("Memory Sync start-up unlock did not finish: %s", exc)
+            return False
+        await self._after_memory_unlock()
+        return True
 
     async def prompt_memory_sync_unlock(self) -> None:
         """Unlock Memory Sync when the user opens a memory section.
@@ -2178,13 +2450,10 @@ class ServonautApp(App):
             # Already unlocked: make sure sharing and the reader have the key.
             self._propagate_memory_key_material()
             return
-        if not sync.is_enrolled_locally():
-            return
-        auth = getattr(self, "auth_service", None)
-        if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
-            return
         # Don't nag: if the user dismissed the prompt this session, stay quiet.
         if getattr(self, "_memory_sync_prompt_skipped", False):
+            return
+        if not await self._memory_unlock_applies():
             return
 
         # Silent path first (also re-tries a transient boot failure).
@@ -2201,6 +2470,7 @@ class ServonautApp(App):
         failure is reported with its reason, and the next visit to a memory
         section asks again. A cancel leaves sync dormant for this session.
         """
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
         from servonaut.services.memory.sync_errors import (
             WRONG_PASSPHRASE_MESSAGE,
             describe_sync_error,
@@ -2210,6 +2480,15 @@ class ServonautApp(App):
         while True:
             try:
                 await self.bootstrap_memory_cloud()
+            except _PassphraseCustodyNeeded:
+                # Joined a start-up run that found a passphrase account after
+                # all: it is over, so the next round asks with the dialog.
+                continue
+            except VaultCustodyLocked as exc:
+                # A vault key never gets a passphrase dialog.
+                logger.info("prompt_memory_sync_unlock: key is kept in the vault, which is locked here")
+                self._notify_vault_custody_locked(exc)
+                return
             except RuntimeError:
                 # User cancelled the modal — leave sync dormant, no error toast.
                 self._memory_sync_prompt_skipped = True
@@ -2245,6 +2524,7 @@ class ServonautApp(App):
                 logger.info("prompt_memory_sync_unlock: wrong passphrase; asking again")
                 self.notify(WRONG_PASSPHRASE_MESSAGE, severity="error", timeout=6, markup=False)
                 continue
+            await self._after_memory_unlock()
             self.notify("Memory Sync unlocked.", severity="information", timeout=4)
             return
 
@@ -2725,8 +3005,9 @@ class ServonautApp(App):
     async def _prompt_memory_passphrase(self, mode: str = "enrol") -> str:
         """Return the memory encryption passphrase.
 
-        Checks ``SERVONAUT_MEMORY_PASSPHRASE`` env var first (headless/MCP
-        mode).  Falls back to ``PassphraseEnrolModal`` in TUI mode with
+        Checks the ``SERVONAUT_MEMORY_PASSPHRASE`` env var first (for scripted
+        app sessions; the standalone MCP server and CLI never read it).
+        Falls back to ``PassphraseEnrolModal`` in TUI mode with
         the appropriate ``mode`` (``"enrol"`` for first-time setup,
         ``"unlock"`` when the keypair already exists server-side).
 
@@ -2796,6 +3077,45 @@ class ServonautApp(App):
                     "_prompt_memory_passphrase: keychain store failed: %s", exc
                 )
         return result.passphrase
+
+    async def unlock_memory_sync_for_summary(self) -> bool:
+        """Have Memory Sync unlocked for a hosted summary; ``True`` when it is.
+
+        A vault key unlocks silently; a passphrase account gets the usual
+        dialog; a vault key with a locked vault gets the explanation and no
+        dialog. Whatever stops the unlock is reported to the user here.
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None:
+            return False
+        if not sync.is_configured:
+            # An explicit request, so an earlier dismissal does not apply.
+            self._memory_sync_prompt_skipped = False
+            await self.prompt_memory_sync_unlock()
+        if sync.is_configured:
+            self._propagate_memory_key_material()
+            return True
+        if getattr(self, "_memory_sync_prompt_skipped", False):
+            return False  # the user closed the dialog; already told
+        from servonaut.services.memory.interfaces import VaultCustodyLocked
+        from servonaut.services.memory.sync_service import VaultUnlock
+
+        if await sync.unlock_from_vault() is VaultUnlock.VAULT_LOCKED:
+            self._notify_vault_custody_locked(VaultCustodyLocked("vault_locked"))
+        else:
+            self.notify(
+                "Memory Sync is locked. Open Memory Sync to unlock it, then try again.",
+                severity="warning", markup=False,
+            )
+        return False
+
+    async def request_memory_passphrase(self, mode: str = "unlock") -> str:
+        """Ask for the Memory Sync passphrase (the hosted-summary fall-back).
+
+        Raises:
+            RuntimeError: If the user cancels the dialog.
+        """
+        return await self._prompt_memory_passphrase(mode)
 
     def pointer_gesture_started(self) -> None:
         """Start a fresh pointer-gesture window for TextArea auto-copy."""

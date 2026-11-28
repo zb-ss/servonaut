@@ -247,3 +247,15 @@ class TestIsModuleDisabledFor:
             per_server_overrides={"i-prod": {"memory_disabled": False}}
         )
         assert config.is_module_disabled_for("i-prod") is False
+
+
+class TestKeysMePerHour:
+    def test_default_matches_the_service_limit(self) -> None:
+        assert MemoryConfig().keys_me_wait() == 20
+
+    def test_a_positive_whole_number_is_used(self) -> None:
+        assert MemoryConfig(keys_me_per_hour=5).keys_me_wait() == 5
+
+    @pytest.mark.parametrize("value", [0, -3, 2.5, "9", True, None])
+    def test_anything_else_falls_back_to_the_default(self, value) -> None:
+        assert MemoryConfig(keys_me_per_hour=value).keys_me_wait() == 20

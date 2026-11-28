@@ -56,6 +56,8 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     Args:
         mode: ``"enrol"`` (create new keypair) or ``"unlock"`` (enter
               existing passphrase to unwrap a stored keypair).
+        remember_default: Initial state of the keep-unlocked switch.
+        show_remember: ``False`` hides the keep-unlocked switch.
 
     Returns via dismiss():
         :class:`PassphraseResult` on confirmation, or ``None`` on
@@ -141,6 +143,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         mode: str = "enrol",
         *,
         remember_default: bool = False,
+        show_remember: bool = True,
     ) -> None:
         super().__init__()
         self._mode = mode
@@ -149,7 +152,9 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         # lazy import avoids a hard dep on keyring at module load.
         try:
             from servonaut.services.memory import passphrase_store as _ps
-            self._remember_available = _ps.keyring_available()
+            # A prompt that only proves the passphrase (the move to the vault)
+            # must not offer to store it.
+            self._remember_available = show_remember and _ps.keyring_available()
         except Exception:
             self._remember_available = False
 

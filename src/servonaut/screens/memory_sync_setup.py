@@ -11,6 +11,7 @@ The context header stays above the scrollable setup or status workspace.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -18,7 +19,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Footer, Static
+from textual.widgets import Button, Footer, LoadingIndicator, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.markup import literal
@@ -48,6 +49,45 @@ _BENEFITS_FREE = [
     ("·", "$text-muted", "Drift detection across re-probes"),
     ("·", "$text-muted", "AI-queryable fact cache shared across devices"),
 ]
+
+# Where the key lives decides which card the screen shows.
+STATE_ACTIVE_VAULT = "active_vault"
+STATE_ACTIVE_MOVABLE = "active_movable"  # passphrase key, vault ready: Move button
+STATE_ACTIVE_NO_VAULT = "active_no_vault"
+STATE_ACTIVE_PLAIN = "active_plain"  # custody not wired (passphrase only)
+STATE_LOCKED_VAULT = "locked_vault"
+STATE_LOCKED_PASSPHRASE = "locked_passphrase"
+STATE_SETUP_VAULT = "setup_vault"
+STATE_SETUP_NEEDS_DEVICE = "setup_needs_device"
+STATE_SETUP_PASSPHRASE = "setup_passphrase"
+STATE_DISABLED = "disabled"  # "Disable sync" holds until the user enables it again
+STATE_VAULT_RETRY = "vault_retry"  # key kept in an unlocked vault, unlock did not finish
+
+_MOVE_CONFIRM_TITLE = "Move key to vault"
+_MOVE_CONFIRM_MESSAGE = (
+    "This moves your Memory Sync key into your vault and cannot be undone.\n\n"
+    "- Your Memory Sync passphrase stops working.\n"
+    "- Your vault recovery key becomes the only way to recover your synced "
+    "memory.\n"
+    "- The config sync key moves separately, from Config snapshots.\n\n"
+    "Next you enter your recovery key (and your passphrase if Memory Sync "
+    "is locked)."
+)
+_ROTATE_CONFIRM_MESSAGE = (
+    "Servonaut creates a new Memory Sync key in your vault and uploads your "
+    "local memory again under it. No passphrase is needed. Memory that "
+    "teammates shared with you is wrapped to the new key by their devices "
+    "the next time they open Memory Sync."
+)
+_MOVE_STEP_LABELS = {
+    "preflight": "Checking your vault and account",
+    "already_vault": "Your key is already in the vault",
+    "recovery_check": "Checking your recovery key",
+    "unlock_key": "Opening your Memory Sync key",
+    "vault_item": "Saving the key in your vault",
+    "switch_custody": "Switching the service to your vault key",
+    "cleanup": "Cleaning up this device",
+}
 
 
 class MemorySyncSetupScreen(WorkspaceScreen):
@@ -97,6 +137,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    # Set while a move or rotation runs so a refresh cannot replace its card.
+    _custody_busy = False
+    _render_generation = 0
+
     def on_mount(self) -> None:
         # The screen can be left or the app closed before it has finished composing;
         # Textual then dismantles it under this handler and its fields are gone.
@@ -119,6 +163,9 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         self._render_state()
 
     def _render_state(self) -> None:
+        if self._custody_busy:
+            return
+        self._render_generation += 1
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()
 
@@ -138,12 +185,25 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             return
 
         # 3. Solo+ — figure out configured state
-        configured = sync is not None and getattr(sync, "is_configured", False)
-        try:
-            enrolled = bool(sync is not None and sync.is_enrolled_locally())
-        except Exception:
-            enrolled = False
-        if configured:
+        state = self._custody_state(auth, sync)
+        if state is None:
+            # Only the "no key, vault not on this device" case needs the service.
+            self._set_status("⏳ Checking your key…", "$accent")
+            self.run_worker(
+                self._resolve_enrolment(
+                    self._render_generation, body.mount(self._build_loading_card()),
+                ),
+                group="memory_custody",
+                name="msync_resolve",
+                exclusive=False,
+            )
+            return
+        self._mount_state(body, auth, sync, state)
+
+    def _mount_state(self, body: VerticalScroll, auth: Any, sync: Any, state: str) -> None:
+        if state in (
+            STATE_ACTIVE_VAULT, STATE_ACTIVE_MOVABLE, STATE_ACTIVE_NO_VAULT, STATE_ACTIVE_PLAIN,
+        ):
             if getattr(self.app, "_memory_manual_sync_in_progress", False):
                 message = getattr(
                     self.app,
@@ -153,11 +213,139 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 self._set_status(f"⏳ {message}", "$accent")
             else:
                 self._set_status("● Active", "$success")
-            body.mount(self._build_status_card(auth, sync))
+            body.mount(self._build_status_card(auth, sync, state))
+            return
+        if state == STATE_SETUP_VAULT:
+            self._set_status("⚪ Not set up yet", "$warning")
+            body.mount(self._build_vault_setup_card(auth))
+        elif state == STATE_SETUP_NEEDS_DEVICE:
+            self._set_status("⚪ Not set up yet", "$warning")
+            body.mount(self._build_needs_device_card())
+        elif state == STATE_LOCKED_VAULT:
+            self._set_status("⚪ Locked", "$warning")
+            body.mount(self._build_locked_vault_card())
+        elif state == STATE_VAULT_RETRY:
+            self._set_status("⚪ Locked", "$warning")
+            body.mount(self._build_vault_retry_card())
+        elif state == STATE_DISABLED:
+            self._set_status("⚪ Disabled", "$text-muted")
+            body.mount(self._build_disabled_card())
+        elif state == STATE_LOCKED_PASSPHRASE:
+            self._set_status("⚪ Locked", "$warning")
+            ready = self._vault_ready()
+            body.mount(self._build_setup_card(auth, vault_hint=not ready, movable=ready))
         else:
-            status_label = "⚪ Locked" if enrolled else "⚪ Not set up yet"
-            self._set_status(status_label, "$warning")
+            self._set_status("⚪ Not set up yet", "$warning")
             body.mount(self._build_setup_card(auth))
+
+    # ------------------------------------------------------------------
+    # Custody state
+    # ------------------------------------------------------------------
+
+    def _vault_ready(self) -> bool:
+        vault = getattr(self.app, "vault_command_service", None)
+        return vault is not None and bool(vault.is_unlocked)
+
+    def _sync_disabled(self) -> bool:
+        try:
+            return self.app.config_manager.get().memory.sync_disabled is True
+        except AttributeError:
+            return False
+
+    def _custody_state(self, auth: Any, sync: Any) -> Optional[str]:
+        """Pick the card from local facts; ``None`` means the service must be asked.
+
+        Nothing here touches the network: the sync service's key source, the
+        "Disable sync" flag, the local marker and the key file answer every
+        case except a device that holds no key. That one needs the service,
+        even with an unlocked vault: the account may keep its key under a
+        passphrase.
+        """
+        custody = getattr(self.app, "memory_key_custody", None)
+        configured = sync is not None and getattr(sync, "is_configured", False)
+        if configured:
+            source = getattr(sync, "key_source", None)
+            if source == "vault":
+                return STATE_ACTIVE_VAULT
+            if custody is None:
+                return STATE_ACTIVE_PLAIN
+            # A key loaded from an item the service still keeps under a
+            # passphrase is an unfinished move: offer to finish it.
+            if source == "vault_pending":
+                return STATE_ACTIVE_MOVABLE
+            return STATE_ACTIVE_MOVABLE if self._vault_ready() else STATE_ACTIVE_NO_VAULT
+        if self._sync_disabled():
+            return STATE_DISABLED
+        if custody is None:
+            return STATE_SETUP_PASSPHRASE
+        try:
+            if custody.marker_says_vault(getattr(auth, "user_id", None)):
+                # An unlocked vault with no key loaded is a failed or pending
+                # unlock, not a locked vault: offer a retry, not "unlock it".
+                return STATE_VAULT_RETRY if self._vault_ready() else STATE_LOCKED_VAULT
+        except Exception:
+            logger.debug("custody marker unreadable", exc_info=True)
+        try:
+            enrolled = bool(sync is not None and sync.is_enrolled_locally())
+        except Exception:
+            enrolled = False
+        if enrolled:
+            return STATE_LOCKED_PASSPHRASE
+        return None
+
+    async def _resolve_enrolment(self, generation: int, loading_mounted: Any) -> None:
+        """Ask the custody where the key is kept, then draw the card.
+
+        The service's record comes first: an account that keeps its key under
+        a passphrase gets the passphrase card even with an unlocked vault. Only
+        an account without a key is asked how a new one would be kept.
+
+        Waits for the loading card to be mounted first, or a fast answer would
+        be drawn and then covered by the late loading card.
+        """
+        await loading_mounted
+        custody = getattr(self.app, "memory_key_custody", None)
+        try:
+            state = await self._state_from_service(custody)
+        except Exception as exc:
+            logger.info("Memory Sync custody check failed: %s", type(exc).__name__)
+            state = None
+        self._draw_resolved(generation, state)
+
+    async def _state_from_service(self, custody: Any) -> Optional[str]:
+        from servonaut.services.memory.key_custody import (
+            MODE_NEEDS_VAULT_DEVICE, MODE_VAULT, ResolutionKind,
+        )
+
+        resolution = await custody.resolve()
+        kind = resolution.kind
+        if kind is ResolutionKind.PASSPHRASE:
+            return STATE_LOCKED_PASSPHRASE
+        if kind is ResolutionKind.VAULT_KEY:
+            return STATE_VAULT_RETRY
+        if kind is ResolutionKind.VAULT_LOCKED:
+            return STATE_VAULT_RETRY if self._vault_ready() else STATE_LOCKED_VAULT
+        if kind is ResolutionKind.UNAVAILABLE:
+            return None
+        mode = await custody.enrolment_mode()
+        if mode == MODE_VAULT:
+            return STATE_SETUP_VAULT
+        if mode == MODE_NEEDS_VAULT_DEVICE:
+            return STATE_SETUP_NEEDS_DEVICE
+        return STATE_SETUP_PASSPHRASE
+
+    def _draw_resolved(self, generation: int, state: Optional[str]) -> None:
+        if generation != self._render_generation or self._custody_busy or not self.is_mounted:
+            return
+        auth = getattr(self.app, "auth_service", None)
+        sync = getattr(self.app, "memory_sync_service", None)
+        body = self.query_one("#msync_body", VerticalScroll)
+        body.remove_children()
+        if state is None:
+            self._set_status("⚪ Could not check", "$warning")
+            body.mount(self._build_check_failed_card())
+            return
+        self._mount_state(body, auth, sync, state)
 
     def _set_status(self, text: str, color: str) -> None:
         widget = self.query_one("#msync_status", Static)
@@ -227,7 +415,9 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             classes="msync_card_stack",
         )
 
-    def _build_setup_card(self, auth: Any) -> Container:
+    def _build_setup_card(
+        self, auth: Any, *, vault_hint: bool = False, movable: bool = False,
+    ) -> Container:
         plan = (auth._token.plan if getattr(auth, "_token", None) else "solo") or "solo"
         benefits = (
             _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
@@ -247,6 +437,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                     classes="msync_card_body",
                 ),
                 self._build_benefits_list(benefits),
+                *self._vault_hint_widgets(vault_hint),
                 Horizontal(
                     Button(
                         "Unlock Memory Sync",
@@ -254,6 +445,11 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                         id="msync_btn_setup",
                     ),
                     Button("Learn more", id="msync_btn_learn"),
+                    *self._open_vault_buttons(vault_hint),
+                    *(
+                        [Button("Move key to vault", id="msync_btn_move_to_vault")]
+                        if movable else []
+                    ),
                     classes="msync_card_actions",
                 ),
                 classes="msync_card msync_card_primary",
@@ -271,7 +467,114 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             classes="msync_card_stack",
         )
 
-    def _build_status_card(self, auth: Any, sync: Any) -> Container:
+    _NO_VAULT_HINT = (
+        "Open your vault to keep this key there instead: no passphrase to "
+        "remember, and your vault recovery key can restore it."
+    )
+
+    @classmethod
+    def _vault_hint_widgets(cls, show: bool) -> list:
+        if not show:
+            return []
+        return [Static(cls._NO_VAULT_HINT, classes="msync_card_body", id="msync_vault_hint")]
+
+    @staticmethod
+    def _open_vault_buttons(show: bool) -> list:
+        return [Button("Open vault", id="msync_btn_open_vault")] if show else []
+
+    def _build_loading_card(self) -> Container:
+        return Container(
+            LoadingIndicator(id="msync_loading"),
+            Static("Checking where your key is kept…", id="msync_loading_text"),
+            classes="msync_card msync_card_primary",
+        )
+
+    def _build_check_failed_card(self) -> Container:
+        return Container(
+            Static("[bold]Could not check your key[/bold]", classes="msync_card_title"),
+            Static(
+                "Servonaut could not check where your Memory Sync key is kept. "
+                "Try again in a moment.",
+                classes="msync_card_body",
+            ),
+            Horizontal(
+                Button("Try again", variant="primary", id="msync_btn_retry"),
+                classes="msync_card_actions",
+            ),
+            classes="msync_card msync_card_primary",
+        )
+
+    def _build_vault_card(
+        self, title: str, body: str, buttons: list, benefits: Optional[list] = None,
+    ) -> Container:
+        children: list = [
+            Static(f"[bold]{escape(title)}[/bold]", classes="msync_card_title"),
+            Static(escape(body), classes="msync_card_body", id="msync_vault_body"),
+        ]
+        if benefits:
+            children.append(self._build_benefits_list(benefits))
+        children.append(Horizontal(*buttons, classes="msync_card_actions"))
+        return Container(*children, classes="msync_card msync_card_primary")
+
+    def _build_vault_setup_card(self, auth: Any) -> Container:
+        benefits = (
+            _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
+        )
+        return Container(
+            self._build_vault_card(
+                "Set up Memory Sync",
+                "Your key will be kept in your vault. No passphrase needed.",
+                [
+                    Button("Set up Memory Sync", variant="primary", id="msync_btn_setup"),
+                    Button("Learn more", id="msync_btn_learn"),
+                ],
+                benefits,
+            ),
+            Container(
+                Static("[bold]Heads-up[/bold]", classes="msync_card_title"),
+                Static(
+                    "Your vault recovery key is the only way back to your synced "
+                    "memory if you lose access to your vault. Keep it safe.",
+                    classes="msync_card_body msync_card_warning",
+                ),
+                classes="msync_card",
+            ),
+            classes="msync_card_stack",
+        )
+
+    def _build_needs_device_card(self) -> Container:
+        return self._build_vault_card(
+            "Add this device to your vault first",
+            "Your account has a vault, and Memory Sync keeps its key there. "
+            "Add this device to your vault, then come back to set up Memory Sync.",
+            [Button("Open vault", variant="primary", id="msync_btn_open_vault")],
+        )
+
+    def _build_locked_vault_card(self) -> Container:
+        return self._build_vault_card(
+            "Locked",
+            "Your Memory Sync key is kept in your vault. Unlock or add this "
+            "device to your vault to use Memory Sync here.",
+            [Button("Open vault", variant="primary", id="msync_btn_open_vault")],
+        )
+
+    def _build_vault_retry_card(self) -> Container:
+        return self._build_vault_card(
+            "Locked",
+            "Your Memory Sync key is kept in your vault, which is unlocked, but "
+            "Memory Sync did not unlock. Try again.",
+            [Button("Try again", variant="primary", id="msync_btn_unlock_vault")],
+        )
+
+    def _build_disabled_card(self) -> Container:
+        return self._build_vault_card(
+            "Disabled on this device",
+            "Memory Sync is off on this device. Your encrypted memory on the "
+            "service is untouched. Enable it to unlock again.",
+            [Button("Enable Memory Sync", variant="primary", id="msync_btn_enable")],
+        )
+
+    def _build_status_card(self, auth: Any, sync: Any, state: str = STATE_ACTIVE_PLAIN) -> Container:
         status = getattr(sync, "status", None)
         last_sync = "—"
         used = "—"
@@ -334,12 +637,28 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         if not remember_available:
             auto_unlock_label = "unavailable (no supported OS keychain)"
 
+        in_vault = state == STATE_ACTIVE_VAULT
         actions_children: list = [
             Button("Sync all local memory", variant="primary", id="msync_btn_sync_now"),
             Button("Rotate keypair", id="msync_btn_rotate"),
             Button("Disable sync", variant="warning", id="msync_btn_disable"),
         ]
-        if is_remembered:
+        extra_notes: list = []
+        if state == STATE_ACTIVE_MOVABLE:
+            actions_children.append(Button("Move key to vault", id="msync_btn_move_to_vault"))
+            extra_notes.append(Static(
+                "Your vault can keep this key, so you would not need a passphrase "
+                "any more. Moving it cannot be undone.",
+                classes="msync_card_body", id="msync_move_hint",
+            ))
+        elif state == STATE_ACTIVE_NO_VAULT:
+            actions_children.append(Button("Open vault", id="msync_btn_open_vault"))
+            extra_notes.append(Static(
+                self._NO_VAULT_HINT, classes="msync_card_body", id="msync_vault_hint",
+            ))
+        if in_vault:
+            pass  # no passphrase, so no forget or auto-unlock control
+        elif is_remembered:
             actions_children.append(
                 Button("Forget on this device", id="msync_btn_forget")
             )
@@ -370,8 +689,12 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                         f"{pending} envelope(s)",
                         value_id="msync_pending_value",
                     ),
+                    *(
+                        [self._kv_row("Key", "kept in your vault", value_id="msync_key_value")]
+                        if in_vault else []
+                    ),
                     self._kv_row("Key fingerprint", fingerprint),
-                    self._kv_row("Auto-unlock", auto_unlock_label),
+                    *([] if in_vault else [self._kv_row("Auto-unlock", auto_unlock_label)]),
                     classes="msync_kv_grid",
                 ),
                 classes="msync_card msync_card_primary",
@@ -382,10 +705,11 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                     *actions_children,
                     classes="msync_card_actions msync_configured_actions",
                 ),
+                *extra_notes,
                 Static(
                     "[dim]Disabling stops the background sync loop on this "
                     "device but leaves your encrypted data intact on the "
-                    "server. Re-enrol any time to resume.[/dim]",
+                    "server. Turn it back on from this screen at any time.[/dim]",
                     classes="msync_card_body",
                 ),
                 classes="msync_card",
@@ -515,6 +839,13 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 name="msync_setup",
                 exclusive=True,
             )
+        elif bid in ("msync_btn_enable", "msync_btn_unlock_vault"):
+            self.run_worker(
+                self._do_enable(),
+                group="memory_sync",
+                name="msync_enable",
+                exclusive=True,
+            )
         elif bid == "msync_btn_remember":
             self.run_worker(
                 self._do_remember(),
@@ -525,16 +856,51 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         elif bid == "msync_btn_sync_now":
             self._start_sync_now()
         elif bid == "msync_btn_rotate":
-            self.run_worker(
-                self._do_rotate(),
-                group="memory_sync",
-                name="msync_rotate",
-                exclusive=True,
-            )
+            self._start_rotate()
+        elif bid == "msync_btn_move_to_vault":
+            self._start_custody_worker(self._do_move_to_vault(), "msync_move_to_vault")
+        elif bid == "msync_btn_open_vault":
+            self._open_vault()
+        elif bid == "msync_btn_retry":
+            self._render_state()
         elif bid == "msync_btn_disable":
             self._do_disable()
         elif bid == "msync_btn_forget":
             self._do_forget()
+
+    def _open_vault(self) -> None:
+        from servonaut.screens.vault import VaultScreen
+
+        self.app.switch_screen(VaultScreen())
+
+    def _start_rotate(self) -> None:
+        sync = getattr(self.app, "memory_sync_service", None)
+        if getattr(sync, "key_source", None) == "vault":
+            self._start_custody_worker(self._do_rotate_in_vault(), "msync_rotate_vault")
+            return
+        self.run_worker(
+            self._do_rotate(),
+            group="memory_sync",
+            name="msync_rotate",
+            exclusive=True,
+        )
+
+    def _start_custody_worker(self, coro: Any, name: str) -> None:
+        # Not exclusive: replacing a running move would cancel it mid-step.
+        if self._custody_busy:
+            coro.close()
+            return
+        self.run_worker(
+            self._guarded(coro), group="memory_custody", name=name, exclusive=False,
+        )
+
+    async def _guarded(self, coro: Any) -> None:
+        """Hold the busy flag from the first question to the end, whatever happens."""
+        self._custody_busy = True
+        try:
+            await coro
+        finally:
+            self._custody_busy = False
 
     @staticmethod
     def _open_url(url: str) -> None:
@@ -544,6 +910,23 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             webbrowser.open(url)
         except Exception as exc:
             logger.warning("Could not open browser: %s", exc)
+
+    def _set_sync_disabled(self, disabled: bool) -> None:
+        """Persist the "Disable sync" flag; start-up and every unlock trigger honour it."""
+        try:
+            import dataclasses as _dc
+
+            memory = self.app.config_manager.get().memory
+            if memory.sync_disabled is disabled:
+                return
+            self.app.config_manager.update(memory=_dc.replace(memory, sync_disabled=disabled))
+        except Exception as exc:
+            logger.warning("could not save the Memory Sync disabled flag: %s", exc)
+
+    async def _do_enable(self) -> None:
+        """Clear the disabled flag, then unlock like Set up does."""
+        self._set_sync_disabled(False)
+        await self._do_setup()
 
     async def _do_setup(self) -> None:
         sync = getattr(self.app, "memory_sync_service", None)
@@ -602,6 +985,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             "msync_btn_disable",
             "msync_btn_remember",
             "msync_btn_forget",
+            "msync_btn_move_to_vault",
+            "msync_btn_open_vault",
+            "msync_btn_enable",
+            "msync_btn_unlock_vault",
         ):
             try:
                 self.query_one(f"#{btn_id}", Button).disabled = True
@@ -616,6 +1003,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             "msync_btn_disable",
             "msync_btn_remember",
             "msync_btn_forget",
+            "msync_btn_move_to_vault",
+            "msync_btn_open_vault",
+            "msync_btn_enable",
+            "msync_btn_unlock_vault",
         ):
             try:
                 self.query_one(f"#{btn_id}", Button).disabled = False
@@ -926,6 +1317,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             sync.clear_local_keypair_cache()
         except Exception as exc:
             logger.warning("_do_disable: clear_local_keypair_cache failed: %s", exc)
+        # Durable: a vault-held key has no key file to remove, so without
+        # the flag the next start, vault unlock or Fleet memory visit would
+        # unlock Memory Sync again.
+        self._set_sync_disabled(True)
         # Clear keychain passphrase and remember flag so there is no stale
         # credential left behind.
         self._do_forget(notify=False)
@@ -961,3 +1356,197 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 severity="information",
             )
         self._render_state()
+
+    # ------------------------------------------------------------------
+    # Vault custody actions
+    # ------------------------------------------------------------------
+
+    async def _ask_modal(self, modal: Any) -> Any:
+        """Push *modal* and wait for its result.
+
+        Uses a callback and a future rather than ``push_screen_wait`` because
+        the move asks from a helper thread's request, which has no worker.
+        """
+        future = asyncio.get_running_loop().create_future()
+        self.app.push_screen(modal, lambda result: future.done() or future.set_result(result))
+        return await future
+
+    async def _do_rotate_in_vault(self) -> None:
+        from servonaut.screens.snapshot_manager import ConfirmModal
+
+        sync = getattr(self.app, "memory_sync_service", None)
+        if sync is None:
+            return
+        if not await self._ask_modal(
+            ConfirmModal(title="Rotate keypair", message=_ROTATE_CONFIRM_MESSAGE)
+        ):
+            return
+        self._custody_busy = True
+        self._set_busy("Rotating your key in the vault…")
+        try:
+            result = await sync.rotate_keypair_in_vault()
+        except Exception as exc:
+            self._custody_busy = False
+            self._clear_busy()
+            self._notify_custody_failure(exc, "rotation", "Rotation failed")
+            self._render_state()
+            return
+        self._custody_busy = False
+        self._clear_busy()
+        self._notify_rotation_result(result)
+        self._render_state()
+
+    def _notify_rotation_result(self, result: Any) -> None:
+        text = "Keypair rotated. Your new key is kept in your vault."
+        if getattr(result, "old_item_kept", False):
+            text += " Your previous key stays in your vault until older memory ages out."
+        self.app.notify(text, severity="information", markup=False)
+        upload_error = getattr(result, "upload_error", None)
+        if upload_error:
+            self.app.notify(
+                f"Some memory could not be uploaded again yet: {upload_error}",
+                severity="warning", timeout=10, markup=False,
+            )
+
+    def _notify_custody_failure(self, exc: BaseException, context: str, prefix: str) -> None:
+        from servonaut.services.memory.custody_errors import custody_error_message
+        from servonaut.services.memory.sync_errors import describe_sync_error
+
+        text = custody_error_message(exc, context) or describe_sync_error(
+            exc, failure_prefix=prefix
+        )
+        self.app.notify(text, severity="error", timeout=8, markup=False)
+
+    def _build_mover(self) -> Any:
+        from servonaut.services.memory.custody_move import MemoryCustodyMover
+
+        app = self.app
+        parts = (
+            getattr(app, "api_client", None),
+            getattr(app, "auth_service", None),
+            getattr(app, "memory_rate_limiter", None),
+            getattr(app, "vault_command_service", None),
+            getattr(app, "memory_sync_service", None),
+            getattr(app, "memory_key_custody", None),
+            getattr(app, "config_manager", None),
+        )
+        if any(part is None for part in parts):
+            return None
+        return MemoryCustodyMover(*parts)
+
+    def _threaded_prompt(self, ask: Any, loop: asyncio.AbstractEventLoop) -> Any:
+        """A blocking provider for the mover that shows a modal on the app loop.
+
+        The mover runs its providers in a helper thread; this hands the
+        question to the loop and waits. A cancelled prompt aborts the move.
+        """
+        from servonaut.services.memory.custody_move import MoveAborted
+
+        def provider() -> str:
+            answer = asyncio.run_coroutine_threadsafe(ask(), loop).result()
+            if answer is None:
+                raise MoveAborted()
+            return answer
+
+        return provider
+
+    async def _ask_recovery_key(self) -> Optional[str]:
+        from servonaut.screens.vault import VaultSecretPromptModal
+
+        return await self._ask_modal(VaultSecretPromptModal(
+            "Confirm your recovery key",
+            "Type your vault recovery key to show you still have it. It is "
+            "checked against your vault and is not stored.",
+        ))
+
+    async def _ask_passphrase(self) -> Optional[str]:
+        from servonaut.screens.memory_keys import PassphraseEnrolModal
+
+        result = await self._ask_modal(PassphraseEnrolModal(mode="unlock", show_remember=False))
+        return None if result is None else result.passphrase
+
+    async def _do_move_to_vault(self) -> None:
+        from servonaut.screens.snapshot_manager import ConfirmModal
+        from servonaut.services.memory.custody_move import MoveAborted, MoveStopped
+
+        if not await self._ask_modal(ConfirmModal(
+            title=_MOVE_CONFIRM_TITLE, message=_MOVE_CONFIRM_MESSAGE, danger=True,
+        )):
+            return
+        mover = self._build_mover()
+        if mover is None:
+            self.app.notify(
+                "Memory Sync is not ready to move yet. Try again in a moment.",
+                severity="warning", markup=False,
+            )
+            return
+        loop = asyncio.get_running_loop()
+        self._custody_busy = True
+        self._move_lines: list[str] = []
+        self._show_move_card()
+        try:
+            report = await mover.run(
+                self._threaded_prompt(self._ask_passphrase, loop),
+                self._threaded_prompt(self._ask_recovery_key, loop),
+                self._on_move_step,
+            )
+        except MoveAborted:
+            self._finish_move()
+            self.app.notify("Move cancelled. Nothing was changed.", markup=False)
+            return
+        except MoveStopped as exc:
+            self._finish_move()
+            self.app.notify(exc.message, severity="error", timeout=10, markup=False)
+            return
+        except Exception as exc:
+            logger.warning("Move to vault failed: %s", type(exc).__name__)
+            self._finish_move()
+            self._notify_custody_failure(exc, "default", "Move failed")
+            return
+        self._finish_move()
+        self._notify_move_report(report)
+
+    def _finish_move(self) -> None:
+        self._custody_busy = False
+        self._render_state()
+
+    def _notify_move_report(self, report: Any) -> None:
+        from servonaut.services.memory.custody_move import (
+            OUTCOME_ALREADY_VAULT,
+            OUTCOME_NOTHING_TO_MOVE,
+        )
+
+        outcome = getattr(report, "outcome", "")
+        if outcome == OUTCOME_NOTHING_TO_MOVE:
+            text = "There was no Memory Sync key to move."
+        elif outcome == OUTCOME_ALREADY_VAULT:
+            text = "Your Memory Sync key was already in your vault. This device is up to date."
+        else:
+            text = "Your Memory Sync key is now kept in your vault."
+            if getattr(report, "vault_created", False):
+                text += " A personal vault was created for it."
+        self.app.notify(text, severity="information", timeout=8, markup=False)
+        for warning in getattr(report, "warnings", []) or []:
+            self.app.notify(warning, severity="warning", timeout=10, markup=False)
+
+    def _show_move_card(self) -> None:
+        self._set_status("⏳ Moving your key to the vault…", "$accent")
+        body = self.query_one("#msync_body", VerticalScroll)
+        body.remove_children()
+        body.mount(Container(
+            Static("[bold]Moving your key to the vault[/bold]", classes="msync_card_title"),
+            LoadingIndicator(id="msync_move_loading"),
+            Static("", id="msync_move_steps", classes="msync_card_body"),
+            classes="msync_card msync_card_primary",
+        ))
+
+    def _on_move_step(self, step: str) -> None:
+        label = _MOVE_STEP_LABELS.get(step, "Working")
+        lines = self._move_lines
+        if lines:
+            lines[-1] = lines[-1].replace("· ", "✓ ", 1)
+        lines.append(f"· {label}…")
+        try:
+            self.query_one("#msync_move_steps", Static).update(escape("\n".join(lines)))
+        except Exception:
+            pass

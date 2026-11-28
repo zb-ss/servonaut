@@ -69,6 +69,8 @@ _CARRIED_VARIABLES = (
     ENV_ARTIFACTS,
     ENV_RELEASE_CACHE,
     ENV_PREBUILT_WHEELS,
+    # Opt-in old-client journey (e2e/journeys/packaged/test_old_clients_vault_custody.py).
+    "SERVONAUT_E2E_OLD_CLIENT_VERSIONS",
     "PYTEST_XDIST_WORKER",
     "PYTEST_XDIST_WORKER_COUNT",
     "PYTEST_XDIST_TESTRUNUID",

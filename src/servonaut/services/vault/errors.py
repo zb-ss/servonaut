@@ -180,6 +180,10 @@ NO_LOCAL_IDENTITY = (
 )
 
 
+# Items that hold a key of a Servonaut feature are never displayed.
+APP_KEY_NOT_SHOWN = "this item holds a Servonaut key and cannot be shown"
+
+
 # A bound server's address or port is not the one its vault key was bound to:
 # the pinned host keys belong to the old address, so the key is not used.
 SERVER_MOVED_SINCE_BINDING = (
@@ -236,6 +240,18 @@ _ACTIONABLE_CODES = {
     "vault_rotation_required": (
         "the vault key must be rotated first, usually because a member left; a team owner or admin "
         "rotates it with Rotate vault key or `servonaut vault rotate --vault <vault>`, then try again"
+    ),
+    # Keys that Servonaut features keep in the personal vault (Memory Sync, config sync).
+    "item_type_exists": (
+        "your vault already holds a current and a next key of this kind; "
+        "finish the key change that is in progress, then try again"
+    ),
+    "memory_key_in_use": "this vault item holds your Memory Sync key and is still in use; it was not deleted",
+    "config_key_in_use": (
+        "this vault item holds your config sync key and your snapshots still use it; it was not deleted"
+    ),
+    "device_signature_required": (
+        "this needs your vault on this device; unlock or add this device to your vault, then try again"
     ),
 }
 

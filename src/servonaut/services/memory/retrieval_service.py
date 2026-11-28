@@ -30,6 +30,7 @@ from servonaut.services.memory.interfaces import (
     MemoryNotFound,
     ReservedInstanceIdError,
     UpsellRequired,
+    VaultCustodyLocked,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 
@@ -41,6 +42,38 @@ logger = logging.getLogger(__name__)
 # LRU cache settings
 _LRU_MAX = 10
 _LRU_TTL_SECONDS = 60.0
+
+
+class StaleEnvelopes(MemoryBackendError):
+    """The memory on the service no longer matches the envelopes a consent named."""
+
+    code = "stale_envelopes"
+
+    def __init__(self) -> None:
+        super().__init__("stale_envelopes")
+
+
+class EnvelopeKeyError(MemoryBackendError):
+    """A hosted-summary key could not be released; ``code`` picks the text people read."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _plaintext_fits_module(module: str, plaintext: Any) -> bool:
+    """Whether a decrypted payload has the shape that module's writers produce.
+
+    Probe modules carry ``observed``/``declared``/``raw_output``, annotations
+    carry ``content`` and findings carry ``findings`` (see the sync service).
+    """
+    if not isinstance(plaintext, dict):
+        return False
+    if module == "annotations":
+        return "content" in plaintext
+    if module == "findings":
+        return "findings" in plaintext
+    return any(key in plaintext for key in ("observed", "declared", "raw_output"))
 
 
 def _validate_instance_id(instance_id: str) -> None:
@@ -93,6 +126,28 @@ class _LRUCache:
 
     def __len__(self) -> int:
         return len(self._data)
+
+
+#: Server-written summaries; their plaintext may be bare Markdown, not JSON.
+_SUMMARY_MODULE = "ai_summary"
+
+
+def _parse_plaintext(module: str, plaintext_bytes: bytes) -> Any:
+    """Decode an envelope's plaintext.
+
+    Probe modules are always JSON; anything else is corrupt and raises. A
+    hosted summary is written by the service as bare UTF-8 Markdown, so for
+    that module text that is not JSON is the summary itself.
+    """
+    text = plaintext_bytes.decode("utf-8")
+    if module != _SUMMARY_MODULE:
+        return json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    # Markdown such as "42" also parses as JSON; only an object or a string is a summary payload.
+    return parsed if isinstance(parsed, (dict, str)) else text
 
 
 class MemoryRetrievalService:
@@ -164,6 +219,13 @@ class MemoryRetrievalService:
         data = await self._api.get(
             "/api/v1/memory/keys/me", retry_on_401=False
         )
+        # A vault-custody key has no passphrase to ask for, and this service
+        # never prompts for (or reads) a vault item: Memory Sync's own unlock
+        # hands the key over.
+        from servonaut.services.memory.key_custody import CUSTODY_VAULT, parse_key_record
+
+        if parse_key_record(data).custody == CUSTODY_VAULT:
+            raise VaultCustodyLocked("vault_locked")
         pub_b64 = data.get("public_key", "")
         wrapped_json = data.get("wrapped_private_key", "")
         fingerprint = data.get("fingerprint", "")
@@ -233,7 +295,7 @@ class MemoryRetrievalService:
             self_private_key=self._self_privkey,
             self_public_key=self._self_pubkey,
         )
-        plaintext = json.loads(plaintext_bytes.decode("utf-8"))
+        plaintext = _parse_plaintext(raw.get("module", ""), plaintext_bytes)
 
         return DecryptedEnvelope(
             id=raw.get("id", ""),
@@ -398,6 +460,103 @@ class MemoryRetrievalService:
             raise self._map_403(exc) from exc
         except NotFoundError as exc:
             raise self._map_404(exc) from exc
+
+    async def envelope_keys(
+        self, instance_id: str, envelope_ids: Dict[str, str]
+    ) -> List[Dict[str, str]]:
+        """Data keys of exactly the named envelopes, for a hosted summary.
+
+        Fetches each envelope by id, checks that the service returned that
+        envelope for that module, opens the caller's own wrap and returns
+        ``{"envelope_id", "dek"}`` with the key as base64. The private key
+        never leaves this service, and every data-key buffer is zeroed once
+        encoded. Keys are not cached.
+
+        Raises:
+            StaleEnvelopes: An envelope is gone, or is not the one asked for.
+            VaultCustodyLocked: Memory Sync's key is in the vault, which is locked.
+        """
+        import base64
+        from servonaut.services.memory.crypto import CryptoError, open_dek, secure_zero
+
+        _validate_instance_id(instance_id)
+        if not envelope_ids:
+            raise StaleEnvelopes()
+        await self._ensure_key_material()
+        private_key = self._self_privkey
+        if private_key is None:
+            raise MemoryBackendError("memory_locked")
+        keys: List[Dict[str, str]] = []
+        for module, envelope_id in sorted(envelope_ids.items()):
+            # Both come from the service and end up in a URL path.
+            if not (INSTANCE_ID_RE.fullmatch(str(module)) and INSTANCE_ID_RE.fullmatch(str(envelope_id))):
+                raise MemoryBackendError("invalid_envelope")
+            raw = await self._fetch_envelope_at(instance_id, module, envelope_id)
+            if str(raw.get("id", "")) != envelope_id:
+                raise StaleEnvelopes()
+            dek = None
+            try:
+                dek = open_dek(raw.get("wrapped_dek", ""), private_key=private_key)
+                self._check_envelope_belongs(raw, dek, instance_id, module)
+                keys.append({
+                    "envelope_id": envelope_id,
+                    "dek": base64.b64encode(bytes(dek)).decode("ascii"),
+                })
+            except CryptoError as exc:
+                raise EnvelopeKeyError("envelope_key_unreadable") from exc
+            finally:
+                if dek is not None:
+                    secure_zero(dek)
+        return keys
+
+    @staticmethod
+    def _check_envelope_belongs(
+        raw: Dict[str, Any], dek: bytearray, instance_id: str, module: str
+    ) -> None:
+        """Refuse to release a key for an envelope that is not this instance's module.
+
+        Envelopes carry no associated data, and the plaintext does not name its
+        instance or module, so the binding is as strong as the format allows:
+        the service's own instance/module fields must agree with the request,
+        the ciphertext must open under this key, and the payload must have the
+        shape that module's writers produce. Residual risk: a hostile service
+        could still hand over another instance's envelope of the same module
+        that this user can open; the hosted summary then covers that memory
+        instead. Only envelopes the user's own key opens are ever reachable,
+        and AAD in the envelope format would close the gap.
+        """
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from servonaut.services.memory.crypto import validate_ciphertext, validate_iv, validate_tag
+
+        for field, expected in (("instance_id", instance_id), ("module", module)):
+            if field in raw and str(raw[field]) != expected:
+                raise EnvelopeKeyError("envelope_mismatch")
+        try:
+            iv = validate_iv(raw["iv"])
+            tag = validate_tag(raw["tag"])
+            ciphertext = validate_ciphertext(raw["ciphertext"])
+            plaintext = json.loads(AESGCM(bytes(dek)).decrypt(iv, ciphertext + tag, None))
+        except Exception as exc:  # noqa: BLE001 - any failure means the key does not open this envelope
+            raise EnvelopeKeyError("envelope_key_unreadable") from exc
+        if not _plaintext_fits_module(module, plaintext):
+            raise EnvelopeKeyError("envelope_mismatch")
+
+    async def _fetch_envelope_at(
+        self, instance_id: str, module: str, envelope_id: str
+    ) -> Dict[str, Any]:
+        """One envelope by id; a missing one means the memory changed."""
+        try:
+            await self._rate_limiter.acquire(RateLimitKey.GENERAL)
+            raw = await self._api.get(
+                f"/api/v1/memory/{instance_id}/{module}/at/{envelope_id}"
+            )
+        except ForbiddenEntitlementError as exc:
+            raise self._map_403(exc) from exc
+        except NotFoundError as exc:
+            raise StaleEnvelopes() from exc
+        if not isinstance(raw, dict):
+            raise MemoryBackendError("invalid_envelope")
+        return raw
 
     async def get_snapshot(self, instance_id: str, module: str, snapshot_id: str) -> DecryptedEnvelope:
         """GET /api/v1/memory/{instance_id}/{module}/at/{snapshot_id}."""
