@@ -463,12 +463,12 @@ async def test_ca_busy_native_rail_request_matches_qualified_original_policy(nav
         sidebar = screen.query_one(Sidebar)
         if not sidebar.display:
             await _click(pilot, "#workspace_navigation")
-        core = sidebar.query_one("#section_core")
-        if core.collapsed:
-            header = core.query_one(".section-header", Button)
+        fleet = sidebar.query_one("#section_fleet")
+        if fleet.collapsed:
+            header = fleet.query_one(".section-header", Button)
             assert header.region.area and app.get_widget_at(*header.region.center)[0] is header
-            await _click(pilot, "#section_core > .section-header")
-            await wait_until(lambda: not core.collapsed)
+            await _click(pilot, "#section_fleet > .section-header")
+            await wait_until(lambda: not fleet.collapsed)
             await pilot.pause()
         target = sidebar.query_one("#nav_list", Button)
         assert target.region.area and target.region.intersection(screen.region) == target.region

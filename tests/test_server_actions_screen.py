@@ -1491,7 +1491,9 @@ class TestLostTeamKeyOnConnect:
         (notice,) = _warnings(app)
         assert notice.args[0] == _LOST_KEY
         assert notice.kwargs["markup"] is False
-        assert app.notify.call_args.args[0] == "No SSH key configured for this instance."
+        assert app.notify.call_args.args[0] == (
+            "No SSH key configured for this instance. Press u to bind a Vault key or open Local SSH keys."
+        )
 
     def test_it_is_not_repeated_on_the_next_connect(self):
         screen, app, connect = _lost_key_connect(resolved=True, takes=[True, False])

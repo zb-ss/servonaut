@@ -47,7 +47,9 @@ def status(t: Any) -> str:
 
 
 async def open_memory_sync(t: Any) -> None:
-    await t.nav("nav_memory_sync")
+    await t.nav("nav_memory")
+    await t.wait_for_screen("FleetMemoryScreen")
+    await t.click("#memory_view_sync")
     await t.wait_for_screen("MemorySyncSetupScreen")
 
 

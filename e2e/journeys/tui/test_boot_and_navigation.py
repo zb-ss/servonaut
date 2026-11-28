@@ -26,9 +26,7 @@ DESTINATIONS = {
     "nav_custom_servers": "CustomServersScreen",
     "nav_keys": "KeyManagementScreen",
     "nav_memory": "FleetMemoryScreen",
-    "nav_memory_sync": "MemorySyncSetupScreen",
     "nav_secrets": "SecretsScreen",
-    "nav_bw_vault": "BwVaultManagerScreen",
     "nav_findings": "FindingsScreen",
     "nav_settings": "SettingsScreen",
     "nav_aws_manage": "AWSManagerScreen",
@@ -45,16 +43,15 @@ DESTINATIONS = {
 # busy machine; one session through every destination could outlast the
 # journey's time limit there. Each leg still moves from screen to screen.
 TOUR_LEGS = {
-    "fleet": ("nav_list", "nav_custom_servers", "nav_keys", "nav_memory", "nav_memory_sync"),
+    "fleet": ("nav_list", "nav_custom_servers", "nav_keys", "nav_memory", "nav_secrets"),
     "account": (
-        "nav_secrets", "nav_bw_vault", "nav_findings", "nav_settings", "nav_login",
-        "nav_bug_report",
+        "nav_findings", "nav_settings", "nav_login", "nav_bug_report",
     ),
     "aws": ("nav_aws_manage", "nav_aws_s3", "nav_cloudwatch", "nav_ip_ban", "nav_cloudtrail"),
 }
 assert {nav for leg in TOUR_LEGS.values() for nav in leg} == set(DESTINATIONS)
 # Hidden from a signed-out user: they need an account (and a plan) first.
-HIDDEN_WHEN_SIGNED_OUT = ("nav_sync_config", "nav_teams", "nav_drift", "nav_memory_export")
+HIDDEN_WHEN_SIGNED_OUT = ("nav_teams", "nav_vault", "nav_ca")
 # Provider sections stay hidden until that provider is configured.
 HIDDEN_WITHOUT_PROVIDERS = (
     "nav_ovh_manage",
@@ -169,7 +166,7 @@ async def test_help_back_to_root_and_quit(tui, seed):
         await t.wait_for_screen("InstanceListScreen")
 
         # Leaving a top-level screen returns to the fleet, never to nothing.
-        await t.palette("Go to SSH keys")
+        await t.palette("Go to Local SSH keys")
         await t.wait_for_screen("KeyManagementScreen")
         await t.press("escape")
         await t.wait_for_screen("InstanceListScreen")

@@ -248,7 +248,7 @@ async def test_narrow_hide_restores_visible_content_focus(stop: str, pilot_scree
         screen = app.screen
         origin = (
             screen.query_one(InstanceTable) if pilot_screen == "fleet"
-            else screen.query_one("#btn_browse", Button)
+            else screen.query_one("#btn_ssh", Button)
         )
         origin.focus()
         panel = await _open_chat(app, pilot)
@@ -346,7 +346,7 @@ async def test_resize_moves_focus_out_of_content_that_becomes_hidden(pilot_scree
         screen = app.screen
         content_focus = (
             screen.query_one(InstanceTable) if pilot_screen == "fleet"
-            else screen.query_one("#btn_browse", Button)
+            else screen.query_one("#btn_ssh", Button)
         )
         panel = await _open_chat(app, pilot)
         content_focus.focus()

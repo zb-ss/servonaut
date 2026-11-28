@@ -379,8 +379,8 @@ async def test_held_server_operation_disables_only_team_controls() -> None:
                 for name in reads
             }
             with patch.object(app, "notify", Mock(wraps=app.notify)) as notify:
-                # The active Account section leaves Core collapsed initially.
-                await _click(pilot, "#section_core .section-header")
+                # The active Team section leaves Fleet collapsed initially.
+                await _click(pilot, "#section_fleet .section-header")
                 await wait_until(lambda: bool(screen.query_one("#nav_list", Button).region))
                 nav = screen.query_one("#nav_list", Button)
                 assert app.get_widget_at(*nav.region.center)[0] is nav

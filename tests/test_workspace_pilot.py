@@ -149,7 +149,7 @@ async def test_push_and_pop_apply_preference_without_losing_fleet_state(visible:
         await pilot.press("o")
         actions = app.screen
         assert isinstance(actions, ServerActionsScreen)
-        assert app.focused is actions.query_one("#btn_browse", Button)
+        assert app.focused is actions.query_one("#btn_ssh", Button)
         assert actions.query_one(Sidebar).display is visible
         await _click(pilot, "#workspace_navigation")
         await pilot.press("9")
@@ -202,7 +202,7 @@ async def test_navigation_blocks_fleet_letters_and_does_not_pop_actions_on_escap
         assert isinstance(actions, ServerActionsScreen)
         await pilot.press("shift+f6", "escape")
         assert app.screen is actions
-        assert app.focused is actions.query_one("#btn_browse", Button)
+        assert app.focused is actions.query_one("#btn_ssh", Button)
         await pilot.press("escape")
         assert app.screen is fleet
 
@@ -274,12 +274,13 @@ async def test_navigation_enter_and_click_emit_the_same_destination() -> None:
         await pilot.pause()
         await _click(pilot, "#nav_list")
         assert app.destinations == ["nav_list", "nav_list"]
-        section = app.screen.query_one("#section_tools", SidebarSection)
+        section = app.screen.query_one("#section_access", SidebarSection)
         section.query_one(".section-header", Button).focus()
         await pilot.press("enter")
         await pilot.pause()
         assert not section.collapsed
-        assert section.query_one("#nav_settings", Button).can_focus
+        assert section.query_one("#nav_keys", Button).can_focus
+        assert app.screen.query_one("#nav_settings", Button).can_focus
         assert not app.screen.query_one("#nav_teams", Button).can_focus
 
 
@@ -495,7 +496,7 @@ async def test_collapsing_previous_chat_focus_returns_to_primary_content(
         await pilot.press("escape")
         await pilot.pause()
         primary = (screen.query_one(InstanceTable) if pilot_screen == "fleet"
-                   else screen.query_one("#btn_browse", Button))
+                   else screen.query_one("#btn_ssh", Button))
         assert app.screen is screen
         assert app.focused is primary
 

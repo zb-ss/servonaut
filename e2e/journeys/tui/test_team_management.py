@@ -221,9 +221,12 @@ async def test_owner_invites_promotes_removes_and_shares(tui, seed, fake_cloud):
         await t.fill("#input_share_username", "deploy")
         await _press(t, "#btn_confirm_share")
         await t.wait_for_toast(rf"^Server '{fleet.APP_1.name}' shared with team\.$")
+        await t.wait_for_screen("_TeamBindPromptModal")
+        await t.click("#team_bind_prompt_cancel")
+        await t.wait_for_screen("TeamManagementScreen")
         await t.wait_until(
             lambda: t.table_rows("#servers_table") == [
-                *servers_before, [fleet.APP_1.name, fleet.APP_1.private_ip, fleet.APP_1.region],
+                *servers_before, [fleet.APP_1.name, fleet.APP_1.private_ip, fleet.APP_1.region, "Not bound"],
             ],
             desc="app-1 among the shared servers",
         )

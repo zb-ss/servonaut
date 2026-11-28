@@ -456,6 +456,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/team_management.py", "_prefill_share_address", "update",
                    "Share Server address note — fixed explanatory text; the addresses "
                    "are only in the picker's options, redacted by _display_server_address."),
+    AllowlistEntry("screens/team_management.py", "_refresh_onboarding_strip", "update",
+                   "Writes fixed onboarding guidance strings — no server or user values."),
+    AllowlistEntry("screens/custom_servers.py", "_show_post_save_row", "update",
+                   "Writes a fixed prompt string — no server or user values."),
 
     # memory.py — sync status and AI summary update UI labels, not raw data.
     AllowlistEntry(

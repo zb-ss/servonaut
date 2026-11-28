@@ -63,9 +63,7 @@ SIDEBAR_TOUR = {
     "nav_custom_servers": "CustomServersScreen",
     "nav_keys": "KeyManagementScreen",
     "nav_memory": "FleetMemoryScreen",
-    "nav_memory_sync": "MemorySyncSetupScreen",
     "nav_secrets": "SecretsScreen",
-    "nav_bw_vault": "BwVaultManagerScreen",
     "nav_findings": "FindingsScreen",
     "nav_settings": "SettingsScreen",
     "nav_aws_manage": "AWSManagerScreen",
@@ -573,6 +571,14 @@ async def _tour_sidebar(tour: Tour) -> None:
         await t.nav(nav_id)
         await t.wait_for_screen(screen_name)
         await tour.check(screen_name)
+        if screen_name == "FleetMemoryScreen":
+            await t.click("#memory_view_sync")
+            await t.wait_for_screen("MemorySyncSetupScreen")
+            await tour.check("MemorySyncSetupScreen")
+        if screen_name == "SecretsScreen":
+            await t.press("b")
+            await t.wait_for_screen("BwVaultManagerScreen")
+            await tour.check("BwVaultManagerScreen")
         if screen_name == "OVHDNSScreen":
             await _open_first_dns_zone(tour)
         if screen_name == "BugReportConsentModal":
@@ -626,8 +632,8 @@ async def test_demo_flag_sidebar_tour_shows_no_real_identifier(
 ):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         await _tour_sidebar(tour)
-        # Every destination, the DNS records, the fleet table and help.
-        assert len(tour.visited) == len(SIDEBAR_TOUR) + 3
+        # Every sidebar destination, the two consolidated sub-views (MemorySync, BW Vault), DNS records, fleet table and help.
+        assert len(tour.visited) == len(SIDEBAR_TOUR) + 5
         tour.assert_clean()
 
 
