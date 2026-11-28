@@ -100,7 +100,6 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
         tour = [
             ("nav_custom_servers", "CustomServersScreen", "Custom servers"),
             ("nav_keys", "KeyManagementScreen", "Connection keys"),
-            # Settings sits in a section that starts collapsed.
             ("nav_settings", "SettingsScreen", "Settings"),
             ("nav_list", "InstanceListScreen", FLEET_NAMES[0]),
         ]
