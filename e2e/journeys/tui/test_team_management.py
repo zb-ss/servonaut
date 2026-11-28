@@ -316,6 +316,9 @@ async def test_servers_leave_for_the_team_only_when_the_owner_confirms(tui, seed
         )
         [posted] = fake_cloud.requests(servers_url, "POST")
         assert (posted["body"]["name"], posted["body"]["hostname"]) == (fleet.APP_1.name, fleet.APP_1.private_ip)
+        await t.wait_for_screen("_TeamBindPromptModal")
+        await t.click("#team_bind_prompt_cancel")
+        await t.wait_for_screen("TeamManagementScreen")
         await _screen_idle(t)
 
         # Push config: every custom server offered unticked, the profiles listed.

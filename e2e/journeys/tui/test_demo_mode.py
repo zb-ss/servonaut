@@ -579,9 +579,12 @@ async def _tour_sidebar(tour: Tour) -> None:
             )
             await tour.check("MemorySyncTab")
         if screen_name == "SecretsScreen":
-            await t.press("b")
-            await t.wait_for_screen("BwVaultManagerScreen")
-            await tour.check("BwVaultManagerScreen")
+            from servonaut.widgets.sidebar import is_nav_route_visible
+
+            if is_nav_route_visible(t.app, "nav_bw_vault"):
+                await t.press("b")
+                await t.wait_for_screen("BwVaultManagerScreen")
+                await tour.check("BwVaultManagerScreen")
         if screen_name == "OVHDNSScreen":
             await _open_first_dns_zone(tour)
         if screen_name == "BugReportConsentModal":
@@ -635,8 +638,8 @@ async def test_demo_flag_sidebar_tour_shows_no_real_identifier(
 ):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         await _tour_sidebar(tour)
-        # Every sidebar destination, the two consolidated sub-views (MemorySync, BW Vault), DNS records, fleet table and help.
-        assert len(tour.visited) == len(SIDEBAR_TOUR) + 5
+        # Every sidebar destination (BW Vault is gated while signed out), MemorySync tab, DNS records, fleet table and help.
+        assert len(tour.visited) == len(SIDEBAR_TOUR) + 4
         tour.assert_clean()
 
 
