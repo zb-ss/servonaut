@@ -849,7 +849,7 @@ class CustomServersScreen(WorkspaceScreen):
             self.set_focus(open_btn)
             self.call_after_refresh(self._reveal_post_save_row)
             self.call_later(self._reveal_post_save_row)
-        if can_team:
+        if can_team and getattr(self, "is_attached", False):
             self.run_worker(
                 self._probe_post_save_share_teams(),
                 group="custom_share_gate",

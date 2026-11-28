@@ -437,28 +437,52 @@ async def test_custom_server_share_holds_button_busy_and_ignores_duplicate_press
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delay_s", [0.0, 0.05])
 async def test_instance_list_reloads_after_push_custom_server_and_empty_fresh_cache_mount(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delay_s: float,
 ) -> None:
+    if delay_s > 0:
+        orig_commit = CustomServersScreen._commit_save_server
+        orig_sync = InstanceListScreen._sync_from_app_instances
+
+        def _delayed_commit(self, editing_name, server) -> None:
+            asyncio.get_running_loop().call_later(delay_s, orig_commit, self, editing_name, server)
+
+        def _delayed_sync(self) -> None:
+            asyncio.get_running_loop().call_later(delay_s, orig_sync, self)
+
+        monkeypatch.setattr(CustomServersScreen, "_commit_save_server", _delayed_commit)
+        monkeypatch.setattr(InstanceListScreen, "_sync_from_app_instances", _delayed_sync)
+
     app = _boot_offline_app(tmp_path, cached_instances=[])
     async with app.run_test(size=(160, 50)) as pilot:
         fleet = app.screen
         assert isinstance(fleet, InstanceListScreen)
-        assert fleet.query_one("#empty_fleet_card").display is True
+        await wait_until(
+            lambda: fleet.query_one("#empty_fleet_card").display is True
+            and fleet.query_one("#btn_empty_add_custom", Button).region.width > 0
+        )
 
         await pilot.click("#btn_empty_add_custom")
-        await wait_until(lambda: isinstance(app.screen, CustomServersScreen))
+        await wait_until(
+            lambda: isinstance(app.screen, CustomServersScreen)
+            and app.screen.query_one("#add_form").display is True
+            and not app.screen.query_one("#btn_save_server", Button).disabled
+            and app.screen.query_one("#btn_save_server", Button).region.width > 0
+        )
         custom_screen = app.screen
         custom_screen.query_one("#input_name", Input).value = "web-added"
         custom_screen.query_one("#input_host", Input).value = "10.0.1.9"
         await pilot.click("#btn_save_server")
-        await pilot.pause()
+        await wait_until(lambda: custom_screen.query_one("#custom_post_save_row").display is True)
 
         await pilot.press("escape")
         await wait_until(lambda: isinstance(app.screen, InstanceListScreen))
+        await wait_until(lambda: fleet.query_one(InstanceTable).row_count == 1)
         assert fleet.query_one("#empty_fleet_card").display is False
         table = fleet.query_one(InstanceTable)
-        assert table.row_count == 1
         assert "web-added" in str(table.get_row_at(0)[1])
 
 

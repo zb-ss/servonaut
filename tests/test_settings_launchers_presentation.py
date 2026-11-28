@@ -44,8 +44,21 @@ def manager(tmp_path: Path) -> ConfigManager:
 
 
 class _LauncherHost(_Host):
-    def __init__(self, manager: ConfigManager, panel_id: str, navigation: bool, *, snapshots: bool = True) -> None:
+    def __init__(
+        self,
+        manager: ConfigManager,
+        panel_id: str,
+        navigation: bool,
+        *,
+        snapshots: bool = True,
+        entitled: bool | None = None,
+    ) -> None:
         super().__init__(manager, panel_id, navigation_visible=navigation)
+        is_entitled = snapshots if entitled is None else entitled
+        self.auth_service = SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda feature: is_entitled if feature == "config_sync" else False,
+        )
         self.custom_server_service = SimpleNamespace(list_servers=lambda: manager.get().custom_servers)
         self.ssh_service = SimpleNamespace(
             check_ssh_agent=Mock(return_value=True),
@@ -117,16 +130,18 @@ async def test_launcher_pointer_opens_real_route_and_returns_to_clean_cached_pan
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(160, 50), (100, 30)])
 @pytest.mark.parametrize("navigation", [True, False])
-async def test_snapshot_launcher_without_service_stays_in_settings_with_existing_warning(
-    manager, size, navigation,
+@pytest.mark.parametrize("snapshots,entitled", [(False, True), (True, False)])
+async def test_snapshot_launcher_hidden_without_entitlement_or_service_and_direct_guard_warns(
+    manager, size, navigation, snapshots, entitled,
 ) -> None:
-    app = _LauncherHost(manager, "backups", navigation, snapshots=False)
+    app = _LauncherHost(manager, "backups", navigation, snapshots=snapshots, entitled=entitled)
     before = manager._config_path.read_bytes()
     async with app.run_test(size=size) as pilot:
         panel = await _ready(app, pilot)
         settings = app.screen
-        button = panel.query_one("#backups_open_snapshots", Button)
-        await _click_launcher(app, pilot, button)
+        assert panel.query_one("#backups_open_snapshots", Button).display is False
+        assert panel.query_one("#backups_open_restore", Button).display is True
+        panel._open_snapshot_manager()
         await wait_until(lambda: "Config sync is not available on this plan." in app.notes)
         assert app.screen is settings
         assert not panel.is_dirty()
