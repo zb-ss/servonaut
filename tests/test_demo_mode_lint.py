@@ -705,6 +705,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_show_setup_error", "update",
                    "Writes escaped exception message from setup flow — exception "
                    "type, not raw server data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_on_move_step", "update",
+                   "Writes fixed step labels of the move to the vault — "
+                   "code-controlled constants, no server or memory data."),
     AllowlistEntry("screens/memory_sync_setup.py", "_set_busy", "update",
                    "Writes a busy-state message passed from _do_setup — "
                    "always a code-controlled string constant."),
