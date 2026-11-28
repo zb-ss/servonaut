@@ -33,8 +33,8 @@ from servonaut.services.vault.roster_pins import RosterPins
 from servonaut.services.vault.team_vault_client import TeamVaultClient, VaultStateError
 
 
-VAULT_ID = "22222222-2222-4222-8222-222222222222"
-IDENTITY_ID = "11111111-1111-4111-8111-111111111111"
+VAULT_ID = "22222222-2222-4222-8222-222222222222"  # leak-guard:allow (synthetic id)
+IDENTITY_ID = "11111111-1111-4111-8111-111111111111"  # leak-guard:allow (synthetic id)
 _B64 = lambda raw: base64.b64encode(raw).decode()  # noqa: E731
 
 
@@ -251,8 +251,8 @@ async def test_list_filters_by_type_and_skips_deleted_rows() -> None:
     await world.keys.create(CONFIG_SYNC_KEY, config_payload())
     gone = await world.keys.create(MEMORY_KEY, memory_payload(b"3" * 32))
     world.items[gone.item_id]["deleted_at"] = "2026-11-28T00:00:00Z"
-    world.items["99999999-9999-4999-8999-999999999999"] = {
-        "item_id": "99999999-9999-4999-8999-999999999999", "type": "secret", "revision": 1,
+    world.items["99999999-9999-4999-8999-999999999999"] = {  # leak-guard:allow (synthetic id)
+        "item_id": "99999999-9999-4999-8999-999999999999", "type": "secret", "revision": 1,  # leak-guard:allow (synthetic id)
         "public_fingerprint": None,
     }
 
@@ -367,7 +367,7 @@ async def test_writing_to_a_team_vault_is_refused() -> None:
 
     with pytest.raises(ValueError, match="personal vault"):
         await world.items_service._write_once(
-            VAULT_ID, "33333333-3333-4333-8333-333333333333", MEMORY_KEY, memory_payload(),
+            VAULT_ID, "33333333-3333-4333-8333-333333333333", MEMORY_KEY, memory_payload(),  # leak-guard:allow (synthetic id)
             expected_revision=0, vault=team,
         )
     assert world.items == {}
@@ -381,7 +381,7 @@ async def test_write_refuses_a_vault_the_service_relabelled_as_personal(changes)
 
     with pytest.raises(ValueError, match="personal vault"):
         await world.items_service._write_once(
-            VAULT_ID, "33333333-3333-4333-8333-333333333333", MEMORY_KEY, memory_payload(),
+            VAULT_ID, "33333333-3333-4333-8333-333333333333", MEMORY_KEY, memory_payload(),  # leak-guard:allow (synthetic id)
             expected_revision=0, vault=relabelled,
         )
     assert world.items == {}
@@ -393,11 +393,11 @@ async def test_personal_vault_id_ignores_a_relabelled_vault(changes) -> None:
     world = _World()
     verified = {**world.vault, **changes}  # a verified team vault whose list row says kind=personal
     world.vaults.get_vault = AsyncMock(return_value=verified)
-    world.vaults.create_personal = AsyncMock(return_value={"vault_id": "44444444-4444-4444-8444-444444444444"})
+    world.vaults.create_personal = AsyncMock(return_value={"vault_id": "44444444-4444-4444-8444-444444444444"})  # leak-guard:allow (synthetic id)
 
     assert await world.keys.personal_vault_id() is None
     assert await world.keys.list(MEMORY_KEY) == []
-    assert await world.keys.personal_vault_id(create=True) == "44444444-4444-4444-8444-444444444444"
+    assert await world.keys.personal_vault_id(create=True) == "44444444-4444-4444-8444-444444444444"  # leak-guard:allow (synthetic id)
     assert not [call for call in world.calls if call[0] == "PUT"]
 
 
