@@ -31,7 +31,7 @@ def _exit_missing_sdk() -> NoReturn:
     sys.exit(1)
 
 
-def _wire_headless_shared_memory(tools, config_manager, auth_service) -> None:
+def _wire_headless_shared_memory(tools, config_manager, auth_service, vault_runtime=None) -> None:
     """Let the tools read team-shared memory when Memory Sync was unlocked in the app.
 
     Best effort: the shared copy is only a fallback, so a failure here leaves
@@ -43,7 +43,7 @@ def _wire_headless_shared_memory(tools, config_manager, auth_service) -> None:
         from servonaut.services.api_client import APIClient
         from servonaut.services.memory.headless_shared import build_headless_shared_memory
         shared = build_headless_shared_memory(
-            config_manager, auth_service, APIClient(auth_service),
+            config_manager, auth_service, APIClient(auth_service), vault_runtime,
         )
         if shared is not None:
             tools.set_shared_memory_reader(shared.reader, shared.check_lock)
@@ -311,7 +311,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         team_policy=team_policy,
         team_merge=HeadlessTeamMerge(memory_service) if memory_service is not None else None,
     )
-    _wire_headless_shared_memory(tools, config_manager, auth_service)
+    _wire_headless_shared_memory(tools, config_manager, auth_service, vault_runtime)
     if memory_service is not None:
         # A memory build hops through a bastion's vault key and falls back to
         # a team's key like the other tools do.

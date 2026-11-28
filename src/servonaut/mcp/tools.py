@@ -2628,7 +2628,7 @@ class ServonautTools:
             })
             self._audit.log(
                 'get_server_memory', {'instance_id': instance_id, 'format': format},
-                payload, False, 'missing',
+                payload, False, self._missing_audit_reason(requested, lock_reason),
             )
             return payload
 
@@ -2736,6 +2736,13 @@ class ServonautTools:
             return isinstance(findings, list) and bool(findings)
         except (OSError, ValueError):
             return False
+
+    @staticmethod
+    def _missing_audit_reason(requested: Dict, lock_reason: Any) -> str:
+        """The audit reason for "no memory": its own code when a lock hid a shared copy."""
+        if requested.get('is_shared') is True and lock_reason is not None:
+            return f"shared_memory_locked_{getattr(lock_reason, 'value', lock_reason)}"
+        return 'missing'
 
     def _shared_memory_unavailable_hint(self, default: str, lock_reason: Any) -> str:
         """Why a team-shared server has no readable copy, for the ``missing`` hint."""

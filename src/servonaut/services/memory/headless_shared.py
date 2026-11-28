@@ -5,12 +5,14 @@ a team shares only with an unlocked Memory Sync key, and nothing here may
 change state the way the app's unlock does: no key is enrolled, nothing is
 uploaded, no setting, config value, keychain entry or cache is written.
 
-So the only unlock offered is the one the user already granted: the app
-unlocked Memory Sync with "Keep unlocked for 30 days" (the
-``sync_remember_device`` setting, "Remember on this device" in code), which keeps the
-passphrase in the OS keychain for a limited time. This module reads that
-passphrase and opens the local keypair cache with it, and otherwise leaves
-Memory Sync locked.
+So the only unlocks offered are the ones the user already granted. A key
+kept in the vault is read through a read-only
+:class:`~servonaut.services.memory.key_custody.MemoryKeyCustody` once the
+vault is unlocked on this device. Otherwise the app unlocked Memory Sync with
+"Keep unlocked for 30 days" (the ``sync_remember_device`` setting, "Remember
+on this device" in code), which keeps the passphrase in the OS keychain for a
+limited time; this module reads that passphrase and opens the local keypair
+cache with it, and otherwise leaves Memory Sync locked.
 
 Building the services does no network call and no key derivation; the unlock
 runs on the first read that needs it.
@@ -20,12 +22,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from enum import Enum
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from servonaut.services.memory import passphrase_store
+from servonaut.services.memory import sync_service as _sync_module
 from servonaut.services.memory.remembered_passphrase import remember_passphrase_expired
-from servonaut.services.memory.sync_service import LocalUnlock, MemorySyncService
+from servonaut.services.memory.sync_service import (
+    LocalUnlock, MemorySyncService, VaultUnlock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +48,7 @@ class LockReason(str, Enum):
     NOT_KEPT = "not_kept"
     NO_KEYCHAIN = "no_keychain"
     UNLOCK_FAILED = "unlock_failed"
+    VAULT_LOCKED = "vault_locked"
 
 
 _HINTS = {
@@ -64,6 +72,12 @@ _HINTS = {
         "could not unlock Memory Sync. Unlock it again in the Servonaut app "
         f"and choose {_LABEL}."
     ),
+    LockReason.VAULT_LOCKED: (
+        "This server is shared through a team, and the Memory Sync key is "
+        "kept in your vault. Unlock your vault or add this device to it so "
+        "Servonaut's MCP server can read the shared memory, or set "
+        "SERVONAUT_VAULT_DEVICE_KEY on a computer without a keychain."
+    ),
 }
 
 #: Reader not wired: signed out, or a plan without Memory Sync.
@@ -85,10 +99,21 @@ class HeadlessSharedMemory:
         reader: The :class:`SharedMemoryReader` to bind to the tools.
     """
 
-    def __init__(self, reader: Any, sync_service: Any, config_manager: Any) -> None:
+    def __init__(
+        self,
+        reader: Any,
+        sync_service: Any,
+        config_manager: Any,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.reader = reader
         self._sync = sync_service
         self._config_manager = config_manager
+        self._clock = clock
+        # A vault attempt that did not unlock is not repeated until then, so a
+        # tool that asks on every read does not hit the service each time.
+        self._vault_retry_at: float = 0.0
+        self._vault_outcome: Optional[VaultUnlock] = None
         # A digest, never the passphrase: it only recognises one that already
         # failed, so the slow key derivation is not repeated for it.
         self._failed_digest: Optional[str] = None
@@ -118,10 +143,31 @@ class HeadlessSharedMemory:
             if self.is_unlocked:
                 return None
             try:
+                reason = await self._unlock_from_vault()
+                if reason is not _NO_VAULT_ANSWER:
+                    return reason
                 return await self._unlock_from_remembered_passphrase()
             except Exception as exc:  # noqa: BLE001 - a fallback must never fail a tool
                 logger.debug("Shared memory unlock skipped (%s)", type(exc).__name__)
                 return LockReason.UNLOCK_FAILED
+
+    async def _unlock_from_vault(self) -> Any:
+        """``None`` when unlocked, ``VAULT_LOCKED`` when the vault holds the key
+        but cannot give it up, else ``_NO_VAULT_ANSWER`` (try the passphrase path).
+        """
+        if self._clock() < self._vault_retry_at:
+            outcome = self._vault_outcome
+        else:
+            outcome = await self._sync.unlock_from_vault()
+            self._vault_outcome = outcome
+            if outcome is not VaultUnlock.OK:
+                wait = self._config_manager.get().memory.vault_key_recheck_wait()
+                self._vault_retry_at = self._clock() + wait
+        if outcome is VaultUnlock.OK:
+            return None if self.is_unlocked else _NO_VAULT_ANSWER
+        if outcome is VaultUnlock.VAULT_LOCKED:
+            return LockReason.VAULT_LOCKED
+        return _NO_VAULT_ANSWER
 
     async def _unlock_from_remembered_passphrase(self) -> Optional[LockReason]:
         if not self._sync.is_enrolled_locally():
@@ -153,6 +199,10 @@ class HeadlessSharedMemory:
         return passphrase_store.get_passphrase() or None
 
 
+#: Sentinel: the vault gave no answer, so the passphrase path decides.
+_NO_VAULT_ANSWER = object()
+
+
 async def _no_passphrase(mode: str = "unlock") -> str:
     """The retrieval service's passphrase source: this process never asks."""
     raise RuntimeError(
@@ -160,8 +210,47 @@ async def _no_passphrase(mode: str = "unlock") -> str:
     )
 
 
+def build_read_only_key_custody(
+    api_client: Any,
+    auth_service: Any,
+    rate_limiter: Any,
+    config_manager: Any,
+    vault_runtime: Any = None,
+) -> Any:
+    """A ``MemoryKeyCustody(writable=False)`` for a process that must not write.
+
+    It reads the key from *vault_runtime* once that is unlocked (the vault is
+    asked lazily, so a vault that unlocks later is picked up) and never
+    writes the marker, enrols or cleans up.
+    """
+    from servonaut.services.memory.key_custody import MemoryKeyCustody
+    from servonaut.services.vault.errors import NO_LOCAL_IDENTITY, VaultUserError
+
+    def app_keys() -> Any:
+        if vault_runtime is None or not vault_runtime.is_unlocked:
+            return None
+        return vault_runtime.app_keys
+
+    def signer() -> Any:
+        if vault_runtime is None:
+            raise VaultUserError(NO_LOCAL_IDENTITY)
+        return vault_runtime.device_signer()
+
+    return MemoryKeyCustody(
+        api_client,
+        auth_service,
+        rate_limiter,
+        app_keys,
+        signer,
+        Path.home() / ".servonaut" / "memory" / "key_custody.json",
+        False,
+        memory_config_provider=lambda: config_manager.get().memory,
+        key_cache_path=_sync_module._KEY_CACHE_PATH,
+    )
+
+
 def build_headless_shared_memory(
-    config_manager: Any, auth_service: Any, api_client: Any
+    config_manager: Any, auth_service: Any, api_client: Any, vault_runtime: Any = None,
 ) -> Optional[HeadlessSharedMemory]:
     """The shared-memory reader for a process without an app, or ``None``.
 
@@ -194,6 +283,9 @@ def build_headless_shared_memory(
         auth_service=auth_service,
         rate_limiter=rate_limiter,
     )
+    sync.set_key_custody(build_read_only_key_custody(
+        api_client, auth_service, rate_limiter, config_manager, vault_runtime,
+    ))
     retrieval = MemoryRetrievalService(
         api_client=api_client,
         crypto=memory_crypto,

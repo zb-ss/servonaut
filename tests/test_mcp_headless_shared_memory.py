@@ -21,7 +21,7 @@ import pytest
 import servonaut.services.memory.crypto as memory_crypto
 import servonaut.services.memory.sync_service as sync_module
 from servonaut.config.manager import ConfigManager
-from servonaut.services.api_client import APIClient
+from servonaut.services.api_client import APIClient, NotFoundError
 from servonaut.services.auth_service import AuthService
 from servonaut.services.memory import passphrase_store
 from servonaut.services.memory.headless_shared import (
@@ -164,13 +164,15 @@ def test_unlock_succeeds_and_get_server_memory_returns_the_team_copy(env: Env):
 ])
 def test_stays_locked_without_a_usable_remembered_passphrase(env: Env, setup):
     setup(env)
+    # Without keys.json the vault step asks the service where the key is kept.
+    env.api.get = AsyncMock(side_effect=NotFoundError(
+        code="not_found", message="no key", status=404))
     shared = _build(env)
 
     assert asyncio.run(shared.ensure_unlocked()) is False
     assert not shared.is_unlocked
     assert env.unwraps == []
-    env.auth.fetch_user_id.assert_not_awaited()
-    _assert_nothing_written(env)
+    _assert_nothing_written_but_reads(env)
 
 
 def test_a_wrong_stored_passphrase_is_tried_once_then_remembered_as_failed(env: Env):
@@ -534,3 +536,197 @@ def test_read_saved_memory_remember_ignores_a_broken_file(tmp_path: Path):
     manager.get()
     path.write_text("{not json")
     assert manager.read_saved_memory_remember() == (False, "")
+
+
+# --- a key kept in the vault ----------------------------------------------
+
+
+class FakeVault:
+    """The few vault members the read-only custody uses."""
+
+    def __init__(self, pair, unlocked: bool = True) -> None:
+        self.pair = pair
+        self.is_unlocked = unlocked
+        self.app_keys = MagicMock()
+        self.app_keys.list = AsyncMock(
+            return_value=[SimpleNamespace(public_fingerprint=pair.fingerprint)]
+        )
+        self.app_keys.read = AsyncMock(side_effect=self._payload)
+        self.app_keys.create = AsyncMock()
+        self.app_keys.delete = AsyncMock()
+
+    async def _payload(self, item_type, fingerprint):
+        return {
+            "user_id": USER_ID,
+            "public_key": base64.b64encode(self.pair.public_key).decode(),
+            "private_key": base64.b64encode(self.pair.private_key).decode(),
+        }
+
+    def device_signer(self):
+        raise AssertionError("a read-only process never signs")
+
+
+def _vault_env(env: Env, *, unlocked: bool = True, keys_json: bool = False):
+    """A vault-custody account: no wrapped key at the service, no keys.json."""
+    if not keys_json:
+        env.cache_path.unlink()
+    env.api.get = AsyncMock(return_value={
+        "id": 1, "fingerprint": "f" * 64, "public_key": "AAAA",
+        "wrapped_private_key": None, "custody": "vault",
+    })
+    pair = memory_crypto.generate_keypair()
+    return FakeVault(pair, unlocked)
+
+
+def _vault_shared(env: Env, vault: FakeVault, clock=None):
+    shared = build_headless_shared_memory(env.config_manager, env.auth, env.api, vault)
+    if clock is not None:
+        shared._clock = clock
+    return shared
+
+
+def _marker_path() -> Path:
+    return Path.home() / ".servonaut" / "memory" / "key_custody.json"
+
+
+def test_an_unlocked_vault_unlocks_memory_sync_without_the_keychain(env: Env):
+    vault = _vault_env(env)
+    env.keychain.available = False
+    shared = _vault_shared(env, vault)
+    shared.reader.read = AsyncMock(side_effect=lambda *a: _shared_copy() if shared.is_unlocked else None)
+
+    out = asyncio.run(_tools_for(shared).get_server_memory("web-1"))
+
+    assert "distro: Debian 12" in out
+    assert shared.is_unlocked
+    assert env.unwraps == []
+    # One adopt from the single item: no service lookup, nothing written.
+    env.api.get.assert_not_awaited()
+    assert not _marker_path().exists()
+    vault.app_keys.create.assert_not_awaited()
+    vault.app_keys.delete.assert_not_awaited()
+    _assert_nothing_written_but_reads(env)
+
+
+def _assert_nothing_written_but_reads(env: Env) -> None:
+    env.keychain.store.assert_not_called()
+    env.keychain.clear.assert_not_called()
+    env.config_manager.save.assert_not_called()
+    env.config_manager.update.assert_not_called()
+    for name in ("post", "put", "patch", "delete", "request_signed"):
+        assert not getattr(env.api, name).called
+
+
+def test_a_locked_vault_gives_the_vault_hint_and_its_own_audit_reason(env: Env):
+    vault = _vault_env(env, unlocked=False)
+    shared = _vault_shared(env, vault)
+    shared.reader.read = AsyncMock(return_value=None)
+    tools = _tools_for(shared)
+    audit = MagicMock()
+    tools._audit = audit
+
+    out = asyncio.run(tools.get_server_memory("web-1"))
+
+    error = json.loads(out)["error"]
+    assert error["code"] == "missing"
+    assert error["hint"] == locked_hint(LockReason.VAULT_LOCKED)
+    shared.reader.read.assert_not_awaited()
+    assert audit.log.call_args.args[4] == "shared_memory_locked_vault_locked"
+    _assert_nothing_written_but_reads(env)
+    assert not _marker_path().exists()
+
+
+def test_the_vault_hint_names_the_vault_not_the_30_day_option(env: Env):
+    hint = locked_hint(LockReason.VAULT_LOCKED)
+    assert "vault" in hint
+    assert "SERVONAUT_VAULT_DEVICE_KEY" in hint
+    assert "30 days" not in hint and "Keep unlocked" not in hint
+    assert "Servonaut's MCP server" in hint
+    assert "this server is shared" not in hint.lower().replace("this server is shared through a team", "")
+
+
+def test_a_vault_that_unlocks_later_is_picked_up_after_the_recheck_wait(env: Env):
+    vault = _vault_env(env, unlocked=False)
+    now = SimpleNamespace(value=1000.0)
+    shared = _vault_shared(env, vault, clock=lambda: now.value)
+
+    assert asyncio.run(shared.check_lock()) is LockReason.VAULT_LOCKED
+
+    vault.is_unlocked = True
+    now.value += 10  # inside the wait: still the earlier answer, no new attempt
+    assert asyncio.run(shared.check_lock()) is LockReason.VAULT_LOCKED
+    vault.app_keys.list.assert_not_awaited()
+
+    now.value += 60
+    assert asyncio.run(shared.check_lock()) is None
+    assert shared.is_unlocked
+
+
+def test_a_failed_vault_attempt_is_not_repeated_within_the_wait(env: Env):
+    vault = _vault_env(env, unlocked=False)
+    now = SimpleNamespace(value=0.0)
+    shared = _vault_shared(env, vault, clock=lambda: now.value)
+
+    for _ in range(3):
+        assert asyncio.run(shared.check_lock()) is LockReason.VAULT_LOCKED
+        now.value += 5
+
+    # The marker-less, vault-less lookup asked the service once, not three times.
+    assert env.api.get.await_count == 1
+
+
+def test_the_recheck_wait_comes_from_the_config(env: Env):
+    env.config_manager.get.return_value.memory.vault_key_recheck_seconds = 5
+    vault = _vault_env(env, unlocked=False)
+    now = SimpleNamespace(value=0.0)
+    shared = _vault_shared(env, vault, clock=lambda: now.value)
+
+    assert asyncio.run(shared.check_lock()) is LockReason.VAULT_LOCKED
+    now.value = 6
+    assert asyncio.run(shared.check_lock()) is LockReason.VAULT_LOCKED
+    assert env.api.get.await_count == 2
+
+
+def test_a_passphrase_account_keeps_the_remembered_passphrase_path(env: Env):
+    """keys.json present: the vault step answers NOT_VAULT with no service call."""
+    shared = _vault_shared(env, FakeVault(memory_crypto.generate_keypair(), unlocked=False))
+
+    assert asyncio.run(shared.ensure_unlocked()) is True
+    assert len(env.unwraps) == 1
+    env.api.get.assert_not_called()
+
+
+def test_a_passphrase_account_without_the_kept_option_still_gets_the_old_hint(env: Env):
+    env.api.get = AsyncMock(return_value={
+        "id": 1, "fingerprint": "f" * 64, "public_key": "AAAA",
+        "wrapped_private_key": {"v": 1}, "custody": "passphrase",
+    })
+    env.remember.value = (False, "")
+    shared = _vault_shared(env, FakeVault(memory_crypto.generate_keypair(), unlocked=False))
+
+    assert asyncio.run(shared.check_lock()) is LockReason.NOT_KEPT
+
+
+def test_a_service_error_in_the_vault_step_falls_through_to_the_passphrase_path(env: Env):
+    env.cache_path.unlink()
+    env.api.get = AsyncMock(side_effect=NotFoundError(code="not_found", message="no key", status=404))
+    shared = _vault_shared(env, FakeVault(memory_crypto.generate_keypair(), unlocked=False))
+
+    assert asyncio.run(shared.check_lock()) is LockReason.NOT_SET_UP
+
+
+def test_mcp_startup_hands_the_vault_runtime_to_the_builder(env: Env, monkeypatch):
+    from servonaut.mcp import server
+
+    seen = {}
+    real = build_headless_shared_memory
+
+    def spy(config_manager, auth, api, vault_runtime=None):
+        seen["vault"] = vault_runtime
+        return real(config_manager, auth, api, vault_runtime)
+
+    monkeypatch.setattr("servonaut.services.memory.headless_shared.build_headless_shared_memory", spy)
+    monkeypatch.setattr("servonaut.services.api_client.APIClient", lambda auth: env.api)
+    vault = object()
+    server._wire_headless_shared_memory(MagicMock(), env.config_manager, env.auth, vault)
+    assert seen["vault"] is vault

@@ -741,6 +741,12 @@ def _init_headless_sync_services(
         )
         if hasattr(memory_service, "set_sync_service"):
             memory_service.set_sync_service(sync_service)
+        # Read-only: finds a vault-held key, never enrols or writes the marker.
+        from servonaut.services.memory.headless_shared import build_read_only_key_custody
+
+        sync_service.set_key_custody(build_read_only_key_custody(
+            api_client, auth, rate_limiter, config_manager, _vault_runtime(),
+        ))
     except Exception as exc:  # noqa: BLE001
         logger.debug("headless sync: MemorySyncService init failed: %s", exc)
         return None, None
@@ -757,8 +763,18 @@ def _init_headless_sync_services(
             crypto=_memory_crypto,
             passphrase_provider=_stdin_passphrase,
             rate_limiter=rate_limiter,  # type: ignore[possibly-undefined]
+            key_material_provider=sync_service.get_key_material,
             user_id_provider=auth.fetch_user_id,
         )
+
+        def _hand_key_to_retrieval() -> None:
+            material = sync_service.get_key_material()
+            if material is None:
+                return
+            retrieval_service.set_key_material(material)
+            retrieval_service.clear_cache()
+
+        sync_service.set_key_material_listener(_hand_key_to_retrieval)
         sync_service.set_retrieval_service(retrieval_service)
     except Exception as exc:  # noqa: BLE001
         logger.debug("headless sync: MemoryRetrievalService init failed: %s", exc)
@@ -790,6 +806,30 @@ _PULL_FINDINGS_RESULT_MESSAGES: Dict[str, str] = {
 }
 
 
+_NOT_CONFIGURED = "Memory Sync is not configured. Set up Memory Sync first."
+
+
+async def _unlocked_for_pull(sync: Any) -> bool:
+    """Whether Memory Sync is usable, trying the vault first and never prompting.
+
+    A key kept in a vault that cannot be opened here gets the vault text (the
+    caller exits 6); a passphrase account stays "not configured" because this
+    command has no way to ask for the passphrase.
+    """
+    from servonaut.services.memory.custody_errors import custody_error_message
+    from servonaut.services.memory.interfaces import VaultCustodyLocked
+    from servonaut.services.memory.sync_service import VaultUnlock
+
+    if not getattr(sync, "is_configured", False):
+        if await sync.unlock_from_vault() is VaultUnlock.VAULT_LOCKED:
+            print(custody_error_message(VaultCustodyLocked()), file=sys.stderr)
+            return False
+    if not getattr(sync, "is_configured", False):
+        print(_NOT_CONFIGURED, file=sys.stderr)
+        return False
+    return True
+
+
 def _cmd_pull_annotations(
     args: Any,
     config: Any,
@@ -799,11 +839,8 @@ def _cmd_pull_annotations(
 ) -> int:
     """Handle ``memory pull`` — fetch and write back memory (annotations +
     findings) from the sync server for an instance."""
-    if sync is None or not getattr(sync, "is_configured", False):
-        print(
-            "Memory Sync is not configured. Set up Memory Sync first.",
-            file=sys.stderr,
-        )
+    if sync is None:
+        print(_NOT_CONFIGURED, file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
     iid = inst.get("id") or inst.get("name", "")
@@ -811,6 +848,8 @@ def _cmd_pull_annotations(
     provider = instance_provider(inst)
 
     async def _do_pull() -> int:
+        if not await _unlocked_for_pull(sync):
+            return _EXIT_GENERIC_ERROR
         try:
             ann = await sync.pull_annotations(iid, name, provider)
         except Exception as exc:  # noqa: BLE001
