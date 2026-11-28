@@ -472,7 +472,12 @@ def _movable_app() -> _CustodyApp:
 
 
 async def _press(app: App, pilot, button_id: str, until=None) -> None:
-    """Press a button, then wait for the condition the press must lead to."""
+    """Press a button once it is mounted, then wait for the condition the press must lead to.
+
+    A pushed modal is the active screen before its widgets are composed, so
+    the button is waited for rather than queried at once.
+    """
+    await wait_until(lambda: len(app.screen.query(f"#{button_id}")) > 0)
     app.screen.query_one(f"#{button_id}", Button).press()
     await pilot.pause()
     if until is not None:
