@@ -644,3 +644,65 @@ def test_memory_sync_pane_exposes_max_drain_batches() -> None:
 
     pane = MemorySyncPane()
     assert pane._MAX_DRAIN_BATCHES == MemorySyncSetupScreen._MAX_DRAIN_BATCHES
+
+
+@pytest.mark.asyncio
+async def test_custom_servers_post_save_disables_hidden_form_buttons_and_focuses_open(tmp_path) -> None:
+    cm = ConfigManager(config_path=str(tmp_path / "config.json"))
+    cm.save(AppConfig())
+    stored: list[CustomServer] = []
+
+    class _CustomSaveHost(App):
+        CSS_PATH = CSS_FILES
+        demo_mode = False
+        redaction_service = None
+        vault_available = False
+        vault_command_service = None
+        auth_service = None
+        instances: list = []
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.config_manager = cm
+            self.ssh_service = SimpleNamespace(
+                list_available_keys=lambda: [],
+                check_key_permissions=lambda _p: True,
+            )
+            self.custom_server_service = SimpleNamespace(
+                list_servers=lambda: list(stored),
+                get_server=lambda name: next((s for s in stored if s.name == name), None),
+                add_server=lambda srv: stored.append(srv),
+                update_server=lambda name, srv: True,
+                list_as_instances=lambda: [
+                    {
+                        "id": f"custom-{s.name}",
+                        "name": s.name,
+                        "public_ip": s.host,
+                        "private_ip": s.host,
+                        "is_custom": True,
+                    }
+                    for s in stored
+                ],
+            )
+
+        def on_mount(self) -> None:
+            self.push_screen(CustomServersScreen(open_add_form=True))
+
+    app = _CustomSaveHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#input_name", Input).value = "web-1"
+        screen.query_one("#input_host", Input).value = "10.0.1.99"
+        await pilot.click("#btn_save_server")
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.query_one("#btn_save_server").disabled is True
+        assert screen.query_one("#btn_cancel_form").disabled is True
+        assert app.focused is screen.query_one("#btn_custom_open_server", Button)
+
+        screen.action_add_server()
+        await pilot.pause()
+        assert screen.query_one("#btn_save_server").disabled is False
+        assert screen.query_one("#btn_cancel_form").disabled is False

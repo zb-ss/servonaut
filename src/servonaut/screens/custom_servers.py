@@ -392,6 +392,8 @@ class CustomServersScreen(WorkspaceScreen):
         self._editing_name = None
         self.query_one("#add_form").display = False
         self.query_one("#add_form_actions").display = False
+        self.query_one("#btn_save_server").disabled = True
+        self.query_one("#btn_cancel_form").disabled = True
 
     def _show_form(self, server: CustomServer = None) -> None:
         """Show the add/edit form, optionally pre-filled.
@@ -415,6 +417,8 @@ class CustomServersScreen(WorkspaceScreen):
         form = self.query_one("#add_form")
         form.display = True
         self.query_one("#add_form_actions").display = True
+        self.query_one("#btn_save_server").disabled = False
+        self.query_one("#btn_cancel_form").disabled = False
 
         extras_area = self.query_one("#input_extra_ssh_options", TextArea)
         key_select = self.query_one("#select_custom_ssh_key", Select)
@@ -838,11 +842,13 @@ class CustomServersScreen(WorkspaceScreen):
         self.query_one("#btn_custom_bind_vault", Button).display = can_vault
         share_btn = self.query_one("#btn_custom_share_team", Button)
         share_btn.display = False
+        open_btn = self.query_one("#btn_custom_open_server", Button)
         row = self.query_one("#custom_post_save_row")
         row.display = True
+        self.set_focus(open_btn)
         if getattr(self, "is_attached", False):
             self.call_after_refresh(self._reveal_post_save_row)
-        self.query_one("#btn_custom_open_server", Button).focus()
+            self.call_later(self._reveal_post_save_row)
         if can_team:
             self.run_worker(
                 self._probe_post_save_share_teams(),
@@ -851,12 +857,14 @@ class CustomServersScreen(WorkspaceScreen):
             )
 
     def _reveal_post_save_row(self) -> None:
+        if not getattr(self, "is_attached", True):
+            return
         row = self.query_one("#custom_post_save_row")
         if row.display:
             row.scroll_visible(animate=False, top=True)
             btn = self.query_one("#btn_custom_open_server", Button)
             if btn.display:
-                btn.focus()
+                self.set_focus(btn)
 
     async def _probe_post_save_share_teams(self) -> None:
         from servonaut.screens._team_share import resolve_manageable_teams
