@@ -36,6 +36,7 @@ VALUE_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("key_name", "Key", "Key"),
     ("state", "State", "State"),
     ("provider", "Provider", "Prov"),
+    ("team_name", "Team", "Team"),
     ("login_user", "Team login", "Login"),
     ("username", "Username", "User"),
     ("port", "Port", "Port"),
@@ -55,7 +56,16 @@ def instance_values(instance: Optional[dict]) -> dict[str, str]:
     for key, _label, _short in VALUE_FIELDS:
         if key in _ACCOUNT_FIELDS and not qualified:
             continue
-        value = display_name(instance) if key == "name" else instance.get(key)
+        if key == "name":
+            value = display_name(instance)
+        elif key == "team_name":
+            value = (
+                (instance.get("team_name") or instance.get("team_slug"))
+                if instance.get("is_shared") is True
+                else None
+            )
+        else:
+            value = instance.get(key)
         if value not in (None, ""):
             values[key] = str(value)
     return values

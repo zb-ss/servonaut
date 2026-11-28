@@ -28,7 +28,6 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 CONNECTED = "● connected"
 DISCONNECTED = "○ disconnected"
 SESSION_EXPIRED = "○ session expired"
-ACCOUNT_ONLY = "nav_sync_config"
 
 
 def _seed(seed, fake_cloud, *, signed_in: bool = True, heartbeat_interval=None) -> None:
@@ -84,7 +83,7 @@ async def _sign_in(t) -> None:
 async def test_login_starts_the_relay_and_unlocks_account_features(tui, seed, fake_cloud):
     _seed(seed, fake_cloud, signed_in=False)
     async with tui() as t:
-        assert not t.nav_reachable(ACCOUNT_ONLY)
+        assert not t.nav_reachable("nav_teams")
         await t.nav("nav_login")
         await t.wait_for_screen("LoginScreen")
         await _sign_in(t)
@@ -110,13 +109,15 @@ async def test_login_starts_the_relay_and_unlocks_account_features(tui, seed, fa
         assert session["plan"] == "solo" and session["user_id"] == user_id
         assert (seed.home / ".servonaut" / "auth.json").stat().st_mode & 0o777 == 0o600
 
-        # A fresh screen's sidebar reflects the account: Sync Config appears,
-        # Teams stays hidden on a Solo plan.
+        # A fresh screen's sidebar and Account view reflect the signed-in Solo plan:
+        # Teams stays hidden in the sidebar while Sync config snapshots appear on LoginScreen.
         await t.nav("nav_list")
         await t.wait_for_screen("InstanceListScreen")
-        assert t.nav_reachable(ACCOUNT_ONLY)
         assert not t.nav_reachable("nav_teams")
         assert _indicator_text(t) == CONNECTED
+        await t.nav("nav_login")
+        await t.wait_for_screen("LoginScreen")
+        assert t.is_reachable(t.on_screen("#btn_login_sync_config"))
 
 
 async def test_revoked_session_leads_back_to_sign_in(tui, seed, fake_cloud):
@@ -215,10 +216,11 @@ async def test_logout_revokes_the_session_and_stops_the_relay(tui, seed, fake_cl
         await t.wait_until(lambda: not _live(fake_cloud), desc="relay unsubscribed")
         await _relay_shows(t, DISCONNECTED)
         assert t.is_reachable(t.on_screen("#btn_login"))
+        assert not t.on_screen("#btn_login_sync_config").display
 
         await t.nav("nav_list")
         await t.wait_for_screen("InstanceListScreen")
-        assert not t.nav_reachable(ACCOUNT_ONLY)
+        assert not t.nav_reachable("nav_teams")
 
 
 async def test_relay_status_screen_stops_and_restarts(tui, seed, fake_cloud):

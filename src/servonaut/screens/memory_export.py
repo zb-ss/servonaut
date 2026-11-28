@@ -21,111 +21,67 @@ from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 logger = logging.getLogger(__name__)
 
 
-class MemoryExportScreen(WorkspaceScreen):
-    """Screen for exporting memory archives with Ed25519 signature verification.
+class _MemoryExportContentMixin:
+    """Shared compose and export worker behavior for screen and tabbed pane."""
 
-    Tier-gated on ``memory_compliance_export``.  Provides from/to date inputs,
-    an export button, and in-place status updates after verification.
-    """
-
-    CHAT_REFLOW = True
-    CHAT_MIN_CONTENT_WIDTH = 48
-    CONTENT_NARROW_WIDTH = 80
-
-    BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
-        Binding("ctrl+s", "start_export", "Export", show=True),
-    ]
-
-    def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if self.navigation_focused:
-            return super().check_action(action, parameters)
-        return check_action_passthrough(self, action)
-
-    # ------------------------------------------------------------------
-    # Compose
-    # ------------------------------------------------------------------
-
-    def compose(self) -> ComposeResult:
-        yield SafeHeader()
-        yield WorkspaceControls("Memory export")
-        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
-            yield self.workspace_sidebar()
-            yield VerticalScroll(
+    def _compose_export_body(self, *, show_back: bool = True, extra_classes: str = "") -> ComposeResult:
+        scroll_kwargs = {"classes": extra_classes} if extra_classes else {}
+        buttons: list[Button] = [Button("Start export", variant="primary", id="btn-export-start")]
+        if show_back:
+            buttons.append(Button("Back", variant="default", id="btn-export-back"))
+        yield VerticalScroll(
+            Container(
                 Container(
-                    Container(
-                        Static(
-                            "[bold]Compliance memory export[/bold]",
-                            id="export-title",
-                            classes="screen-title",
-                        ),
-                        Static(
-                            "[dim]Export a signed archive of all memory envelopes for audit "
-                            "or compliance purposes.  The archive is verified with an "
-                            "Ed25519 signature from the server.[/dim]",
-                            id="export-description",
-                        ),
-                        id="export-context",
+                    Static(
+                        "[bold]Compliance memory export[/bold]",
+                        id="export-title",
+                        classes="screen-title",
                     ),
-                    Horizontal(
-                        Container(
-                            Static("Archive date range", classes="memory-secondary-heading"),
-                            Horizontal(
-                                Container(
-                                    Label("From date (ISO-8601, optional)"),
-                                    Input(
-                                        placeholder="e.g. 2024-01-01T00:00:00Z",
-                                        id="export-from-input",
-                                    ),
-                                    classes="export-field-row",
-                                ),
-                                Container(
-                                    Label("To date (ISO-8601, optional)"),
-                                    Input(
-                                        placeholder="e.g. 2024-12-31T23:59:59Z",
-                                        id="export-to-input",
-                                    ),
-                                    classes="export-field-row",
-                                ),
-                                id="export-date-fields",
-                            ),
-                            Horizontal(
-                                Button("Start export", variant="primary", id="btn-export-start"),
-                                Button("Back", variant="default", id="btn-export-back"),
-                                id="export-btn-row",
-                            ),
-                            id="export-range-panel",
-                        ),
-                        Container(
-                            Static("Archive verification", classes="memory-secondary-heading"),
-                            Static("Choose the optional date range, then start the export. The signature verification result appears here.", id="export-status"),
-                            id="export-result-panel",
-                        ),
-                        id="export-workspace",
+                    Static(
+                        "[dim]Export a signed archive of all memory envelopes for audit "
+                        "or compliance purposes.  The archive is verified with an "
+                        "Ed25519 signature from the server.[/dim]",
+                        id="export-description",
                     ),
-                    id="export-container",
+                    id="export-context",
                 ),
-                id="export-scroll",
-                classes="workspace-content",
-            )
-        yield Footer()
-
-    # ------------------------------------------------------------------
-    # Mount
-    # ------------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        auth = getattr(self.app, "auth_service", None)
-        if auth and not auth.has_feature("memory_compliance_export"):
-            from servonaut.widgets.upsell_modal import UpsellModal
-            self.app.push_screen(UpsellModal("memory_compliance_export"))
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
+                Horizontal(
+                    Container(
+                        Static("Archive date range", classes="memory-secondary-heading"),
+                        Horizontal(
+                            Container(
+                                Label("From date (ISO-8601, optional)"),
+                                Input(
+                                    placeholder="e.g. 2024-01-01T00:00:00Z",
+                                    id="export-from-input",
+                                ),
+                                classes="export-field-row",
+                            ),
+                            Container(
+                                Label("To date (ISO-8601, optional)"),
+                                Input(
+                                    placeholder="e.g. 2024-12-31T23:59:59Z",
+                                    id="export-to-input",
+                                ),
+                                classes="export-field-row",
+                            ),
+                            id="export-date-fields",
+                        ),
+                        Horizontal(*buttons, id="export-btn-row"),
+                        id="export-range-panel",
+                    ),
+                    Container(
+                        Static("Archive verification", classes="memory-secondary-heading"),
+                        Static("Choose the optional date range, then start the export. The signature verification result appears here.", id="export-status"),
+                        id="export-result-panel",
+                    ),
+                    id="export-workspace",
+                ),
+                id="export-container",
+            ),
+            id="export-scroll",
+            **scroll_kwargs,
+        )
 
     def action_start_export(self) -> None:
         export_service = getattr(self.app, "export_service", None)
@@ -146,6 +102,7 @@ class MemoryExportScreen(WorkspaceScreen):
             return
         from_val = self.query_one("#export-from-input", Input).value.strip() or None
         to_val = self.query_one("#export-to-input", Input).value.strip() or None
+
         def _s(x: str) -> str:
             if self.app.demo_mode and self.app.redaction_service:
                 return self.app.redaction_service.scrub_stream(x)
@@ -176,12 +133,61 @@ class MemoryExportScreen(WorkspaceScreen):
             status.update(f"[$text-error]Export failed: {_esc(str(exc))}[/$text-error]")
             self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
-    # ------------------------------------------------------------------
-    # Button handler
-    # ------------------------------------------------------------------
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-export-start":
             self.action_start_export()
         elif event.button.id == "btn-export-back":
-            self.action_back()
+            back = getattr(self, "action_back", None)
+            if callable(back):
+                back()
+
+
+class MemoryExportScreen(_MemoryExportContentMixin, WorkspaceScreen):
+    """Screen for exporting memory archives with Ed25519 signature verification.
+
+    Tier-gated on ``memory_compliance_export``.  Provides from/to date inputs,
+    an export button, and in-place status updates after verification.
+    """
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 48
+    CONTENT_NARROW_WIDTH = 80
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=True),
+        Binding("ctrl+s", "start_export", "Export", show=True),
+    ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
+        return check_action_passthrough(self, action)
+
+    # ------------------------------------------------------------------
+    # Compose
+    # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield WorkspaceControls("Memory export")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield from self._compose_export_body(show_back=True, extra_classes="workspace-content")
+        yield Footer()
+
+    # ------------------------------------------------------------------
+    # Mount
+    # ------------------------------------------------------------------
+
+    def on_mount(self) -> None:
+        auth = getattr(self.app, "auth_service", None)
+        if auth and not auth.has_feature("memory_compliance_export"):
+            from servonaut.widgets.upsell_modal import UpsellModal
+            self.app.push_screen(UpsellModal("memory_compliance_export"))
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def action_back(self) -> None:
+        self.app.pop_screen()

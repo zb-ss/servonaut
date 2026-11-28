@@ -9,6 +9,9 @@ CustomServersScreen #custom_servers_container {
     height: 1fr;
     background: transparent;
 }
+CustomServersScreen #custom_busy {
+    margin: 0 0 1 0;
+}
 CustomServersScreen #custom_servers_header {
     height: auto;
     color: $text;
@@ -41,7 +44,7 @@ CustomServersScreen #custom_servers_toolbar .custom-section-title {
     content-align: left middle;
 }
 CustomServersScreen .add_row {
-    width: 64;
+    width: 72;
     max-width: 100%;
     height: auto;
 }

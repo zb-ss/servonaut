@@ -59,7 +59,10 @@ def _rows(t) -> list[list[str]]:
 
 
 async def _open_snapshots(t) -> None:
-    await t.nav("nav_sync_config")
+    await t.nav("nav_login")
+    await t.wait_for_screen("LoginScreen")
+    await t.wait_until(lambda: t.on_screen("#btn_login_sync_config").display, desc="config snapshots link")
+    await t.click("#btn_login_sync_config")
     await t.wait_for_screen("SnapshotManagerScreen")
 
 

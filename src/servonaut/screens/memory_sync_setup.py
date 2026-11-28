@@ -50,75 +50,39 @@ _BENEFITS_FREE = [
 ]
 
 
-class MemorySyncSetupScreen(WorkspaceScreen):
-    """Setup + status hub for the Memory Sync feature."""
+def compose_sync_container(*, extra_classes: str = "") -> ComposeResult:
+    """Yield the shared Memory Sync heading + scrollable body container."""
+    kwargs = {"classes": extra_classes} if extra_classes else {}
+    yield Container(
+        Container(
+            Horizontal(
+                Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
+                Static("", id="msync_status"),
+                id="msync_heading_row",
+            ),
+            Static(
+                "[dim]Encrypted, AI-queryable backup of every server's "
+                "memory across your devices.[/dim]",
+                id="msync_subtitle",
+            ),
+            id="msync_context",
+        ),
+        # The body card swaps between explain / setup / locked / ready
+        VerticalScroll(id="msync_body"),
+        id="msync_container",
+        **kwargs,
+    )
 
-    CHAT_REFLOW = True
-    CHAT_MIN_CONTENT_WIDTH = 56
-    CONTENT_NARROW_WIDTH = 96
 
-    BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh", "Refresh", show=True),
-    ]
+class _MemorySyncContentMixin:
+    """Shared Memory Sync setup/status card logic for screen and tabbed pane."""
 
-    def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if self.navigation_focused:
-            return super().check_action(action, parameters)
-        return check_action_passthrough(self, action)
+    # Cap drain iterations so a runaway producer can't loop us forever.
+    # 200 batches × 50 envelopes = 10k envelopes per click — well over a
+    # full-fleet sweep (47 instances × ~12 modules = ~564 envelopes).
+    _MAX_DRAIN_BATCHES = 200
 
-    def compose(self) -> ComposeResult:
-        yield SafeHeader()
-        yield WorkspaceControls("Memory sync")
-        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
-            yield self.workspace_sidebar()
-            yield Container(
-                Container(
-                    Horizontal(
-                        Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
-                        Static("", id="msync_status"),
-                        id="msync_heading_row",
-                    ),
-                    Static(
-                        "[dim]Encrypted, AI-queryable backup of every server's "
-                        "memory across your devices.[/dim]",
-                        id="msync_subtitle",
-                    ),
-                    id="msync_context",
-                ),
-                # The body card swaps between explain / setup / locked / ready
-                VerticalScroll(id="msync_body"),
-                id="msync_container",
-                classes="workspace-content",
-            )
-        yield Footer()
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        # The screen can be left or the app closed before it has finished composing;
-        # Textual then dismantles it under this handler and its fields are gone.
-        if self.is_being_dismantled():
-            return
-        self._render_state()
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
-
-    def action_refresh(self) -> None:
-        self._render_state()
-
-    # ------------------------------------------------------------------
-    # State machine
-    # ------------------------------------------------------------------
-
-    def refresh_after_demo_toggle(self) -> None:
-        """Rebuild the status card for the new demo-mode state."""
-        self._render_state()
-
-    def _render_state(self) -> None:
+    def _apply_sync_state(self) -> None:
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()
 
@@ -159,13 +123,16 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             self._set_status(status_label, "$warning")
             body.mount(self._build_setup_card(auth))
 
+    def _render_state(self) -> None:
+        self._apply_sync_state()
+        if getattr(self, "is_attached", False):
+            refresh_tabs = getattr(self.screen, "refresh_tab_gates", None)
+            if callable(refresh_tabs):
+                refresh_tabs()
+
     def _set_status(self, text: str, color: str) -> None:
         widget = self.query_one("#msync_status", Static)
         widget.update(f"[{color}]{escape(text)}[/{color}]")
-
-    # ------------------------------------------------------------------
-    # Card builders
-    # ------------------------------------------------------------------
 
     def _build_logged_out_card(self) -> Container:
         return Container(
@@ -186,7 +153,8 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         )
 
     def _build_upsell_card(self, auth: Any) -> Container:
-        plan = (auth._token.plan if getattr(auth, "_token", None) else "free") or "free"
+        raw_plan = getattr(getattr(auth, "_token", None), "plan", None)
+        plan = raw_plan if isinstance(raw_plan, str) and raw_plan else "free"
         return Container(
             Container(
                 Static(
@@ -228,7 +196,8 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         )
 
     def _build_setup_card(self, auth: Any) -> Container:
-        plan = (auth._token.plan if getattr(auth, "_token", None) else "solo") or "solo"
+        raw_plan = getattr(getattr(auth, "_token", None), "plan", None)
+        plan = raw_plan if isinstance(raw_plan, str) and raw_plan else "solo"
         benefits = (
             _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
         )
@@ -271,128 +240,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             classes="msync_card_stack",
         )
 
-    def _build_status_card(self, auth: Any, sync: Any) -> Container:
-        status = getattr(sync, "status", None)
-        last_sync = "—"
-        used = "—"
-        soft_cap = "—"
-        pending = 0
-        if status is not None:
-            last_sync = getattr(status, "last_sync_at", None) or "never"
-            quota = getattr(status, "quota", None)
-            if quota is not None:
-                used = f"{getattr(quota, 'envelopes_used', '?'):,}"
-                soft_cap = f"{getattr(quota, 'envelopes_soft_cap', '?'):,}"
-            pending = getattr(status, "pending_envelopes", 0)
-
-        fingerprint = "—"
-        material = sync.get_key_material() if sync is not None else None
-        if material is not None and getattr(material, "public_key", None):
-            try:
-                from servonaut.services.memory.crypto import fingerprint as fp_func
-                from servonaut.services.memory.crypto import short_fingerprint
-
-                fingerprint = short_fingerprint(fp_func(material.public_key))
-            except Exception:
-                fingerprint = "loaded"
-
-        # Auto-unlock status — read from config (no network needed).
-        auto_unlock_label = "off"
-        is_remembered = False
-        try:
-            from servonaut.services.memory import passphrase_store
-
-            remember_available = passphrase_store.keyring_available()
-        except Exception:
-            remember_available = False
-        try:
-            cfg = self.app.config_manager.get()
-            is_remembered = bool(getattr(cfg.memory, "sync_remember_device", False))
-            if is_remembered:
-                auto_unlock_label = "on"
-                # Surface the remember TTL so the user knows when they'll be
-                # asked to re-enter the passphrase.
-                raw_exp = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
-                if raw_exp:
-                    try:
-                        from datetime import datetime, timezone
-
-                        exp = datetime.fromisoformat(raw_exp)
-                        if exp.tzinfo is None:
-                            exp = exp.replace(tzinfo=timezone.utc)
-                        days_left = (exp - datetime.now(timezone.utc)).days
-                        if days_left < 0:
-                            auto_unlock_label = "on (expired — will re-prompt)"
-                        else:
-                            auto_unlock_label = f"on (re-prompt in {days_left}d)"
-                    except Exception:
-                        pass
-            else:
-                auto_unlock_label = "off"
-        except Exception:
-            pass
-        if not remember_available:
-            auto_unlock_label = "unavailable (no supported OS keychain)"
-
-        actions_children: list = [
-            Button("Sync all local memory", variant="primary", id="msync_btn_sync_now"),
-            Button("Rotate keypair", id="msync_btn_rotate"),
-            Button("Disable sync", variant="warning", id="msync_btn_disable"),
-        ]
-        if is_remembered:
-            actions_children.append(
-                Button("Forget on this device", id="msync_btn_forget")
-            )
-        elif remember_available:
-            actions_children.append(
-                Button("Enable auto-unlock", id="msync_btn_remember")
-            )
-        if getattr(self.app, "_memory_manual_sync_in_progress", False):
-            for action in actions_children:
-                action.disabled = True
-
-        return Container(
-            Container(
-                Static("[bold]Device and encrypted store[/bold]", classes="msync_card_title"),
-                Vertical(
-                    self._kv_row(
-                        "Last sync",
-                        str(last_sync),
-                        value_id="msync_last_sync_value",
-                    ),
-                    self._kv_row(
-                        "Quota used",
-                        f"{used} / {soft_cap} envelopes",
-                        value_id="msync_quota_value",
-                    ),
-                    self._kv_row(
-                        "Pending",
-                        f"{pending} envelope(s)",
-                        value_id="msync_pending_value",
-                    ),
-                    self._kv_row("Key fingerprint", fingerprint),
-                    self._kv_row("Auto-unlock", auto_unlock_label),
-                    classes="msync_kv_grid",
-                ),
-                classes="msync_card msync_card_primary",
-            ),
-            Container(
-                Static("[bold]Sync and key controls[/bold]", classes="msync_card_title"),
-                Horizontal(
-                    *actions_children,
-                    classes="msync_card_actions msync_configured_actions",
-                ),
-                Static(
-                    "[dim]Disabling stops the background sync loop on this "
-                    "device but leaves your encrypted data intact on the "
-                    "server. Re-enrol any time to resume.[/dim]",
-                    classes="msync_card_body",
-                ),
-                classes="msync_card",
-            ),
-            classes="msync_card_stack",
-        )
-
     def _build_benefits_list(self, items: list) -> Container:
         rows = []
         for marker, color, text in items:
@@ -404,16 +251,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             )
         return Container(*rows, classes="msync_benefits")
 
-    def _kv_row(
-        self, label: str, value: str, *, value_id: Optional[str] = None
-    ) -> Horizontal:
-        return Horizontal(
-            Static(f"[dim]{escape(label)}[/dim]", classes="msync_kv_label"),
-            Static(escape(value), id=value_id, classes="msync_kv_value"),
-            classes="msync_kv_row",
-        )
-
-    # ------------------------------------------------------------------
     def _refresh_status_card(self) -> None:
         """Repaint sync metrics without rebuilding the actions card."""
         sync = getattr(self.app, "memory_sync_service", None)
@@ -443,8 +280,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 self.query_one(f"#{widget_id}", Static).update(escape(value))
             except Exception:
                 pass
-
-    # ------------------------------------------------------------------
 
     def refresh_memory_sync_progress(self, message: Optional[str]) -> None:
         """Reflect an app-owned manual sync while this screen is visible."""
@@ -622,17 +457,10 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             except Exception:
                 pass
 
-    # Cap drain iterations so a runaway producer can't loop us forever.
-    # 200 batches × 50 envelopes = 10k envelopes per click — well over a
-    # full-fleet sweep (47 instances × ~12 modules = ~564 envelopes).
-    _MAX_DRAIN_BATCHES = 200
-
     async def _do_sync_now(self) -> None:
         sync = getattr(self.app, "memory_sync_service", None)
         if sync is None or not sync.is_configured:
             return
-        # Bridge: enqueue every locally-cached module that was probed
-        # before keypair enrollment (queue would otherwise be empty).
         pending_before = getattr(sync.status, "pending_envelopes", 0)
         self._publish_manual_sync_progress("Scanning local memory cache…")
         try:
@@ -661,10 +489,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 self._publish_manual_sync_progress(
                     f"{total_accepted} uploaded · {pending_now} pending"
                 )
-                # Empty result == queue drained or service halted/errored.
-                # drain_now re-queues on APIError/RateLimit/etc and returns
-                # empty, so we can't distinguish "done" from "stuck" without
-                # also checking the status afterwards.
                 if batch_accepted == 0 and batch_rejected == 0:
                     break
         except Exception as exc:
@@ -674,10 +498,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
         self._publish_manual_sync_progress(
             "Upload finished · checking remote annotations and findings…"
         )
-        # Re-read status after the loop so the message reflects ground truth,
-        # not just what drain_now returned. APIError re-queues silently and
-        # returns 0/0, so the queue can stay non-empty even when our totals
-        # look like "nothing happened".
         status_after = sync.status
         pending_after = getattr(status_after, "pending_envelopes", 0)
         last_error = getattr(status_after, "last_error", None)
@@ -695,7 +515,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 severity="warning",
             )
         elif pending_after > 0:
-            # Had work, drained nothing — surface the real cause.
             reason = halted_reason or last_error or "unknown error (see logs)"
             self.app.notify(
                 f"{pending_after} envelope(s) queued but none uploaded — "
@@ -711,11 +530,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 severity="information",
             )
 
-        # Best-effort annotations pull: fetch the latest annotations envelope
-        # from the server for every locally-known instance and write it back
-        # to disk when the server copy is newer. Never raises; per-instance
-        # errors are swallowed so a single unreachable instance can't stall
-        # the overall sync UX.
         updated = 0
         findings_updated = 0
         mem = self.app.memory_service
@@ -731,7 +545,7 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                     if await sync.pull_annotations(iid, name, provider) == "updated":
                         updated += 1
                 except Exception:
-                    pass  # pull is best-effort; never break the sync UX
+                    pass
                 try:
                     if await sync.pull_findings(iid, name, provider) == "updated":
                         findings_updated += 1
@@ -772,8 +586,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             self._show_setup_error(exc)
             return
         self._clear_busy()
-        # The old passphrase in the OS keychain (if any) is now invalid —
-        # clear it.  If the user opted to remember the new one, store it.
         try:
             import dataclasses as _dc
             from servonaut.services.memory import passphrase_store
@@ -781,9 +593,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             passphrase_store.clear_passphrase()
             if new_result.remember and passphrase_store.keyring_available():
                 passphrase_store.store_passphrase(new_result.passphrase)
-                # MAJOR-3: mirror what _prompt_memory_passphrase does — set the
-                # remember flag AND refresh the TTL so the status card, startup
-                # path, and expiry check all agree.
                 from datetime import datetime, timedelta, timezone
                 from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
 
@@ -799,8 +608,6 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 )
                 self.app.config_manager.update(memory=updated_mem)
             else:
-                # Make sure the remember flag is cleared in config so the
-                # stale keychain entry is not attempted on the next startup.
                 cfg = self.app.config_manager.get()
                 updated_mem = _dc.replace(
                     cfg.memory,
@@ -907,36 +714,24 @@ class MemorySyncSetupScreen(WorkspaceScreen):
             sync.stop()
         except Exception as exc:
             logger.warning("sync.stop failed: %s", exc)
-        # Drop the in-memory keypair so the service flips back to "not configured".
-        # The encrypted data on the server is untouched — re-enrol any time.
-        # M12: use the public lock() method instead of poking private attrs
-        # directly (per the project's memory-encapsulation convention).
         try:
             if hasattr(sync, "lock"):
                 sync.lock()
             else:
-                # Fallback for any stub/mock that hasn't been updated yet.
                 sync._self_pubkey = None  # type: ignore[attr-defined]
                 sync._self_privkey = None  # type: ignore[attr-defined]
         except Exception:
             pass
-        # Clear the local keypair cache so the startup reactivation path
-        # does not silently re-unlock sync on the next launch.
         try:
             sync.clear_local_keypair_cache()
         except Exception as exc:
             logger.warning("_do_disable: clear_local_keypair_cache failed: %s", exc)
-        # Clear keychain passphrase and remember flag so there is no stale
-        # credential left behind.
         self._do_forget(notify=False)
         self.app.notify("Memory Sync disabled on this device.")
         self._render_state()
 
     def _do_forget(self, *, notify: bool = True) -> None:
-        """Clear the stored keychain passphrase and the sync_remember_device flag.
-
-        Called by "Forget on this device" button and as part of ``_do_disable``.
-        """
+        """Clear the stored keychain passphrase and the sync_remember_device flag."""
         try:
             from servonaut.services.memory import passphrase_store
 
@@ -961,3 +756,182 @@ class MemorySyncSetupScreen(WorkspaceScreen):
                 severity="information",
             )
         self._render_state()
+
+
+class MemorySyncSetupScreen(_MemorySyncContentMixin, WorkspaceScreen):
+    """Setup + status hub for the Memory Sync feature."""
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 56
+    CONTENT_NARROW_WIDTH = 96
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=True),
+        Binding("r", "refresh", "Refresh", show=True),
+    ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
+        return check_action_passthrough(self, action)
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield WorkspaceControls("Memory sync")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield from compose_sync_container(extra_classes="workspace-content")
+        yield Footer()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def on_mount(self) -> None:
+        # The screen can be left or the app closed before it has finished composing;
+        # Textual then dismantles it under this handler and its fields are gone.
+        if self.is_being_dismantled():
+            return
+        self._render_state()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_refresh(self) -> None:
+        self._render_state()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Rebuild the status card for the new demo-mode state."""
+        self._render_state()
+
+    # ------------------------------------------------------------------
+    # Status card builders kept on MemorySyncSetupScreen for CSS coverage proof
+    # ------------------------------------------------------------------
+
+    def _build_status_card(self, auth: Any, sync: Any) -> Container:
+        status = getattr(sync, "status", None)
+        last_sync = "—"
+        used = "—"
+        soft_cap = "—"
+        pending = 0
+        if status is not None:
+            last_sync = getattr(status, "last_sync_at", None) or "never"
+            quota = getattr(status, "quota", None)
+            if quota is not None:
+                used = f"{getattr(quota, 'envelopes_used', '?'):,}"
+                soft_cap = f"{getattr(quota, 'envelopes_soft_cap', '?'):,}"
+            pending = getattr(status, "pending_envelopes", 0)
+
+        fingerprint = "—"
+        material = sync.get_key_material() if sync is not None else None
+        if material is not None and getattr(material, "public_key", None):
+            try:
+                from servonaut.services.memory.crypto import fingerprint as fp_func
+                from servonaut.services.memory.crypto import short_fingerprint
+
+                fingerprint = short_fingerprint(fp_func(material.public_key))
+            except Exception:
+                fingerprint = "loaded"
+
+        auto_unlock_label = "off"
+        is_remembered = False
+        try:
+            from servonaut.services.memory import passphrase_store
+
+            remember_available = passphrase_store.keyring_available()
+        except Exception:
+            remember_available = False
+        try:
+            cfg = self.app.config_manager.get()
+            is_remembered = bool(getattr(cfg.memory, "sync_remember_device", False))
+            if is_remembered:
+                auto_unlock_label = "on"
+                raw_exp = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
+                if raw_exp:
+                    try:
+                        from datetime import datetime, timezone
+
+                        exp = datetime.fromisoformat(raw_exp)
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        days_left = (exp - datetime.now(timezone.utc)).days
+                        if days_left < 0:
+                            auto_unlock_label = "on (expired — will re-prompt)"
+                        else:
+                            auto_unlock_label = f"on (re-prompt in {days_left}d)"
+                    except Exception:
+                        pass
+            else:
+                auto_unlock_label = "off"
+        except Exception:
+            pass
+        if not remember_available:
+            auto_unlock_label = "unavailable (no supported OS keychain)"
+
+        actions_children: list = [
+            Button("Sync all local memory", variant="primary", id="msync_btn_sync_now"),
+            Button("Rotate keypair", id="msync_btn_rotate"),
+            Button("Disable sync", variant="warning", id="msync_btn_disable"),
+        ]
+        if is_remembered:
+            actions_children.append(
+                Button("Forget on this device", id="msync_btn_forget")
+            )
+        elif remember_available:
+            actions_children.append(
+                Button("Enable auto-unlock", id="msync_btn_remember")
+            )
+        if getattr(self.app, "_memory_manual_sync_in_progress", False):
+            for action in actions_children:
+                action.disabled = True
+
+        return Container(
+            Container(
+                Static("[bold]Device and encrypted store[/bold]", classes="msync_card_title"),
+                Vertical(
+                    self._kv_row(
+                        "Last sync",
+                        str(last_sync),
+                        value_id="msync_last_sync_value",
+                    ),
+                    self._kv_row(
+                        "Quota used",
+                        f"{used} / {soft_cap} envelopes",
+                        value_id="msync_quota_value",
+                    ),
+                    self._kv_row(
+                        "Pending",
+                        f"{pending} envelope(s)",
+                        value_id="msync_pending_value",
+                    ),
+                    self._kv_row("Key fingerprint", fingerprint),
+                    self._kv_row("Auto-unlock", auto_unlock_label),
+                    classes="msync_kv_grid",
+                ),
+                classes="msync_card msync_card_primary",
+            ),
+            Container(
+                Static("[bold]Sync and key controls[/bold]", classes="msync_card_title"),
+                Horizontal(
+                    *actions_children,
+                    classes="msync_card_actions msync_configured_actions",
+                ),
+                Static(
+                    "[dim]Disabling stops the background sync loop on this "
+                    "device but leaves your encrypted data intact on the "
+                    "server. Re-enrol any time to resume.[/dim]",
+                    classes="msync_card_body",
+                ),
+                classes="msync_card",
+            ),
+            classes="msync_card_stack",
+        )
+
+    def _kv_row(
+        self, label: str, value: str, *, value_id: Optional[str] = None
+    ) -> Horizontal:
+        return Horizontal(
+            Static(f"[dim]{escape(label)}[/dim]", classes="msync_kv_label"),
+            Static(escape(value), id=value_id, classes="msync_kv_value"),
+            classes="msync_kv_row",
+        )

@@ -27,6 +27,7 @@ class _StubApp:
         self.relay_state = prior_state
         self.notify = MagicMock()
         self.query = MagicMock(return_value=[])
+        self._refresh_navigation_and_tab_gates = MagicMock()
 
 
 def _fire(prior, new):

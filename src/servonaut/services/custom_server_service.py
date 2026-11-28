@@ -59,7 +59,7 @@ class CustomServerService(CustomServerServiceInterface):
         return True
 
     def update_server(self, name: str, server: CustomServer) -> bool:
-        """Replace a custom server entry by name and persist.
+        """Replace a custom server entry by name (preserving order) and persist.
 
         Args:
             name: Existing server name to replace.
@@ -67,13 +67,21 @@ class CustomServerService(CustomServerServiceInterface):
 
         Returns:
             True if found and updated, False otherwise.
+
+        Raises:
+            ValueError: If renaming to a name already used by another server.
         """
         config = self._config_manager.get()
         for idx, existing in enumerate(config.custom_servers):
             if existing.name == name:
+                if server.name != name and any(
+                    other_idx != idx and other.name == server.name
+                    for other_idx, other in enumerate(config.custom_servers)
+                ):
+                    raise ValueError(f"Custom server '{server.name}' already exists")
                 config.custom_servers[idx] = server
                 self._config_manager.save(config)
-                logger.info("Updated custom server: %s", name)
+                logger.info("Updated custom server: %s -> %s", name, server.name)
                 return True
         return False
 

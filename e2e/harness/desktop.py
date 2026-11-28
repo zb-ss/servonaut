@@ -701,7 +701,9 @@ async def nav(page: DesktopPage, desktop_app: InProcessDesktop, nav_id: str) -> 
         await tui.wait_until(lambda: not section.collapsed, desc=f"section of {nav_id} open")
         await tui.settle()
     button = tui.nav_button(nav_id)
-    await scroll_into_view(page, desktop_app, button, tui.on_screen("#sidebar-scroll"))
+    sidebar_scroll = tui.on_screen("#sidebar-scroll")
+    if sidebar_scroll in button.ancestors:
+        await scroll_into_view(page, desktop_app, button, sidebar_scroll)
     await click_widget(page, desktop_app, button)
 
 

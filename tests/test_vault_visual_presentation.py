@@ -164,7 +164,7 @@ async def test_native_sidebar_entry_with_pending_identity_keeps_setup_action_vis
     app.vault_command_service.status.side_effect = pending_status
     async with app.run_test(size=(100, 30), notifications=True) as pilot:
         await wait_until(lambda: isinstance(app.screen, InstanceListScreen))
-        await pilot.click("#section_tools Button.section-header")
+        await pilot.click("#section_access Button.section-header")
         await pilot.pause()
         assert await pilot.click("#nav_vault")
         await wait_until(entered.is_set)
@@ -222,7 +222,7 @@ async def test_ready_empty_native_sidebar_entry_shows_create_and_cancel_without_
     app.vault_command_service = service
     async with app.run_test(size=(100, 30), notifications=True) as pilot:
         await wait_until(lambda: isinstance(app.screen, InstanceListScreen))
-        assert await pilot.click("#section_tools Button.section-header")
+        assert await pilot.click("#section_access Button.section-header")
         await pilot.pause()
         assert await pilot.click("#nav_vault")
         await wait_until(lambda: isinstance(app.screen, VaultScreen))
@@ -318,9 +318,9 @@ async def test_pending_device_native_sidebar_entry_reveals_approve_above_footer(
     ]
     async with app.run_test(size=size, notifications=True) as pilot:
         await wait_until(lambda: isinstance(app.screen, InstanceListScreen))
-        assert await pilot.click("#section_core Button.section-header")
+        assert await pilot.click("#section_fleet Button.section-header")
         await pilot.pause()
-        assert await pilot.click("#section_tools Button.section-header")
+        assert await pilot.click("#section_access Button.section-header")
         await pilot.pause()
         assert await pilot.click("#nav_vault")
         await wait_until(lambda: isinstance(app.screen, VaultScreen))

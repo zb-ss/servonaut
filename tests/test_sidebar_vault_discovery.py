@@ -7,6 +7,8 @@ without the user having to switch screens first.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.reactive import reactive
@@ -28,6 +30,13 @@ class _SidebarScreen(Screen):
 class _Host(App):
     vault_available = reactive(False)
     vault_update_required = reactive(False)
+
+    def __init__(self, *, ssh_ca_feature: bool = True) -> None:
+        super().__init__()
+        self.auth_service = SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda feature: feature == "ssh_ca" and ssh_ca_feature,
+        )
 
     def on_mount(self) -> None:
         self.push_screen(_SidebarScreen())
@@ -92,3 +101,12 @@ async def test_sidebar_composed_after_discovery_starts_with_vault_shown() -> Non
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         assert _vault_nav_shown(app.screen) == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_ca_nav_stays_hidden_when_vault_ready_without_ssh_ca_feature() -> None:
+    app = _Host(ssh_ca_feature=False)
+    app.vault_available = True
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert _vault_nav_shown(app.screen) == [True, False]

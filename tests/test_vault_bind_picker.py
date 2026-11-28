@@ -261,7 +261,7 @@ async def test_an_own_server_without_a_usable_vault_says_to_create_a_personal_on
     async with app.run_test(size=size) as pilot:
         message = lambda: str(app.screen.query_one("#vault_bind_message", Static).render())  # noqa: E731
         await _settle(pilot, lambda: "No vault holds keys your own servers can use yet" in message())
-        assert "create your personal vault on the Vault screen first." in message()
+        assert "create your personal vault first." in message()
 
 
 @pytest.mark.asyncio

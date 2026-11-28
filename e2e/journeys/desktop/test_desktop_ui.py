@@ -100,7 +100,6 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
         tour = [
             ("nav_custom_servers", "CustomServersScreen", "Custom servers"),
             ("nav_keys", "KeyManagementScreen", "Connection keys"),
-            # Settings sits in a section that starts collapsed.
             ("nav_settings", "SettingsScreen", "Settings"),
             ("nav_list", "InstanceListScreen", FLEET_NAMES[0]),
         ]
@@ -176,9 +175,9 @@ async def test_keyboard_search_help_and_command_palette(desktop, seed):
         # The command palette: ctrl+p, a query, Enter.
         await page.press("Control+p")
         await tui.wait_for_screen("CommandPalette")
-        await page.type("Go to SSH keys")
+        await page.type("Go to Local SSH keys")
         await tui.wait_until(
-            lambda: _palette_highlight(tui).startswith("Go to SSH keys"), desc="palette entry"
+            lambda: _palette_highlight(tui).startswith("Go to Local SSH keys"), desc="palette entry"
         )
         mark = page.output_mark()
         await page.press("Enter")

@@ -17,11 +17,13 @@ async def test_startup_refresh_fetches_entitlements_then_redraws_open_chat_foote
     app = SimpleNamespace(
         auth_service=SimpleNamespace(fetch_entitlements=AsyncMock(return_value={})),
         screen_stack=[screen],
+        _refresh_navigation_and_tab_gates=MagicMock(),
     )
 
     await ServonautApp._refresh_entitlements_on_start(app)  # type: ignore[arg-type]
 
     app.auth_service.fetch_entitlements.assert_awaited_once()
+    app._refresh_navigation_and_tab_gates.assert_called_once_with()
     panel._update_quota_footer.assert_called_once_with()
 
 
@@ -31,8 +33,10 @@ async def test_startup_refresh_failure_is_quiet_and_leaves_the_footer_alone() ->
     app = SimpleNamespace(
         auth_service=SimpleNamespace(fetch_entitlements=AsyncMock(side_effect=OSError("offline"))),
         screen_stack=[screen],
+        _refresh_navigation_and_tab_gates=MagicMock(),
     )
 
     await ServonautApp._refresh_entitlements_on_start(app)  # type: ignore[arg-type]
 
+    app._refresh_navigation_and_tab_gates.assert_not_called()
     screen.query.assert_not_called()

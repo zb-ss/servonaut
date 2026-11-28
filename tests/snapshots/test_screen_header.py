@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,7 +22,6 @@ SCREENS = [
     ("nav_ca", "ca_title", "ca_description"),
     ("nav_cloudwatch", "cloudwatch_title", None),
     ("nav_cloudtrail", "cloudtrail_title", None),
-    ("nav_bw_vault", "bw_vault_mgr_header", "bw_vault_mgr_hint"),
     ("nav_aws_manage", "aws_mgr_header", None),
     ("nav_hetzner_manage", "hetzner_mgr_header", None),
     ("nav_ovh_manage", "ovh_mgr_header", None),
@@ -40,6 +40,7 @@ async def test_screen_header_is_the_shared_look(nav_id, title_id, description_id
     app = _harness.SnapshotApp()
     async with app.run_test(size=size) as pilot:
         await _harness.wait_for_fleet(pilot)
+        app.auth_service = SimpleNamespace(is_authenticated=True, has_feature=lambda _f: True)
         app.vault_available = True
         app.screen.query_one(f"#{nav_id}", Button).press()
 

@@ -40,6 +40,7 @@ from servonaut.services.secrets_status import (
 )
 from servonaut.widgets.action_button import ActionButton, ActionRole, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
+from servonaut.widgets.sidebar import is_nav_route_visible
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class SecretsScreen(WorkspaceScreen):
     _ACTION_SHORT = {
         "Guided Bitwarden setup": "Set up Bitwarden",
         "Set up Bitwarden": "Set up Bitwarden",
+        "Bitwarden SSH vault": "BW SSH vault",
         "DB-vault coverage": "DB coverage",
         "Refresh from server": "Refresh",
         "List stored secrets": "List secrets",
@@ -87,6 +89,7 @@ class SecretsScreen(WorkspaceScreen):
     _ACTION_TIPS = {
         "Guided Bitwarden setup": "Pick a project and test the connection",
         "Set up Bitwarden": "Pick a project and test the connection",
+        "Bitwarden SSH vault": "Browse Bitwarden SSH-key items and referencing servers",
         "DB-vault coverage": "See which servers are stored",
         "List stored secrets": "Names only; values stay hidden",
         "Open team settings": "Opens the team settings on the web",
@@ -99,6 +102,7 @@ class SecretsScreen(WorkspaceScreen):
         "r": "refresh", "l": "list_secrets", "c": "clear_cache",
         "o": "open_team_settings", "u": "open_upgrade", "i": "install_bws",
         "g": "guided_setup", "v": "db_coverage", "s": "open_login",
+        "b": "bw_vault",
     }
 
     BINDINGS = [
@@ -111,10 +115,13 @@ class SecretsScreen(WorkspaceScreen):
         Binding("i", "install_bws", "Install bws", show=False),
         Binding("g", "guided_setup", "Setup", show=True),
         Binding("v", "db_coverage", "Coverage", show=True),
+        Binding("b", "bw_vault", "BW SSH vault", show=True),
         Binding("s", "open_login", "Sign in", show=False),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "bw_vault" and not is_nav_route_visible(self.app, "nav_bw_vault"):
+            return False
         if self.navigation_focused:
             return super().check_action(action, parameters)
         return check_action_passthrough(self, action)
@@ -480,17 +487,22 @@ class SecretsScreen(WorkspaceScreen):
                 Static("[$text-warning]" + lead + "; ".join(problems) + ".[/$text-warning]"),
                 warning=True,
             ))
+        bw_actions = [
+            ("g", "Guided Bitwarden setup"),
+            ("v", "DB-vault coverage"),
+        ]
+        if is_nav_route_visible(self.app, "nav_bw_vault"):
+            bw_actions.append(("b", "Bitwarden SSH vault"))
+        bw_actions.extend([
+            ("r", "Refresh from server"),
+            ("l", "List stored secrets"),
+            ("o", "Open team settings"),
+            ("i", "Install bws"),
+            ("c", "Clear cached config"),
+        ])
         self._mount_card(body, self._card(
             "Actions",
-            self._actions(
-                ("g", "Guided Bitwarden setup"),
-                ("v", "DB-vault coverage"),
-                ("r", "Refresh from server"),
-                ("l", "List stored secrets"),
-                ("o", "Open team settings"),
-                ("i", "Install bws"),
-                ("c", "Clear cached config"),
-            ),
+            self._actions(*bw_actions),
         ))
 
     def _render_local(
@@ -542,10 +554,14 @@ class SecretsScreen(WorkspaceScreen):
         actions = [
             ("g", "Set up Bitwarden"),
             ("v", "DB-vault coverage"),
+        ]
+        if is_nav_route_visible(self.app, "nav_bw_vault"):
+            actions.append(("b", "Bitwarden SSH vault"))
+        actions.extend([
             ("l", "List stored secrets"),
             ("u", "Upgrade for team secrets"),
             ("o", "Open docs"),
-        ]
+        ])
         # If a server-supplied config is cached (e.g. a broken team config that
         # forced this local fallback), offer Clear here too — otherwise the
         # only way to drop the poisoned cache is an undiscoverable key press.
@@ -645,6 +661,20 @@ class SecretsScreen(WorkspaceScreen):
         """Open the DB-vault coverage + search view (B4)."""
         from servonaut.screens.db_coverage_view import DbCoverageScreen
         self.app.push_screen(DbCoverageScreen())
+
+    def action_bw_vault(self) -> None:
+        """Open the Bitwarden SSH vault manager."""
+        if not is_nav_route_visible(self.app, "nav_bw_vault"):
+            return
+        summary = self._summary()
+        if summary is not None and not summary.authenticated:
+            self.action_open_login()
+            return
+        if summary is not None and not summary.entitled_secrets_management:
+            self.action_open_upgrade()
+            return
+        from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
+        self.app.push_screen(BwVaultManagerScreen())
 
     def action_clear_cache(self) -> None:
         from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal

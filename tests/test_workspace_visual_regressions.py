@@ -169,7 +169,7 @@ async def test_navigation_focus_is_flat_and_keeps_the_active_route_marker(
         await pilot.pause()
         sidebar = app.screen.query_one(Sidebar)
         active = sidebar.query_one("#nav_list", Button)
-        section = sidebar.query_one("#section_core", SidebarSection)
+        section = sidebar.query_one("#section_fleet", SidebarSection)
         header = section.query_one(".section-header", Button)
         alternate = sidebar.query_one("#nav_custom_servers", Button)
         regions = {button: button.region for button in (active, header, alternate)}

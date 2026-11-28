@@ -317,6 +317,7 @@ class ServonautApp(App):
         self.user_theme_errors: Tuple[ThemeError, ...] = ()
         self._register_user_themes()
         self.instances = []
+        self._team_list_cache = None
         self.workspace_state = WorkspaceState()
         self.memory_first_connect_seen = set()
         self.memory_annotations_pulled_seen = set()
@@ -1147,9 +1148,27 @@ class ServonautApp(App):
                 severity="error", timeout=20, markup=False,
             )
 
+    def _refresh_navigation_and_tab_gates(self) -> None:
+        """Refresh mounted sidebar auth/feature gates and FleetMemory tab gates."""
+        for screen in list(getattr(self, "screen_stack", ())):
+            for sidebar in screen.query("Sidebar"):
+                refresh = getattr(sidebar, "refresh_auth_gates", None)
+                if callable(refresh):
+                    refresh()
+            refresh_tabs = getattr(screen, "refresh_tab_gates", None)
+            if callable(refresh_tabs):
+                refresh_tabs()
+
     def _on_sign_in_ended(self) -> None:
         """Tell the user once that the service no longer accepts this sign-in."""
+        from servonaut.screens._team_share import clear_cached_teams
+
         self._sign_in_ended_notice_at = time.monotonic()
+        self.vault_update_required = False
+        self.vault_available = False
+        self._personal_vault_bound_ids = set()
+        clear_cached_teams(self)
+        self._refresh_navigation_and_tab_gates()
         try:
             self.notify(
                 "Your Servonaut sign-in has ended. Sign in again from Account / login.",
@@ -1174,7 +1193,13 @@ class ServonautApp(App):
                             name="relay_logout_stop", exclusive=True)
         if getattr(self, "vault_command_service", None) is not None:
             self.workers.cancel_group(self, "vault_background")
-            self.vault_update_required = False
+        from servonaut.screens._team_share import clear_cached_teams
+
+        self.vault_update_required = False
+        self.vault_available = False
+        self._personal_vault_bound_ids = set()
+        clear_cached_teams(self)
+        self._refresh_navigation_and_tab_gates()
         # Config-sync session
         if getattr(self, "config_sync_service", None) is not None:
             self.config_sync_service.clear_session()
@@ -1621,6 +1646,11 @@ class ServonautApp(App):
                 logger.debug("AIToolBridge init skipped: %s", e)
                 self.ai_tool_bridge = None
             logger.info("Paid-tier services initialized")
+            for screen in list(getattr(self, "screen_stack", ())):
+                for sidebar in screen.query("Sidebar"):
+                    refresh = getattr(sidebar, "refresh_auth_gates", None)
+                    if callable(refresh):
+                        refresh()
         except ImportError:
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
@@ -1827,7 +1857,7 @@ class ServonautApp(App):
             logger.debug("TeamMemoryService init failed: %s", exc)
 
         # NOTE: Memory cloud is NOT bootstrapped at app start.  The user opts
-        # in via ``MemorySyncSetupScreen`` (sidebar → Memory Sync), which calls
+        # in via ``FleetMemoryScreen`` (Monitor -> Fleet memory -> Sync), which calls
         # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
         # No auto-modals, no auto network calls.
 
@@ -1836,7 +1866,7 @@ class ServonautApp(App):
     ) -> None:
         """Bootstrap the memory cloud sync layer (user-initiated or auto-restart).
 
-        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up",
+        Called from ``FleetMemoryScreen``'s Sync tab when the user clicks "Set up",
         or from ``_reactivate_memory_sync`` on startup when a local keypair
         cache is present.
 
@@ -3072,7 +3102,7 @@ class ServonautApp(App):
     _PALETTE_NAVIGATION = (
         ("Instances", "nav_list", "Fleet table: every server across providers"),
         ("Custom servers", "nav_custom_servers", "Add, edit and remove non-cloud servers"),
-        ("SSH keys", "nav_keys", "SSH keys and agent configuration"),
+        ("Local SSH keys", "nav_keys", "Local ~/.ssh keys, overrides and agent"),
         ("Fleet memory", "nav_memory", "Fleet-wide server memory"),
         ("Sync config", "nav_sync_config", "Push or pull your config across devices"),
         ("Memory Sync", "nav_memory_sync", "Encrypted server-memory backup across devices"),
@@ -3105,10 +3135,10 @@ class ServonautApp(App):
     )
 
     def get_system_commands(self, screen):
-        """Textual command palette entries: the built-ins plus one "Go to …"
-        per sidebar section, so every screen is reachable from the keyboard."""
+        """Textual command palette entries: built-ins, navigation, settings, and quick tasks."""
         from textual.app import SystemCommand
-        from servonaut.widgets.sidebar import Sidebar
+        from servonaut.screens.settings.registry import PANELS
+        from servonaut.widgets.sidebar import Sidebar, _aws_switched_on, is_nav_route_visible
 
         yield from super().get_system_commands(screen)
         if (not isinstance(screen, ModalScreen) and not self._navigation_hold_reason()
@@ -3131,19 +3161,56 @@ class ServonautApp(App):
                     "Restart Servonaut", "Close this window and start the installed version",
                     self.request_apt_restart,
                 )
+
+        aws_on = _aws_switched_on(self)
+
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
-            if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
+            if not is_nav_route_visible(self, target_id):
                 continue
-            if target_id.startswith("nav_hetzner") and not self.provider_available("hetzner"):
-                continue
-            if target_id in {"nav_vault", "nav_ca"} and not self.vault_available:
-                if target_id == "nav_ca" or not self.vault_update_required:
-                    continue
             yield SystemCommand(
                 f"Go to {title}",
                 help_text,
                 lambda target=target_id: self.post_message(Sidebar.NavigationRequested(target)),
             )
+
+        if not isinstance(screen, ModalScreen) and not self._navigation_hold_reason():
+            for spec in PANELS:
+                kw = ", ".join(spec.keywords[:5])
+                desc = f"{spec.group} — {kw}" if kw else spec.group
+                yield SystemCommand(
+                    f"Settings: {spec.title}",
+                    desc,
+                    lambda pid=spec.id: self.open_settings_screen(pid),
+                )
+            yield SystemCommand(
+                "Add custom server",
+                "Open Custom servers and start adding a new host",
+                self._open_add_custom_server,
+            )
+            yield SystemCommand(
+                "Scan all servers for keywords",
+                "Run configured keyword scans across all running servers",
+                self._run_global_scan,
+            )
+            if aws_on:
+                yield SystemCommand(
+                    "Launch AWS EC2 instance",
+                    "Open the EC2 instance launch wizard",
+                    self._open_aws_create_wizard,
+                )
+            if self.provider_available("hetzner"):
+                yield SystemCommand(
+                    "Create Hetzner Cloud server",
+                    "Open the Hetzner server creation wizard",
+                    self._open_hetzner_create_wizard,
+                )
+            if self.provider_available("ovh"):
+                yield SystemCommand(
+                    "Create OVH Public Cloud instance",
+                    "Open the OVH instance creation wizard",
+                    self._open_ovh_create_wizard,
+                )
+
         # The sidebar's relay indicator opens this on a click; the palette
         # makes it reachable from the keyboard too.
         from servonaut.widgets.relay_indicator import open_relay_status
@@ -3153,6 +3220,34 @@ class ServonautApp(App):
             "MCP relay connection: its state, restart and stop",
             lambda: open_relay_status(self),
         )
+
+    def _open_add_custom_server(self) -> None:
+        if self._refuse_navigation():
+            return
+        from servonaut.screens.custom_servers import CustomServersScreen
+
+        self.switch_screen(CustomServersScreen(open_add_form=True))
+
+    def _open_aws_create_wizard(self) -> None:
+        if self._refuse_navigation():
+            return
+        from servonaut.screens.aws_create import AWSCreateScreen
+
+        self.push_screen(AWSCreateScreen())
+
+    def _open_hetzner_create_wizard(self) -> None:
+        if self._refuse_navigation():
+            return
+        from servonaut.screens.hetzner_create import HetznerCreateScreen
+
+        self.push_screen(HetznerCreateScreen())
+
+    def _open_ovh_create_wizard(self) -> None:
+        if self._refuse_navigation():
+            return
+        from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
+
+        self.push_screen(OVHCloudCreateScreen())
 
     def reload_user_themes(self) -> LoadResult:
         """Scan the themes folder again and show the active theme as it now reads.
@@ -3581,11 +3676,8 @@ class ServonautApp(App):
         elif target_id == "nav_keys":
             from servonaut.screens.key_management import KeyManagementScreen
             self.switch_screen(KeyManagementScreen())
-        elif target_id == "nav_scan":
-            self._run_global_scan()
         elif target_id == "nav_memory":
-            from servonaut.screens.fleet_memory import FleetMemoryScreen
-            self.switch_screen(FleetMemoryScreen())
+            self._open_fleet_memory_tab("fleet")
         elif target_id == "nav_settings":
             from servonaut.screens.settings import SettingsScreen
             self.switch_screen(SettingsScreen())
@@ -3653,8 +3745,7 @@ class ServonautApp(App):
             from servonaut.screens.snapshot_manager import SnapshotManagerScreen
             self.switch_screen(SnapshotManagerScreen())
         elif target_id == "nav_memory_sync":
-            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
-            self.switch_screen(MemorySyncSetupScreen())
+            self._open_fleet_memory_tab("sync")
         elif target_id == "nav_secrets":
             from servonaut.screens.secrets import SecretsScreen
             self.switch_screen(SecretsScreen())
@@ -3673,11 +3764,9 @@ class ServonautApp(App):
             from servonaut.screens.findings import FindingsScreen
             self.switch_screen(FindingsScreen())
         elif target_id == "nav_drift":
-            from servonaut.screens.memory_drift import MemoryDriftScreen
-            self.switch_screen(MemoryDriftScreen())
+            self._open_fleet_memory_tab("drift")
         elif target_id == "nav_memory_export":
-            from servonaut.screens.memory_export import MemoryExportScreen
-            self.switch_screen(MemoryExportScreen())
+            self._open_fleet_memory_tab("export")
         elif target_id == "nav_bug_report":
             if self.bug_report_service is None:
                 self.notify(
@@ -3735,10 +3824,48 @@ class ServonautApp(App):
         elif target_id == "nav_quit":
             self.exit()
 
+    def _open_fleet_memory_tab(self, tab: str) -> None:
+        """Show FleetMemoryScreen on *tab*, switching tabs in place if already active."""
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
+
+        screen = getattr(self, "screen", None)
+        if isinstance(screen, FleetMemoryScreen):
+            screen.activate_tab(tab)
+            if tab == "fleet" and not getattr(screen, "_scanning", False):
+                screen._launch_populate()
+            return
+        self.switch_screen(FleetMemoryScreen(initial_tab=tab))
+
     def _run_global_scan(self) -> None:
-        """Run keyword scan across every server not known to be stopped."""
-        self.notify("Starting scan of all servers...", severity="information")
-        self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
+        """Confirm then run keyword scan across every server not known to be stopped."""
+        from servonaut.screens.scan_confirm import GlobalScanConfirmModal
+        from servonaut.services.scan_service import is_scannable
+
+        instances = self.instances
+        if not instances:
+            self.notify("No instances loaded. Load instances first.", severity="warning")
+            return
+
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
+            return
+
+        def _on_confirm(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            self.notify(
+                f"Starting keyword scan across {len(targets)} servers...",
+                severity="information",
+            )
+            self.run_worker(
+                self._do_global_scan(),
+                name="global_scan",
+                group="global_scan",
+                exclusive=True,
+            )
+
+        self.push_screen(GlobalScanConfirmModal(len(targets)), callback=_on_confirm)
 
     async def _do_global_scan(self) -> None:
         """Worker: scan every server not known to be stopped for keywords.
@@ -3800,6 +3927,7 @@ class ServonautApp(App):
             return
         from servonaut.widgets.chat_panel import ChatPanel
 
+        self._refresh_navigation_and_tab_gates()
         for screen in list(self.screen_stack):
             for panel in screen.query(ChatPanel):
                 panel._update_quota_footer()

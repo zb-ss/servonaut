@@ -18,6 +18,7 @@ from servonaut.services.plan_labels import FEATURE_LABELS, plan_label
 from servonaut.utils.markup import web_link
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
 from servonaut.widgets.busy_indicator import BusyIndicator
+from servonaut.widgets.action_button import ActionButton, ActionRow
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.dialogs import DialogActions, DialogBody, DialogFrame, DialogNotificationSpace
 from servonaut.widgets.secret_input import SecretInput
@@ -144,6 +145,17 @@ class PassphraseModal(ModalScreen[Optional[str]]):
 class LoginScreen(WorkspaceScreen):
     """OAuth2 device flow login screen for servonaut.dev."""
 
+    DEFAULT_CSS = """
+    LoginScreen #login_sync_row {
+        height: auto;
+        margin: 0;
+        background: transparent;
+    }
+    LoginScreen #btn_login_sync_config {
+        width: auto;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
@@ -163,8 +175,8 @@ class LoginScreen(WorkspaceScreen):
 
         Args:
             return_to: Optional screen slug to switch to after a successful
-                login. Currently ``"memory_sync"`` (back to
-                MemorySyncSetupScreen) and ``"sync_config"`` (forward to
+                login. Currently ``"memory_sync"`` (back to the Sync tab in
+                FleetMemoryScreen) and ``"sync_config"`` (forward to
                 SnapshotManagerScreen) are recognised. None (default)
                 parks the user on the logged-in view.
         """
@@ -255,6 +267,15 @@ class LoginScreen(WorkspaceScreen):
                             Static("[bold]Signed-in account[/bold]", classes="account_section_heading"),
                             Static("", id="account_info"),
                             Static("", id="plan_info"),
+                            Horizontal(
+                                ActionButton(
+                                    "Manage config snapshots",
+                                    id="btn_login_sync_config",
+                                    tooltip="Push or pull encrypted config snapshots across devices",
+                                    compact=True,
+                                ),
+                                id="login_sync_row",
+                            ),
                             id="account_info_header", classes="account_panel",
                         ),
                         Container(
@@ -313,8 +334,8 @@ class LoginScreen(WorkspaceScreen):
         the existing UX (sidebar nav, account info) is unchanged.
         """
         if self._return_to == "memory_sync":
-            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
-            self.app.switch_screen(MemorySyncSetupScreen())
+            from servonaut.screens.fleet_memory import FleetMemoryScreen
+            self.app.switch_screen(FleetMemoryScreen(initial_tab="sync"))
         elif self._return_to == "sync_config":
             # Same entitlement check the sidebar nav applies — a logged-in
             # Free user shouldn't bounce into a screen that immediately
@@ -339,6 +360,8 @@ class LoginScreen(WorkspaceScreen):
             "logged_out_container",
             "device_flow_container",
             "logged_in_container",
+            "login_sync_row",
+            "btn_login_sync_config",
             "login_actions",
             "btn_back",
             "btn_logout",
@@ -411,6 +434,12 @@ class LoginScreen(WorkspaceScreen):
         )
 
         self.query_one("#logged_in_container").display = True
+        can_sync = bool(
+            auth.has_feature("config_sync")
+            and getattr(self.app, "config_sync_service", None) is not None
+        )
+        self.query_one("#login_sync_row").display = can_sync
+        self.query_one("#btn_login_sync_config").display = can_sync
         self.query_one("#login_actions").display = True
         self.query_one("#btn_logout").display = True
         self.query_one("#btn_logout_local").display = True
@@ -467,6 +496,9 @@ class LoginScreen(WorkspaceScreen):
             self.run_worker(self._do_logout(), exclusive=True, name="logout")
         elif button_id == "btn_logout_local":
             self._confirm_local_sign_out()
+        elif button_id == "btn_login_sync_config":
+            from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+            self.app.push_screen(SnapshotManagerScreen())
         elif button_id == "btn_back":
             self.action_back()
 

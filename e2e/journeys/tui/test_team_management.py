@@ -221,9 +221,12 @@ async def test_owner_invites_promotes_removes_and_shares(tui, seed, fake_cloud):
         await t.fill("#input_share_username", "deploy")
         await _press(t, "#btn_confirm_share")
         await t.wait_for_toast(rf"^Server '{fleet.APP_1.name}' shared with team\.$")
+        await t.wait_for_screen("_TeamBindPromptModal")
+        await t.click("#team_bind_prompt_cancel")
+        await t.wait_for_screen("TeamManagementScreen")
         await t.wait_until(
             lambda: t.table_rows("#servers_table") == [
-                *servers_before, [fleet.APP_1.name, fleet.APP_1.private_ip, fleet.APP_1.region],
+                *servers_before, [fleet.APP_1.name, fleet.APP_1.private_ip, fleet.APP_1.region, "Not bound"],
             ],
             desc="app-1 among the shared servers",
         )
@@ -313,6 +316,9 @@ async def test_servers_leave_for_the_team_only_when_the_owner_confirms(tui, seed
         )
         [posted] = fake_cloud.requests(servers_url, "POST")
         assert (posted["body"]["name"], posted["body"]["hostname"]) == (fleet.APP_1.name, fleet.APP_1.private_ip)
+        await t.wait_for_screen("_TeamBindPromptModal")
+        await t.click("#team_bind_prompt_cancel")
+        await t.wait_for_screen("TeamManagementScreen")
         await _screen_idle(t)
 
         # Push config: every custom server offered unticked, the profiles listed.

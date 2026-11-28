@@ -182,121 +182,47 @@ class DriftDiffScreen(ModalScreen[None]):
         self.dismiss()
 
 
-class MemoryDriftScreen(WorkspaceScreen):
-    """Screen for viewing and managing memory drift events.
-
-    Lists drift events from the ``DriftService`` with columns:
-    When, Instance, Module, Severity, Hash Delta, Status.
-
-    Tier-gated on ``memory_drift`` — pushes ``UpsellModal`` on mount if
-    the entitlement is missing.
-    """
-
-    DEFAULT_CSS = """
-    MemoryDriftScreen .workspace-content > BusyIndicator.read-loading {
-        dock: top;
-        height: 1;
-    }
-    """
-
-    AUTO_FOCUS = "#drift-table"
-
-    CHAT_REFLOW = True
-    CHAT_MIN_CONTENT_WIDTH = 64
-    CONTENT_NARROW_WIDTH = 96
-
-    BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
-        Binding("r", "refresh", "Refresh", show=True),
-        Binding("a", "ack_selected", "Ack", show=True),
-        Binding("u", "toggle_unack", "Unacknowledged only", show=True),
-        Binding("enter", "view_diff", "Diff", show=True),
-    ]
-
-    def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if self.navigation_focused:
-            return super().check_action(action, parameters)
-        return check_action_passthrough(self, action)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._read_loading = BusyWork(self, "#read_loading")
-        self._show_unack_only: bool = False
-        self._events: List[Any] = []
-
-    # ------------------------------------------------------------------
-    # Compose
-    # ------------------------------------------------------------------
-
-    def compose(self) -> ComposeResult:
-        yield SafeHeader()
-        yield WorkspaceControls("Memory drift")
-        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
-            yield self.workspace_sidebar()
-            yield Container(
-                BusyIndicator(id="read_loading", classes="read-loading"),
-                Container(
-                    Static(
-                        "[bold]Memory drift events[/bold]",
-                        id="drift-title",
-                        classes="screen-title",
-                    ),
-                    Static("", id="drift-filter-label"),
-                    id="drift-context",
+def compose_drift_container(*, include_busy: bool = True, extra_classes: str = "") -> ComposeResult:
+    """Yield the Drift events body container, shared by screen and tabbed pane."""
+    children: list = []
+    if include_busy:
+        children.append(BusyIndicator(id="read_loading", classes="read-loading"))
+    children.extend(
+        [
+            Container(
+                Static(
+                    "[bold]Memory drift events[/bold]",
+                    id="drift-title",
+                    classes="screen-title",
                 ),
-                Container(
-                    Static("Event actions", classes="memory-secondary-heading"),
-                    ActionRow(
-                        ActionButton("Refresh", "r", id="btn-drift-refresh"),
-                        ActionButton("View diff", "enter", id="btn-drift-diff"),
-                        ActionButton("Acknowledge", "a", short="Ack", id="btn-drift-ack"),
-                        ActionButton("Unacknowledged only", "u", short="Unack only", id="btn-drift-unack"),
-                        id="drift-actions",
-                    ),
-                    id="drift-tools",
+                Static("", id="drift-filter-label"),
+                id="drift-context",
+            ),
+            Container(
+                Static("Event actions", classes="memory-secondary-heading"),
+                ActionRow(
+                    ActionButton("Refresh", "r", id="btn-drift-refresh"),
+                    ActionButton("View diff", "enter", id="btn-drift-diff"),
+                    ActionButton("Acknowledge", "a", short="Ack", id="btn-drift-ack"),
+                    ActionButton("Unacknowledged only", "u", short="Unack only", id="btn-drift-unack"),
+                    id="drift-actions",
                 ),
-                Container(
-                    Static("Configuration changes · Enter opens the diff", classes="memory-secondary-heading"),
-                    Static("", id="drift-empty-state", classes="hidden"),
-                    DataTable(id="drift-table", zebra_stripes=True),
-                    id="drift-records",
-                ),
-                id="drift-container",
-                classes="workspace-content",
-            )
-        yield Footer()
+                id="drift-tools",
+            ),
+            Container(
+                Static("Configuration changes · Enter opens the diff", classes="memory-secondary-heading"),
+                Static("", id="drift-empty-state", classes="hidden"),
+                DataTable(id="drift-table", zebra_stripes=True),
+                id="drift-records",
+            ),
+        ]
+    )
+    container_kwargs = {"classes": extra_classes} if extra_classes else {}
+    yield Container(*children, id="drift-container", **container_kwargs)
 
-    # ------------------------------------------------------------------
-    # Mount
-    # ------------------------------------------------------------------
 
-    def _restyle_rows(self, _theme: Any = None) -> None:
-        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
-        self.call_after_refresh(
-            rebuild_keeping_cursor,
-            self.query_one("#drift-table", DataTable),
-            self._render_table,
-        )
-
-    def on_mount(self) -> None:
-        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
-        auth = getattr(self.app, "auth_service", None)
-        if auth and not auth.has_feature("memory_drift"):
-            from servonaut.widgets.upsell_modal import UpsellModal
-            self.app.push_screen(UpsellModal("memory_drift"))
-            return
-        table = self.query_one("#drift-table", DataTable)
-        table.cursor_type = "row"
-        table.add_column("When", key="when")
-        table.add_column("Instance", key="instance")
-        table.add_column("Module", key="module")
-        table.add_column("Severity", key="severity")
-        table.add_column("Status", key="status")
-        self._load_drift_events()
-
-    # ------------------------------------------------------------------
-    # Data loading
-    # ------------------------------------------------------------------
+class _MemoryDriftContentMixin:
+    """Shared Drift event table logic used by MemoryDriftScreen and MemoryDriftPane."""
 
     def _load_drift_events(self) -> None:
         self.run_worker(
@@ -318,6 +244,7 @@ class MemoryDriftScreen(WorkspaceScreen):
                 self.app.notify(f"Drift load failed: {exc}", severity="error", markup=False)
                 return
             self._events = events
+            self._loaded_once = True
             self._render_table()
 
     def _render_table(self) -> None:
@@ -364,13 +291,6 @@ class MemoryDriftScreen(WorkspaceScreen):
             else "No drift events captured yet. Refresh to check for changes."
         )
         empty.set_class(table.row_count > 0, "hidden")
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
 
     def action_refresh(self) -> None:
         self._load_drift_events()
@@ -447,9 +367,96 @@ class MemoryDriftScreen(WorkspaceScreen):
         retrieval = getattr(self.app, "memory_retrieval_service", None)
         self.app.push_screen(DriftDiffScreen(evt, retrieval_service=retrieval))
 
+
+class MemoryDriftScreen(_MemoryDriftContentMixin, WorkspaceScreen):
+    """Screen for viewing and managing memory drift events.
+
+    Lists drift events from the ``DriftService`` with columns:
+    When, Instance, Module, Severity, Hash Delta, Status.
+
+    Tier-gated on ``memory_drift`` — pushes ``UpsellModal`` on mount if
+    the entitlement is missing.
+    """
+
+    DEFAULT_CSS = """
+    MemoryDriftScreen .workspace-content > BusyIndicator.read-loading {
+        dock: top;
+        height: 1;
+    }
+    """
+
+    AUTO_FOCUS = "#drift-table"
+
+    CHAT_REFLOW = True
+    CHAT_MIN_CONTENT_WIDTH = 64
+    CONTENT_NARROW_WIDTH = 96
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=True),
+        Binding("r", "refresh", "Refresh", show=True),
+        Binding("a", "ack_selected", "Ack", show=True),
+        Binding("u", "toggle_unack", "Unacknowledged only", show=True),
+        Binding("enter", "view_diff", "Diff", show=True),
+    ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self.navigation_focused:
+            return super().check_action(action, parameters)
+        return check_action_passthrough(self, action)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._read_loading = BusyWork(self, "#read_loading")
+        self._show_unack_only: bool = False
+        self._events: List[Any] = []
+        self._loaded_once: bool = False
+
     # ------------------------------------------------------------------
-    # Button handler
+    # Compose
     # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield WorkspaceControls("Memory drift")
+        with Horizontal(id="main-layout", classes="workspace-chat-layout"):
+            yield self.workspace_sidebar()
+            yield from compose_drift_container(include_busy=True, extra_classes="workspace-content")
+        yield Footer()
+
+    # ------------------------------------------------------------------
+    # Mount
+    # ------------------------------------------------------------------
+
+    def _restyle_rows(self, _theme: Any = None) -> None:
+        """Cells carry theme colours fixed at add time: rebuild on a theme change."""
+        self.call_after_refresh(
+            rebuild_keeping_cursor,
+            self.query_one("#drift-table", DataTable),
+            self._render_table,
+        )
+
+    def on_mount(self) -> None:
+        self.app.theme_changed_signal.subscribe(self, self._restyle_rows)
+        auth = getattr(self.app, "auth_service", None)
+        if auth and not auth.has_feature("memory_drift"):
+            from servonaut.widgets.upsell_modal import UpsellModal
+            self.app.push_screen(UpsellModal("memory_drift"))
+            return
+        table = self.query_one("#drift-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("When", key="when")
+        table.add_column("Instance", key="instance")
+        table.add_column("Module", key="module")
+        table.add_column("Severity", key="severity")
+        table.add_column("Status", key="status")
+        self._load_drift_events()
+
+    # ------------------------------------------------------------------
+    # Navigation & buttons
+    # ------------------------------------------------------------------
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_map = {

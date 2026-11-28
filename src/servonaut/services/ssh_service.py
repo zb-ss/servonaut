@@ -372,7 +372,7 @@ class SSHService(SSHServiceInterface):
 
         for pattern in patterns:
             for key_file in self._ssh_dir.glob(pattern):
-                if key_file.is_file():
+                if key_file.is_file() and not key_file.name.endswith('.pub'):
                     key_files.append(str(key_file))
 
         return sorted(list(set(key_files)))  # Remove duplicates and sort

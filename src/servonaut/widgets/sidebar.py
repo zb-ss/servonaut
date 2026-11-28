@@ -44,16 +44,16 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
     "FleetMemoryScreen": "nav_memory",
-    "MemorySyncSetupScreen": "nav_memory_sync",
+    "MemorySyncSetupScreen": "nav_memory",
     "SecretsScreen": "nav_secrets",
     "VaultScreen": "nav_vault",
     "CaScreen": "nav_ca",
-    "BwVaultManagerScreen": "nav_bw_vault",
+    "BwVaultManagerScreen": "nav_secrets",
     "FindingsScreen": "nav_findings",
     "FindingDetailScreen": "nav_findings",
-    "MemoryDriftScreen": "nav_drift",
-    "MemoryExportScreen": "nav_memory_export",
-    "SnapshotManagerScreen": "nav_sync_config",
+    "MemoryDriftScreen": "nav_memory",
+    "MemoryExportScreen": "nav_memory",
+    "SnapshotManagerScreen": "nav_login",
     "OVHDNSScreen": "nav_ovh_dns",
     "OVHIPManagementScreen": "nav_ovh_ips",
     "OVHStorageScreen": "nav_ovh_storage",
@@ -68,7 +68,6 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "TeamManagementScreen": "nav_teams",
     "BugReportScreen": "nav_bug_report",
 }
-
 
 def _provider_available(app, provider: str) -> bool:
     """Whether *provider* has a usable account (any account, not only the
@@ -88,6 +87,63 @@ def _aws_switched_on(app) -> bool:
         return aws_enabled(manager.get()) if manager is not None else True
     except Exception:  # noqa: BLE001 — a stand-in host must never hide AWS
         return True
+
+
+def provider_ready(app, provider: str) -> bool:
+    """Whether *provider* has an enabled, usable account for creating servers."""
+    if provider == "aws":
+        return is_nav_route_visible(app, "nav_aws_manage") and _provider_available(app, "aws")
+    if provider == "hetzner":
+        return is_nav_route_visible(app, "nav_hetzner_manage")
+    if provider == "ovh":
+        return is_nav_route_visible(app, "nav_ovh_manage")
+    return _provider_available(app, provider)
+
+
+def is_nav_route_visible(app, target_id: str) -> bool:
+    """Single source of truth for Sidebar and Command Palette route visibility."""
+    auth = getattr(app, "auth_service", None)
+    is_auth = bool(auth and getattr(auth, "is_authenticated", False))
+    sync_svc = getattr(app, "memory_sync_service", None)
+    sync_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
+    aws_on = _aws_switched_on(app)
+
+    if target_id == "nav_aws_s3":
+        return bool(aws_on and getattr(app, "aws_object_storage_service", None) is not None)
+    if target_id.startswith(("nav_aws", "nav_cloudwatch", "nav_ip_ban", "nav_cloudtrail")):
+        return aws_on
+    if target_id == "nav_ovh_s3":
+        return getattr(app, "ovh_object_storage_service", None) is not None
+    if target_id.startswith("nav_ovh"):
+        return _provider_available(app, "ovh")
+    if target_id == "nav_hetzner_s3":
+        return getattr(app, "hetzner_object_storage_service", None) is not None
+    if target_id.startswith("nav_hetzner"):
+        return _provider_available(app, "hetzner")
+    if target_id == "nav_vault":
+        return bool(
+            getattr(app, "vault_available", False)
+            or getattr(app, "vault_update_required", False)
+        )
+    if target_id == "nav_ca":
+        return bool(
+            getattr(app, "vault_available", False)
+            and auth
+            and auth.has_feature("ssh_ca")
+        )
+    if target_id == "nav_teams":
+        return bool(auth and auth.has_feature("team_workspaces"))
+    if target_id == "nav_sync_config":
+        return bool(is_auth and auth.has_feature("config_sync"))
+    if target_id == "nav_bw_vault":
+        return bool(is_auth and auth.has_feature("secrets_management"))
+    if target_id == "nav_drift":
+        return bool(auth and auth.has_feature("memory_drift") and sync_configured)
+    if target_id == "nav_memory_export":
+        return bool(
+            auth and auth.has_feature("memory_compliance_export") and sync_configured
+        )
+    return True
 
 
 class _NavigationButton(Button):
@@ -144,46 +200,34 @@ class Sidebar(Widget):
         # Explicit navigation mode enables the visible buttons temporarily.
         with VerticalScroll(id="sidebar-scroll", can_focus=False):
             yield SidebarSection(
-                "Core",
+                "Fleet",
                 self._nav("Instances", "nav_list",
                           tooltip="View, connect, and manage all servers"),
                 self._nav("Custom servers", "nav_custom_servers",
-                          tooltip="Manage non-AWS servers (DigitalOcean, Hetzner, etc.)"),
-                self._nav("SSH keys", "nav_keys",
-                          tooltip="Configure SSH keys and agent"),
-                section_id="section_core",
+                          tooltip="Add, edit, and organize non-cloud SSH servers"),
+                section_id="section_fleet",
             )
             yield SidebarSection(
-                "Tools",
-                self._nav("Fleet memory", "nav_memory",
-                          tooltip="Fleet-wide server memory — scan, refresh, and inspect "
-                                  "the AI-queryable fact cache for every server"),
-                self._nav("Sync config", "nav_sync_config",
-                          tooltip="Push or pull your servonaut config across devices via "
-                                  "the cloud — encrypted with your passphrase"),
-                self._nav("Memory Sync", "nav_memory_sync",
-                          tooltip="Set up encrypted Memory Sync — back up server memory "
-                                  "across devices, with drift detection and AI-queryable history"),
-                self._nav("Secrets", "nav_secrets",
-                          tooltip="Manage secrets-management backend — Bitwarden / "
-                                  "local store / install bws / refresh team config"),
+                "Access & secrets",
                 self._nav("Vault", "nav_vault",
                           tooltip="Encrypted vault identities, SSH keys and secrets"),
+                self._nav("Local SSH keys", "nav_keys",
+                          tooltip="Configure local ~/.ssh keys, overrides, and SSH agent"),
                 self._nav("SSH certificates", "nav_ca",
                           tooltip="Team SSH certificate authority and audit"),
-                self._nav("BW SSH vault", "nav_bw_vault",
-                          tooltip="Browse your Bitwarden SSH-key items joined with the "
-                                  "servers that reference them (local-only; Solo/Teams)"),
+                self._nav("Secrets", "nav_secrets",
+                          tooltip="Manage secrets backends, DB coverage, and Bitwarden SSH items"),
+                section_id="section_access",
+                collapsed=True,
+            )
+            yield SidebarSection(
+                "Monitor",
                 self._nav("Findings", "nav_findings",
                           tooltip="Proactive monitoring findings across your fleet — "
                                   "scan, review, and triage server-detected issues"),
-                self._nav("Drift events", "nav_drift",
-                          tooltip="View configuration drift and anomaly events across the fleet"),
-                self._nav("Memory export", "nav_memory_export",
-                          tooltip="Export a compliance-grade signed archive of server memory"),
-                self._nav("Settings", "nav_settings",
-                          tooltip="Edit configuration, scan rules, and AI provider"),
-                section_id="section_tools",
+                self._nav("Fleet memory", "nav_memory",
+                          tooltip="Fleet-wide server memory, Memory Sync, drift events, and exports"),
+                section_id="section_monitor",
                 collapsed=True,
             )
             yield SidebarSection(
@@ -232,11 +276,16 @@ class Sidebar(Widget):
                 collapsed=True,
             )
             yield SidebarSection(
+                "Team",
+                self._nav("Teams", "nav_teams",
+                          tooltip="Manage team members, shared servers, and shared configs"),
+                section_id="section_team",
+                collapsed=True,
+            )
+            yield SidebarSection(
                 "Account",
                 self._nav("Account / login", "nav_login",
-                          tooltip="Sign in to your Servonaut account"),
-                self._nav("Teams", "nav_teams",
-                          tooltip="Manage team members and shared access"),
+                          tooltip="Sign in to your Servonaut account and manage plan / snapshots"),
                 self._nav("Report a bug", "nav_bug_report",
                           tooltip="Send a bug report — review exactly what's "
                                   "included before anything leaves your machine"),
@@ -246,6 +295,11 @@ class Sidebar(Widget):
 
         # ----- bottom: docked, always visible -----
         with Vertical(id="sidebar-bottom"):
+            yield self._nav(
+                "Settings",
+                "nav_settings",
+                tooltip="Edit configuration, scan rules, cloud providers, and AI",
+            )
             from servonaut.widgets.relay_indicator import RelayIndicator
             yield RelayIndicator(id="relay_indicator")
             update = LinkButton(
@@ -419,34 +473,12 @@ class Sidebar(Widget):
             self._hide_button("nav_aws_s3")
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----
-        auth = getattr(self.app, "auth_service", None)
         # Vault discovery usually answers after this sidebar is up, so follow
         # the app's flag instead of reading it once.
         self.watch(self.app, "vault_available", self._show_vault_navigation)
         if hasattr(self.app, "vault_update_required"):
             self.watch(self.app, "vault_update_required", self._show_vault_navigation)
-        if not auth or not auth.has_feature("team_workspaces"):
-            self._hide_button("nav_teams")
-
-        # Sync Config — only for logged-in subscribers (config_sync entitlement).
-        if not auth or not auth.is_authenticated or not auth.has_feature("config_sync"):
-            self._hide_button("nav_sync_config")
-
-        # Memory cloud nav gating:
-        # - "Memory Sync" (nav_memory_sync) is visible to ALL users — central
-        #   setup hub, the screen adapts to tier.
-        # - Drift / Export only appear once entitled AND configured, otherwise
-        #   they'd be empty and confusing.
-        sync_svc = getattr(self.app, "memory_sync_service", None)
-        is_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
-        memory_feature_gates = {
-            "nav_drift": "memory_drift",
-            "nav_memory_export": "memory_compliance_export",
-        }
-        for nav_id, feature_slug in memory_feature_gates.items():
-            entitled = bool(auth and auth.has_feature(feature_slug))
-            if not (entitled and is_configured):
-                self._hide_button(nav_id)
+        self.refresh_auth_gates()
 
         # ----- Initial active highlight + auto-expand -----
         self._update_active()
@@ -461,6 +493,19 @@ class Sidebar(Widget):
         except NoMatches:
             pass
 
+    def refresh_auth_gates(self) -> None:
+        """Re-apply auth/entitlement gating (Team section and Vault/CA items)."""
+        has_teams = is_nav_route_visible(self.app, "nav_teams")
+        try:
+            self.query_one("#section_team", SidebarSection).display = has_teams
+        except NoMatches:
+            pass
+        try:
+            self.query_one("#nav_teams", Button).display = has_teams
+        except NoMatches:
+            pass
+        self._show_vault_navigation(None)
+
     def _hide_section(self, section_id: str) -> None:
         try:
             self.query_one(f"#{section_id}", SidebarSection).display = False
@@ -468,13 +513,13 @@ class Sidebar(Widget):
             pass
 
     def _show_vault_navigation(self, _changed: object) -> None:
-        available = bool(getattr(self.app, "vault_available", False))
-        update_required = bool(getattr(self.app, "vault_update_required", False))
-        for button_id in ("nav_vault", "nav_ca"):
+        visibility = {
+            "nav_vault": is_nav_route_visible(self.app, "nav_vault"),
+            "nav_ca": is_nav_route_visible(self.app, "nav_ca"),
+        }
+        for button_id, visible in visibility.items():
             try:
-                self.query_one(f"#{button_id}", Button).display = available or (
-                    button_id == "nav_vault" and update_required
-                )
+                self.query_one(f"#{button_id}", Button).display = visible
             except NoMatches:
                 pass
         self.call_after_refresh(self._sync_navigation_focusable)
@@ -512,12 +557,23 @@ class Sidebar(Widget):
                 pass
 
         # Auto-expand: only the section containing the active button stays open.
-        if active_id:
+        # Settings sits in #sidebar-bottom outside any section, so keep Fleet
+        # expanded to leave Instances one click away.
+        if active_id == "nav_settings":
+            for section in self.query(SidebarSection):
+                section.collapsed = section.id != "section_fleet"
+        elif active_id:
             for section in self.query(SidebarSection):
                 section.collapsed = not section.contains_button(active_id)
-            # On a short terminal the active entry can sit below the fold.
-            # Scroll to it once the expanded section has been laid out.
-            self.call_after_refresh(self._scroll_to_button, active_id)
+            # On a short terminal an active entry inside #sidebar-scroll can
+            # sit below the fold; pinned #sidebar-bottom buttons need no scroll.
+            try:
+                scroll = self.query_one("#sidebar-scroll", VerticalScroll)
+                btn = self.query_one(f"#{active_id}", Button)
+                if scroll in btn.ancestors:
+                    self.call_after_refresh(self._scroll_to_button, active_id)
+            except NoMatches:
+                pass
 
     def _scroll_to_button(self, button_id: str) -> None:
         """Scroll the sidebar so the nav button *button_id* is in view."""

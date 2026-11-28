@@ -35,6 +35,8 @@ async def test_edit_share_all_remove_single_and_multiple_and_show_config_author(
         assert fake_cloud.requests(path, "POST") == []
         await t.fill("#share_confirm_port", "2202")
         await _press(t, "#share_confirm_share")
+        await t.wait_for_screen("_TeamBindPromptModal")
+        await t.click("#team_bind_prompt_cancel")
         await t.wait_for_screen("TeamManagementScreen")
         await t.wait_for_toast(r"Share all: Shared 2")
         await _screen_idle(t)

@@ -53,7 +53,7 @@ a connection rule, or on the team's shared server, before you bind.
 
 For each server, Auto-bind picks the vault key:
 
-1. that is the key file set for the server (**SSH Keys → Add Mapping**, the
+1. that is the key file set for the server (**Local SSH keys → Add mapping**, the
    key your own SSH connection to it uses), compared by its public-key
    fingerprint, from its `.pub` file or the key itself when it has no
    passphrase, else by the file's name;

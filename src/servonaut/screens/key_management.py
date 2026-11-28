@@ -1,6 +1,7 @@
 """SSH keys screen for Servonaut v2.0."""
 
 from __future__ import annotations
+import os
 import subprocess
 from typing import Optional
 
@@ -12,12 +13,14 @@ from textual.content import Content
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.utils.markup import literal
 from servonaut.widgets.action_button import ActionButton
+from servonaut.widgets.link_button import LinkButton
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.workspace import WorkspaceControls, WorkspaceScreen
-from textual.widgets import Footer, Static, Input, Button, DataTable, Label
+from textual.widgets import Footer, Static, Input, Button, DataTable, Label, Select
 from textual.worker import Worker
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import real_fleet_rows
 
 
 class KeyManagementScreen(WorkspaceScreen):
@@ -29,6 +32,30 @@ class KeyManagementScreen(WorkspaceScreen):
     CHAT_MIN_CONTENT_WIDTH = 48
     # Below this width, connection settings and local-agent tools stack.
     CONTENT_NARROW_WIDTH = 104
+
+    DEFAULT_CSS = """
+    KeyManagementScreen #keys_vault_hint {
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        border: round $border-blurred;
+        background: transparent;
+        align: left middle;
+    }
+    KeyManagementScreen #keys_vault_text {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
+    KeyManagementScreen #btn_keys_open_vault {
+        width: auto;
+        margin-left: 1;
+    }
+    KeyManagementScreen #select_mapping_server {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    """
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -47,16 +74,22 @@ class KeyManagementScreen(WorkspaceScreen):
     def compose(self) -> ComposeResult:
         """Separate connection policy from keys available on this computer."""
         yield SafeHeader()
-        yield WorkspaceControls("SSH keys")
+        yield WorkspaceControls("Local SSH keys")
         with Horizontal(id="main-layout", classes="workspace-chat-layout"):
             yield self.workspace_sidebar()
             with ScrollableContainer(id="keys_container", classes="workspace-content"):
-                yield Static("SSH keys", id="keys_header", classes="screen-title")
+                yield Static("Local SSH keys", id="keys_header", classes="screen-title")
                 yield Static(
-                    "Set your connection default, then add exceptions for individual servers.",
+                    "Set your default local key path, then add overrides for individual servers.",
                     id="keys_intro",
                     classes="screen-description",
                 )
+                with Horizontal(id="keys_vault_hint"):
+                    yield Static(
+                        "Tip: use Vault to encrypt SSH keys once and share or rotate them across your team.",
+                        id="keys_vault_text",
+                    )
+                    yield LinkButton("Open vault", id="btn_keys_open_vault")
                 with Horizontal(id="keys_sections"):
                     with Vertical(id="key_connection_column"):
                         yield Static("Connection keys", classes="key-column-title")
@@ -71,6 +104,12 @@ class KeyManagementScreen(WorkspaceScreen):
                         with Vertical(id="instance_key_section", classes="key-section"):
                             yield Static("Per-server overrides", classes="key-section-title")
                             yield Static("Use a different key for a specific instance ID.", classes="key-section-note")
+                            yield Select(
+                                [],
+                                prompt="Pick a server to fill ID (optional)…",
+                                allow_blank=True,
+                                id="select_mapping_server",
+                            )
                             with Horizontal(classes="setting_row", id="key_mapping_fields"):
                                 with Vertical(classes="key-field"):
                                     yield Label("Instance ID")
@@ -98,21 +137,55 @@ class KeyManagementScreen(WorkspaceScreen):
                             yield Static("", id="agent_keys_output")
                         with Vertical(id="available_key_section", classes="key-section"):
                             yield Static("Available key files", classes="key-section-title")
-                            yield Static("Discovered in ~/.ssh/", classes="key-section-note")
-                            yield DataTable(id="available_keys_table")
+                            yield Static("Discovered in ~/.ssh/ (select a row to fill a key input)", classes="key-section-note")
+                            yield DataTable(id="available_keys_table", cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
         """Load key information when screen mounts."""
+        self._sync_vault_hint()
         self._load_default_key()
         self._load_instance_mappings()
+        self._load_mapping_servers()
         self._check_agent_status()
         self._load_available_keys()
 
+    def _sync_vault_hint(self) -> None:
+        hint = self.query_one("#keys_vault_hint")
+        vault_ready = bool(getattr(self.app, "vault_available", False))
+        hint.display = vault_ready
+
+    def _load_mapping_servers(self) -> None:
+        try:
+            select = self.query_one("#select_mapping_server", Select)
+        except Exception:
+            return
+        if self.app.demo_mode and self.app.redaction_service:
+            select.display = False
+            select.set_options([])
+            return
+        rows = real_fleet_rows(self.app) or []
+        options: list[tuple[Content, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if row.get("is_custom") or row.get("is_shared"):
+                continue
+            sid = str(row.get("id") or "")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            name = str(row.get("name") or sid)
+            label = f"{name} ({sid})" if name != sid else sid
+            options.append((literal(label), sid))
+        select.set_options(options)
+        select.display = bool(options)
+
     def refresh_after_demo_toggle(self) -> None:
         """Re-render every key path, instance id and agent listing."""
+        self._sync_vault_hint()
         self._load_default_key()
         self._load_instance_mappings()
+        self._load_mapping_servers()
         self._load_available_keys()
         # ``ssh-add -l`` output was rendered for the old mode; list again.
         self.query_one("#agent_keys_output", Static).update("")
@@ -224,12 +297,64 @@ class KeyManagementScreen(WorkspaceScreen):
                 return self.app.redaction_service.redact_key_name(x)
             return x
 
+        from pathlib import Path
+        from servonaut.services.ssh_host_keys import home_relative
+
         # Add keys
+        self._available_key_paths = {}
+        check_perms = getattr(self.app.ssh_service, "check_key_permissions", None)
         if keys:
             for key_path in keys:
-                table.add_row(_k(key_path))
+                shown = home_relative(str(key_path))
+                suffix = ""
+                if os.name != "nt" and callable(check_perms) and Path(str(key_path)).expanduser().exists():
+                    try:
+                        if not check_perms(str(key_path)):
+                            suffix = " (insecure permissions: expected 0600)"
+                    except Exception:
+                        pass
+                row_key = table.add_row(_k(shown) + suffix)
+                self._available_key_paths[row_key] = shown
         else:
             table.add_row("[dim]No SSH keys found in ~/.ssh/[/dim]")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "select_mapping_server" and isinstance(event.value, str) and event.value:
+            self.query_one("#input_mapping_instance", Input).value = event.value
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "available_keys_table":
+            return
+        if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+            self.notify("Autofilling key paths is disabled in demo mode.", severity="warning")
+            return
+        available = getattr(self, "_available_key_paths", {})
+        key_path = available.get(event.row_key)
+        if not key_path:
+            return
+        default_field = self.query_one("#input_default_key", Input)
+        if not default_field.value.strip():
+            default_field.value = key_path
+            default_field.focus()
+            self.notify("Filled default SSH key path.", severity="information")
+        else:
+            mapping_field = self.query_one("#input_mapping_key", Input)
+            mapping_field.value = key_path
+            mapping_field.focus()
+            self.notify("Filled per-server override key path.", severity="information")
+        from pathlib import Path
+
+        check_perms = getattr(self.app.ssh_service, "check_key_permissions", None)
+        if os.name != "nt" and callable(check_perms) and Path(key_path).expanduser().exists():
+            try:
+                if not check_perms(key_path):
+                    self.notify(
+                        f"Warning: {key_path} has overly open permissions; run chmod 600.",
+                        severity="warning",
+                        markup=False,
+                    )
+            except Exception:
+                pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
@@ -247,6 +372,10 @@ class KeyManagementScreen(WorkspaceScreen):
             self.action_remove_mapping()
         elif button_id == "btn_add_agent":
             self._add_key_to_agent()
+        elif button_id == "btn_keys_open_vault":
+            from servonaut.screens.vault import VaultScreen
+
+            self.app.switch_screen(VaultScreen())
         elif button_id == "btn_list_agent":
             self._list_agent_keys()
 
@@ -309,7 +438,11 @@ class KeyManagementScreen(WorkspaceScreen):
             self._load_instance_mappings()
             self.query_one("#input_mapping_instance", Input).value = ""
             self.query_one("#input_mapping_key", Input).value = ""
-            self.notify(f"Key mapping added: {instance_id} → {key_path}", severity="information")
+            self.notify(
+                f"Key mapping added: {instance_id} → {key_path}",
+                severity="information",
+                markup=False,
+            )
         except Exception as e:
             self.notify(f"Error adding key mapping: {e}", severity="error", markup=False)
 

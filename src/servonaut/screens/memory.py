@@ -2152,9 +2152,9 @@ class MemoryScreen(WorkspaceScreen):
             pass
 
     def action_open_memory_sync_setup(self) -> None:
-        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
 
-        self.app.switch_screen(MemorySyncSetupScreen())
+        self.app.switch_screen(FleetMemoryScreen(initial_tab="sync"))
 
     def action_sync_now(self) -> None:
         """Queue this server's local memory and sync it in the background."""

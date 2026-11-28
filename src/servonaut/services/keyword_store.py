@@ -125,6 +125,19 @@ class KeywordStore(KeywordStoreInterface):
         """
         return list(self._load().keys())
 
+    def rename_server_id(self, old_id: str, new_id: str) -> bool:
+        """Move stored results from *old_id* to *new_id* if present."""
+        if not old_id or not new_id or old_id == new_id:
+            return False
+        data = self._load()
+        if old_id not in data:
+            return False
+        moved = data.pop(old_id)
+        data.setdefault(new_id, moved)
+        self._save(data)
+        logger.info("Moved scan results from %s to %s", old_id, new_id)
+        return True
+
     def clear(self) -> None:
         """Clear all stored results."""
         self._save({})

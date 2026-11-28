@@ -325,15 +325,25 @@ class TestCustomServersRefreshRedacts:
 
 
 class TestPaletteNavigation:
+    _CONSOLIDATED_PALETTE_TARGETS = frozenset({
+        "nav_sync_config",
+        "nav_memory_sync",
+        "nav_bw_vault",
+        "nav_drift",
+        "nav_memory_export",
+    })
+
     def test_every_target_is_a_sidebar_button(self) -> None:
-        import re
         from pathlib import Path
+        import re
         import servonaut.widgets.sidebar as sidebar_module
 
         source = Path(sidebar_module.__file__).read_text(encoding="utf-8")
-        sidebar_ids = set(re.findall(r'"(nav_[a-z0-9_]+)"', source))
+        # Only actual SidebarButton definitions inside Sidebar.compose (excluding _SCREEN_TO_NAV / helpers).
+        compose_body = source.split("def compose(self)", 1)[1].split("def on_mount(self)", 1)[0]
+        sidebar_ids = set(re.findall(r'"(nav_[a-z0-9_]+)"', compose_body))
         for _, target_id, _ in ServonautApp._PALETTE_NAVIGATION:
-            assert target_id in sidebar_ids, target_id
+            assert target_id in sidebar_ids or target_id in self._CONSOLIDATED_PALETTE_TARGETS, target_id
 
     def test_commands_post_navigation_messages(self) -> None:
         from servonaut.widgets.sidebar import Sidebar
@@ -352,18 +362,27 @@ class TestPaletteNavigation:
         assert isinstance(posted[0], Sidebar.NavigationRequested)
         assert posted[0].target_id == "nav_custom_servers"
 
-    @pytest.mark.parametrize(("available", "update_required"), [(False, False), (False, True), (True, False)])
-    def test_vault_commands_follow_discovered_availability(self, available, update_required) -> None:
+    @pytest.mark.parametrize(("available", "update_required", "ssh_ca"), [
+        (False, False, False),
+        (False, True, False),
+        (True, False, False),
+        (True, False, True),
+    ])
+    def test_vault_commands_follow_discovered_availability(self, available, update_required, ssh_ca) -> None:
         app = ServonautApp()
         app.ovh_service = None
         app.hetzner_service = None
         app.vault_available = available
         app.vault_update_required = update_required
+        app.auth_service = SimpleNamespace(
+            is_authenticated=True,
+            has_feature=lambda feature: feature == "ssh_ca" and ssh_ca,
+        )
         app.post_message = MagicMock()
         with patch("textual.app.App.get_system_commands", return_value=iter(())):
             titles = [command.title for command in ServonautApp.get_system_commands(app, Screen())]
         assert ("Go to Vault" in titles) is (available or update_required)
-        assert ("Go to SSH certificates" in titles) is available
+        assert ("Go to SSH certificates" in titles) is (available and ssh_ca)
 
 
 class TestCustomServersRemoveToast:

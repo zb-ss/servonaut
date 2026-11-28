@@ -485,9 +485,9 @@ class MemoryPanel(SettingsPanel):
 
     def _open_device_auto_unlock_management(self) -> None:
         """Push the sole setup screen that can enable or forget auto-unlock."""
-        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
 
-        self.app.push_screen(MemorySyncSetupScreen())
+        self.app.push_screen(FleetMemoryScreen(initial_tab="sync"))
 
     def refresh_external_state(self) -> None:
         """Refresh remembered-unlock status after the setup screen closes."""

@@ -160,9 +160,9 @@ async def test_section_headers_paint_readable_text_before_and_during_navigation(
     app.theme = theme
     async with app.run_test(size=(100, 30)) as pilot:
         sidebar = app.screen.query_one(Sidebar)
-        core = sidebar.query_one("#section_core .section-header", Button)
-        tools = sidebar.query_one("#section_tools .section-header", Button)
-        for header, text in ((core, "Core"), (tools, "Tools")):
+        fleet = sidebar.query_one("#section_fleet .section-header", Button)
+        access = sidebar.query_one("#section_access .section-header", Button)
+        for header, text in ((fleet, "Fleet"), (access, "Access & secrets")):
             _assert_exposed(app, header)
             _assert_readable(
                 _painted_text_styles(header, text),
@@ -171,7 +171,7 @@ async def test_section_headers_paint_readable_text_before_and_during_navigation(
         sidebar.enter_navigation_mode()
         await wait_until(lambda: app.focused is sidebar.query_one("#nav_list"))
         await pilot.press("shift+tab")
-        for header, text in ((core, "Core"), (tools, "Tools")):
+        for header, text in ((fleet, "Fleet"), (access, "Access & secrets")):
             await _tab_to(pilot, header)
             await pilot.pause()
             _assert_exposed(app, header)

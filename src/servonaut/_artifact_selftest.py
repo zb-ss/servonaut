@@ -424,9 +424,6 @@ async def _run_tui(runtime: object, config_path: Path) -> dict[str, bool]:
             raise _SelftestFailure("tui-help")
         from servonaut.widgets.sidebar_section import SidebarSection
 
-        tools = sidebar.query_one("#section_tools", SidebarSection)
-        await pilot.click(tools.query_one("Button.section-header", Button))
-        await pilot.pause()
         await pilot.click(sidebar.query_one("#nav_settings", Button))
         await pilot.pause()
         if not isinstance(app.screen, SettingsScreen):
@@ -439,10 +436,14 @@ async def _run_tui(runtime: object, config_path: Path) -> dict[str, bool]:
             # to an unavailable placeholder. Require a mounted real control.
             raise _SelftestFailure("tui-settings") from None
         sidebar = app.screen.query_one(Sidebar)
-        core = sidebar.query_one("#section_core", SidebarSection)
-        await pilot.click(core.query_one("Button.section-header", Button))
-        await pilot.pause()
-        await pilot.click(sidebar.query_one("#nav_list", Button))
+        list_btn = sidebar.query_one("#nav_list", Button)
+        fleet_section = next(
+            node for node in list_btn.ancestors if isinstance(node, SidebarSection)
+        )
+        if fleet_section.collapsed:
+            await pilot.click(fleet_section.query_one("Button.section-header", Button))
+            await pilot.pause()
+        await pilot.click(list_btn)
         await pilot.pause()
         if not isinstance(app.screen, InstanceListScreen):
             raise _SelftestFailure("tui-instances")

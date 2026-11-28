@@ -91,13 +91,22 @@ async def test_optional_account_routes_keep_entitlement_and_sync_gates(
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         sidebar = app.screen.query_one(Sidebar)
+        app.vault_available = True
+        sidebar.refresh_auth_gates()
+        await pilot.pause()
         expected = {
             "nav_teams": entitled,
-            "nav_sync_config": entitled,
-            "nav_drift": entitled and configured,
-            "nav_memory_export": entitled and configured,
-            "nav_memory_sync": True,
+            "nav_ca": entitled,
+            "nav_secrets": True,
+            "nav_memory": True,
+            "nav_settings": True,
         }
         assert {
             route: sidebar.query_one(f"#{route}", Button).display for route in expected
         } == expected
+        palette_titles = {c.title for c in app.get_system_commands(app.screen)}
+        assert ("Go to Sync config" in palette_titles) is entitled
+        assert ("Go to Memory Sync" in palette_titles) is True
+        assert ("Go to Drift events" in palette_titles) is (entitled and configured)
+        assert ("Go to Memory export" in palette_titles) is (entitled and configured)
+        assert ("Go to SSH certificates" in palette_titles) is entitled

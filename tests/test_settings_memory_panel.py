@@ -298,8 +298,8 @@ class TestMemoryPanelDeviceAutoUnlock:
     async def test_manage_opens_setup_without_marking_form_dirty(
         self, tmp_path
     ) -> None:
-        """Management delegates to Memory Sync setup and changes no form state."""
-        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+        """Management delegates to Memory Sync tab on FleetMemoryScreen and changes no form state."""
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
 
         manager = _temp_config_manager(tmp_path, AppConfig())
         with patch(
@@ -317,6 +317,7 @@ class TestMemoryPanelDeviceAutoUnlock:
 
                 app.push_screen.assert_called_once()
                 screen = app.push_screen.call_args.args[0]
-                assert isinstance(screen, MemorySyncSetupScreen)
+                assert isinstance(screen, FleetMemoryScreen)
+                assert screen._initial_tab == "sync"
                 assert app.panel.is_dirty() is False
                 assert manager.get().memory.sync_remember_device is False

@@ -404,8 +404,6 @@ async def _settings_round_trip(app: Any, pilot: Any, dwell: float, outcome: Dict
     from servonaut.screens.instance_list import InstanceListScreen
     from servonaut.screens.settings import SettingsScreen
 
-    # Expand the sidebar group that holds Settings, as a user would.
-    await pilot.click("#section_tools > Button.section-header")
     instances = app.screen
     # Button.press() rather than pilot.click(): a Pilot click settles
     # the new screen before returning, hiding the window under test.
@@ -460,7 +458,6 @@ async def _scenario_leave_before_rebaseline() -> Dict[str, Any]:
     try:
         async with app.run_test(headless=True, size=(140, 45)) as pilot:
             await pilot.pause()
-            await pilot.click("#section_tools > Button.section-header")
             instances = app.screen
             instances.query_one("#nav_settings", Button).press()
             await _wait_until(

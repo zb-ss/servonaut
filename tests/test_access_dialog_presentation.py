@@ -478,7 +478,7 @@ async def test_account_return_to_existing_entitlement_gate_and_destination(monke
             self.kind = kind
 
     monkeypatch.setattr("servonaut.screens.snapshot_manager.SnapshotManagerScreen", lambda: _Destination("config"))
-    monkeypatch.setattr("servonaut.screens.memory_sync_setup.MemorySyncSetupScreen", lambda: _Destination("memory"))
+    monkeypatch.setattr("servonaut.screens.fleet_memory.FleetMemoryScreen", lambda *_a, **_kw: _Destination("memory"))
     app = _AccessHost(False, state="in")
     app.auth_service.config_sync = entitled
     async with app.run_test(size=(100, 30)) as pilot:

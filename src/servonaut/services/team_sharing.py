@@ -133,6 +133,26 @@ def share_candidates(
     return offered, len(omitted), missing
 
 
+def server_share_defaults(connection_service: Any, instance: Mapping[str, Any]) -> dict[str, Any]:
+    """Return *instance* enriched with share defaults (login, port, bastion IP)."""
+    from servonaut.services.connection_service import rule_username
+
+    result = dict(instance)
+    profile = connection_service.resolve_profile(result) if connection_service is not None else None
+    own_username = instance.get("username") if instance.get("is_custom") is True else ""
+    result["username"] = (
+        instance.get("login_user")
+        or rule_username(result, profile)
+        or own_username
+        or ""
+    )
+    result["port"] = instance.get("port") or 22
+    _public, private = address_choices(instance)
+    if private and getattr(profile, "bastion_host", None):
+        result[SHARE_ADDRESS] = private
+    return result
+
+
 def share_payload(instance: Mapping[str, Any]) -> dict[str, Any]:
     """Public connection fields only: no local key paths, credentials or flags."""
     payload: dict[str, Any] = {
