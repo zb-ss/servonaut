@@ -937,6 +937,226 @@ def _cmd_clear(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# move-key-to-vault
+# ---------------------------------------------------------------------------
+
+_MOVE_STEP_LINES: Dict[str, str] = {
+    "preflight": "Checking your account and vault...",
+    "already_vault": "Your key is already in vault custody; checking the vault copy...",
+    "recovery_check": "Checking your recovery key...",
+    "unlock_key": "Opening your Memory Sync key...",
+    "vault_item": "Storing the key in your vault...",
+    "switch_custody": "Switching Memory Sync to vault custody...",
+    "cleanup": "Cleaning up this device...",
+}
+_CONFIG_STEP_LINES: Dict[str, str] = {
+    "key": "Config sync: preparing the vault key...",
+    "snapshot": "Config sync: uploading your config with the vault key...",
+    "cleanup": "Config sync: removing old passphrase snapshots...",
+}
+_MOVE_CONFIRM_TEXT = (
+    "This moves your Memory Sync key into your vault. It cannot be undone, and "
+    "older Servonaut versions will no longer open Memory Sync for this account."
+)
+_MOVE_OUTCOME_TEXT: Dict[str, str] = {
+    "moved": "Memory Sync now keeps its key in your vault.",
+    "already_vault": "Memory Sync already kept its key in your vault; this device is up to date.",
+    "nothing_to_move": "You have no Memory Sync key yet, so there is nothing to move.",
+}
+
+
+class _MoveInputUnavailable(Exception):
+    """A secret is needed but the terminal and the stdin flags cannot supply it."""
+
+
+class _StdinLines:
+    """Hands out stdin lines in the order the move asks for secrets.
+
+    The move asks for the recovery key first and the passphrase second, so
+    with both stdin flags the first line is the recovery key.
+    """
+
+    def read(self, prompt_name: str) -> str:
+        line = sys.stdin.readline()
+        if not line:
+            raise _MoveInputUnavailable(f"No {prompt_name} was given on stdin.")
+        value = line.rstrip("\r\n")
+        if not value:
+            raise _MoveInputUnavailable(f"The {prompt_name} on stdin was empty.")
+        return value
+
+
+def _move_secret_provider(prompt: str, name: str, from_stdin: bool, lines: _StdinLines) -> Any:
+    """A blocking provider for one secret: a stdin line, or a hidden prompt on a terminal."""
+
+    def provide() -> str:
+        if from_stdin:
+            return lines.read(name)
+        if not sys.stdin.isatty():
+            raise _MoveInputUnavailable(
+                f"A terminal is needed to type the {name}. Use the matching --*-stdin flag to pipe it."
+            )
+        try:
+            value = getpass.getpass(prompt, stream=sys.stderr)
+        except (EOFError, KeyboardInterrupt) as exc:
+            from servonaut.services.memory.custody_move import MoveAborted
+
+            raise MoveAborted() from exc
+        if not value:
+            raise _MoveInputUnavailable(f"No {name} was entered.")
+        return value
+
+    return provide
+
+
+def _confirm_move(args: Any) -> bool:
+    if getattr(args, "yes", False):
+        return True
+    if not sys.stdin.isatty():
+        raise _MoveInputUnavailable("A terminal is needed to confirm. Use --yes to skip the question.")
+    print(_MOVE_CONFIRM_TEXT, file=sys.stderr)
+    print("Continue? [y/N] ", end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower() in {"y", "yes"}
+
+
+def _build_move_services(vault: Any) -> Tuple[Any, Any, Any, Any]:
+    """``(mover, config_sync, config_manager, auth)`` for a signed-in vault service."""
+    import servonaut.services.memory.crypto as memory_crypto
+    from servonaut.config.manager import ConfigManager
+    from servonaut.services.config_sync_service import ConfigSyncService, vault_key_items_provider
+    from servonaut.services.memory.custody_move import MemoryCustodyMover
+    from servonaut.services.memory.key_custody import MemoryKeyCustody
+    from servonaut.services.memory.rate_limiter import RateLimiter
+    from servonaut.services.memory.sync_service import MemorySyncService
+
+    config_manager = ConfigManager()
+    config_manager.load()
+    api, auth, limiter = vault.api, vault.auth, RateLimiter()
+    sync = MemorySyncService(
+        api_client=api, crypto=memory_crypto, memory_service=None,
+        config_manager=config_manager, auth_service=auth, rate_limiter=limiter,
+    )
+    custody = MemoryKeyCustody(
+        api, auth, limiter,
+        app_keys_provider=lambda: vault.app_keys if vault.is_unlocked else None,
+        signer_provider=vault.device_signer,
+        marker_path=Path.home() / ".servonaut" / "memory" / "key_custody.json",
+        writable=True,
+        remote_identity_provider=vault.has_remote_identity,
+        memory_config_provider=lambda: config_manager.get().memory,
+    )
+    sync.set_key_custody(custody)
+    mover = MemoryCustodyMover(api, auth, limiter, vault, sync, custody, config_manager)
+    config_sync = ConfigSyncService(
+        api, config_manager, key_items_provider=vault_key_items_provider(lambda: vault),
+    )
+    return mover, config_sync, config_manager, auth
+
+
+def _move_say(use_json: bool, lines: Dict[str, str]) -> Any:
+    def say(step: str) -> None:
+        if not use_json and step in lines:
+            print(lines[step])
+
+    return say
+
+
+def _fail_move(message: str, code: int, use_json: bool) -> int:
+    print(message, file=sys.stderr)
+    if use_json:
+        print(json.dumps({"ok": False, "error": message}))
+    return code
+
+
+async def _move_memory_part(mover: Any, args: Any, use_json: bool) -> Dict[str, Any]:
+    lines = _StdinLines()
+    report = await mover.run(
+        _move_secret_provider("Memory Sync passphrase: ", "passphrase", args.passphrase_stdin, lines),
+        _move_secret_provider("Vault recovery key: ", "recovery key", args.recovery_key_stdin, lines),
+        _move_say(use_json, _MOVE_STEP_LINES),
+    )
+    return {"outcome": report.outcome, "vault_created": report.vault_created,
+            "warnings": list(report.warnings)}
+
+
+async def _move_config_part(
+    config_sync: Any, auth: Any, use_json: bool,
+) -> Dict[str, Any]:
+    if not auth.has_feature("config_sync"):
+        return {"skipped": "Config sync is not part of your plan."}
+    result = await config_sync.move_key_to_vault(_move_say(use_json, _CONFIG_STEP_LINES))
+    return {"key_created": result["key_created"], "pushed": result["pushed"],
+            "deleted": result["deleted"]}
+
+
+async def _run_move(mover: Any, config_sync: Any, auth: Any, args: Any, use_json: bool) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"ok": True}
+    if not args.skip_memory:
+        summary["memory"] = await _move_memory_part(mover, args, use_json)
+    if not args.skip_config:
+        summary["config"] = await _move_config_part(config_sync, auth, use_json)
+    return summary
+
+
+def _print_move_summary(summary: Dict[str, Any], use_json: bool) -> None:
+    if use_json:
+        print(json.dumps(summary))
+        return
+    memory = summary.get("memory")
+    if memory:
+        print(_MOVE_OUTCOME_TEXT[memory["outcome"]])
+        if memory["vault_created"]:
+            print("Your personal vault did not exist yet, so it was created.")
+        for warning in memory["warnings"]:
+            print(f"Warning: {warning}", file=sys.stderr)
+    config = summary.get("config")
+    if config and "skipped" in config:
+        print(config["skipped"])
+    elif config:
+        print(f"Config sync now keeps its key in your vault ({config['deleted']} old snapshot(s) removed).")
+
+
+def _cmd_move_key_to_vault(args: Any) -> int:
+    """Handle ``memory move-key-to-vault``; never prints a key, passphrase or recovery key."""
+    from servonaut.services.api_client import APIError
+    from servonaut.services.memory.custody_errors import custody_error_message
+    from servonaut.services.memory.custody_move import MoveAborted, MoveStopped
+    from servonaut.services.vault.command_service import VaultCommandService
+    from servonaut.services.vault.errors import VaultUserError
+
+    use_json = getattr(args, "json", False)
+    if args.skip_memory and args.skip_config:
+        return _fail_move("Nothing to do: both parts were skipped.", _EXIT_USAGE_ERROR, use_json)
+    try:
+        if not _confirm_move(args):
+            return _fail_move("Cancelled. Nothing was changed.", _EXIT_USER_ABORT, use_json)
+        vault = VaultCommandService.from_local_session()
+        mover, config_sync, _config_manager, auth = _build_move_services(vault)
+        summary = _run_async(_run_move(mover, config_sync, auth, args, use_json))
+    except _MoveInputUnavailable as exc:
+        return _fail_move(str(exc), _EXIT_USAGE_ERROR, use_json)
+    except (MoveAborted, KeyboardInterrupt):
+        return _fail_move("Cancelled.", _EXIT_USER_ABORT, use_json)
+    except MoveStopped as exc:
+        return _fail_move(exc.message, _EXIT_GENERIC_ERROR, use_json)
+    except VaultUserError as exc:
+        return _fail_move(str(exc), _EXIT_GENERIC_ERROR, use_json)
+    except APIError as exc:
+        message = custody_error_message(exc) or "The Servonaut service refused the request."
+        return _fail_move(message, _EXIT_GENERIC_ERROR, use_json)
+    except Exception as exc:  # noqa: BLE001 - config sync failures carry their own safe text
+        logger.debug("move-key-to-vault failed", exc_info=True)
+        from servonaut.services.config_crypto import DecryptionError
+
+        message = str(exc) if isinstance(exc, DecryptionError) else (
+            f"The move stopped unexpectedly ({type(exc).__name__}). Run it again to continue."
+        )
+        return _fail_move(message, _EXIT_GENERIC_ERROR, use_json)
+    _print_move_summary(summary, use_json)
+    return _EXIT_SUCCESS
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -956,6 +1176,11 @@ def run_memory(args: Any) -> int:
     # don't make this simple config operation fail.
     if memory_command == "reset-prompts":
         return _cmd_reset_prompts(args)
+
+    # move-key-to-vault builds its own vault-backed services; the probe stack
+    # (fleet, cloud credentials) is not needed.
+    if memory_command == "move-key-to-vault":
+        return _cmd_move_key_to_vault(args)
 
     config, memory_service, fleet = _init_headless_services()
 

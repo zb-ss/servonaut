@@ -1741,6 +1741,23 @@ def _main() -> None:
         ),
     )
 
+    # memory move-key-to-vault
+    mem_move = memory_sub.add_parser(
+        'move-key-to-vault',
+        help='Move your Memory Sync key (and config sync key) into your vault. Cannot be undone.',
+    )
+    mem_move.add_argument('--skip-config', action='store_true',
+                          help='Move only the Memory Sync key.')
+    mem_move.add_argument('--skip-memory', action='store_true',
+                          help='Move only the config sync key.')
+    mem_move.add_argument('--yes', action='store_true', help='Do not ask for confirmation.')
+    mem_move.add_argument('--passphrase-stdin', action='store_true',
+                          help='Read the Memory Sync passphrase from a line of stdin.')
+    mem_move.add_argument('--recovery-key-stdin', action='store_true',
+                          help='Read the vault recovery key from a line of stdin '
+                               '(with both flags: recovery key first, passphrase second).')
+    mem_move.add_argument('--json', action='store_true', help='Print the result as JSON.')
+
     # ---- ai subcommand ----
     from servonaut.cli.ai import add_ai_parser, handle_ai_command
     from servonaut.utils.terminal_output import protect_cli_output
