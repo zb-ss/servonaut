@@ -12,7 +12,11 @@ from servonaut.services.memory.sync_errors import describe_sync_error
 _SERVICE_WORDING = "Service wording that must never reach the user."
 
 _EXPECTED = {
-    "vault_not_ready": "Your vault is not ready for this. Unlock your vault on this device, confirm your vault identity, and try again.",
+    "vault_not_ready": (
+        "Your vault is not ready for this. Unlock your vault on this device and confirm your vault "
+        "identity (open the link we e-mailed you, or choose Confirm identity on the Vault screen), "
+        "then try again."
+    ),
     "fingerprint_mismatch": "Your Memory Sync key changed on another device. Nothing was moved. Open Memory Sync and try again.",
     "memory_key_custody_vault": "Memory Sync keeps its key in your vault. Set up or unlock your vault on this device, then try again.",
     "config_key_not_ready": "Your config sync key is not in your vault yet. Unlock your vault and try again.",

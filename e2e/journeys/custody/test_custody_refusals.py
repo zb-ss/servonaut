@@ -23,6 +23,8 @@ journey).
 
 from __future__ import annotations
 
+import re
+
 import base64
 import os
 
@@ -46,8 +48,9 @@ CUSTODY_VAULT = (
     "device, then try again."
 )
 VAULT_NOT_READY = (
-    "Your vault is not ready for this. Unlock your vault on this device, confirm "
-    "your vault identity, and try again."
+    "Your vault is not ready for this. Unlock your vault on this device and confirm "
+    "your vault identity (open the link we e-mailed you, or choose Confirm identity "
+    "on the Vault screen), then try again."
 )
 FINGERPRINT_MISMATCH = (
     "Your Memory Sync key changed on another device. Nothing was moved. Open "
@@ -130,7 +133,7 @@ async def test_set_up_with_the_passphrase_switch_off_and_no_vault(
 async def test_set_up_when_the_service_says_the_vault_is_not_ready(tui, fake_cloud, vault_account, monkeypatch):
     monkeypatch.setattr(fake_cloud.memory, "_vault_ready", lambda user_id, fingerprint: False)
     async with tui() as t:
-        await _setup_refused(t, f"^{VAULT_NOT_READY}$")
+        await _setup_refused(t, f"^{re.escape(VAULT_NOT_READY)}$")
     _nothing_left(fake_cloud)  # the item made for the key was removed again
 
 
@@ -205,7 +208,7 @@ async def test_a_refused_move_leaves_the_passphrase_key_alone(
 
     async with tui() as t:
         await _start_move(t, recovery_key)
-        await t.wait_for_toast(f"^{expected_text}$", severity="error")
+        await t.wait_for_toast(f"^{re.escape(expected_text)}$", severity="error")
         _assert_only_client_wording(t)
 
     after = fake_cloud.memory.enrolled_key()

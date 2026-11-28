@@ -42,7 +42,7 @@ from servonaut.services.memory.key_custody import (
 from servonaut.services.memory.rate_limiter import RateLimitKey
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.items import MEMORY_KEY
-from servonaut.services.vault.onboarding import identity_step
+from servonaut.services.vault.onboarding import CONFIRM_IDENTITY, NextStep, identity_step
 from servonaut.services.vault.team_vault_client import VaultStateError
 
 logger = logging.getLogger(__name__)
@@ -73,9 +73,14 @@ OUTCOME_MOVED = "moved"
 OUTCOME_ALREADY_VAULT = "already_vault"
 OUTCOME_NOTHING_TO_MOVE = "nothing_to_move"
 
-_MSG_VAULT_NOT_READY = (
-    "Your vault is not ready for this. Unlock your vault on this device, "
-    "confirm your vault identity, and try again."
+_MSG_VAULT_NOT_READY = custody_code_message("vault_not_ready")
+_MSG_VAULT_LOCKED = "Unlock your vault on this device first, then try again. Nothing was changed."
+# The onboarding text for this step ends "confirm it here", which only fits the
+# Vault screen; the move runs from Memory Sync and the CLI.
+_MSG_CONFIRM_IDENTITY = (
+    "Confirm your vault identity first: open the link we e-mailed you. If the link "
+    "expired, choose Confirm identity on the Vault screen or run "
+    "servonaut vault identity confirm to get a new one. Nothing was changed."
 )
 _MSG_UPSELL = "Memory Sync is not part of your plan. Nothing was changed."
 _MSG_SIGN_IN = "Sign in with servonaut login first. Nothing was changed."
@@ -121,6 +126,13 @@ class MoveStopped(Exception):
 
 class MoveAborted(Exception):
     """The person running the move declined or cancelled; nothing further was written."""
+
+
+def _identity_step_message(step: NextStep) -> str:
+    """Say which vault step is missing and how to do it; fixed client text only."""
+    if step.code == CONFIRM_IDENTITY.code:
+        return _MSG_CONFIRM_IDENTITY
+    return f"Your vault is not ready for this. {step.message} Nothing was changed."
 
 
 @dataclass
@@ -230,10 +242,11 @@ class MemoryCustodyMover:
         if not self._auth.has_feature("memory_sync"):
             raise MoveStopped("forbidden_entitlement", _MSG_UPSELL)
         if not self._vault.is_unlocked:
-            raise MoveStopped("vault_not_ready", _MSG_VAULT_NOT_READY)
+            raise MoveStopped("vault_not_ready", _MSG_VAULT_LOCKED)
         status = await self._vault.status()
-        if identity_step(status) is not None:
-            raise MoveStopped("vault_not_ready", _MSG_VAULT_NOT_READY)
+        step = identity_step(status)
+        if step is not None:
+            raise MoveStopped("vault_not_ready", _identity_step_message(step))
         return await self._fetch_record()
 
     async def _fetch_record(self) -> Optional[KeyRecord]:

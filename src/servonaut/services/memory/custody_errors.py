@@ -21,8 +21,9 @@ CONTEXT_ROTATION = "rotation"
 CONTEXT_GENERAL = "general"
 
 _VAULT_NOT_READY = (
-    "Your vault is not ready for this. Unlock your vault on this device, "
-    "confirm your vault identity, and try again."
+    "Your vault is not ready for this. Unlock your vault on this device and "
+    "confirm your vault identity (open the link we e-mailed you, or choose "
+    "Confirm identity on the Vault screen), then try again."
 )
 _FEATURE_DISABLED = (
     "Keeping Memory Sync keys in the vault is not available on this Servonaut "

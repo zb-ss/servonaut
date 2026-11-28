@@ -327,6 +327,7 @@ By default the command moves both keys. It lists what it will do and asks you to
 
 What to expect:
 
+- **Your vault identity must be confirmed.** A new vault identity is confirmed through the link Servonaut e-mails you. Until then the move stops before it changes anything and says so. If the link expired, run `servonaut vault identity confirm` (or choose **Confirm identity** on the Vault screen) to get a new one.
 - **The recovery key comes first.** Servonaut asks you to type your vault recovery key and checks it against your vault before it changes anything, so you know your only way back works. If you have no personal vault yet, the move creates one.
 - **The passphrase stops working.** After the move, the Memory Sync passphrase no longer opens anything. Your vault recovery key is the only recovery path; if you lose access to your vault, memory already synced cannot be recovered with a passphrase.
 - **The passphrase is asked for once, to open your current key.** In the app, only when Memory Sync is locked. `servonaut memory move-key-to-vault` always asks, because the command has no unlocked session; the move puts that same key in the vault.

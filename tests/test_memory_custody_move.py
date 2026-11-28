@@ -282,6 +282,37 @@ async def test_preflight_refuses_before_any_call(env, break_it):
     assert env.recovery_calls == 0
 
 
+@pytest.mark.parametrize(("break_it", "expected"), [
+    ("locked", "Unlock your vault on this device first, then try again. Nothing was changed."),
+    ("pending_confirmation", (
+        "Confirm your vault identity first: open the link we e-mailed you. If the link "
+        "expired, choose Confirm identity on the Vault screen or run "
+        "servonaut vault identity confirm to get a new one. Nothing was changed."
+    )),
+    ("no_identity", (
+        "Your vault is not ready for this. Create your vault identity and write down its "
+        "recovery key. Nothing was changed."
+    )),
+])
+async def test_preflight_says_which_vault_step_is_missing(env, break_it, expected):
+    if break_it == "locked":
+        env.vault.is_unlocked = False
+    elif break_it == "pending_confirmation":
+        env.vault.status = AsyncMock(return_value={
+            "remote": {"identity": {"trust_status": "pending_confirmation"}},
+            "local_identity": "abc", "custody_missing": False,
+        })
+    else:
+        env.vault.status = AsyncMock(return_value={"remote": {}, "local_identity": None})
+
+    with pytest.raises(MoveStopped) as stopped:
+        await env.run()
+
+    assert stopped.value.reason == "vault_not_ready"
+    assert stopped.value.message == expected
+    env.api.get.assert_not_awaited()
+
+
 async def test_unlocked_sync_material_skips_the_passphrase(env):
     env.sync.get_key_material.return_value = KeyMaterial(
         user_id=USER_ID, public_key=env.pair.public_key, private_key=env.pair.private_key)
