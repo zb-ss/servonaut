@@ -31,7 +31,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from servonaut.services.bw_errors import (
     BwCliMissingError,
@@ -111,6 +111,7 @@ class BwSessionService:
     def __init__(self, bw_binary: str = "bw") -> None:
         self._bw_binary = bw_binary
         self._session: Optional[str] = None
+        self._lock_listeners: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
     # subprocess plumbing
@@ -278,8 +279,17 @@ class BwSessionService:
         return bool(self._session)
 
     def lock(self) -> None:
-        """Drop the in-memory session (does not call ``bw lock``)."""
+        """Drop the in-memory session (does not call ``bw lock``) and tell the listeners."""
         self._session = None
+        for listener in list(self._lock_listeners):
+            try:
+                listener()
+            except Exception as exc:  # noqa: BLE001 - one listener must not stop the others
+                logger.debug("Bitwarden lock listener failed (%s)", type(exc).__name__)
+
+    def add_lock_listener(self, listener: Callable[[], None]) -> None:
+        """Call *listener* (no arguments) whenever :meth:`lock` drops the session."""
+        self._lock_listeners.append(listener)
 
     async def ensure_servonaut_folder(self, name: str = DEFAULT_FOLDER_NAME) -> str:
         """Return the id of the ``name`` folder, creating it if absent. Idempotent.

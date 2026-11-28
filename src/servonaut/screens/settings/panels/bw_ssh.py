@@ -23,6 +23,7 @@ from textual.containers import Container, Horizontal, VerticalGroup
 from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Static
 
+from servonaut.screens.bw_unlock_modal import BW_UNLOCK_SCOPE_NOTE
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.forms import setting_row
 from servonaut.widgets._layout_refit import LayoutRefitMixin
@@ -97,6 +98,11 @@ class BwSshPanel(SettingsPanel):
             yield Static(
                 "[dim]Set up vault wiring to resolve per-instance SSH keys "
                 "from your Bitwarden vault.[/dim]",
+                classes="note",
+            )
+            yield Static(
+                f"[dim]{BW_UNLOCK_SCOPE_NOTE}[/dim]",
+                id="bw_unlock_scope",
                 classes="note",
             )
         with VerticalGroup(classes="settings-access-status"):

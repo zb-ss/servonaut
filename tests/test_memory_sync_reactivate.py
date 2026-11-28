@@ -1014,6 +1014,8 @@ class TestLogoutClearsMemorySyncState:
             config_sync_service=MagicMock(),
             config_manager=cm,
             memory_sync_service=sync if has_sync else None,
+            # Logout also drops the Bitwarden key files (covered in test_vault_ssh_paths).
+            _forget_bw_keys=MagicMock(),
         )
         return stub
 

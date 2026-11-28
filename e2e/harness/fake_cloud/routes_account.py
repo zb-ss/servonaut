@@ -25,7 +25,7 @@ import copy
 import datetime as dt
 import threading
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from aiohttp import web
 
@@ -428,6 +428,7 @@ def add_routes(
     ssh_ca: Optional[Callable[[str, str], Optional[dict[str, Any]]]] = None,
     base_url: Callable[[], str] = lambda: "",
     credential_binding: Optional[Callable[[str, str], Optional[dict[str, Any]]]] = None,
+    ssh_ref_keys: Callable[[], Iterable[tuple[str, str]]] = lambda: (),
 ) -> None:
     """Register the account data routes on *app*.
 
@@ -435,6 +436,10 @@ def add_routes(
     CA state; without it every row says ``null`` (no CA). *credential_binding*
     answers a bound server's ``credential_binding`` field (``None`` leaves the
     field out). *base_url* is where invitation accept URLs point.
+    *ssh_ref_keys* lists the instances with a stored SSH ref: the
+    ``/me/instances`` roll-up has a row for each of them (as the client's
+    ``BwSshConfigService.list_personal_instances`` documents it), not yet
+    verified until a verify result is reported.
     """
 
     def guarded(handler: Any) -> Any:
@@ -573,7 +578,22 @@ def add_routes(
         return web.json_response({"data": servers})
 
     async def verify_list(request: web.Request) -> web.Response:
-        return web.json_response({"instances": data.verify_rows()})
+        rows = data.verify_rows()
+        listed = {(row["provider"], row["instance_id"]) for row in rows}
+        rows.extend(
+            {
+                "provider": provider,
+                "instance_id": instance_id,
+                "ssh_credential_provider": "bitwarden_pm",
+                "ssh_verify_status": None,
+                "ssh_verified_at": None,
+                "checked_by_client": None,
+                "updated_at": None,
+            }
+            for provider, instance_id in ssh_ref_keys()
+            if (provider, instance_id) not in listed
+        )
+        return web.json_response({"instances": rows})
 
     async def verify_status(request: web.Request) -> web.Response:
         row = data.verify_row(request.match_info["provider"], request.match_info["instance_id"])

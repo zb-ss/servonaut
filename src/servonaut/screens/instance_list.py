@@ -1783,6 +1783,7 @@ class InstanceListScreen(WorkspaceScreen):
                 cache=getattr(self.app, "vault_lease_cache", None),
                 team_rows=team_rows(self.app),
                 rows=fleet_rows(self.app),
+                bw_keys=getattr(self.app, "bw_ssh_keys", None),
             )
         except VaultCredentialError as exc:
             self.app.notify(str(exc), severity="error", markup=False)

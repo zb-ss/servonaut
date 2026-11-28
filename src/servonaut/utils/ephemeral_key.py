@@ -136,8 +136,9 @@ def remove_bw_ssh_key(path: str) -> None:
     Zero-overwrites then unlinks *path*; missing files and permission errors
     are silently ignored (the shared ``atexit`` sweeper and
     :func:`cleanup_stale_bw_keys` — run at every entry-point startup — remain
-    as backstops). The path is also dropped from the live-key registry so the
-    exit sweeper does not retain it.
+    as backstops). Once the file is gone the path is dropped from the
+    live-key registry; a file that survived (in use on Windows, say) stays
+    registered, so the exit sweeper still removes it.
 
     Intended for per-call lifecycles — e.g. the MCP server resolves a vault
     key, runs one ssh/scp subprocess, and must delete the file in a
@@ -146,7 +147,8 @@ def remove_bw_ssh_key(path: str) -> None:
     """
     with suppress(OSError):
         _zero_and_unlink(path)
-    _live_bw_key_paths.discard(path)
+    if not os.path.lexists(path):
+        _live_bw_key_paths.discard(path)
 
 
 def cleanup_stale_bw_keys(max_age_seconds: int = 86400) -> None:

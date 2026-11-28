@@ -15,6 +15,8 @@ from textual.content import Content
 from textual.widgets import Footer, Static, Input, Button, RadioSet, RadioButton, LoadingIndicator
 from textual.worker import Worker
 
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice, uses_bw_key
+from servonaut.utils.ssh_utils import is_ssh_own_login_refusal
 from servonaut.utils.markup import inert_text, single_line_text
 from servonaut.utils.scp_client import remote_path_value, local_source_name
 from servonaut.utils.ssh_names import SSHRefusal
@@ -25,6 +27,7 @@ from servonaut.services.vault.display import terminal_safe
 from servonaut.utils.instance_resolver import display_name
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
+    SSH_FAILURE_EXIT_CODE,
     HostKeyPolicy,
     HostKeyTarget,
     detect_host_key_problem,
@@ -40,6 +43,11 @@ def path_roles(is_upload: bool) -> tuple[str, str]:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ssh_failed(error: BaseException | None) -> bool:
+    """Whether *error* is ssh failing on its own (exit 255), not a remote command."""
+    return getattr(error, "returncode", None) == SSH_FAILURE_EXIT_CODE
 
 
 @dataclass(frozen=True)
@@ -313,7 +321,10 @@ class SCPTransferScreen(WorkspaceScreen):
         root = path or get_scan_paths_for_instance(self.app.config_manager.get(), conn)[0]
         if path and await remote_path_kind(self.app, options, path) != 'directory':
             root = remote_parent(path)
-        result = await self.app.push_screen_wait(RemotePathPickerModal(conn, source=source, root=root, options=options))
+        result = await self.app.push_screen_wait(RemotePathPickerModal(
+            conn, source=source, root=root, options=options,
+            bw_key_reason=getattr(self, "_bw_key_reason", None),
+        ))
         self._set_form_busy(False)
         self._apply_picker_result('remote', result)
 
@@ -459,10 +470,17 @@ class SCPTransferScreen(WorkspaceScreen):
             cache=getattr(self.app, "vault_lease_cache", None),
             team_rows=team_rows(self.app),
             rows=fleet_rows(self.app),
+            bw_keys=getattr(self.app, "bw_ssh_keys", None),
         )
+        self._bw_key_reason = resolved.get(BW_KEY_UNAVAILABLE)
+        # Kept for a refused login (see _bw_auth_notice); never splatted into a builder.
+        self._bw_resolved = dict(resolved)
         if resolved.get("identity_agent") is None:
-            # No vault key for the server; its hop may still use the bastion's.
+            # No vault key for the server: its hop may still use the bastion's,
+            # and its key may be the server's Bitwarden one.
             options = {**options, "proxy_args": resolved.get("proxy_args", options.get("proxy_args"))}
+            if uses_bw_key(resolved):
+                options["key_path"] = resolved.get("key_path")
             return options
         options = {
             **{key: resolved.get(key) for key in options},
@@ -473,6 +491,21 @@ class SCPTransferScreen(WorkspaceScreen):
             profile=self.app.connection_service.resolve_profile(conn),
         )
         return options
+
+    def _bw_auth_notice(self, error_text: str, *, ssh_failed: bool) -> Optional[str]:
+        """The Bitwarden cause when ssh refused the login and the server's Bitwarden key was not used.
+
+        *ssh_failed*: ssh or scp exited with its own failure code; with it,
+        only ssh's own refusal line counts (a remote error can contain the
+        same words). A refusal of the server's Bitwarden key also has it read
+        again on the next transfer (which resolves again).
+        """
+        if not is_ssh_own_login_refusal(error_text or "", ssh_failed=ssh_failed):
+            return None
+        key_refused = getattr(getattr(self.app, "bw_ssh_keys", None), "key_refused", None)
+        if callable(key_refused):
+            key_refused(getattr(self, "_bw_resolved", None) or {})
+        return bw_key_notice(getattr(self, "_bw_key_reason", None))
 
     def _build_transfer_command(
         self, conn: dict, local_path: str, remote_path: str,
@@ -547,7 +580,12 @@ class SCPTransferScreen(WorkspaceScreen):
             from servonaut.services.remote_paths import path_error_message
             if event.worker.error:
                 logger.warning('Remote browser preparation failed: %s', event.worker.error)
-            status = path_error_message(str(event.worker.error)) if event.worker.error else 'Ready to transfer.'
+            if event.worker.error:
+                status = self._bw_auth_notice(
+                    str(event.worker.error), ssh_failed=_ssh_failed(event.worker.error),
+                ) or path_error_message(str(event.worker.error))
+            else:
+                status = 'Ready to transfer.'
             self._set_status(status)
             self.query_one('#remote_path_input', Input).focus()
         if event.worker.name == "scp_transfer":
@@ -574,6 +612,9 @@ class SCPTransferScreen(WorkspaceScreen):
                     self.app.notify(error_msg, severity="error", markup=False)
                 elif event.worker.error:
                     raw_error = str(event.worker.error)
+                    raw_error = self._bw_auth_notice(
+                        raw_error, ssh_failed=_ssh_failed(event.worker.error),
+                    ) or raw_error
                     error_msg = _s(raw_error)
                     self._set_status(raw_error, prefix='Transfer failed:', style='$text-error')
                     self.app.notify(f"Transfer failed: {error_msg}", severity="error", markup=False)
@@ -598,6 +639,10 @@ class SCPTransferScreen(WorkspaceScreen):
                             stdout=stdout, exit_codes=SCP_REFUSAL_EXIT_CODES,
                         )
                         raw_error = problem.message if problem else (stderr or 'Unknown error')
+                        if not problem:
+                            raw_error = self._bw_auth_notice(
+                                stderr or '', ssh_failed=returncode in SCP_REFUSAL_EXIT_CODES,
+                            ) or raw_error
                         error_msg = _s(raw_error)
                         self._set_status(raw_error, prefix='Transfer failed:', style='$text-error')
                         self.app.notify(

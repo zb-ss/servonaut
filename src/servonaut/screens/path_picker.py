@@ -15,7 +15,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DirectoryTree, Input, LoadingIndicator, Static, Tree
 
 from servonaut.screens._demo_resolve import display_text
+from servonaut.services.bw_key_notice import bw_key_notice
 from servonaut.utils.instance_resolver import display_name
+from servonaut.services.ssh_host_keys import SSH_FAILURE_EXIT_CODE
+from servonaut.utils.ssh_utils import is_ssh_own_login_refusal
 from servonaut.utils.markup import single_line_text
 from servonaut.widgets.dialogs import (
     DIALOG_VERTICAL_BREAKPOINTS, DialogActions, DialogContent, DialogFrame,
@@ -328,8 +331,12 @@ class LocalPathPickerModal(PathPickerModal):
 class RemotePathPickerModal(PathPickerModal):
     separator = '/'
 
-    def __init__(self, instance: dict, *, source: bool, root: str, options: dict) -> None:
+    def __init__(
+        self, instance: dict, *, source: bool, root: str, options: dict,
+        bw_key_reason: str | None = None,
+    ) -> None:
         self._instance, self._root, self._options = instance, root, options
+        self._bw_key_reason = bw_key_reason
         self._resolving_parent = False
         self._retry_parent = False
         self._parent_worker = None
@@ -352,6 +359,7 @@ class RemotePathPickerModal(PathPickerModal):
         return build_remote_tree(
             self.app, self._instance, tree_id='path_picker_tree',
             connection_options=self._options, literal_paths=True, scrub=self.scrub,
+            bw_key_reason=self._bw_key_reason,
         )
 
     def on_mount(self) -> None:
@@ -403,7 +411,11 @@ class RemotePathPickerModal(PathPickerModal):
         except (OSError, RuntimeError, ValueError) as error:
             self._parent_worker = None
             self._resolving_parent, self._retry_parent = False, True
-            self._load_state(RemoteTree.LoadState(path, False, str(error)))
+            message = str(error)
+            ssh_failed = getattr(error, "returncode", None) == SSH_FAILURE_EXIT_CODE
+            refused = is_ssh_own_login_refusal(message, ssh_failed=ssh_failed)
+            notice = bw_key_notice(self._bw_key_reason) if refused else None
+            self._load_state(RemoteTree.LoadState(path, False, notice or message))
             return
         self._parent_worker = None
         self.query_one('#path_picker_location', Input).value = parent

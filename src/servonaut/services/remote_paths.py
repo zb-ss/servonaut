@@ -7,8 +7,17 @@ import subprocess
 import posixpath
 
 from servonaut.utils.remote_shell import shell_path, posix_command
-from servonaut.utils.ssh_utils import run_ssh
+from servonaut.services.bw_key_notice import is_bw_key_notice
 from servonaut.utils.scp_client import remote_path_value
+from servonaut.utils.ssh_utils import is_ssh_login_refusal, run_ssh
+
+
+class RemoteCommandError(RuntimeError):
+    """A remote read that failed; ``returncode`` is ssh's exit code (255: ssh itself failed)."""
+
+    def __init__(self, message: str, returncode: int) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 async def remote_path_kind(app, options: dict, path: str) -> str:
@@ -46,6 +55,10 @@ async def remote_parent_directory(app, options: dict, path: str) -> str:
 
 def path_error_message(error: str) -> str:
     """Explain a failed folder load without displaying remote command output."""
+    if is_bw_key_notice(error):
+        return error
+    if is_ssh_login_refusal(error):
+        return 'Could not sign in to the server. Check the connection settings.'
     lowered = error.lower()
     if 'permission denied' in lowered:
         return "You don't have permission to open this folder."
@@ -77,5 +90,5 @@ async def _read_remote(app, options: dict, command: str) -> str:
     stdout = result.stdout.decode('utf-8', errors='surrogateescape') if isinstance(result.stdout, bytes) else result.stdout
     stderr = result.stderr.decode('utf-8', errors='replace') if isinstance(result.stderr, bytes) else result.stderr
     if result.returncode:
-        raise RuntimeError(stderr.strip() or 'Could not inspect the remote path')
+        raise RemoteCommandError(stderr.strip() or 'Could not inspect the remote path', result.returncode)
     return stdout

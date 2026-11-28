@@ -38,6 +38,8 @@ from servonaut.services.accounts.headless import (
     usable_account,
 )
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice, bw_key_reason
+from servonaut.services.ssh_ref_resolver import SSH_REF_MEMO_TTL_SECONDS as _BW_REF_MEMO_TTL_SECONDS
 from servonaut.services.api_client import ClientUpdateRequiredError, find_client_update_required
 from servonaut.services.client_identity import format_update_required_message, get_client_identity
 from servonaut.services.memory.notes import has_notes, strip_comments
@@ -118,16 +120,26 @@ def _s3_content_type(name: str) -> str | None:
     suffix = PurePosixPath(name).suffix.lower()
     return _S3_CONTENT_TYPES.get(suffix) or mimetypes.guess_type(name)[0]
 
-# Short-lived per-(provider, instance_id) memo of Bitwarden ssh-ref lookups
-# (positive AND negative results). Fleet-wide tools resolve connections once
-# per instance per call; without the memo every SSH-backed tool call pays an
-# uncached backend GET — and, when the API is degraded, its full HTTP timeout.
-# Internal coalescing window, not an ops-tunable: key material is still
-# resolved and wiped per call, only the opaque ref pointer is memoized.
-_BW_REF_MEMO_TTL_SECONDS = 60.0
 # How long one read of the teams' shared servers serves list_instances and
 # lookups: a tool loop must not cost a team-list request per call.
 _SHARED_SERVERS_MEMO_TTL_SECONDS = 60.0
+
+# The exit status OpenSSH uses for its own failures (not the remote command's).
+_SSH_OWN_FAILURE_EXIT_CODE = 255
+
+
+class _StderrText(str):
+    """A probe's stderr; ``bw_hint`` is the Bitwarden notice for a refused login."""
+
+    bw_hint: Optional[str] = None
+
+
+def _bw_hint_of(stderr: str) -> Optional[str]:
+    """The Bitwarden notice _exec_ssh attached to *stderr*, if any.
+
+    Shown after the (capped) stderr, so the cap cannot cut it off.
+    """
+    return getattr(stderr, "bw_hint", None)
 
 
 def _own_row_key(instance: Dict) -> tuple:
@@ -361,6 +373,9 @@ class ServonautTools:
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
+        # The in-app Bitwarden session source; None on headless surfaces,
+        # where the ambient BW_SESSION applies.
+        self._bw_session_getter = None
         # (expires_at, result) of the last read of the teams' shared servers.
         self._shared_memo: Optional[tuple[float, SharedServers]] = None
         # Every provider account (AccountRegistry). The single-service
@@ -492,6 +507,27 @@ class ServonautTools:
         """
         from servonaut.services.secrets_status import describe_secret_store
         return describe_secret_store(self._secret_provider)
+
+    def set_bw_session_getter(self, getter) -> None:
+        """Bind the in-app Bitwarden session getter.
+
+        The desktop app hands its in-memory unlock session getter to the tools
+        instance it hosts; the token is read in-process and never stored,
+        logged or passed to another process.
+        """
+        self._bw_session_getter = getter
+
+    def _bw_auth_hint(self, conn: Mapping[str, Any], *, ssh_failed: bool) -> Optional[str]:
+        """The Bitwarden notice for a login refusal, when a reason is on *conn*.
+
+        *ssh_failed*: ssh (or scp) itself failed (its own exit code), so the
+        refusal text is ssh's and not a remote command's output.
+        """
+        if not ssh_failed:
+            return None
+        return bw_key_notice(
+            conn.get(BW_KEY_UNAVAILABLE), headless=self._bw_session_getter is None,
+        )
 
     def set_bw_ssh_config_service(self, service) -> None:
         """Bind/rebind the Bitwarden SSH-ref client after construction.
@@ -1316,7 +1352,11 @@ class ServonautTools:
                 host_key_problem.reason_code, key_source,
             )
         if self._is_ssh_authentication_failure(stderr_text):
+            hint = self._bw_auth_hint(
+                conn, ssh_failed=ssh_returncode(output) == _SSH_OWN_FAILURE_EXIT_CODE,
+            )
             message = (
+                f"Error: SSH authentication failed. {hint}" if hint else
                 "Error: SSH authentication failed. "
                 + (
                     "The configured key and forwarded SSH agent were both tried. "
@@ -1497,6 +1537,11 @@ class ServonautTools:
                 'get_server_info', args, '', False,
                 'ssh_auth_failed', **key_extras,
             )
+            hint = self._bw_auth_hint(
+                conn, ssh_failed=ssh_returncode(ssh_output) == _SSH_OWN_FAILURE_EXIT_CODE,
+            )
+            if hint:
+                return f"Error: SSH authentication failed. {hint}"
             return (
                 "Error: SSH authentication failed. Verify the configured "
                 "username and key or the forwarded SSH agent identities."
@@ -1614,6 +1659,16 @@ class ServonautTools:
                 result += f"\n{host_key_problem.agent_message}"
             elif stderr:
                 result += f"\n{stderr}"
+            # scp has no private log: its own failure is its exit code
+            # (legacy scp exits 1 rather than 255).
+            hint = (
+                self._bw_auth_hint(conn, ssh_failed=returncode in SCP_REFUSAL_EXIT_CODES)
+                if host_key_problem is None
+                and self._is_ssh_authentication_failure(stderr or "")
+                else None
+            )
+            if hint:
+                result += f"\n{hint}"
 
         self._audit.log('transfer_file', args, result, returncode == 0, **key_extras)
         return result
@@ -5059,9 +5114,10 @@ class ServonautTools:
                 persistent_bw_ssh_key, remove_bw_ssh_key,
             )
             # session_getter=None → BwResolver falls back to the ambient
-            # BW_SESSION env var, the only session source in headless mode.
+            # BW_SESSION env var, the only session source in headless mode;
+            # inside the desktop app it is the app's in-memory session.
             key_body = await asyncio.to_thread(
-                BwResolver(session_getter=None).resolve_ssh_key, str(item_id),
+                BwResolver(session_getter=self._bw_session_getter).resolve_ssh_key, str(item_id),
             )
             # File IO (makedirs + 0600 open + write) off the event loop.
             key_path = await asyncio.to_thread(persistent_bw_ssh_key, key_body)
@@ -5073,6 +5129,8 @@ class ServonautTools:
                 "BW key resolution unavailable for %s/%s (%s); using local key",
                 provider, instance_id, type(exc).__name__,
             )
+            conn = dict(conn)
+            conn[BW_KEY_UNAVAILABLE] = bw_key_reason(exc)
             return conn, None
 
         conn = dict(conn)
@@ -6294,7 +6352,10 @@ class ServonautTools:
         as a single SSH argument, so the *remote* shell parses it — nested
         single-quoted awk/grep is safe (there is no intermediate local shell;
         see ``run_ssh_subprocess`` which uses ``create_subprocess_exec``).
-        Returns ``(stdout_str, stderr_str)``.
+        Returns ``(stdout_str, stderr_str)``. When ssh itself refused the
+        login, ``stderr_str.bw_hint`` holds the Bitwarden notice (see
+        :func:`_bw_hint_of`); it is kept out of the text so a caller that
+        shows a capped stderr can add it after the cap.
 
         ``audit_extras``: optional dict the helper populates with
         ``key_source`` when the key came from a Bitwarden ref, so callers can
@@ -6319,10 +6380,16 @@ class ServonautTools:
         if host_key_problem is not None:
             # Every caller turns an exception into "Error: <message>".
             raise HostKeyVerificationError(host_key_problem, for_agent=True)
-        return (
-            stdout.decode('utf-8', errors='replace'),
-            stderr.decode('utf-8', errors='replace'),
-        )
+        stdout_text = stdout.decode('utf-8', errors='replace')
+        stderr_text = stderr.decode('utf-8', errors='replace')
+        # Only ssh itself (exit 255) can have refused the login; a remote
+        # command printing the same words must not get the hint.
+        if self._is_ssh_authentication_failure(stderr_text):
+            stderr_text = _StderrText(stderr_text)
+            stderr_text.bw_hint = self._bw_auth_hint(
+                conn, ssh_failed=ssh_returncode(output) == _SSH_OWN_FAILURE_EXIT_CODE,
+            )
+        return stdout_text, stderr_text
 
     async def _gather_all_instances(self) -> List[Dict]:
         """Merge instances across every provider account (AWS + custom + OVH + Hetzner)."""
@@ -6411,6 +6478,8 @@ class ServonautTools:
         result = format_web_traffic(summary, log_hint=hint)
         if not summary.get("vhosts") and stderr.strip():
             result += f"\n\n(stderr: {stderr.strip()[:300]})"
+            if bw_hint := _bw_hint_of(stderr):
+                result += f"\n{bw_hint}"
         self._audit.log('web_traffic_summary', args, result, True, **key_extras)
         return result
 
@@ -6858,6 +6927,8 @@ class ServonautTools:
         output = stdout or ""
         if stderr.strip():
             output += f"\nSTDERR:\n{stderr.strip()[:500]}"
+            if bw_hint := _bw_hint_of(stderr):
+                output += f"\n{bw_hint}"
         # Audit WITHOUT the command (it carries the password via env).
         self._audit.log('db_processlist', args, output, True, **key_extras)
         return output or "(no rows)"
@@ -6924,6 +6995,8 @@ class ServonautTools:
         output = stdout or ""
         if stderr.strip():
             output += f"\nSTDERR:\n{stderr.strip()[:500]}"
+            if bw_hint := _bw_hint_of(stderr):
+                output += f"\n{bw_hint}"
         self._audit.log('db_top_queries', args, output, True, **key_extras)
         return output or "(no rows)"
 
@@ -8140,12 +8213,16 @@ class ServonautTools:
     async def _docker_probe(
         self, tool: str, args: Dict, instance_id: str,
         docker_command: str, timeout: int = 60,
+        key_extras: Optional[Dict[str, Any]] = None,
     ):
         """Shared guard/instance/SSH plumbing for the docker_* tools.
 
         Returns ``(payload_error_str, stdout)`` — exactly one is None.
-        The error string is already audited.
+        The error string is already audited. *key_extras* gets the
+        connection's ``key_source`` (for the caller's own audit row).
         """
+        if key_extras is None:
+            key_extras = {}
         allowed, reason = self._guard.check_tool(tool)
         if not allowed:
             self._audit.log(tool, args, '', False, reason)
@@ -8157,20 +8234,22 @@ class ServonautTools:
 
         remote = self._DOCKER_PRELUDE + docker_command
         try:
-            stdout, stderr = await self._exec_ssh(instance, remote, timeout=timeout)
+            stdout, stderr = await self._exec_ssh(
+                instance, remote, timeout=timeout, audit_extras=key_extras,
+            )
         except asyncio.TimeoutError:
-            self._audit.log(tool, args, '', False, 'timeout')
+            self._audit.log(tool, args, '', False, 'timeout', **key_extras)
             return f"Error: {tool} timed out after {timeout} seconds", None
         except Exception as e:
-            self._audit.log(tool, args, '', False, self._ssh_failure_reason(e))
+            self._audit.log(tool, args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}", None
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
         if head == "DOCKER_NOT_AVAILABLE":
-            self._audit.log(tool, args, '', False, 'docker_not_available')
+            self._audit.log(tool, args, '', False, 'docker_not_available', **key_extras)
             return "Error: docker_not_available", None
         if head == "DOCKER_PERMISSION_DENIED":
-            self._audit.log(tool, args, '', False, 'docker_permission_denied')
+            self._audit.log(tool, args, '', False, 'docker_permission_denied', **key_extras)
             return "Error: docker_permission_denied", None
         return None, stdout
 
@@ -8188,13 +8267,14 @@ class ServonautTools:
             '[ -n "$IDS" ] && $D inspect --format '
             f"'{self._DOCKER_PS_TEMPLATE}' $IDS 2>/dev/null; true"
         )
+        key_extras: Dict[str, Any] = {}
         error, stdout = await self._docker_probe(
-            'docker_ps', args, instance_id, remote,
+            'docker_ps', args, instance_id, remote, key_extras=key_extras,
         )
         if error is not None:
             return error
         result = json.dumps({"containers": parse_docker_ps_lines(stdout)})
-        self._audit.log('docker_ps', args, f"{len(result)} chars", True)
+        self._audit.log('docker_ps', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def docker_stats(self, instance_id: str) -> str:
@@ -8203,13 +8283,14 @@ class ServonautTools:
 
         args = {'instance_id': instance_id}
         remote = "$D stats --no-stream --format '{{json .}}' 2>/dev/null; true"
+        key_extras: Dict[str, Any] = {}
         error, stdout = await self._docker_probe(
-            'docker_stats', args, instance_id, remote, timeout=90,
+            'docker_stats', args, instance_id, remote, timeout=90, key_extras=key_extras,
         )
         if error is not None:
             return error
         result = json.dumps({"containers": parse_docker_stats_lines(stdout)})
-        self._audit.log('docker_stats', args, f"{len(result)} chars", True)
+        self._audit.log('docker_stats', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def docker_logs(
@@ -8228,8 +8309,9 @@ class ServonautTools:
         # Byte-cap defensively; a chatty container can emit MBs in 1000
         # lines and evidence strings are bounded server-side anyway.
         remote = f'$D logs --tail {n} {quoted} 2>&1 | tail -c 200000'
+        key_extras: Dict[str, Any] = {}
         error, stdout = await self._docker_probe(
-            'docker_logs', args, instance_id, remote, timeout=60,
+            'docker_logs', args, instance_id, remote, timeout=60, key_extras=key_extras,
         )
         if error is not None:
             return error
@@ -8237,7 +8319,7 @@ class ServonautTools:
             "container": container,
             "lines": stdout.splitlines()[-n:],
         })
-        self._audit.log('docker_logs', args, f"{len(result)} chars", True)
+        self._audit.log('docker_logs', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def docker_events_summary(
@@ -8258,14 +8340,15 @@ class ServonautTools:
             "--filter event=kill --filter event=start "
             "--format '{{json .}}' 2>/dev/null; true"
         )
+        key_extras: Dict[str, Any] = {}
         error, stdout = await self._docker_probe(
-            'docker_events_summary', args, instance_id, remote, timeout=90,
+            'docker_events_summary', args, instance_id, remote, timeout=90, key_extras=key_extras,
         )
         if error is not None:
             return error
         result = json.dumps({"events": summarize_docker_events(stdout)})
         self._audit.log('docker_events_summary', args,
-                        f"{len(result)} chars", True)
+                        f"{len(result)} chars", True, **key_extras)
         return result
 
     # ------------------------------------------------------------------
@@ -8322,28 +8405,29 @@ class ServonautTools:
             'systemctl --failed --no-legend --plain 2>/dev/null | head -n 100; '
             'true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('journal_errors', args, '', False, 'timeout')
+            self._audit.log('journal_errors', args, '', False, 'timeout', **key_extras)
             return "Error: journal_errors timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('journal_errors', args, '', False, self._ssh_failure_reason(e))
+            self._audit.log('journal_errors', args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
         if head == "JOURNAL_NOT_AVAILABLE":
-            self._audit.log('journal_errors', args, '', False, 'journal_not_available')
+            self._audit.log('journal_errors', args, '', False, 'journal_not_available', **key_extras)
             return "Error: journal_not_available"
         if head == "JOURNAL_PERMISSION_DENIED":
             self._audit.log('journal_errors', args, '', False,
-                            'journal_permission_denied')
+                            'journal_permission_denied', **key_extras)
             return "Error: journal_permission_denied"
 
         result = json.dumps(parse_journal_errors(
             stdout, top_n=max(1, min(int(top_n or 20), 100)),
         ))
-        self._audit.log('journal_errors', args, f"{len(result)} chars", True)
+        self._audit.log('journal_errors', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def disk_usage(self, instance_id: str, top_n: int = 20) -> str:
@@ -8381,23 +8465,24 @@ class ServonautTools:
             '$DU -x -B1 -d 2 "$M" 2>/dev/null | sort -rn | head -n 60; fi; '
             'true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('disk_usage', args, '', False, 'timeout')
+            self._audit.log('disk_usage', args, '', False, 'timeout', **key_extras)
             return "Error: disk_usage timed out after 120 seconds"
         except Exception as e:
-            self._audit.log('disk_usage', args, '', False, self._ssh_failure_reason(e))
+            self._audit.log('disk_usage', args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         parsed = parse_disk_usage(
             stdout, top_n=max(1, min(int(top_n or 20), 100)),
         )
         if not parsed["filesystems"]:
-            self._audit.log('disk_usage', args, '', False, 'df_not_available')
+            self._audit.log('disk_usage', args, '', False, 'df_not_available', **key_extras)
             return "Error: df_not_available"
         result = json.dumps(parsed)
-        self._audit.log('disk_usage', args, f"{len(result)} chars", True)
+        self._audit.log('disk_usage', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def pending_updates(self, instance_id: str) -> str:
@@ -8439,24 +8524,25 @@ class ServonautTools:
             'else echo PKG_MANAGER_NOT_SUPPORTED; fi; '
             'true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('pending_updates', args, '', False, 'timeout')
+            self._audit.log('pending_updates', args, '', False, 'timeout', **key_extras)
             return "Error: pending_updates timed out after 120 seconds"
         except Exception as e:
             self._audit.log('pending_updates', args, '', False,
-                            self._ssh_failure_reason(e))
+                            self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
         if head == "PKG_MANAGER_NOT_SUPPORTED":
             self._audit.log('pending_updates', args, '', False,
-                            'pkg_manager_not_supported')
+                            'pkg_manager_not_supported', **key_extras)
             return "Error: pkg_manager_not_supported"
 
         result = json.dumps(parse_pending_updates(stdout))
-        self._audit.log('pending_updates', args, f"{len(result)} chars", True)
+        self._audit.log('pending_updates', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def security_audit(self, instance_id: str) -> str:
@@ -8511,18 +8597,19 @@ class ServonautTools:
             "printf 'FILE|%s|%s\\n' \"$f\" \"$meta\"; "
             "done; true"
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('security_audit', args, '', False, 'timeout')
+            self._audit.log('security_audit', args, '', False, 'timeout', **key_extras)
             return "Error: security_audit timed out after 90 seconds"
         except Exception as e:
             self._audit.log('security_audit', args, '', False,
-                            self._ssh_failure_reason(e))
+                            self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         result = json.dumps(parse_security_audit(stdout))
-        self._audit.log('security_audit', args, f"{len(result)} chars", True)
+        self._audit.log('security_audit', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def service_state(self, instance_id: str) -> str:
@@ -8560,17 +8647,18 @@ class ServonautTools:
             "printf '%s|%s|%s|%s\\n' \"$u\" \"$en\" \"$ac\" \"$nr\"; "
             "done; true"
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('service_state', args, '', False, 'timeout')
+            self._audit.log('service_state', args, '', False, 'timeout', **key_extras)
             return "Error: service_state timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('service_state', args, '', False, self._ssh_failure_reason(e))
+            self._audit.log('service_state', args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         result = json.dumps(parse_service_state(stdout))
-        self._audit.log('service_state', args, f"{len(result)} chars", True)
+        self._audit.log('service_state', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def tls_cert_check(self, instance_id: str) -> str:
@@ -8616,23 +8704,24 @@ class ServonautTools:
             'else sudo -n openssl x509 -noout -subject -issuer -enddate '
             '-in "$f" 2>/dev/null; fi; done; true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=60)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=60, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('tls_cert_check', args, '', False, 'timeout')
+            self._audit.log('tls_cert_check', args, '', False, 'timeout', **key_extras)
             return "Error: tls_cert_check timed out after 60 seconds"
         except Exception as e:
-            self._audit.log('tls_cert_check', args, '', False, self._ssh_failure_reason(e))
+            self._audit.log('tls_cert_check', args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
         if head == "OPENSSL_NOT_AVAILABLE":
             self._audit.log('tls_cert_check', args, '', False,
-                            'openssl_not_available')
+                            'openssl_not_available', **key_extras)
             return "Error: openssl_not_available"
 
         result = json.dumps({"certs": parse_tls_certs(stdout)})
-        self._audit.log('tls_cert_check', args, f"{len(result)} chars", True)
+        self._audit.log('tls_cert_check', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def auth_log_summary(
@@ -8703,30 +8792,31 @@ class ServonautTools:
             'else echo "INSTALLED=false"; fi; '
             'true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('auth_log_summary', args, '', False, 'timeout')
+            self._audit.log('auth_log_summary', args, '', False, 'timeout', **key_extras)
             return "Error: auth_log_summary timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('auth_log_summary', args, '', False, self._ssh_failure_reason(e))
+            self._audit.log('auth_log_summary', args, '', False, self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         stripped = stdout.strip()
         head = stripped.splitlines()[0].strip() if stripped else ""
         if head == "AUTH_LOG_NOT_AVAILABLE":
             self._audit.log('auth_log_summary', args, '', False,
-                            'auth_log_not_available')
+                            'auth_log_not_available', **key_extras)
             return "Error: auth_log_not_available"
         if "AUTH_LOG_PERMISSION_DENIED" in stripped[:2000]:
             self._audit.log('auth_log_summary', args, '', False,
-                            'auth_log_permission_denied')
+                            'auth_log_permission_denied', **key_extras)
             return "Error: auth_log_permission_denied"
 
         result = json.dumps(summarize_auth_log(
             stdout, top_n=max(1, min(int(top_n or 20), 100)),
         ))
-        self._audit.log('auth_log_summary', args, f"{len(result)} chars", True)
+        self._audit.log('auth_log_summary', args, f"{len(result)} chars", True, **key_extras)
         return result
 
     async def detect_onbox_firewall(self, instance_id: str) -> str:
@@ -8807,32 +8897,33 @@ class ServonautTools:
             f'$D logs --since {minutes}m --tail 20000 {quoted} 2>&1 '
             '| tail -c 400000; true'
         )
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90, audit_extras=key_extras)
         except asyncio.TimeoutError:
-            self._audit.log('docker_log_summary', args, '', False, 'timeout')
+            self._audit.log('docker_log_summary', args, '', False, 'timeout', **key_extras)
             return "Error: docker_log_summary timed out after 90 seconds"
         except Exception as e:
             self._audit.log('docker_log_summary', args, '', False,
-                            self._ssh_failure_reason(e))
+                            self._ssh_failure_reason(e), **key_extras)
             return f"Error: {e}"
 
         head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
         if head == "DOCKER_NOT_AVAILABLE":
             self._audit.log('docker_log_summary', args, '', False,
-                            'docker_not_available')
+                            'docker_not_available', **key_extras)
             return "Error: docker_not_available"
         if head == "DOCKER_PERMISSION_DENIED":
             self._audit.log('docker_log_summary', args, '', False,
-                            'docker_permission_denied')
+                            'docker_permission_denied', **key_extras)
             return "Error: docker_permission_denied"
         if head == "CONTAINER_NOT_FOUND":
             self._audit.log('docker_log_summary', args, '', False,
-                            'container_not_found')
+                            'container_not_found', **key_extras)
             return "Error: container_not_found"
         if not stdout.strip():
             self._audit.log('docker_log_summary', args, '', False,
-                            'no_logs_available')
+                            'no_logs_available', **key_extras)
             return "Error: no_logs_available"
 
         summary = summarize_container_log(
@@ -8840,5 +8931,5 @@ class ServonautTools:
         )
         result = json.dumps(summary)
         self._audit.log('docker_log_summary', args,
-                        f"{len(result)} chars", True)
+                        f"{len(result)} chars", True, **key_extras)
         return result

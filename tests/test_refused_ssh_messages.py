@@ -39,6 +39,7 @@ def _app() -> MagicMock:
     app.instances = [dict(INSTANCE)]
     app.vault_command_service = None
     app.vault_lease_cache = None
+    app.bw_ssh_keys = None
     app.connection_service.resolve_profile.return_value = None
     app.connection_service.get_extra_options.return_value = []
     app.ssh_service.get_key_path.return_value = None

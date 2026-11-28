@@ -95,6 +95,22 @@ def test_unexpected_error_answers_are_reported(fake_cloud):
     )
 
 
+def test_the_instance_roll_up_lists_every_stored_ssh_ref(fake_cloud):
+    """A saved ref has a roll-up row before any verify result (the client treats the roll-up as listing every stored ref)."""
+    fake_cloud.secrets.set_ssh_ref("colo", "custom-web-1", "item-1")
+    fake_cloud.account.set_verify_status("aws", "i-verified", "verified")
+    with _client(fake_cloud) as client:
+        rows = client.get("/api/v1/me/instances").json()["instances"]
+    by_id = {(row["provider"], row["instance_id"]): row for row in rows}
+    assert by_id[("colo", "custom-web-1")]["ssh_verify_status"] is None
+    assert by_id[("colo", "custom-web-1")]["ssh_credential_provider"] == "bitwarden_pm"
+    assert by_id[("aws", "i-verified")]["ssh_verify_status"] == "verified"
+    fake_cloud.secrets.delete_ssh_ref("colo", "custom-web-1")
+    with _client(fake_cloud) as client:
+        rows = client.get("/api/v1/me/instances").json()["instances"]
+    assert ("colo", "custom-web-1") not in {(row["provider"], row["instance_id"]) for row in rows}
+
+
 # ---------------------------------------------------------------------------
 # Fakes refuse what the service refuses
 # ---------------------------------------------------------------------------

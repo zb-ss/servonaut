@@ -7,7 +7,7 @@ import logging
 import subprocess
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, List, Tuple, Optional
+from typing import Any, List, Mapping, Tuple, Optional
 from datetime import datetime
 
 from servonaut.services.interfaces import (
@@ -16,6 +16,7 @@ from servonaut.services.interfaces import (
     ConnectionServiceInterface,
 )
 from servonaut.config.manager import ConfigManager
+from servonaut.services.bw_key_notice import BW_ITEM_ID, BW_KEY_UNAVAILABLE, bw_key_notice, uses_bw_key
 from servonaut.services.ssh_host_keys import (
     HostKeyPolicy,
     HostKeyTarget,
@@ -144,6 +145,11 @@ class _ScanTarget:
     identity_file: Optional[str] = None
     certificate_file: Optional[str] = None
     known_hosts_file: Optional[str] = None
+    # Why the server's Bitwarden key was not used (see bw_key_notice).
+    bw_key_reason: Optional[str] = None
+    # The Bitwarden key's file, source and item when key_path is one (for a
+    # refused login, see BwSshKeyProvider.key_refused); never passed to ssh.
+    bw_key_conn: Optional[Mapping[str, Any]] = None
 
     def argv(self, remote_command: str) -> List[str]:
         identity = {
@@ -171,6 +177,9 @@ class ScanService(ScanServiceInterface):
     or scans specified paths to collect keyword data for later searching.
     """
 
+    # Class-level so an instance built without __init__ still works.
+    _bw_keys: Any = None
+
     def __init__(self, config_manager: ConfigManager) -> None:
         """Initialize the scan service.
 
@@ -180,6 +189,7 @@ class ScanService(ScanServiceInterface):
         self._config_manager = config_manager
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        self._bw_keys: Any = None
         self._connection_rows: Any = None
 
     async def scan_server(
@@ -250,6 +260,10 @@ class ScanService(ScanServiceInterface):
         self._vault_runtime = runtime
         self._vault_leases = leases
 
+    def set_bw_keys(self, provider: Any) -> None:
+        """Use a server's Bitwarden SSH key for scans."""
+        self._bw_keys = provider
+
     def set_connection_rows(self, supplier: Any) -> None:
         """Ask *supplier* for ``(team_rows, fleet_rows)`` on every scan.
 
@@ -280,11 +294,23 @@ class ScanService(ScanServiceInterface):
             resolved = await resolve_with_vault(
                 conn, instance, vault_runtime=self._vault_runtime,
                 connection_service=connection_service, cache=self._vault_leases,
-                team_rows=team_rows, rows=fleet_rows,
+                team_rows=team_rows, rows=fleet_rows, bw_keys=self._bw_keys,
             )
         except VaultCredentialError as exc:
             raise ScanConnectionError(str(exc)) from exc
         if resolved.get("identity_agent") is None:
+            reason = resolved.get(BW_KEY_UNAVAILABLE)
+            if uses_bw_key(resolved):
+                return dataclasses.replace(
+                    target, key_path=resolved.get("key_path"),
+                    bw_key_conn={
+                        "key_path": resolved.get("key_path"),
+                        "key_source": resolved.get("key_source"),
+                        BW_ITEM_ID: resolved.get(BW_ITEM_ID),
+                    },
+                )
+            if reason:
+                return dataclasses.replace(target, bw_key_reason=reason)
             return target
         return dataclasses.replace(
             target,
@@ -369,10 +395,24 @@ class ScanService(ScanServiceInterface):
         self._raise_for_host_key_problem(result, target.host_key_target)
         if result.returncode == _SSH_CONNECTION_FAILED:
             error = ScanConnectionError.from_ssh_stderr(result.stderr)
+            notice = (
+                bw_key_notice(target.bw_key_reason)
+                if error.reason == 'authentication failed' else None
+            )
+            if notice:
+                error.hint = notice
+            if error.reason == 'authentication failed':
+                self._drop_refused_key(target)
             logger.warning(
                 "Scan could not connect to %s: %s", target.host, error.detail or error.reason
             )
             raise error
+
+    def _drop_refused_key(self, target: _ScanTarget) -> None:
+        """After ssh refused the server's Bitwarden key, have the next scan read it again."""
+        key_refused = getattr(self._bw_keys, "key_refused", None)
+        if target.bw_key_conn and callable(key_refused):
+            key_refused(target.bw_key_conn)
 
     def _raise_for_host_key_problem(
         self, result: subprocess.CompletedProcess, target: HostKeyTarget,

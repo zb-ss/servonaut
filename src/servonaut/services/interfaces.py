@@ -1245,6 +1245,14 @@ class BwSshConfigServiceInterface(ABC):
     async def list_personal_instances(self) -> List[Dict[str, Any]]:
         pass
 
+    def has_local_refs(self) -> bool:
+        """Whether this device saved at least one ref (its local mirror is not empty).
+
+        Defaults to True ("may have refs"), so an implementation without a
+        local mirror never stops per-server ref lookups.
+        """
+        return True
+
     @abstractmethod
     async def put_personal_instance_ref(
         self,

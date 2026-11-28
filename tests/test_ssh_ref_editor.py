@@ -164,3 +164,71 @@ class TestDoSave:
         assert any(
             call.kwargs.get("markup") is False for call in app.notify.call_args_list
         )
+
+
+class TestForgetRefsOnEdit:
+    """Saving or deleting a ref drops the provider's memoised refs."""
+
+    def _screen(self, app, *, save=True, existing_ref=None):
+        screen = SshRefEditorModal(_instance(), existing_ref=existing_ref)
+        widgets = {
+            "#item_id": _FakeInput("ssh-1"),
+            "#collection_id": _FakeInput(),
+            "#vault_url": _FakeInput(),
+        }
+        bw = MagicMock()
+        bw.put_personal_instance_ref = AsyncMock(return_value={})
+        bw.delete_personal_instance_ref = AsyncMock(return_value={})
+        app.bw_ssh_config_service = bw
+        app.notify = MagicMock()
+        screen.query_one = lambda sel, *a, **k: widgets[sel]
+        screen.dismiss = MagicMock()
+        return screen
+
+    def _run(self, screen, app, coro_name):
+        patcher = patch.object(type(screen), "app", property(lambda self: app))
+        patcher.start()
+        try:
+            asyncio.run(getattr(screen, coro_name)())
+        finally:
+            patcher.stop()
+
+    def test_save_forgets_refs(self):
+        app = MagicMock()
+        screen = self._screen(app)
+        self._run(screen, app, "_do_save")
+        app.bw_ssh_keys.forget_refs.assert_called_once_with(["ssh-1"])
+        screen.dismiss.assert_called_once_with(True)
+
+    def test_delete_forgets_refs(self):
+        app = MagicMock()
+        screen = self._screen(app)
+        self._run(screen, app, "_do_delete")
+        app.bw_ssh_keys.forget_refs.assert_called_once_with([])
+        screen.dismiss.assert_called_once_with(True)
+
+    def test_save_forgets_the_old_and_the_new_item_keys(self):
+        app = MagicMock()
+        old = {"ssh_credential_ref": {"item_id": "33333333-3333-4333-8333-333333333333"}}
+        screen = self._screen(app, existing_ref=old)
+        self._run(screen, app, "_do_save")
+        app.bw_ssh_keys.forget_refs.assert_called_once_with(
+            ["ssh-1", "33333333-3333-4333-8333-333333333333"],
+        )
+
+    def test_delete_forgets_the_removed_item_key(self):
+        app = MagicMock()
+        old = {"ssh_credential_ref": {"item_id": "33333333-3333-4333-8333-333333333333"}}
+        screen = self._screen(app, existing_ref=old)
+        self._run(screen, app, "_do_delete")
+        app.bw_ssh_keys.forget_refs.assert_called_once_with(
+            ["33333333-3333-4333-8333-333333333333"],
+        )
+
+    def test_save_and_delete_without_provider_still_succeed(self):
+        for name in ("_do_save", "_do_delete"):
+            app = SimpleNamespace()
+            app.notify = MagicMock()
+            screen = self._screen(app)
+            self._run(screen, app, name)
+            screen.dismiss.assert_called_once_with(True)

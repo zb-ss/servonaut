@@ -62,6 +62,9 @@ class LogViewerService(LogViewerServiceInterface):
     # ``probed_at`` ISO timestamp from the memory store, else ``None``.
     last_probe_probed_at: Optional[str] = None
 
+    # Class-level so an instance built without __init__ still works.
+    _bw_keys: Any = None
+
     def __init__(
         self,
         config_manager: "ConfigManager",
@@ -71,6 +74,7 @@ class LogViewerService(LogViewerServiceInterface):
         self._memory_service = memory_service
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        self._bw_keys: Any = None
 
     def set_memory_service(
         self, memory_service: Optional["MemoryServiceInterface"]
@@ -84,6 +88,10 @@ class LogViewerService(LogViewerServiceInterface):
         log viewer injected, and finally wire the memory service back here.
         """
         self._memory_service = memory_service
+
+    def set_bw_keys(self, provider: Any) -> None:
+        """Use a server's Bitwarden SSH key for log access."""
+        self._bw_keys = provider
 
     def set_vault_runtime(self, runtime: Any, leases: Any = None) -> None:
         """Use a server's Servonaut Vault key (or SSH certificate) for log access."""
@@ -110,7 +118,7 @@ class LogViewerService(LogViewerServiceInterface):
             self._resolve_connection(instance, ssh_service, connection_service),
             instance, vault_runtime=self._vault_runtime,
             connection_service=connection_service, cache=self._vault_leases,
-            team_rows=team_rows, rows=rows,
+            team_rows=team_rows, rows=rows, bw_keys=self._bw_keys,
         )
 
     def _resolve_connection(

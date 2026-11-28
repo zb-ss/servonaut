@@ -17,12 +17,14 @@ from textual.content import Content
 from textual.events import Key
 from textual.widgets import Button, Footer, Static, RichLog
 
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice
 from servonaut.utils.markup import literal
 from servonaut.utils.theme_text import themed_text
 from servonaut.utils.ssh_names import SSHRefusal
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
+    is_ssh_login_refusal,
     track_background_process,
     with_diagnostics,
 )
@@ -316,6 +318,7 @@ class LogViewerScreen(WorkspaceScreen):
             self.query_one("#log_output", RichLog).write(themed_text(self.app, message, "$text-error"))
             self.app.notify(message, severity="error", markup=False)
             return
+        self._bw_key_reason = conn.get(BW_KEY_UNAVAILABLE)
         try:
             ssh_cmd = self.app.ssh_service.build_ssh_command(
                 host=conn["host"],
@@ -411,6 +414,12 @@ class LogViewerScreen(WorkspaceScreen):
                         if err_lines:
                             # Queued lines are written as plain text.
                             self._line_queue.put(f"SSH error: {err_lines[-1]}")
+                            notice = (
+                                bw_key_notice(getattr(self, "_bw_key_reason", None))
+                                if is_ssh_login_refusal(err_text) else None
+                            )
+                            if notice:
+                                self._line_queue.put(notice)
                 except Exception:
                     pass
             self._line_queue.put(_EOF)

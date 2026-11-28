@@ -75,3 +75,28 @@ def test_entry_point_configures_stdio_once(monkeypatch):
         main_mod.main()
 
     assert len(calls) == 1
+
+
+def test_mcp_merges_login_path_before_run_server(monkeypatch):
+    import servonaut.mcp.server as server_mod
+    import servonaut.utils.login_path as login_path_mod
+
+    order: list[str] = []
+
+    async def fake_run_server():
+        order.append("run_server")
+
+    monkeypatch.setattr(main_mod, "_configure_stdio", lambda: None)
+    monkeypatch.setattr(main_mod, "_prune_empty_env", lambda: None)
+    monkeypatch.setattr(main_mod, "_setup_logging", lambda **kwargs: None)
+    monkeypatch.setattr(
+        login_path_mod, "merge_login_path",
+        lambda **kwargs: order.append(("merge_login_path", kwargs)),
+    )
+    monkeypatch.setattr(server_mod, "run_server", fake_run_server)
+    monkeypatch.setattr(main_mod.sys, "argv", ["servonaut", "--mcp"])
+
+    main_mod.main()
+
+    # The MCP client's PATH stays first; login entries are only appended.
+    assert order == [("merge_login_path", {"prefer_current": True}), "run_server"]

@@ -565,3 +565,20 @@ class TestSyncNow:
     def test_locked_session_is_swallowed(self):
         svc = BwSessionService()  # no session at all
         _run(svc.sync_now())  # must not raise
+
+
+def test_lock_tells_every_listener_even_after_one_fails():
+    from servonaut.services.bw_session_service import BwSessionService
+
+    svc = BwSessionService()
+    svc._session = "test-session"
+    calls = []
+
+    def broken():
+        raise RuntimeError("listener failed")
+
+    svc.add_lock_listener(broken)
+    svc.add_lock_listener(lambda: calls.append("second"))
+    svc.lock()
+    assert svc.session() is None
+    assert calls == ["second"]

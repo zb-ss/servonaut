@@ -30,6 +30,39 @@ ResolutionSource = Literal["ca", "vault", "personal", "team", "local"]
 
 _KNOWN_PROVIDERS = frozenset({"aws", "ovh", "hetzner"})
 
+#: How long (seconds) a server's SSH-ref lookup, hit or miss, is reused; shared
+#: by the MCP tools and the in-app Bitwarden key provider.
+#:
+#: Short-lived per-(provider, instance_id) memo of Bitwarden ssh-ref lookups
+#: (positive AND negative results). Fleet-wide tools resolve connections once
+#: per instance per call; without the memo every SSH-backed tool call pays an
+#: uncached backend GET — and, when the API is degraded, its full HTTP timeout.
+#: Internal coalescing window, not an ops-tunable: key material is still
+#: resolved and wiped per call, only the opaque ref pointer is memoized.
+SSH_REF_MEMO_TTL_SECONDS = 60.0
+
+#: How often (seconds) the in-app Bitwarden key provider reads a key through
+#: ``bw`` again. A re-read interval, not a bound on time on disk: key files are
+#: never changed; a rotated key gets a new file, and the decrypted 0600 files
+#: stay in the private directory until Bitwarden is locked in the app, the user
+#: signs in or out, the server's ref is edited, or the app quits (the same as
+#: Connect), or, for a superseded file, until BW_SUPERSEDED_KEY_GRACE_SECONDS
+#: after the rotation. Checked on the next lookup, with no timer; an internal
+#: window like the one above, overridden per provider.
+BW_KEY_FILE_TTL_SECONDS = 600.0
+
+#: How long (seconds) a key file replaced by a rotated key is kept, so a
+#: connection that was handed it can still start; then it is zero-overwritten
+#: and removed (checked on the next lookup). A screen still holding it after
+#: that resolves again. Overridden per provider.
+BW_SUPERSEDED_KEY_GRACE_SECONDS = BW_KEY_FILE_TTL_SECONDS
+
+#: The longest (seconds) one Servonaut API ref lookup or roll-up read may take
+#: before the in-app Bitwarden key provider treats it as failed, so a hanging
+#: API cannot stall SSH connections. Overridden per provider. Tech debt: an
+#: ops value that belongs in config.
+SSH_REF_LOOKUP_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class ResolvedSshRef:

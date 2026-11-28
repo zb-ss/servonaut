@@ -241,6 +241,20 @@ using the full path or add that directory to `PATH`.
 If pipx later reports `File exists at ~/.local/bin/servonaut` and leaves the
 app's link in place, install with `pipx install --force servonaut`.
 
+## A Command-Line Tool Is Not Found in the macOS App
+
+An app opened from the Dock does not get the `PATH` of your terminal, so a
+Homebrew-installed tool such as `bw` can look missing. The macOS desktop app
+(and an MCP server started by a desktop client) reads your login shell's
+`PATH` at startup and also looks in `/opt/homebrew/bin`, `/opt/homebrew/sbin`,
+`/usr/local/bin` and `~/.local/bin`, so these tools are found.
+
+Restart the app after you change your shell's `PATH`.
+
+`SERVONAUT_LOGIN_PATH_TIMEOUT_SECONDS` (default `3`) bounds the shell start-up
+probe. Raise it if your shell start-up files are very slow; set it to `0` to
+turn the probe off.
+
 ## Logging
 
 Logs are always written to `~/.servonaut/logs/servonaut.log` and include:

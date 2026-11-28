@@ -161,6 +161,8 @@ class TestInstanceListSshConnect:
         # No vault on this machine: the local key is used.
         mock_app.vault_command_service = None
         mock_app.vault_lease_cache = None
+        # No Bitwarden SSH ref on this server.
+        mock_app.bw_ssh_keys = None
         launches = []
 
         with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):

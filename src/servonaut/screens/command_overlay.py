@@ -1,6 +1,7 @@
 """Command overlay modal for Servonaut v2.0."""
 
 from __future__ import annotations
+import os
 import subprocess
 import logging
 import threading
@@ -22,10 +23,12 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
 )
 
+from servonaut.services.bw_key_notice import BW_KEY_UNAVAILABLE, bw_key_notice, uses_bw_key
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
     is_known_hosts_notice,
+    is_ssh_login_refusal,
     track_background_process,
 )
 from servonaut.utils.markup import inert_text, literal
@@ -329,34 +332,64 @@ class CommandOverlay(ModalScreen):
         )
 
     async def _apply_vault(self) -> None:
-        """Use the server's Servonaut Vault key, if it has one (once per overlay).
+        """Use the server's Vault key, or its Bitwarden key, if it has one.
+
+        Resolved once per overlay, except when the Bitwarden part needs another
+        look (see :meth:`_should_resolve_again`).
 
         Raises:
             VaultCredentialError: the server's vault credential cannot be used.
         """
-        if self._identity is not None:
+        if self._identity is not None and not self._should_resolve_again():
             return
+        self._login_refused = False
         from servonaut.services.ssh_credentials import resolve_with_vault, ssh_identity_kwargs
 
-        resolved = await resolve_with_vault(
-            {
+        base = getattr(self, "_base_conn", None)
+        if base is None:
+            base = self._base_conn = {
                 "host": self._host, "username": self._username, "key_path": self._key_path,
-                "proxy_args": self._proxy_args, "port": self._port,
-                "extra_options": self._extra_options, "profile": self._profile,
-            },
+                "proxy_args": list(self._proxy_args), "port": self._port,
+                "extra_options": list(self._extra_options), "profile": self._profile,
+            }
+        resolved = await resolve_with_vault(
+            dict(base),
             self._connection or connection_instance(self.app, self._instance),
             vault_runtime=getattr(self.app, "vault_command_service", None),
             connection_service=self.app.connection_service,
             cache=getattr(self.app, "vault_lease_cache", None),
             team_rows=team_rows(self.app),
             rows=fleet_rows(self.app),
+            bw_keys=getattr(self.app, "bw_ssh_keys", None),
         )
+        self._bw_key_reason = resolved.get(BW_KEY_UNAVAILABLE)
+        self._resolved = dict(resolved)
         self._host = resolved["host"]
         self._username = resolved["username"]
         self._key_path = resolved.get("key_path")
         self._proxy_args = list(resolved.get("proxy_args") or [])
         self._port = resolved.get("port")
         self._identity = {key: value for key, value in ssh_identity_kwargs(resolved).items() if value}
+
+    def _should_resolve_again(self) -> bool:
+        """Whether the next command resolves the connection again (from the original setup).
+
+        After ssh refused the login while the Bitwarden key was missing or
+        used (so unlocking Bitwarden takes effect without reopening the
+        overlay), or when the Bitwarden key file it holds is gone (Bitwarden
+        locked, signed out, the ref edited). A working one stays cached.
+        """
+        resolved = getattr(self, "_resolved", None) or {}
+        used_bw_key = uses_bw_key(resolved)
+        if getattr(self, "_login_refused", False) and (getattr(self, "_bw_key_reason", None) or used_bw_key):
+            return True
+        return used_bw_key and not os.path.isfile(str(self._key_path or ""))
+
+    def _drop_refused_key(self) -> None:
+        """After ssh refused the login with the server's Bitwarden key, have it read again."""
+        key_refused = getattr(getattr(self.app, "bw_ssh_keys", None), "key_refused", None)
+        if callable(key_refused):
+            key_refused(getattr(self, "_resolved", None) or {})
 
     async def _resolve_and_run(self, login_command: str, output_widget: CommandOutput) -> None:
         """Build the ssh command (with the vault credential) and run it in a thread."""
@@ -496,6 +529,15 @@ class CommandOverlay(ModalScreen):
                     output_widget.append_error,
                     f"[dim]{exit_msg}[/dim]",
                 )
+            # diagnostics is ssh's private log: only ssh itself can have refused the login.
+            login_refused = is_ssh_login_refusal(diagnostics)
+            notice = bw_key_notice(getattr(self, "_bw_key_reason", None)) if login_refused else None
+            if login_refused:
+                self._login_refused = True
+                self.app.call_from_thread(self._drop_refused_key)
+            if notice:
+                self._output_lines.append(notice)
+                self.app.call_from_thread(output_widget.append_error, escape(notice))
             self._report_host_key_problem(
                 diagnostics, return_code, saw_stdout, output_widget, _scrub,
             )

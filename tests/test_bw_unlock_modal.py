@@ -113,3 +113,29 @@ async def test_already_unlocked_auto_dismisses():
         await pilot.pause()
         await pilot.pause()
     assert dismissed.get("r") is True
+
+
+@pytest.mark.asyncio
+async def test_locked_state_says_what_unlocking_also_allows():
+    from textual.app import App
+    from textual.widgets import Static
+
+    from servonaut.screens.bw_unlock_modal import BW_UNLOCK_SCOPE_NOTE
+
+    svc = MagicMock()
+    svc.status = AsyncMock(return_value=BwAuthState.LOCKED)
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(BwUnlockModal(session_service=svc))
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        note = app.screen.query_one("#bw_unlock_scope", Static)
+        assert BW_UNLOCK_SCOPE_NOTE in str(note.render())
+    assert BW_UNLOCK_SCOPE_NOTE == (
+        "Unlocking also lets the app's AI chat and relay tools connect with your "
+        "Bitwarden SSH keys until the app quits."
+    )

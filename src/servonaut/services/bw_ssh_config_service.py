@@ -185,6 +185,20 @@ class BwSshConfigService(BwSshConfigServiceInterface):
 
         self._mutate_ref_cache(_mutate)
 
+    def has_local_refs(self) -> bool:
+        """Whether this device's ref mirror holds at least one ref.
+
+        The mirror gets an entry when a ref is saved here and loses it on
+        delete or a 404, so an empty one (or none) means no ref was saved on
+        this device. A missing, unreadable or corrupt file reads as empty.
+        Synchronous file read; never raises.
+        """
+        try:
+            return bool(self._load_ref_cache())
+        except Exception as exc:  # noqa: BLE001 - a mirror problem reads as "none saved here"
+            logger.debug("ref cache unreadable: %s", type(exc).__name__)
+            return False
+
     def _cache_lookup(self, provider: str, instance_id: str) -> Optional[Dict[str, Any]]:
         row = self._load_ref_cache().get(self._cache_key(provider, instance_id))
         return row if isinstance(row, dict) else None

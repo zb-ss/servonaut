@@ -134,6 +134,11 @@ class SecretsData:
         with self._lock:
             return copy.deepcopy(self._refs.get((provider, instance_id)))
 
+    def ssh_ref_keys(self) -> list[tuple[str, str]]:
+        """``(provider, instance_id)`` of every stored ref (for the ``/me/instances`` roll-up)."""
+        with self._lock:
+            return list(self._refs)
+
     def delete_ssh_ref(self, provider: str, instance_id: str) -> bool:
         with self._lock:
             return self._refs.pop((provider, instance_id), None) is not None

@@ -288,3 +288,30 @@ class TestMirrorWriteDurability:
 
         cache = json.loads((tmp_path / "bw_ssh_refs.json").read_text())
         assert {f"aws/{i}" for i in ids} <= set(cache.keys())
+
+
+class TestHasLocalRefs:
+    """Whether this device's ref mirror holds a ref (see BwSshKeyProvider)."""
+
+    REF = {"item_id": "33333333-3333-4333-8333-333333333333"}
+
+    def test_missing_file_is_false(self, service):
+        assert service.has_local_refs() is False
+
+    @pytest.mark.parametrize("content", ["{}", "not json", "[1, 2]", ""])
+    def test_empty_or_corrupt_file_is_false(self, service, tmp_path, content):
+        (tmp_path / "bw_ssh_refs.json").write_text(content)
+        assert service.has_local_refs() is False
+
+    def test_unreadable_file_is_false(self, service, tmp_path):
+        (tmp_path / "bw_ssh_refs.json").mkdir()  # reading a directory fails
+        assert service.has_local_refs() is False
+
+    def test_true_after_a_save_and_false_after_the_delete(self, service, mock_api):
+        _run(service.put_personal_instance_ref(
+            provider="aws", instance_id="i-web1", ssh_credential_ref=dict(self.REF),
+        ))
+        assert service.has_local_refs() is True
+        mock_api.delete.return_value = {"deleted": True}
+        _run(service.delete_personal_instance_ref("aws", "i-web1"))
+        assert service.has_local_refs() is False

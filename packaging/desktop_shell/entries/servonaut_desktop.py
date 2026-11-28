@@ -40,6 +40,13 @@ def main(argv: list[str] | None = None) -> int:
     log_file = configure_rotating_log(
         runtime.data_root / "logs", filename=_GUI_LOG_NAME
     )
+    if runtime.is_frozen and runtime.kind == DistributionKind.PACKAGED_DESKTOP:
+        # A Dock launch gets launchd's PATH, without Homebrew or the user's
+        # shell additions. The child and everything it starts inherit this.
+        from servonaut.utils.login_path import merge_login_path
+
+        merge_login_path()
+
     request = DesktopLaunchRequest(runtime=runtime, log_file=log_file)
     exit_code = run_desktop(request)
     if exit_code == APT_RESTART_EXIT_CODE:
