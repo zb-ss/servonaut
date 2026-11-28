@@ -718,6 +718,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_do_forget", "update",
                    "config_manager.update(memory=...) to reset the remember flag — "
                    "config write, not a widget/UI write; no server-origin data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_set_sync_disabled", "update",
+                   "config_manager.update(memory=...) persists the Disable sync "
+                   "flag — config write, not a widget/UI write."),
     AllowlistEntry("screens/memory_sync_setup.py", "_store_remembered_passphrase", "update",
                    "config_manager.update(memory=...) persists the device-unlock "
                    "expiry — config write, not a widget/UI write."),

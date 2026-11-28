@@ -31,6 +31,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
+
 from servonaut.config.schema import MemoryConfig
 from servonaut.services.api_client import APIError, NotFoundError, RateLimitedError
 from servonaut.services.memory import crypto
@@ -39,13 +41,21 @@ from servonaut.services.memory.interfaces import (
     VaultCustodyLocked,
     VaultCustodyUnavailable,
 )
-from servonaut.services.memory.rate_limiter import RateLimitKey
+from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimitWouldBlockError
 from servonaut.services.vault.app_keys import AppKeyItems
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.items import MEMORY_KEY
 from servonaut.services.vault.team_vault_client import VaultStateError
 
 logger = logging.getLogger(__name__)
+
+#: Where every surface keeps the public custody marker (the app, the CLI, the MCP server).
+DEFAULT_MARKER_PATH = Path.home() / ".servonaut" / "memory" / "key_custody.json"
+
+#: What a lookup over the network can raise: a service answer, a socket error, or an
+#: httpx transport error (``httpx.ConnectError`` is not an ``OSError``).
+NETWORK_ERRORS: tuple[type[BaseException], ...] = (APIError, OSError, httpx.HTTPError)
+_LOOKUP_ERRORS: tuple[type[BaseException], ...] = NETWORK_ERRORS + (VaultCustodyUnavailable,)
 
 CUSTODY_VAULT = "vault"
 CUSTODY_PASSPHRASE = "passphrase"
@@ -89,6 +99,11 @@ def parse_key_record(data: Any) -> KeyRecord:
     """
     if not isinstance(data, dict):
         raise VaultCustodyUnavailable("The key record from the service is unreadable.")
+    # A 200 without an identity is a malformed answer, not "the key is in the
+    # vault": acting on it would run the vault cleanup with no key behind it.
+    for field in ("fingerprint", "public_key"):
+        if not isinstance(data.get(field), str) or not data[field]:
+            raise VaultCustodyUnavailable("The key record from the service is unreadable.")
     wrapped = data.get("wrapped_private_key")
     custody = data.get("custody")
     has_wrap = bool(wrapped) and isinstance(wrapped, (str, dict))
@@ -127,6 +142,7 @@ class Resolution:
     record: Optional[KeyRecord] = None
     reason: Optional[str] = None
     error: Optional[BaseException] = None
+    custody: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -222,16 +238,24 @@ class MemoryKeyCustody:
         self._on_vault_detected = on_vault_detected
         self._key_cache_path = key_cache_path or self._marker_path.parent / "keys.json"
         self._clock = clock
+        # (when, record) of the last ``GET /keys/me`` this process made.
+        self._record_cache: Optional[tuple[float, Optional[KeyRecord]]] = None
 
     # ------------------------------------------------------------------
     # Resolution
     # ------------------------------------------------------------------
 
-    async def resolve(self) -> Resolution:
-        """Say where the key is and, for the vault, hand it over."""
+    async def resolve(self, *, quiet: bool = False) -> Resolution:
+        """Say where the key is and, for the vault, hand it over.
+
+        ``quiet`` is for start-up: it never asks the service when nothing
+        local says an account has a key (no item, no marker, no ``keys.json``),
+        and never runs the periodic custody check, so a start makes no
+        ``GET /keys/me`` for someone who never set Memory Sync up.
+        """
         try:
             user_id = await self._user_id()
-        except (APIError, OSError, VaultCustodyUnavailable) as exc:
+        except _LOOKUP_ERRORS as exc:
             return Resolution(ResolutionKind.UNAVAILABLE, reason="user_id_unavailable", error=exc)
         marker = self._read_marker(user_id)
         items = self._app_keys_provider()
@@ -239,8 +263,9 @@ class MemoryKeyCustody:
             outcome = await self._resolve_from_vault(items, user_id, marker)
             if outcome.resolution is not None:
                 return outcome.resolution
-            return await self._resolve_without_item(user_id, marker, outcome.record, outcome.looked_up)
-        return await self._resolve_without_item(user_id, marker, None, False)
+            return await self._resolve_without_item(
+                user_id, marker, outcome.record, outcome.looked_up, quiet)
+        return await self._resolve_without_item(user_id, marker, None, False, quiet)
 
     async def _resolve_from_vault(
         self, items: AppKeyItems, user_id: int, marker: Optional[CustodyMarker],
@@ -249,27 +274,54 @@ class MemoryKeyCustody:
             refs = await items.list(MEMORY_KEY)
         except VaultUserError:
             return _VaultOutcome()  # locked: handled like an absent vault
-        except (VaultStateError, APIError, OSError) as exc:
+        except (VaultStateError, *NETWORK_ERRORS) as exc:
             return _VaultOutcome(Resolution(
                 ResolutionKind.UNAVAILABLE, reason="vault_unreadable", error=exc))
         if not refs:
             return _VaultOutcome()
         fingerprints = [ref.public_fingerprint for ref in refs]
-        trust_marker = marker is not None and marker.fingerprint in fingerprints and (
-            len(refs) == 1 or not self._writable
+        # A marker that says passphrase never stands in for the service: the
+        # item may be the half-finished end of a move.
+        trust_marker = (
+            marker is not None and marker.custody == CUSTODY_VAULT
+            and marker.fingerprint in fingerprints
         )
-        if trust_marker:
-            return await self._adopt(items, user_id, marker.fingerprint, marker.custody)
-        if not self._writable and len(refs) == 1:
+        if self._writable:
+            if trust_marker and len(refs) == 1:
+                return await self._adopt(items, user_id, marker.fingerprint, marker.custody)
+            return await self._resolve_by_service(items, user_id, fingerprints)
+        return await self._resolve_read_only(items, user_id, fingerprints, marker, trust_marker)
+
+    async def _resolve_read_only(
+        self, items: AppKeyItems, user_id: int, fingerprints: list[str],
+        marker: Optional[CustodyMarker], trust_marker: bool,
+    ) -> _VaultOutcome:
+        """A reader that must not write: no call for one item, the service for two.
+
+        With two items a marker can be stale after a rotation elsewhere, so
+        the service's (cached, rate limited) answer wins; the marker only
+        stands in when the service cannot be reached.
+        """
+        if len(fingerprints) == 1:
+            if trust_marker:
+                return await self._adopt(items, user_id, marker.fingerprint, marker.custody)
             return await self._adopt(items, user_id, fingerprints[0], None)
-        return await self._resolve_by_service(items, user_id, fingerprints)
+        outcome = await self._resolve_by_service(items, user_id, fingerprints)
+        unreachable = (
+            outcome.resolution is not None
+            and outcome.resolution.kind is ResolutionKind.UNAVAILABLE
+            and outcome.resolution.reason == "keys_me_unavailable"
+        )
+        if unreachable and trust_marker:
+            return await self._adopt(items, user_id, marker.fingerprint, None)
+        return outcome
 
     async def _resolve_by_service(
         self, items: AppKeyItems, user_id: int, fingerprints: list[str],
     ) -> _VaultOutcome:
         try:
             record = await self._fetch_record()
-        except (APIError, OSError) as exc:
+        except _LOOKUP_ERRORS as exc:
             return _VaultOutcome(Resolution(
                 ResolutionKind.UNAVAILABLE, reason="keys_me_unavailable", error=exc))
         if record is None:
@@ -287,7 +339,7 @@ class MemoryKeyCustody:
             payload = await items.read(MEMORY_KEY, fingerprint)
         except VaultUserError:
             return _VaultOutcome()
-        except (VaultStateError, APIError, OSError) as exc:
+        except (VaultStateError, *NETWORK_ERRORS) as exc:
             return _VaultOutcome(Resolution(
                 ResolutionKind.UNAVAILABLE, reason="vault_unreadable", error=exc))
         material = self._material_from_payload(payload, user_id, fingerprint)
@@ -302,11 +354,11 @@ class MemoryKeyCustody:
             checked_at=self._now_iso(),
         ))
         return _VaultOutcome(Resolution(
-            ResolutionKind.VAULT_KEY, material=material, fingerprint=fingerprint))
+            ResolutionKind.VAULT_KEY, material=material, fingerprint=fingerprint, custody=custody))
 
     async def _resolve_without_item(
         self, user_id: int, marker: Optional[CustodyMarker],
-        record: Optional[KeyRecord], looked_up: bool,
+        record: Optional[KeyRecord], looked_up: bool, quiet: bool = False,
     ) -> Resolution:
         if marker is not None and marker.custody == CUSTODY_VAULT:
             return Resolution(ResolutionKind.VAULT_LOCKED, fingerprint=marker.fingerprint,
@@ -314,10 +366,12 @@ class MemoryKeyCustody:
         if looked_up:
             return self._from_record(user_id, record)
         if self._key_cache_path.exists():
-            return await self._throttled_check(user_id, marker)
+            return await self._throttled_check(user_id, marker, quiet)
+        if quiet:
+            return Resolution(ResolutionKind.NOT_ENROLLED)
         try:
             record = await self._fetch_record()
-        except (APIError, OSError) as exc:
+        except _LOOKUP_ERRORS as exc:
             return Resolution(ResolutionKind.UNAVAILABLE, reason="keys_me_unavailable", error=exc)
         if record is None:
             return Resolution(ResolutionKind.NOT_ENROLLED)
@@ -335,14 +389,16 @@ class MemoryKeyCustody:
                               record=record, reason="vault_locked")
         return Resolution(ResolutionKind.PASSPHRASE, fingerprint=record.fingerprint, record=record)
 
-    async def _throttled_check(self, user_id: int, marker: Optional[CustodyMarker]) -> Resolution:
+    async def _throttled_check(
+        self, user_id: int, marker: Optional[CustodyMarker], quiet: bool = False,
+    ) -> Resolution:
         """Devices on the ``keys.json`` fast path ask the service at most once per interval."""
         fast_path = Resolution(ResolutionKind.PASSPHRASE, record=None)
-        if not self._writable or not self._check_due(marker):
+        if quiet or not self._writable or not self._check_due(marker):
             return fast_path
         try:
             record = await self._fetch_record()
-        except (APIError, OSError) as exc:
+        except _LOOKUP_ERRORS as exc:
             logger.debug("custody check skipped: %s", exc.__class__.__name__)
             return fast_path
         if record is None:
@@ -362,9 +418,11 @@ class MemoryKeyCustody:
             return True
         return self._clock() - checked >= self._check_interval_seconds()
 
+    def _memory_config(self) -> MemoryConfig:
+        return self._memory_config_provider() if self._memory_config_provider else MemoryConfig()
+
     def _check_interval_seconds(self) -> float:
-        config = self._memory_config_provider() if self._memory_config_provider else MemoryConfig()
-        return config.custody_check_interval_seconds()
+        return self._memory_config().custody_check_interval_seconds()
 
     def _run_vault_detected(self) -> None:
         if self._on_vault_detected is None:
@@ -374,20 +432,45 @@ class MemoryKeyCustody:
         except Exception:  # noqa: BLE001 — cleanup is best effort; a re-run finishes it
             logger.warning("passphrase leftovers cleanup failed", exc_info=True)
 
-    async def _fetch_record(self) -> Optional[KeyRecord]:
-        """``GET /keys/me`` through the limiter; ``None`` when the account has no key."""
-        await self._limiter.acquire(RateLimitKey.KEYS_ME)
+    async def _fetch_record(self, *, fresh: bool = False) -> Optional[KeyRecord]:
+        """``GET /keys/me``; ``None`` when the account has no key.
+
+        The answer is kept for ``vault_key_recheck_seconds`` so the callers of
+        one start or one set-up share a lookup. The limiter is asked without
+        waiting: the server allows only a few of these per hour, and a lookup
+        that sleeps for the rest of the window would hang whatever asked.
+        ``fresh`` skips the kept answer (a key change must see the truth).
+
+        Raises:
+            VaultCustodyUnavailable: ``keys_me_limited`` when no slot is free.
+        """
+        cached = self._record_cache
+        if cached is not None and not fresh:
+            stamp, kept = cached
+            if self._clock() - stamp < self._memory_config().vault_key_recheck_wait():
+                return kept
+        try:
+            await self._limiter.acquire(RateLimitKey.KEYS_ME, block=False)
+        except RateLimitWouldBlockError as exc:
+            raise VaultCustodyUnavailable("keys_me_limited") from exc
+        record: Optional[KeyRecord]
         try:
             data = await self._api.get(_KEYS_ME_PATH, retry_on_401=False)
         except NotFoundError:
-            return None
+            record = None
         except RateLimitedError:
             self._limiter.record_429(RateLimitKey.KEYS_ME)
             raise
-        return parse_key_record(data)
+        else:
+            record = parse_key_record(data)
+        self._record_cache = (self._clock(), record)
+        return record
 
     async def _user_id(self) -> int:
-        user_id = await self._auth.fetch_user_id()
+        try:
+            user_id = await self._auth.fetch_user_id()
+        except NETWORK_ERRORS as exc:
+            raise VaultCustodyUnavailable("user_id_unavailable") from exc
         if user_id is None:
             raise VaultCustodyUnavailable("Could not resolve your user id.")
         return int(user_id)
@@ -427,7 +510,7 @@ class MemoryKeyCustody:
             return MODE_PASSPHRASE
         try:
             has_identity = await self._remote_identity_provider()
-        except (APIError, VaultStateError, VaultUserError, OSError) as exc:
+        except (VaultStateError, VaultUserError, *NETWORK_ERRORS) as exc:
             raise VaultCustodyUnavailable("Could not check your vault.") from exc
         return MODE_NEEDS_VAULT_DEVICE if has_identity else MODE_PASSPHRASE
 
@@ -451,10 +534,12 @@ class MemoryKeyCustody:
         fingerprint = crypto.fingerprint(material.public_key)
         try:
             await self._post_vault_key(material, fingerprint, signer)
-        except APIError:
-            if created:
+        except APIError as exc:
+            # A 5xx or a gateway timeout may have been applied: the item stays.
+            if created and _is_definite_refusal(exc):
                 await self._drop_item(items, fingerprint)
             raise
+        self._record_cache = None
         self._write_marker(CustodyMarker(
             user_id=user_id, custody=CUSTODY_VAULT, fingerprint=fingerprint,
             public_key=base64.b64encode(material.public_key).decode(),
@@ -563,9 +648,11 @@ class MemoryKeyCustody:
         fingerprint = crypto.fingerprint(material.public_key)
         try:
             await self._post_rotation(material, fingerprint, signer)
-        except APIError:
-            await self._drop_item(items, fingerprint)
+        except APIError as exc:
+            if _is_definite_refusal(exc):
+                await self._drop_item(items, fingerprint)
             raise
+        self._record_cache = None
         self._write_marker(CustodyMarker(
             user_id=user_id, custody=CUSTODY_VAULT, fingerprint=fingerprint,
             public_key=base64.b64encode(material.public_key).decode(),
@@ -600,21 +687,25 @@ class MemoryKeyCustody:
             if active is None or active not in [ref.public_fingerprint for ref in refs]:
                 return False
             return not await self._finish_earlier_rotation(items, active)
-        except (APIError, VaultStateError, VaultUserError, OSError, VaultCustodyUnavailable):
+        except (VaultStateError, VaultUserError, *_LOOKUP_ERRORS):
             logger.debug("pending key item cleanup skipped", exc_info=True)
             return False
 
     async def _known_active_fingerprint(self) -> Optional[str]:
-        """The active key's fingerprint from the marker, else one ``GET /keys/me``."""
-        marker = self._read_marker(await self._user_id())
-        if marker is not None:
-            return marker.fingerprint
+        """The service's active key when it is kept in the vault, else ``None``.
+
+        Never the marker alone: after a rotation on another device it names
+        the previous key, and deleting by it would remove the active item.
+        The lookup is the shared, rate limited one.
+        """
         record = await self._fetch_record()
-        return record.fingerprint if record is not None else None
+        if record is None or record.custody != CUSTODY_VAULT:
+            return None
+        return record.fingerprint
 
     async def _active_fingerprint_in_vault(self, items: AppKeyItems) -> str:
         """The service's active key, required to be vault custody and held by this vault."""
-        record = await self._fetch_record()
+        record = await self._fetch_record(fresh=True)
         if record is None or record.custody != CUSTODY_VAULT:
             raise VaultCustodyUnavailable("Your Memory Sync key is not kept in your vault.")
         held = [ref.public_fingerprint for ref in await items.list(MEMORY_KEY)]
@@ -646,7 +737,7 @@ class MemoryKeyCustody:
             if exc.code != _MEMORY_KEY_IN_USE:
                 logger.warning("could not delete a Memory Sync key item (%s)", exc.code)
             return True
-        except (VaultStateError, VaultUserError, OSError):
+        except (VaultStateError, VaultUserError, OSError, httpx.HTTPError):
             logger.warning("could not delete a Memory Sync key item", exc_info=True)
             return True
         return False
@@ -726,6 +817,7 @@ class MemoryKeyCustody:
         """
         if not self._writable:
             return
+        self._record_cache = None
         self._write_marker(CustodyMarker(
             user_id=material.user_id, custody=CUSTODY_VAULT,
             fingerprint=crypto.fingerprint(material.public_key),
@@ -737,6 +829,7 @@ class MemoryKeyCustody:
         """Delete the marker (sign-out). Writable callers only."""
         if not self._writable:
             return
+        self._record_cache = None
         try:
             self._marker_path.unlink(missing_ok=True)
         except OSError:
@@ -788,6 +881,19 @@ class MemoryKeyCustody:
             os.chmod(self._marker_path, 0o600)
         except OSError as exc:
             logger.warning("could not write the custody marker: %s", exc.__class__.__name__)
+
+
+def _is_definite_refusal(exc: APIError) -> bool:
+    """Whether the service certainly did not apply the request.
+
+    A 4xx (but not a 408 timeout), or the 503 ``feature_disabled`` kill
+    switch, which answers before anything is applied. Any other 5xx and a
+    gateway timeout may have been applied, so the item must stay.
+    """
+    if getattr(exc, "code", None) == "feature_disabled":
+        return True
+    status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 408
 
 
 def _derive_public(private_key: bytes) -> Optional[bytes]:

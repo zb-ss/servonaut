@@ -24,7 +24,6 @@ import hashlib
 import logging
 import time
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from servonaut.services.memory import passphrase_store
@@ -223,7 +222,7 @@ def build_read_only_key_custody(
     asked lazily, so a vault that unlocks later is picked up) and never
     writes the marker, enrols or cleans up.
     """
-    from servonaut.services.memory.key_custody import MemoryKeyCustody
+    from servonaut.services.memory.key_custody import DEFAULT_MARKER_PATH, MemoryKeyCustody
     from servonaut.services.vault.errors import NO_LOCAL_IDENTITY, VaultUserError
 
     def app_keys() -> Any:
@@ -242,7 +241,7 @@ def build_read_only_key_custody(
         rate_limiter,
         app_keys,
         signer,
-        Path.home() / ".servonaut" / "memory" / "key_custody.json",
+        DEFAULT_MARKER_PATH,
         False,
         memory_config_provider=lambda: config_manager.get().memory,
         key_cache_path=_sync_module._KEY_CACHE_PATH,

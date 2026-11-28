@@ -16,6 +16,9 @@ from servonaut.services.memory.interfaces import (
 
 CONTEXT_DEFAULT = "default"
 CONTEXT_ROTATION = "rotation"
+#: Generic Memory Sync calls (unlock, sync): a 503 ``feature_disabled`` there
+#: is not about the vault switch, so it gets no vault wording.
+CONTEXT_GENERAL = "general"
 
 _VAULT_NOT_READY = (
     "Your vault is not ready for this. Unlock your vault on this device, "
@@ -82,6 +85,27 @@ _ROTATION_MESSAGES = {
     ),
 }
 
+# The reason codes a failed custody lookup carries (``VaultCustodyUnavailable``).
+_UNAVAILABLE_MESSAGES = {
+    "vault_unreadable": (
+        "Your vault could not be read right now. Check your connection and try again."
+    ),
+    "vault_key_invalid": (
+        "The Memory Sync key in your vault could not be verified. Nothing was changed."
+    ),
+    "keys_me_unavailable": (
+        "Servonaut could not check where your Memory Sync key is kept. Try again in a moment."
+    ),
+    "keys_me_limited": (
+        "Servonaut checked where your Memory Sync key is kept a moment ago. "
+        "Try again in a few minutes."
+    ),
+    "user_id_unavailable": (
+        "Servonaut could not confirm your account. Check your connection and try again."
+    ),
+    "feature_disabled": _FEATURE_DISABLED,
+}
+
 _ENVELOPE_KEYS_MESSAGE = (
     "The summary could not be started because the memory on the service "
     "changed. Sync this server's memory and try again."
@@ -93,8 +117,10 @@ def custody_error_message(exc: BaseException, context: str = CONTEXT_DEFAULT) ->
 
     Args:
         exc: The exception a custody, key or summary call raised.
-        context: ``"rotation"`` selects the wording for a key change; any
-            other value uses the general text.
+        context: ``"rotation"`` selects the wording for a key change;
+            ``"general"`` leaves a ``feature_disabled`` answer to the caller
+            (it is only a vault-switch message for vault-custody calls); any
+            other value uses the default text.
 
     Returns:
         Plain text without Rich markup, or ``None`` so the caller falls back
@@ -104,9 +130,11 @@ def custody_error_message(exc: BaseException, context: str = CONTEXT_DEFAULT) ->
     if isinstance(exc, VaultCustodyLocked):
         return _locked_message(exc.reason)
     if isinstance(exc, VaultCustodyUnavailable):
-        return None
+        return _UNAVAILABLE_MESSAGES.get(str(exc))
     code = getattr(exc, "code", None)
     if not isinstance(code, str):
+        return None
+    if context == CONTEXT_GENERAL and code == "feature_disabled":
         return None
     if code == "validation_failed":
         return _validation_message(exc)
@@ -126,3 +154,31 @@ def _validation_message(exc: BaseException) -> Optional[str]:
     details = getattr(exc, "details", None)
     field = details.get("field") if isinstance(details, dict) else None
     return _ENVELOPE_KEYS_MESSAGE if field == "envelope_keys" else None
+
+
+# Hosted-summary key release (appended; see EnvelopeKeyError in the retrieval service).
+_CODE_MESSAGES.update({
+    "envelope_key_unreadable": (
+        "Your Memory Sync key could not open this server's memory, so no "
+        "summary was started. Sync this server's memory again and try once more."
+    ),
+    "envelope_not_consented": (
+        "The service asked for more memory than you approved, so the summary "
+        "was not started. Nothing was sent."
+    ),
+    "envelope_mismatch": (
+        "The service returned memory that does not belong to this server, so "
+        "the summary was not started. Nothing was sent."
+    ),
+})
+
+
+def custody_code_message(code: str, context: str = CONTEXT_DEFAULT) -> Optional[str]:
+    """The client's text for a custody error *code*, or ``None`` when it has none.
+
+    For callers that detect a condition locally and have no exception that
+    carries the code.
+    """
+    if context == CONTEXT_ROTATION and code in _ROTATION_MESSAGES:
+        return _ROTATION_MESSAGES[code]
+    return _CODE_MESSAGES.get(code)

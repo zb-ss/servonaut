@@ -472,6 +472,7 @@ class FleetMemoryScreen(WorkspaceScreen):
                 name="memory_sync_unlock_prompt",
                 group="memory_reactivate",
                 exclusive=True,
+                exit_on_error=False,
             )
         # If an app-owned manual scan is still running (e.g. the user left
         # this panel mid-scan and came back), surface it — the scan keeps

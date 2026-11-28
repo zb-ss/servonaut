@@ -161,6 +161,10 @@ _POISON_FILENAME = "sync_poison.jsonl"
 # self._key_cache_path so tests can override it.
 _KEY_CACHE_PATH = Path.home() / ".servonaut" / "memory" / "keys.json"
 
+#: ``key_source`` of a key loaded from a vault item while the service still
+#: keeps it under a passphrase (a move that stopped half way).
+KEY_SOURCE_VAULT_PENDING = "vault_pending"
+
 
 def local_keypair_cache_exists() -> bool:
     """Whether this computer holds the passphrase-encrypted Memory Sync keypair.
@@ -269,7 +273,7 @@ class MemorySyncService:
         self._self_user_id: Optional[int] = None
         self._self_pubkey: Optional[bytes] = None
         self._self_privkey: Optional[bytes] = None
-        # Where the adopted key came from: "vault", "passphrase" or None.
+        # Where the adopted key came from: "vault", "vault_pending", "passphrase" or None.
         self._key_source: Optional[str] = None
         # Optional MemoryKeyCustody; None keeps the passphrase-only behaviour.
         self._key_custody: Optional[Any] = None
@@ -363,7 +367,7 @@ class MemorySyncService:
 
     @property
     def key_source(self) -> Optional[str]:
-        """``"vault"`` or ``"passphrase"`` once a key is adopted, else ``None``."""
+        """``"vault"``, ``"vault_pending"`` or ``"passphrase"`` once a key is adopted, else ``None``."""
         return self._key_source
 
     def adopt_key_material(
@@ -379,22 +383,23 @@ class MemorySyncService:
         self._key_source = source
         self._announce_key_material()
 
-    async def unlock_from_vault(self) -> "VaultUnlock":
+    async def unlock_from_vault(self, *, quiet: bool = False) -> "VaultUnlock":
         """Unlock from a vault-held key, without enrolling, uploading or cleaning up.
 
         For read-only processes (MCP server, relay, CLI reads). Needs a custody
         set with :meth:`set_key_custody`; without one the answer is
-        ``NOT_VAULT``.
+        ``NOT_VAULT``. ``quiet`` is passed on to the custody (no lookup at the
+        service when nothing local says the account has a key).
         """
         if self.is_configured:
             return VaultUnlock.OK
         if self._key_custody is None:
             return VaultUnlock.NOT_VAULT
-        from servonaut.services.memory.key_custody import ResolutionKind
+        from servonaut.services.memory.key_custody import NETWORK_ERRORS, ResolutionKind
 
         try:
-            resolution = await self._key_custody.resolve()
-        except (APIError, OSError, MemoryBackendError) as exc:
+            resolution = await self._key_custody.resolve(quiet=quiet)
+        except (*NETWORK_ERRORS, MemoryBackendError) as exc:
             logger.debug("unlock_from_vault: resolve failed (%s)", type(exc).__name__)
             return VaultUnlock.UNAVAILABLE
         kind = resolution.kind
@@ -402,7 +407,8 @@ class MemorySyncService:
             if not self.is_configured:
                 material = resolution.material
                 self.adopt_key_material(
-                    material.user_id, material.public_key, material.private_key)
+                    material.user_id, material.public_key, material.private_key,
+                    source=self._source_of(resolution))
             return VaultUnlock.OK
         if kind is ResolutionKind.VAULT_LOCKED:
             return VaultUnlock.VAULT_LOCKED
@@ -1287,13 +1293,19 @@ class MemorySyncService:
         return enqueued
 
     async def bootstrap(
-        self, passphrase_provider: Callable[[], "asyncio.Coroutine[Any, Any, str]"]
+        self,
+        passphrase_provider: Callable[[], "asyncio.Coroutine[Any, Any, str]"],
+        *,
+        quiet_custody: bool = False,
     ) -> None:
         """Run the CLI bootstrap sequence (spec §5).
 
         1. GET /memory/settings — implicit gate probe.
         2. GET /memory/keys/me — enrol if 404.
         3. POST /memory/instances — upsert managed instances.
+
+        ``quiet_custody`` is for start-up: the custody makes no lookup at the
+        service and never enrols a key (see ``MemoryKeyCustody.resolve``).
 
         Raises:
             BackendMaintenance: on 503 feature_disabled.
@@ -1337,7 +1349,7 @@ class MemorySyncService:
             raise UpsellRequired(plan) from exc
 
         # Step 2: key enrolment
-        await self._ensure_keypair(passphrase_provider)
+        await self._ensure_keypair(passphrase_provider, quiet=quiet_custody)
 
         # Step 3: upsert managed instances
         await self.upsert_all_instances()
@@ -2088,7 +2100,23 @@ class MemorySyncService:
                 metrics[key] = float(val)
         return metrics or None
 
-    async def _ensure_keypair(self, passphrase_provider: Callable[[], Any]) -> None:
+    @staticmethod
+    def _source_of(resolution: Any) -> str:
+        """The key source for a key loaded from a vault item.
+
+        ``vault`` only when the service confirmed vault custody. An item the
+        service still calls passphrase custody is the unfinished end of a move:
+        ``vault_pending`` keeps the passphrase leftovers in place.
+        """
+        from servonaut.services.memory.key_custody import CUSTODY_PASSPHRASE
+
+        if resolution.custody == CUSTODY_PASSPHRASE:
+            return KEY_SOURCE_VAULT_PENDING
+        return "vault"
+
+    async def _ensure_keypair(
+        self, passphrase_provider: Callable[[], Any], *, quiet: bool = False,
+    ) -> None:
         """Load the caller's key from the vault, or fall back to the passphrase paths.
 
         With no custody set this is exactly :meth:`_ensure_keypair_passphrase`.
@@ -2106,11 +2134,13 @@ class MemorySyncService:
             ResolutionKind,
         )
 
-        resolution = await self._key_custody.resolve()
+        resolution = await self._key_custody.resolve(quiet=quiet)
         kind = resolution.kind
         if kind is ResolutionKind.VAULT_KEY and resolution.material is not None:
             material = resolution.material
-            self.adopt_key_material(material.user_id, material.public_key, material.private_key)
+            self.adopt_key_material(
+                material.user_id, material.public_key, material.private_key,
+                source=self._source_of(resolution))
             logger.info("Bootstrap: loaded keypair from the vault fingerprint=%s", resolution.fingerprint)
             return
         if kind is ResolutionKind.VAULT_LOCKED:
@@ -2120,6 +2150,9 @@ class MemorySyncService:
         if kind is ResolutionKind.PASSPHRASE:
             await self._ensure_keypair_passphrase(passphrase_provider, record=resolution.record)
             return
+        if quiet:
+            # Start-up never enrols and never asks the service for the key.
+            raise VaultCustodyUnavailable("keys_me_unavailable")
         mode = await self._key_custody.enrolment_mode()
         if mode == MODE_NEEDS_VAULT_DEVICE:
             raise VaultCustodyLocked(MODE_NEEDS_VAULT_DEVICE)
@@ -2131,7 +2164,9 @@ class MemorySyncService:
     @staticmethod
     def _raise_unavailable(resolution: Any) -> None:
         error = resolution.error
-        if isinstance(error, RateLimitedError):
+        if isinstance(error, RateLimitedError) or (
+            isinstance(error, VaultCustodyUnavailable) and str(error) == "keys_me_limited"
+        ):
             raise RateLimited(endpoint="/api/v1/memory/keys/me", retry_after_s=1200.0) from error
         if isinstance(error, (APIError, MemoryBackendError)):
             raise error
@@ -2142,6 +2177,9 @@ class MemorySyncService:
             material = await self._key_custody.enrol_in_vault()
         except APIError as exc:
             self._raise_mapped_key_write_error(exc)
+            if getattr(exc, "code", None) == "feature_disabled":
+                # Only here is the 503 about the vault switch: say so by type.
+                raise VaultCustodyUnavailable("feature_disabled") from exc
             raise
         self.adopt_key_material(material.user_id, material.public_key, material.private_key)
         logger.info("Bootstrap: enrolled a new keypair in the vault")

@@ -1349,6 +1349,10 @@ class MemoryConfig:
     # silent keychain-based bootstrap on startup.  The actual passphrase
     # is NEVER stored in this config file — only this boolean flag.
     sync_remember_device: bool = False
+    # Set by "Disable sync" on the Memory Sync screen: no start-up, login,
+    # vault-unlock or section-open unlock runs until the user enables it
+    # again there. Without it a vault-held key would unlock again at once.
+    sync_disabled: bool = False
     # Optional client-side AI enhancement. The exact provider is selected and
     # consented per request; this prompt is operator-configurable.
     ai_enhancement_prompt: str = DEFAULT_MEMORY_AI_ENHANCEMENT_PROMPT

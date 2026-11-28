@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from servonaut.config.schema import MemoryConfig
@@ -161,9 +162,10 @@ def test_parse_fails_closed(data, custody) -> None:
 
 
 def test_parse_keeps_wrap_only_for_passphrase_and_allows_null_changed_at() -> None:
-    vault = parse_key_record({"custody": "vault", "wrapped_private_key": "x", "custody_changed_at": None})
+    ident = {"fingerprint": "f", "public_key": "p"}
+    vault = parse_key_record({**ident, "custody": "vault", "wrapped_private_key": "x", "custody_changed_at": None})
     assert vault.wrapped_private_key is None and vault.custody_changed_at is None
-    assert parse_key_record({"wrapped_private_key": "x"}).wrapped_private_key == "x"
+    assert parse_key_record({**ident, "wrapped_private_key": "x"}).wrapped_private_key == "x"
 
 
 def test_parse_rejects_a_non_object() -> None:
@@ -233,13 +235,27 @@ async def test_two_items_writable_always_asks_the_service_even_with_a_marker(env
 
 
 @pytest.mark.asyncio
-async def test_two_items_read_only_picks_the_marker_fingerprint(tmp_path) -> None:
+async def test_two_items_read_only_prefers_the_service_over_a_stale_marker(tmp_path) -> None:
+    """A rotation elsewhere leaves the marker on the previous key (A8)."""
+    env = Env(tmp_path, writable=False)
+    old, new = env.with_item(), env.with_item()
+    env.write_marker("vault", old.fingerprint)
+    env.keys_me(**_record(new, custody="vault", wrapped_private_key=None))
+    result = await env.custody.resolve()
+    assert result.fingerprint == new.fingerprint
+    assert env.api.get.await_count == 1
+    await env.custody.resolve()
+    assert env.api.get.await_count == 1  # the answer is kept for the recheck interval
+
+
+@pytest.mark.asyncio
+async def test_two_items_read_only_falls_back_to_the_marker_when_the_service_is_unreachable(tmp_path) -> None:
     env = Env(tmp_path, writable=False)
     old, new = env.with_item(), env.with_item()
     env.write_marker("vault", new.fingerprint)
+    env.api.get = AsyncMock(side_effect=httpx.ConnectError("offline"))
     result = await env.custody.resolve()
-    assert result.fingerprint == new.fingerprint
-    env.api.get.assert_not_called()
+    assert result.kind is ResolutionKind.VAULT_KEY and result.fingerprint == new.fingerprint
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ words.
 
 from __future__ import annotations
 
-from servonaut.services.memory.custody_errors import custody_error_message
+from servonaut.services.memory.custody_errors import CONTEXT_GENERAL, custody_error_message
 
 WRONG_PASSPHRASE_MESSAGE = "Wrong passphrase — try again."
 
@@ -47,7 +47,7 @@ def describe_sync_error(exc: BaseException, *, failure_prefix: str) -> str:
         Plain text (no Rich markup): the exception text may come from the
         server, so callers show it with markup off or escaped.
     """
-    custody_text = custody_error_message(exc)
+    custody_text = custody_error_message(exc, CONTEXT_GENERAL)
     if custody_text is not None:
         return custody_text
     msg = str(exc) or exc.__class__.__name__

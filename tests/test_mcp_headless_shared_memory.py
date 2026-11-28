@@ -582,6 +582,8 @@ def _vault_shared(env: Env, vault: FakeVault, clock=None):
     shared = build_headless_shared_memory(env.config_manager, env.auth, env.api, vault)
     if clock is not None:
         shared._clock = clock
+        # The custody keeps its own lookup for the same interval: one clock for both.
+        shared._sync._key_custody._clock = clock
     return shared
 
 
@@ -672,6 +674,45 @@ def test_a_failed_vault_attempt_is_not_repeated_within_the_wait(env: Env):
         now.value += 5
 
     # The marker-less, vault-less lookup asked the service once, not three times.
+    assert env.api.get.await_count == 1
+
+
+def test_an_account_with_no_key_never_hangs_a_tool_on_the_keys_me_limit(env: Env):
+    """No keys.json, no marker, nothing in the vault: every read asks at most once per
+    recheck interval, and once the client window is used up the answer is immediate."""
+    from servonaut.services.api_client import NotFoundError
+
+    vault = _vault_env(env, unlocked=False)
+    env.api.get = AsyncMock(side_effect=NotFoundError(code="not_found", message="x", status=404))
+    now = SimpleNamespace(value=0.0)
+    shared = _vault_shared(env, vault, clock=lambda: now.value)
+
+    async def many_reads() -> list:
+        reasons = []
+        for _ in range(12):
+            reasons.append(await shared.check_lock())
+            now.value += 61  # past the recheck wait every time
+        return reasons
+
+    reasons = asyncio.run(asyncio.wait_for(many_reads(), timeout=5))  # a hang fails here
+
+    assert len(reasons) == 12
+    # One lookup per interval at most, and never more than the client window allows.
+    assert 1 <= env.api.get.await_count <= 3
+
+
+def test_reads_inside_one_interval_share_one_keys_me_lookup(env: Env):
+    from servonaut.services.api_client import NotFoundError
+
+    vault = _vault_env(env, unlocked=False)
+    env.api.get = AsyncMock(side_effect=NotFoundError(code="not_found", message="x", status=404))
+    now = SimpleNamespace(value=0.0)
+    shared = _vault_shared(env, vault, clock=lambda: now.value)
+
+    for _ in range(5):
+        asyncio.run(shared.check_lock())
+        now.value += 10
+
     assert env.api.get.await_count == 1
 
 
