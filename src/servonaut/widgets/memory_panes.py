@@ -78,6 +78,10 @@ class MemorySyncPane(Vertical):
         locals()[_method_name] = _make_sync_forwarder(_method_name)
     del _method_name
 
+    @property
+    def _MAX_DRAIN_BATCHES(self) -> int:
+        return _sync_screen_cls()._MAX_DRAIN_BATCHES
+
     @staticmethod
     def _open_url(url: str) -> None:
         _sync_screen_cls()._open_url(url)

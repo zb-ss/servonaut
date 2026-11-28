@@ -2188,6 +2188,11 @@ class TeamManagementScreen(WorkspaceScreen):
             return
         if self._current_team_slug != slug:
             return
+        if (
+            not getattr(self.app, "vault_available", False)
+            or getattr(self.app, "vault_command_service", None) is None
+        ):
+            return
         from servonaut.screens._demo_resolve import real_instance_id
 
         match_idx = next(
@@ -2539,7 +2544,11 @@ class TeamManagementScreen(WorkspaceScreen):
             for line in failure_details(self.app, failed):
                 self.notify(line, severity="error", markup=False)
         await self._load_team_detail(slug)
-        if succeeded > 0 and getattr(self.app, "vault_available", False):
+        if (
+            succeeded > 0
+            and getattr(self.app, "vault_available", False)
+            and getattr(self.app, "vault_command_service", None) is not None
+        ):
             shared_candidates = [
                 (
                     str(result.payload.get("hostname") or result.payload.get("host") or ""),

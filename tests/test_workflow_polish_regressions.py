@@ -588,6 +588,8 @@ def test_team_management_bind_guard_matching_own_row_and_share_all_prompt() -> N
 
     # _offer_post_share_bind triggers _TeamBindPromptModal for newly shared unbound server.
     mock_app.demo_mode = False
+    mock_app.vault_available = True
+    mock_app.vault_command_service = object()
     mock_app.instances = [own_row, {**shared_on_fleet, "id": "s1"}]
     screen._shared_servers = [shared_row]
     screen._display_server_name = lambda n: str(n)
@@ -634,3 +636,11 @@ def test_inspector_key_badges_and_vault_settings_keywords() -> None:
     assert vault_spec is not None
     assert "team" in vault_spec.keywords
     assert "team vault" in vault_spec.keywords
+
+
+def test_memory_sync_pane_exposes_max_drain_batches() -> None:
+    from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+    from servonaut.widgets.memory_panes import MemorySyncPane
+
+    pane = MemorySyncPane()
+    assert pane._MAX_DRAIN_BATCHES == MemorySyncSetupScreen._MAX_DRAIN_BATCHES
